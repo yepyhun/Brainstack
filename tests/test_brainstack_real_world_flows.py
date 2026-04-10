@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from brainstack import BrainstackMemoryProvider
+from plugins.memory.brainstack import BrainstackMemoryProvider
 
 
 def _make_provider(tmp_path, session_id):

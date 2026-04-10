@@ -5,18 +5,10 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "brainstack_refresh_donors.py"
-REGISTRY_PATH = Path(__file__).resolve().parents[1] / "brainstack" / "donors" / "registry.py"
+from plugins.memory.brainstack.donors.registry import DonorSpec
 
 
-def _load_registry_module():
-    spec = importlib.util.spec_from_file_location("brainstack_registry_test", REGISTRY_PATH)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    import sys
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "brainstack_refresh_donors.py"
 
 
 def _load_module():
@@ -34,7 +26,6 @@ def test_refresh_report_rejects_unknown_donor_key():
 
 
 def test_refresh_report_rejects_adapter_path_escape(monkeypatch):
-    DonorSpec = _load_registry_module().DonorSpec
     module = _load_module()
     monkeypatch.setattr(
         module,

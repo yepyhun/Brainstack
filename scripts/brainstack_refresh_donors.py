@@ -10,7 +10,6 @@ pretending to be fully automatic.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import shlex
 import subprocess
@@ -23,19 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-
-def _load_registry_module():
-    module_path = REPO_ROOT / "brainstack" / "donors" / "registry.py"
-    spec = importlib.util.spec_from_file_location("brainstack_registry_runtime", module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load donor registry from {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-list_donor_specs = _load_registry_module().list_donor_specs
+from plugins.memory.brainstack.donors.registry import list_donor_specs  # noqa: E402
 
 
 def _validate_selected(selected: set[str] | None, available: set[str]) -> None:
