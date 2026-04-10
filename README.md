@@ -112,3 +112,93 @@ Current updateability is the middle path:
 - local smoke verification
 
 This is much cleaner than baked-in donor drift, but it is still **not** full automatic upstream syncing.
+
+## Installation into Hermes
+
+Brainstack is meant to be installed into a fresh Hermes checkout, not copied around by hand.
+
+Dry-run compatibility check:
+
+```bash
+python scripts/install_into_hermes.py /path/to/hermes-agent --enable --doctor --dry-run --runtime docker
+```
+
+Real install:
+
+```bash
+python scripts/install_into_hermes.py /path/to/hermes-agent --enable --doctor --runtime docker
+```
+
+Local non-Docker install:
+
+```bash
+python scripts/install_into_hermes.py /path/to/hermes-agent --enable --doctor --runtime local
+```
+
+What the installer does:
+
+- copies `brainstack/` into `plugins/memory/brainstack/`
+- copies `rtk_sidecar.py` when the target Hermes checkout has `agent/`
+- patches recognized Hermes config so:
+  - `memory.provider: brainstack`
+  - `memory.memory_enabled: false`
+  - `memory.user_profile_enabled: false`
+- writes a sanitized `.brainstack-install-manifest.json`
+- runs doctor checks if requested
+- supports both `docker` and `local` runtime modes through the same installer
+- in `docker` mode, generates `scripts/hermes-brainstack-start.sh` inside the target Hermes checkout
+
+What it intentionally does **not** do:
+
+- it does not guess unknown upstream host changes
+- it does not inject secrets
+- it does not pretend API-first deployment already exists
+- it does not claim donor auto-merge
+
+## Upstream Hermes refresh workflow
+
+When Hermes upstream changes, the intended flow is:
+
+```bash
+python scripts/update_hermes_with_brainstack.py /path/to/hermes-agent --pull --reinstall --doctor --runtime local
+```
+
+If the target runtime is Dockerized and the Docker image bakes Hermes source into the image, rebuild after reinstall:
+
+```bash
+python scripts/update_hermes_with_brainstack.py /path/to/hermes-agent --pull --reinstall --doctor --docker-rebuild --runtime docker
+```
+
+Docker helper after install:
+
+```bash
+cd /path/to/hermes-agent
+./scripts/hermes-brainstack-start.sh start
+./scripts/hermes-brainstack-start.sh rebuild
+./scripts/hermes-brainstack-start.sh full
+./scripts/hermes-brainstack-start.sh status
+./scripts/hermes-brainstack-start.sh logs
+```
+
+This helper is intentionally small:
+
+- `start` = bring the stack up
+- `rebuild` = rebuild with cache and restart
+- `full` = no-cache pull+build and restart
+- `stop` = stop the running service
+- `status` = show compose status
+- `logs` = tail live logs
+
+## Doctor checks
+
+`scripts/brainstack_doctor.py` validates:
+
+- target checkout really looks like Hermes
+- memory provider/plugin loader surfaces exist
+- Brainstack plugin payload is present and importable
+- config selects Brainstack and builtin memory is off
+- in `docker` mode: Docker compose uses `gateway run --replace`
+- in `docker` mode: the desktop launcher points at the intended Hermes checkout
+- in `local` mode: Docker-specific checks are skipped and the doctor validates the Hermes checkout/config/plugin path without assuming container runtime
+
+The doctor is designed to fail closed. If upstream Hermes removes a required provider surface, the right outcome is an explicit incompatibility report, not a silent half-wire.
