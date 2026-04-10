@@ -120,19 +120,19 @@ Brainstack is meant to be installed into a fresh Hermes checkout, not copied aro
 Dry-run compatibility check:
 
 ```bash
-python scripts/install_into_hermes.py /path/to/hermes-agent --enable --doctor --dry-run --runtime docker
+python install_into_hermes.py /path/to/hermes-agent --enable --doctor --dry-run --runtime docker
 ```
 
 Real install:
 
 ```bash
-python scripts/install_into_hermes.py /path/to/hermes-agent --enable --doctor --runtime docker
+python install_into_hermes.py /path/to/hermes-agent --enable --doctor --runtime docker
 ```
 
 Local non-Docker install:
 
 ```bash
-python scripts/install_into_hermes.py /path/to/hermes-agent --enable --doctor --runtime local
+python install_into_hermes.py /path/to/hermes-agent --enable --doctor --runtime local
 ```
 
 What the installer does:
@@ -160,13 +160,13 @@ What it intentionally does **not** do:
 When Hermes upstream changes, the intended flow is:
 
 ```bash
-python scripts/update_hermes_with_brainstack.py /path/to/hermes-agent --pull --reinstall --doctor --runtime local
+python update_hermes_with_brainstack.py /path/to/hermes-agent --pull --reinstall --doctor --runtime local
 ```
 
 If the target runtime is Dockerized and the Docker image bakes Hermes source into the image, rebuild after reinstall:
 
 ```bash
-python scripts/update_hermes_with_brainstack.py /path/to/hermes-agent --pull --reinstall --doctor --docker-rebuild --runtime docker
+python update_hermes_with_brainstack.py /path/to/hermes-agent --pull --reinstall --doctor --docker-rebuild --runtime docker
 ```
 
 Docker helper after install:
@@ -191,7 +191,7 @@ This helper is intentionally small:
 
 ## Doctor checks
 
-`scripts/brainstack_doctor.py` validates:
+`brainstack_doctor.py` validates:
 
 - target checkout really looks like Hermes
 - memory provider/plugin loader surfaces exist
