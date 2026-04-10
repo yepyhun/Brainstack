@@ -1,8 +1,12 @@
-# Brainstack 🧠
+# Brainstack
 
-**Brainstack** is a next-generation composite memory architecture designed for autonomous AI agents. 
+Brainstack is a Hermes-native composite memory provider and local memory substrate.
 
-Born out of the limitations of single-engine approaches, **Brainstack is fundamentally a fusion (a composite stack) inspired by and building upon three state-of-the-art memory paradigms:**
+It currently runs **inside Hermes-Agent as a direct `MemoryProvider` plugin**, not as a standalone API-first memory server. The local store is separated so tightly scoped sidecars can share the same SQLite state, but runtime memory ownership stays with Brainstack.
+
+## Core inspiration
+
+Brainstack is primarily built from three donor lines:
 
 1. **[Hindsight](https://github.com/vectorize-io/hindsight)** - For temporal state preservation, bounded history, and preserving old states rather than destructively overwriting past knowledge.
 2. **[Graphiti](https://github.com/getzep/graphiti)** - For explicitly surfacing graph conflicts, tracking entity relationships, and managing temporal truths natively.
@@ -12,43 +16,99 @@ This translates into a strict internal separation of concerns:
 
 | Layer | Inspiration | Core Responsibility |
 | :--- | :--- | :--- |
-| **L1** | **Hindsight** | *recency, session continuity, after-turn learning* |
-| **L2** | **Graphiti** | *entity-relation-temporal graph, current/previous truth* |
-| **L3** | **MemPalace** | *big corpus, books/docs, FUSION context packing* |
+| **L1** | **Hindsight** | recency, session continuity, after-turn learning |
+| **L2** | **Graphiti** | entity-relation-temporal graph, current/previous truth |
+| **L3** | **MemPalace** | big corpus, FUSION context packing |
 
-Brainstack merges the strengths of these engines into a single, highly mature **Proactive Context Management (PCM)** architecture to solve critical agent lifecycle vulnerabilities:
-- **Ghost Vocabulary:** Forgetting essential domain-specific definitions when context windows compress.
-- **Black Box Amnesia:** Forgetting the immediate trajectory, workflow, or "pending intent" during long-running tasks.
-- **Split-Brain Corruption:** Concurrent write conflicts from review-agents and sub-agents.
+Additional patterns also influence the current code:
 
----
+- **Hermes-LCM transcript pattern** for bounded raw transcript retention and temporal evidence fallback
+- **RTK-style sidecar discipline** for token-aware auxiliary work without taking memory ownership
 
-## 🏗️ The 5-Shelf Composite Architecture
+## Current runtime architecture
 
-By analyzing the best mechanics of the *Hindsight/Graphiti/MemPalace* L1-L3 layers, Brainstack categorically routes memories into five intelligent "shelves" rather than a flat vector database:
+Brainstack currently routes memory into five shelves instead of a flat memory blob:
 
-1. **Profile Shelf (Semantic Anchoring):** Dynamically extracts and anchors durable identity, personal preferences, and "shared work" contexts via heuristics. It acts as an always-on dictionary, preventing *Ghost Vocabulary*.
-2. **Continuity Shelf (Intent Carry-Over):** Inspired by stateful trackers (L1 Hindsight), this fires on `pre_compress` and `session_end` hooks to snapshot the exact current workflow state and pending intent before the agent drops context, guaranteeing task seamlessness.
-3. **Transcript Shelf:** An append-only raw conversational log (L1 Hindsight) providing strict, bounded FTS evidence for temporal dispute resolution.
-4. **Graph-Truth Shelf:** Handles structured entities, relation building, supersession logic (A natively overrides B over time), and captures explicit topological conflicts instead of silently auto-resolving them (L2 Graphiti).
-5. **Corpus Shelf:** Manages ingested external documents with FTS FUSION matching and dynamic token-estimate packaging (L3 MemPalace).
+1. **Profile shelf**  
+   Durable identity, preference, and shared-work anchors.
+2. **Continuity shelf**  
+   Session carry-over, compression snapshots, and pending work state.
+3. **Transcript shelf**  
+   Append-only raw turns used only as bounded evidence, not as a second live memory engine.
+4. **Graph-truth shelf**  
+   Entities, relations, temporal state, supersession, and explicit conflict surfacing.
+5. **Corpus shelf**  
+   External documents, sectioning, bounded recall, and large-corpus packing.
 
----
+On top of the shelves, Brainstack uses a **risk-aware control plane**:
 
-## ⚖️ The Control Plane (Risk-Adjusted Retrieval)
+- high-stakes questions suppress memory-only bluffing
+- preference-style questions prefer compact profile recall
+- temporal/explanatory questions expand continuity and graph evidence
+- transcript recall is bounded and session-scoped
 
-Brainstack doesn't blindly inject "Top K" vectors. Its Central Control Plane (`control_plane.py`) interprets the underlying intent and inherent risk of every user query to formulate a rigid **Working Memory Policy**:
+## What is true in the current codebase
 
-- 🚨 **High-Stakes Queries** (e.g., *safety, dose, law, diagnosis, contract*):  
-  Triggers `mode="deep"` and forces `tool_avoidance_allowed=False`. The agent is explicitly prohibited from hallucinating a "memory-only" response and must structurally verify information.
-- 👤 **Preference Inquiries** (e.g., *prefer, like, usually*):  
-  Triggers `mode="compact"`. It restricts noisy full-text transcripts and explicitly highlights the Profile Shelf for a natural, fast personality response.
-- ⏳ **Explanatory / Temporal Queries** (e.g., *why, current, latest, changed*):  
-  Increases continuity and graph-truth limits to provide deep historical context and causality.
+- Brainstack is intended to be the **single live memory path** when Hermes builtin memory is disabled.
+- The donor-inspired parts are behind **explicit local adapters**:
+  - `brainstack/donors/continuity_adapter.py`
+  - `brainstack/donors/graph_adapter.py`
+  - `brainstack/donors/corpus_adapter.py`
+- Donor baselines are tracked via a **bounded refresh workflow**, not hidden copy-paste drift.
+- The refresh script can report local adapter state and optionally run local smoke checks.
+- The current Brainstack baseline is **SQLite/FTS based** and does **not** require TEI/Jina or any external embedding service.
 
----
+## What this repo is not claiming
 
-## 🚀 Unified Singleton Design & Sidecars
+- It is **not** a standalone API-first memory product yet.
+- It is **not** a one-click upstream auto-update system.
+- It is **not** the full Hermes repository.
+- It does **not** claim automatic donor compatibility without review.
 
-Built natively as a `MemoryProvider` for Hermes Agent infrastructures. 
-It functions as a central Singleton Control Unit, meaning any Background Sub-Agents (e.g., the RTK Sidecar) must tap directly into the shared `BrainstackStore`. This entirely eliminates duplicate SQLite connections, lock contention, and duplicate extractions across modular tools.
+## Repo scope
+
+This repository is a focused Brainstack slice containing:
+
+- the Hermes-native Brainstack plugin code under [`brainstack/`](./brainstack)
+- donor boundary and refresh logic under [`brainstack/donors/`](./brainstack/donors) and [`scripts/`](./scripts)
+- focused test slices under [`tests/`](./tests)
+- optional RTK sidecar integration surface in [`rtk_sidecar.py`](./rtk_sidecar.py)
+
+## Repo layout
+
+```text
+brainstack/
+  __init__.py
+  control_plane.py
+  db.py
+  transcript.py
+  graph.py
+  corpus.py
+  retrieval.py
+  donors/
+scripts/
+  brainstack_refresh_donors.py
+tests/
+rtk_sidecar.py
+```
+
+## Running expectations
+
+This repository reflects a **Hermes-integrated** Brainstack slice. Some modules and tests still depend on Hermes runtime interfaces such as `agent.memory_provider` and Hermes home/config conventions.
+
+So the correct framing is:
+
+- **native Hermes integration first**
+- **shared local store second**
+- **standalone API later, only if intentionally built**
+
+## Update model
+
+Current updateability is the middle path:
+
+- explicit donor registry
+- explicit local adapter seams
+- bounded refresh reporting
+- local smoke verification
+
+This is much cleaner than baked-in donor drift, but it is still **not** full automatic upstream syncing.

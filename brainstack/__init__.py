@@ -20,17 +20,12 @@ from typing import Any, Dict, List
 from agent.memory_provider import MemoryProvider
 
 from .control_plane import build_working_memory_packet
-from .corpus import build_document_stable_key, split_corpus_sections
 from .db import BrainstackStore
-from .graph import ingest_graph_candidates
+from .donors import continuity_adapter, corpus_adapter, graph_adapter
+from .donors.registry import get_donor_registry
 from .retrieval import (
     build_compression_hint,
     build_system_prompt_block,
-)
-from .transcript import (
-    build_transcript_snapshot,
-    build_turn_summary,
-    format_turn_content,
 )
 
 logger = logging.getLogger(__name__)
@@ -152,6 +147,9 @@ class BrainstackMemoryProvider(MemoryProvider):
     def is_available(self) -> bool:
         return True
 
+    def donor_registry(self) -> Dict[str, Any]:
+        return {key: spec.to_dict() for key, spec in get_donor_registry().items()}
+
     def get_config_schema(self):
         from hermes_constants import display_hermes_home
 
@@ -224,20 +222,12 @@ class BrainstackMemoryProvider(MemoryProvider):
             return
         sid = session_id or self._session_id
         self._turn_counter += 1
-        content = build_turn_summary(user_content, assistant_content)
-        self._store.add_continuity_event(
+        continuity_adapter.write_turn_records(
+            self._store,
             session_id=sid,
             turn_number=self._turn_counter,
-            kind="turn",
-            content=content,
-            source="sync_turn",
-        )
-        self._store.add_transcript_entry(
-            session_id=sid,
-            turn_number=self._turn_counter,
-            kind="turn",
-            content=format_turn_content(user_content, assistant_content),
-            source="sync_turn",
+            user_content=user_content,
+            assistant_content=assistant_content,
         )
         for item in _extract_profile_candidates(user_content):
             self._store.upsert_profile_item(
@@ -248,11 +238,12 @@ class BrainstackMemoryProvider(MemoryProvider):
                 confidence=float(item["confidence"]),
                 metadata={"session_id": sid},
             )
-        ingest_graph_candidates(
+        graph_adapter.ingest_turn_graph_candidates(
             self._store,
             text=user_content,
+            session_id=sid,
+            turn_number=self._turn_counter,
             source="sync_turn:user",
-            metadata={"session_id": sid, "turn_number": self._turn_counter},
         )
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
@@ -279,23 +270,20 @@ class BrainstackMemoryProvider(MemoryProvider):
         if not text.strip():
             raise ValueError("content is required")
 
-        stable_key = build_document_stable_key(
+        payload = corpus_adapter.prepare_corpus_payload(
             title=normalized_title,
+            content=text,
             source=normalized_source,
             doc_kind=doc_kind,
             metadata=metadata,
-        )
-        sections = split_corpus_sections(
-            title=normalized_title,
-            content=text,
-            max_chars=self._corpus_section_max_chars,
+            section_max_chars=self._corpus_section_max_chars,
         )
         return self._store.ingest_corpus_document(
-            stable_key=stable_key,
+            stable_key=payload["stable_key"],
             title=normalized_title,
             doc_kind=doc_kind,
             source=normalized_source,
-            sections=sections,
+            sections=payload["sections"],
             metadata=metadata,
         )
 
@@ -305,48 +293,33 @@ class BrainstackMemoryProvider(MemoryProvider):
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
         if not self._store:
             return ""
-        summary = build_transcript_snapshot(
-            messages,
+        summary = continuity_adapter.write_snapshot_records(
+            self._store,
+            session_id=self._session_id,
+            turn_number=self._turn_counter,
+            messages=messages,
             label="pre-compress continuity snapshot",
+            kind="compression_snapshot",
+            source="on_pre_compress",
             max_items=self._compression_snapshot_limit,
         )
         if not summary:
             return ""
-        self._store.add_continuity_event(
-            session_id=self._session_id,
-            turn_number=self._turn_counter,
-            kind="compression_snapshot",
-            content=summary,
-            source="on_pre_compress",
-        )
-        self._store.add_transcript_entry(
-            session_id=self._session_id,
-            turn_number=self._turn_counter,
-            kind="compression_snapshot",
-            content=summary,
-            source="on_pre_compress",
-        )
         return build_compression_hint(summary)
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         if not self._store:
             return
-        summary = build_transcript_snapshot(messages, label="session summary", max_items=8)
-        if summary:
-            self._store.add_continuity_event(
-                session_id=self._session_id,
-                turn_number=self._turn_counter,
-                kind="session_summary",
-                content=summary,
-                source="on_session_end",
-            )
-            self._store.add_transcript_entry(
-                session_id=self._session_id,
-                turn_number=self._turn_counter,
-                kind="session_summary",
-                content=summary,
-                source="on_session_end",
-            )
+        continuity_adapter.write_snapshot_records(
+            self._store,
+            session_id=self._session_id,
+            turn_number=self._turn_counter,
+            messages=messages,
+            label="session summary",
+            kind="session_summary",
+            source="on_session_end",
+            max_items=8,
+        )
         for message in messages:
             if message.get("role") != "user":
                 continue
@@ -360,11 +333,11 @@ class BrainstackMemoryProvider(MemoryProvider):
                     confidence=float(item["confidence"]),
                     metadata={"session_id": self._session_id},
                 )
-            ingest_graph_candidates(
+            graph_adapter.ingest_session_graph_candidates(
                 self._store,
                 text=message_content,
+                session_id=self._session_id,
                 source="session_end_scan:user",
-                metadata={"session_id": self._session_id},
             )
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:

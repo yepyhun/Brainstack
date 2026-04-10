@@ -8,7 +8,7 @@ sys.modules.setdefault("fire", types.SimpleNamespace(Fire=lambda *a, **k: None))
 sys.modules.setdefault("firecrawl", types.SimpleNamespace(Firecrawl=object))
 sys.modules.setdefault("fal_client", types.SimpleNamespace())
 
-from plugins.memory.brainstack import BrainstackMemoryProvider
+from brainstack import BrainstackMemoryProvider
 from run_agent import AIAgent
 
 
@@ -93,6 +93,17 @@ def _fake_response(content="ok"):
 
 
 class TestBrainstackIntegrationInvariants:
+    def test_donor_registry_does_not_create_new_live_tool_surface(self, monkeypatch, tmp_path):
+        agent = _make_agent(monkeypatch, tmp_path)
+        try:
+            provider = agent._memory_manager._providers[-1]
+            registry = provider.donor_registry()
+            assert set(registry) == {"continuity", "graph_truth", "corpus"}
+            assert provider.get_tool_schemas() == []
+            assert "memory" not in agent.valid_tool_names
+        finally:
+            agent._memory_manager.shutdown_all()
+
     def test_prefetch_injection_is_api_only_and_does_not_mutate_session_history(self, monkeypatch, tmp_path):
         agent = _make_agent(monkeypatch, tmp_path)
         try:
