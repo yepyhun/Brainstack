@@ -80,3 +80,39 @@ class TestBrainstackTranscriptShelf:
             assert provider._last_prefetch_policy["transcript_limit"] == 1
         finally:
             provider.shutdown()
+
+    def test_search_transcript_is_scoped_to_current_session(self, tmp_path):
+        provider = _make_provider(tmp_path, "session-a")
+        try:
+            provider.sync_turn(
+                "Exact rollback phrase for session A: Atlas rollback stays frozen until Monday morning.",
+                "Saved.",
+                session_id="session-a",
+            )
+            provider.sync_turn(
+                "Exact rollback phrase for session B: Atlas rollback stays frozen until Tuesday morning.",
+                "Saved.",
+                session_id="session-b",
+            )
+
+            rows_a = provider._store.search_transcript(
+                query="Atlas rollback stays frozen morning",
+                session_id="session-a",
+                limit=5,
+            )
+            rows_b = provider._store.search_transcript(
+                query="Atlas rollback stays frozen morning",
+                session_id="session-b",
+                limit=5,
+            )
+
+            assert rows_a
+            assert rows_b
+            assert all(row["session_id"] == "session-a" for row in rows_a)
+            assert all(row["session_id"] == "session-b" for row in rows_b)
+            assert any("Monday morning" in row["content"] for row in rows_a)
+            assert all("Tuesday morning" not in row["content"] for row in rows_a)
+            assert any("Tuesday morning" in row["content"] for row in rows_b)
+            assert all("Monday morning" not in row["content"] for row in rows_b)
+        finally:
+            provider.shutdown()

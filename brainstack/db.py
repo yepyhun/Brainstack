@@ -377,8 +377,8 @@ class BrainstackStore:
                 FROM transcript_fts fts
                 JOIN transcript_entries te ON te.id = fts.rowid
                 WHERE transcript_fts MATCH ?
+                  AND te.session_id = ?
                 ORDER BY
-                    CASE WHEN te.session_id = ? THEN 0 ELSE 1 END,
                     bm25(transcript_fts),
                     te.created_at DESC
                 LIMIT ?
@@ -392,11 +392,11 @@ class BrainstackStore:
                 f"""
                 SELECT id, session_id, turn_number, kind, content, source, created_at
                 FROM transcript_entries
-                WHERE {where}
-                ORDER BY CASE WHEN session_id = ? THEN 0 ELSE 1 END, created_at DESC
+                WHERE session_id = ? AND ({where})
+                ORDER BY created_at DESC
                 LIMIT ?
                 """,
-                tuple(patterns + [session_id, candidate_limit]),
+                tuple([session_id] + patterns + [candidate_limit]),
             ).fetchall()
 
         scored: List[Dict[str, Any]] = []
