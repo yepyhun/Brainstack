@@ -183,10 +183,20 @@ def _check_host_surfaces(target: Path) -> list[Check]:
     else:
         checks.append(Check("brainstack_only_helper", "fail", "agent/brainstack_mode.py is missing or incomplete"))
 
+    if "PERSONAL_MEMORY_FILE_TOOL_NAMES" in brainstack_mode and "side-memory files" in brainstack_mode:
+        checks.append(Check("personal_memory_file_boundary", "pass", "Brainstack-only helper blocks Hermes side-memory file detours"))
+    else:
+        checks.append(Check("personal_memory_file_boundary", "fail", "agent/brainstack_mode.py does not block Hermes side-memory file detours"))
+
     if "filter_legacy_memory_tool_defs" in run_agent and "LEGACY_MEMORY_TOOL_NAMES" in run_agent:
         checks.append(Check("legacy_tool_surface_gate", "pass", "run_agent strips legacy memory and session_search tools in Brainstack-only mode"))
     else:
         checks.append(Check("legacy_tool_surface_gate", "fail", "run_agent does not gate legacy memory tool surface for Brainstack-only mode"))
+
+    if "Brainstack owns personal memory in this mode." in run_agent:
+        checks.append(Check("personal_memory_guidance", "pass", "run_agent injects explicit Brainstack-owned personal memory guidance"))
+    else:
+        checks.append(Check("personal_memory_guidance", "fail", "run_agent still lacks explicit Brainstack-owned personal memory guidance"))
 
     if "_async_finalize_session_memory" in gateway_run and "_finalize_brainstack_session_memory" in gateway_run:
         checks.append(Check("gateway_session_boundary_gate", "pass", "gateway routes session boundaries through a Brainstack-aware finalizer"))

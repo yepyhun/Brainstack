@@ -84,6 +84,8 @@ def test_run_agent_patch_supports_multiline_memory_manager_import(tmp_path: Path
 
     assert "run_agent:import_brainstack_mode" in applied
     assert "from agent.brainstack_mode import (" in content
+    assert "Brainstack owns personal memory in this mode." in content
+    assert "Do not create or maintain notes files, MEMORY.md, USER.md, or skill records" in content
 
 
 def test_memory_manager_patch_hardens_private_recall_wrapper(tmp_path: Path):

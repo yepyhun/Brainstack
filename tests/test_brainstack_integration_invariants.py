@@ -208,3 +208,22 @@ class TestBrainstackIntegrationInvariants:
         assert blocked is not None
         assert "personal profile" in blocked
         assert allowed is None
+
+    def test_file_tool_boundary_blocks_hermes_side_memory_but_keeps_normal_files_available(self):
+        blocked_notes = blocked_brainstack_only_tool_error(
+            "write_file",
+            {"path": "~/.hermes/notes/lauratom-preferences.md"},
+        )
+        blocked_memory_md = blocked_brainstack_only_tool_error(
+            "read_file",
+            {"path": "/root/.hermes/MEMORY.md"},
+        )
+        allowed_workspace_file = blocked_brainstack_only_tool_error(
+            "write_file",
+            {"path": "/workspace/project/README.md"},
+        )
+
+        assert blocked_notes is not None
+        assert "side-memory files" in blocked_notes
+        assert blocked_memory_md is not None
+        assert allowed_workspace_file is None

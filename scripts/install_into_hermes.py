@@ -152,26 +152,43 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
         text = _replace_once(text, filter_anchor, filter_inject, label="run_agent tool filter", path=path)
         applied.append("run_agent:filter_legacy_tools")
 
-    guidance_anchor = (
-        "        if \"session_search\" in self.valid_tool_names:\n"
-        "            tool_guidance.append(SESSION_SEARCH_GUIDANCE)\n"
-        "        if \"skill_manage\" in self.valid_tool_names:\n"
-        "            tool_guidance.append(SKILLS_GUIDANCE)\n"
-    )
+    guidance_replacements = [
+        (
+            "        if \"session_search\" in self.valid_tool_names:\n"
+            "            tool_guidance.append(SESSION_SEARCH_GUIDANCE)\n"
+            "        if \"skill_manage\" in self.valid_tool_names:\n"
+            "            tool_guidance.append(SKILLS_GUIDANCE)\n"
+        ),
+        (
+            "        if \"session_search\" in self.valid_tool_names:\n"
+            "            tool_guidance.append(SESSION_SEARCH_GUIDANCE)\n"
+            "        if \"skill_manage\" in self.valid_tool_names:\n"
+            "            if self._brainstack_only_mode:\n"
+            "                tool_guidance.append(\n"
+            "                    \"Use skill_manage only for reusable procedures or workflows. Never store personal profile, identity, communication style, or project memory there while Brainstack owns memory.\"\n"
+            "                )\n"
+            "            else:\n"
+            "                tool_guidance.append(SKILLS_GUIDANCE)\n"
+        ),
+    ]
     guidance_inject = (
         "        if \"session_search\" in self.valid_tool_names:\n"
         "            tool_guidance.append(SESSION_SEARCH_GUIDANCE)\n"
-        "        if \"skill_manage\" in self.valid_tool_names:\n"
-        "            if self._brainstack_only_mode:\n"
-        "                tool_guidance.append(\n"
-        "                    \"Use skill_manage only for reusable procedures or workflows. Never store personal profile, identity, communication style, or project memory there while Brainstack owns memory.\"\n"
-        "                )\n"
-        "            else:\n"
-        "                tool_guidance.append(SKILLS_GUIDANCE)\n"
+        "        if self._brainstack_only_mode:\n"
+        "            tool_guidance.append(\n"
+        "                \"Brainstack owns personal memory in this mode. Keep user identity, preferences, communication style, and project context inside Brainstack. Do not create or maintain notes files, MEMORY.md, USER.md, or skill records for that kind of memory. Use skill_manage only for reusable procedures or workflows.\"\n"
+        "            )\n"
+        "        elif \"skill_manage\" in self.valid_tool_names:\n"
+        "            tool_guidance.append(SKILLS_GUIDANCE)\n"
     )
-    if "Never store personal profile, identity, communication style, or project memory there while Brainstack owns memory." not in text:
-        text = _replace_once(text, guidance_anchor, guidance_inject, label="run_agent skill guidance", path=path)
-        applied.append("run_agent:scope_skill_guidance")
+    if "Brainstack owns personal memory in this mode." not in text:
+        text = _replace_once_any(
+            text,
+            [(anchor, guidance_inject) for anchor in guidance_replacements],
+            label="run_agent skill guidance",
+            path=path,
+        )
+        applied.append("run_agent:scope_personal_memory_guidance")
 
     nudge_anchor = (
         "            if (self._skill_nudge_interval > 0\n"
@@ -439,7 +456,10 @@ def _patch_gateway_run(path: Path, dry_run: bool) -> list[str]:
         "            )\n"
         "            return\n"
     )
-    if "Skipping legacy memory flush for session %s because Brainstack owns memory" not in text:
+    if (
+        "Skipping legacy memory flush for session %s because Brainstack owns memory" not in text
+        and flush_doc_anchor in text
+    ):
         text = _replace_once(text, flush_doc_anchor, flush_doc_inject, label="gateway legacy flush guard", path=path)
         applied.append("gateway:guard_legacy_flush")
 
@@ -551,7 +571,7 @@ def _patch_gateway_run(path: Path, dry_run: bool) -> list[str]:
         ),
     ]
     for old, new, label in replacements:
-        if new not in text:
+        if new not in text and old in text:
             text = _replace_once(text, old, new, label=label, path=path)
             applied.append(label)
 
