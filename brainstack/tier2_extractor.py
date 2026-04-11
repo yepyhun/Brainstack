@@ -185,6 +185,29 @@ def _normalize_relations(items: Any) -> List[Dict[str, Any]]:
     return normalized[:8]
 
 
+def _normalize_inferred_relations(items: Any) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for raw in items or []:
+        if not isinstance(raw, Mapping):
+            continue
+        subject = _normalize_text(raw.get("subject"))
+        predicate = _normalize_predicate(raw.get("predicate"))
+        object_value = _normalize_text(raw.get("object"))
+        if not subject or not predicate or not object_value:
+            continue
+        item: Dict[str, Any] = {
+            "subject": subject,
+            "predicate": predicate,
+            "object": object_value,
+            "confidence": _coerce_confidence(raw.get("confidence"), default=0.62),
+        }
+        reason = _normalize_text(raw.get("reason"))
+        if reason:
+            item["metadata"] = {"inference_reason": reason}
+        normalized.append(item)
+    return normalized[:4]
+
+
 def _normalize_decisions(items: Any) -> List[str]:
     normalized: List[str] = []
     seen: set[str] = set()
@@ -243,6 +266,7 @@ def extract_tier2_candidates(
                 '  "profile_items": [{"category":"identity|preference|shared_work","content":"...","slot":"optional-stable-slot","confidence":0.0}],\n'
                 '  "states": [{"subject":"...","attribute":"...","value":"...","supersede":true,"confidence":0.0}],\n'
                 '  "relations": [{"subject":"...","predicate":"...","object":"...","confidence":0.0}],\n'
+                '  "inferred_relations": [{"subject":"...","predicate":"...","object":"...","confidence":0.0,"reason":"short evidence"}],\n'
                 '  "continuity_summary": "short durable summary or empty string",\n'
                 '  "decisions": ["durable decision", "..."]\n'
                 "}\n"
@@ -251,6 +275,8 @@ def extract_tier2_candidates(
                 "- ignore markdown tables, quoted transcript dumps, code, wrappers, and assistant policy chatter\n"
                 "- use stable slots only when a profile fact has one obvious durable owner, such as identity:name\n"
                 "- use explicit entity names when clear, otherwise use User\n"
+                "- inferred_relations are optional; include them only when a relation is strongly implied by multiple transcript cues or stable shared context\n"
+                "- keep inferred_relations bounded and conservative; omit weak guesses\n"
                 "- keep continuity_summary concise and factual\n"
                 "- omit uncertain guesses"
             ),
@@ -273,6 +299,7 @@ def extract_tier2_candidates(
         "profile_items": _normalize_profile_items(payload.get("profile_items")),
         "states": _normalize_states(payload.get("states")),
         "relations": _normalize_relations(payload.get("relations")),
+        "inferred_relations": _normalize_inferred_relations(payload.get("inferred_relations")),
         "continuity_summary": _normalize_text(payload.get("continuity_summary")),
         "decisions": _normalize_decisions(payload.get("decisions")),
         "batch_text": batch,

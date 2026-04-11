@@ -36,7 +36,7 @@ Brainstack currently routes memory into five shelves instead of a flat memory bl
 3. **Transcript shelf**  
    Append-only raw turns used only as bounded evidence, not as a second live memory engine.
 4. **Graph-truth shelf**  
-   Entities, relations, temporal state, supersession, and explicit conflict surfacing.
+   Entities, explicit relations, bounded inferred links, temporal state, supersession, and explicit conflict surfacing.
 5. **Corpus shelf**  
    External documents, sectioning, bounded recall, and large-corpus packing.
 
@@ -50,10 +50,14 @@ On top of the shelves, Brainstack uses a **risk-aware control plane**:
   should be applied silently instead of being echoed back to the user
 - bounded retrieval telemetry can gently deprioritize non-core fallback rows
   without deleting them or overriding temporal truth
+- graph recall keeps explicit current truth first, historical truth separate,
+  inferred links bounded, and conflicts visible without flattening them into one blob
 
 ## What is true in the current codebase
 
 - Brainstack is intended to be the **single live memory path** when Hermes builtin memory is disabled.
+- L2 now separates **current explicit truth**, **historical truth**, **open conflicts**,
+  and **bounded inferred links** in recall packaging instead of flattening them together.
 - The donor-inspired parts are behind **explicit local adapters**:
   - `brainstack/donors/continuity_adapter.py`
   - `brainstack/donors/graph_adapter.py`

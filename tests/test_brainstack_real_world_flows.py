@@ -289,6 +289,42 @@ class TestBrainstackRealWorldFlows:
         assert "Debrecen" in extracted["continuity_summary"]
         assert extracted["decisions"] == ["Brainstack remains the primary memory path."]
 
+    def test_tier2_extractor_normalizes_bounded_inferred_relations(self):
+        def _fake_llm(**kwargs):
+            return {
+                "content": """
+                {
+                  "profile_items": [],
+                  "states": [],
+                  "relations": [],
+                  "inferred_relations": [
+                    {
+                      "subject": "Tomi",
+                      "predicate": "depends on",
+                      "object": "Hermes Bestie",
+                      "confidence": 0.61,
+                      "reason": "BrainStack was described as Tomi's project and as integrated into Hermes Bestie."
+                    }
+                  ],
+                  "continuity_summary": "",
+                  "decisions": []
+                }
+                """
+            }
+
+        rows = [
+            {
+                "id": 1,
+                "turn_number": 5,
+                "kind": "turn",
+                "content": "User: A BrainStacken dolgozom, és ezt kötjük rá a Hermes Bestie-re.\nAssistant: Rendben.",
+            }
+        ]
+        extracted = extract_tier2_candidates(rows, llm_caller=_fake_llm, transcript_limit=4)
+
+        assert extracted["inferred_relations"][0]["predicate"] == "depends_on"
+        assert extracted["inferred_relations"][0]["metadata"]["inference_reason"].startswith("BrainStack")
+
     def test_tier2_reconciler_updates_current_state_and_surfaces_conflict(self, tmp_path):
         provider = _make_provider(tmp_path, "session-tier2-reconcile")
         try:
@@ -352,6 +388,101 @@ class TestBrainstackRealWorldFlows:
             )
             assert current_location["metadata"]["temporal"]["supersedes"]
             assert "tier2:test" in current_location["metadata"]["provenance"]["source_ids"]
+        finally:
+            provider.shutdown()
+
+    def test_explicit_truth_beats_inferred_relation_and_inferred_is_packaged_separately(self, tmp_path):
+        provider = _make_provider(tmp_path, "session-inferred")
+        try:
+            reconcile_tier2_candidates(
+                provider._store,
+                session_id="session-inferred",
+                turn_number=1,
+                source="tier2:test",
+                extracted={
+                    "profile_items": [{"category": "identity", "content": "User identity: Tomi", "slot": "identity:name", "confidence": 0.95}],
+                    "states": [],
+                    "relations": [{"subject": "Tomi", "predicate": "works_on", "object": "BrainStack", "confidence": 0.9}],
+                    "inferred_relations": [
+                        {
+                            "subject": "BrainStack",
+                            "predicate": "depends_on",
+                            "object": "Hermes Bestie",
+                            "confidence": 0.61,
+                            "metadata": {"inference_reason": "The project was described as being hooked into Hermes Bestie."},
+                        }
+                    ],
+                    "continuity_summary": "Tomi works on BrainStack and it is being connected to Hermes Bestie.",
+                    "decisions": [],
+                },
+            )
+
+            rows = provider._store.search_graph(query="BrainStack Hermes Bestie", limit=10)
+            explicit_index = next(index for index, row in enumerate(rows) if row["row_type"] == "relation")
+            inferred_index = next(index for index, row in enumerate(rows) if row["row_type"] == "inferred_relation")
+            assert explicit_index < inferred_index
+
+            block = provider.prefetch(
+                "How am I related to BrainStack and what is it connected to?",
+                session_id="session-inferred",
+            )
+            assert "### Current Truth" in block
+            assert "### Inferred Links" in block
+            assert "[relation:explicit] Tomi works_on BrainStack" in block
+            assert "[relation:inferred] BrainStack depends_on Hermes Bestie" in block
+        finally:
+            provider.shutdown()
+
+    def test_explicit_relation_shadows_matching_inferred_relation(self, tmp_path):
+        provider = _make_provider(tmp_path, "session-shadow")
+        try:
+            reconcile_tier2_candidates(
+                provider._store,
+                session_id="session-shadow",
+                turn_number=1,
+                source="tier2:test",
+                extracted={
+                    "profile_items": [],
+                    "states": [],
+                    "relations": [],
+                    "inferred_relations": [
+                        {
+                            "subject": "BrainStack",
+                            "predicate": "integrates_with",
+                            "object": "Hermes Bestie",
+                            "confidence": 0.63,
+                            "metadata": {"inference_reason": "Stable project context implied the integration."},
+                        }
+                    ],
+                    "continuity_summary": "",
+                    "decisions": [],
+                },
+            )
+            reconcile_tier2_candidates(
+                provider._store,
+                session_id="session-shadow",
+                turn_number=2,
+                source="tier2:test",
+                extracted={
+                    "profile_items": [],
+                    "states": [],
+                    "relations": [
+                        {
+                            "subject": "BrainStack",
+                            "predicate": "integrates_with",
+                            "object": "Hermes Bestie",
+                            "confidence": 0.89,
+                        }
+                    ],
+                    "inferred_relations": [],
+                    "continuity_summary": "",
+                    "decisions": [],
+                },
+            )
+
+            graph_rows = provider._store.search_graph(query="BrainStack Hermes Bestie", limit=10)
+            assert any(row["row_type"] == "relation" for row in graph_rows)
+            assert not any(row["row_type"] == "inferred_relation" for row in graph_rows)
         finally:
             provider.shutdown()
 
@@ -665,8 +796,8 @@ class TestBrainstackRealWorldFlows:
             )
 
             assert "## Brainstack Graph Truth" in block
-            assert "[relation] Tomi works_on Brainstack" in block
-            assert "[relation] Brainstack integrates_with Hermes Bestie" in block
+            assert "[relation:explicit] Tomi works_on Brainstack" in block
+            assert "[relation:explicit] Brainstack integrates_with Hermes Bestie" in block
         finally:
             provider.shutdown()
 

@@ -76,4 +76,6 @@ def graph_priority_adjustment(row: Dict[str, Any]) -> float:
         adjustment += 0.04
     elif str(row.get("row_type") or "") == "state" and bool(row.get("is_current")):
         adjustment += 0.02
+    elif str(row.get("row_type") or "") == "inferred_relation":
+        adjustment -= 0.02
     return adjustment

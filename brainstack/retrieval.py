@@ -97,6 +97,101 @@ def _render_contract_section(title: str, lines: Iterable[str]) -> str:
     return f"{title}\n{preface}\n{_render_items(rows)}"
 
 
+def _graph_fact_class(row: Dict[str, Any]) -> str:
+    value = str(row.get("fact_class") or "").strip()
+    if value:
+        return value
+    row_type = str(row.get("row_type") or "").strip()
+    if row_type == "conflict":
+        return "conflict"
+    if row_type == "inferred_relation":
+        return "inferred_relation"
+    if row_type == "relation":
+        return "explicit_relation"
+    if row_type == "state":
+        if row.get("is_current") and record_is_effective_at(row):
+            return "explicit_state_current"
+        return "explicit_state_prior"
+    return row_type or "graph"
+
+
+def _render_graph_rows(
+    rows: Iterable[Dict[str, Any]],
+    *,
+    provenance_mode: str,
+) -> List[str]:
+    lines: List[str] = []
+    seen = set()
+    for row in rows:
+        row_key = (
+            row.get("row_type"),
+            row.get("subject"),
+            row.get("predicate"),
+            row.get("object_value"),
+            row.get("conflict_value"),
+            row.get("fact_class"),
+        )
+        if row_key in seen:
+            continue
+        seen.add(row_key)
+        fact_class = _graph_fact_class(row)
+        if fact_class == "explicit_relation":
+            text = f"[relation:explicit] {row['subject']} {row['predicate']} {row['object_value']}"
+            lines.append(
+                _with_provenance(
+                    text,
+                    source=str(row.get("source", "")),
+                    provenance_mode=provenance_mode,
+                    metadata=row.get("metadata"),
+                )
+            )
+            continue
+        if fact_class == "inferred_relation":
+            reason = str((row.get("metadata") or {}).get("inference_reason") or "").strip()
+            extra = f"reason={reason}" if reason else ""
+            text = f"[relation:inferred] {row['subject']} {row['predicate']} {row['object_value']}"
+            lines.append(
+                _with_provenance(
+                    text,
+                    source=str(row.get("source", "")),
+                    extra=extra,
+                    provenance_mode=provenance_mode,
+                    metadata=row.get("metadata"),
+                )
+            )
+            continue
+        if fact_class == "conflict":
+            text = (
+                f"[conflict] {row['subject']} {row['predicate']} "
+                f"current={row['object_value']} candidate={row['conflict_value']}"
+            )
+            conflict_basis = summarize_provenance((row.get("conflict_metadata") or {}).get("provenance"))
+            extra = f"candidate_source={row.get('conflict_source', '')}"
+            if conflict_basis:
+                extra = f"{extra} ; candidate_basis={conflict_basis}" if extra else f"candidate_basis={conflict_basis}"
+            lines.append(
+                _with_provenance(
+                    text,
+                    source=str(row.get("source", "")),
+                    extra=extra,
+                    provenance_mode=provenance_mode,
+                    metadata=row.get("metadata"),
+                )
+            )
+            continue
+        current_marker = "current" if fact_class == "explicit_state_current" else "prior"
+        text = f"[state:{current_marker}] {row['subject']} {row['predicate']}={row['object_value']}"
+        lines.append(
+            _with_provenance(
+                text,
+                source=str(row.get("source", "")),
+                provenance_mode=provenance_mode,
+                metadata=row.get("metadata"),
+            )
+        )
+    return lines
+
+
 def _with_provenance(
     text: str,
     *,
@@ -295,70 +390,39 @@ def render_working_memory_block(
 
     if graph_rows:
         show_graph_history = bool(policy.get("show_graph_history", False))
-        conflicts = [row for row in graph_rows if row["row_type"] == "conflict"]
-        current_states = [
-            row for row in graph_rows if row["row_type"] == "state" and row.get("is_current") and record_is_effective_at(row)
+        current_truth = [
+            row
+            for row in graph_rows
+            if _graph_fact_class(row) in {"explicit_state_current", "explicit_relation"}
         ]
-        prior_states = [row for row in graph_rows if row["row_type"] == "state" and not row.get("is_current")]
-        relations = [row for row in graph_rows if row["row_type"] == "relation"]
-        ordered_rows = conflicts + current_states
-        if show_graph_history or conflicts:
-            ordered_rows.extend(prior_states)
-        ordered_rows.extend(relations)
+        conflicts = [row for row in graph_rows if _graph_fact_class(row) == "conflict"]
+        historical_truth = [
+            row for row in graph_rows if _graph_fact_class(row) == "explicit_state_prior"
+        ]
+        inferred_links = [
+            row for row in graph_rows if _graph_fact_class(row) == "inferred_relation"
+        ][: max(0, int(policy.get("graph_inferred_limit", 2)))]
 
-        lines = []
-        seen = set()
-        for row in ordered_rows:
-            row_key = (
-                row["row_type"],
-                row.get("subject"),
-                row.get("predicate"),
-                row.get("object_value"),
-                row.get("conflict_value"),
-            )
-            if row_key in seen:
-                continue
-            seen.add(row_key)
-            if row["row_type"] == "relation":
-                text = f"[relation] {row['subject']} {row['predicate']} {row['object_value']}"
-                lines.append(
-                    _with_provenance(
-                        text,
-                        source=str(row.get("source", "")),
-                        provenance_mode=provenance_mode,
-                        metadata=row.get("metadata"),
-                    )
-                )
-            elif row["row_type"] == "conflict":
-                text = (
-                    f"[conflict] {row['subject']} {row['predicate']} "
-                    f"current={row['object_value']} candidate={row['conflict_value']}"
-                )
-                conflict_basis = summarize_provenance((row.get("conflict_metadata") or {}).get("provenance"))
-                extra = f"candidate_source={row.get('conflict_source', '')}"
-                if conflict_basis:
-                    extra = f"{extra} ; candidate_basis={conflict_basis}" if extra else f"candidate_basis={conflict_basis}"
-                lines.append(
-                    _with_provenance(
-                        text,
-                        source=str(row.get("source", "")),
-                        extra=extra,
-                        provenance_mode=provenance_mode,
-                        metadata=row.get("metadata"),
-                    )
-                )
-            else:
-                current_marker = "current" if row.get("is_current") else "prior"
-                text = f"[state:{current_marker}] {row['subject']} {row['predicate']}={row['object_value']}"
-                lines.append(
-                    _with_provenance(
-                        text,
-                        source=str(row.get("source", "")),
-                        provenance_mode=provenance_mode,
-                        metadata=row.get("metadata"),
-                    )
-                )
-        sections.append("## Brainstack Graph Truth\n" + _render_items(lines))
+        graph_sections: List[str] = []
+        current_lines = _render_graph_rows(current_truth, provenance_mode=provenance_mode)
+        if current_lines:
+            graph_sections.append("### Current Truth\n" + _render_items(current_lines))
+
+        conflict_lines = _render_graph_rows(conflicts, provenance_mode=provenance_mode)
+        if conflict_lines:
+            graph_sections.append("### Open Conflicts\n" + _render_items(conflict_lines))
+
+        if show_graph_history or conflicts:
+            history_lines = _render_graph_rows(historical_truth, provenance_mode=provenance_mode)
+            if history_lines:
+                graph_sections.append("### Historical Truth\n" + _render_items(history_lines))
+
+        inferred_lines = _render_graph_rows(inferred_links, provenance_mode=provenance_mode)
+        if inferred_lines:
+            graph_sections.append("### Inferred Links\n" + _render_items(inferred_lines))
+
+        if graph_sections:
+            sections.append("## Brainstack Graph Truth\n" + "\n\n".join(graph_sections))
 
     packed_corpus = _pack_corpus_rows(
         corpus_rows,
@@ -404,6 +468,7 @@ def build_prefetch_block(
             "tool_avoidance_reason": "legacy prefetch path",
             "show_policy": False,
             "show_graph_history": False,
+            "graph_inferred_limit": 2,
             "transcript_char_budget": transcript_char_budget,
             "corpus_char_budget": corpus_char_budget,
         },

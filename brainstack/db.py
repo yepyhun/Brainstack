@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, TypeVar
 
 from .provenance import merge_provenance, normalize_provenance
-from .temporal import merge_temporal, normalize_temporal_fields
+from .temporal import merge_temporal, normalize_temporal_fields, record_is_effective_at
 from .transcript import count_overlap, tokenize_match_text
-from .usefulness import apply_retrieval_telemetry
+from .usefulness import apply_retrieval_telemetry, graph_priority_adjustment
 
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -115,6 +115,68 @@ def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     if "conflict_metadata_json" in item:
         item["conflict_metadata"] = _decode_json_object(item.pop("conflict_metadata_json"))
     return item
+
+
+def _graph_metadata_confidence(metadata: Dict[str, Any] | None) -> float:
+    try:
+        return max(0.0, min(1.0, float((metadata or {}).get("confidence", 0.0) or 0.0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _graph_match_text(row: Dict[str, Any]) -> str:
+    parts = [
+        str(row.get("subject") or "").strip(),
+        str(row.get("predicate") or "").strip(),
+        str(row.get("object_value") or "").strip(),
+        str(row.get("conflict_value") or "").strip(),
+    ]
+    return " ".join(part for part in parts if part)
+
+
+def _graph_fact_class(row: Dict[str, Any]) -> str:
+    row_type = str(row.get("row_type") or "").strip()
+    if row_type == "conflict":
+        return "conflict"
+    if row_type == "inferred_relation":
+        return "inferred_relation"
+    if row_type == "relation":
+        return "explicit_relation"
+    if row_type == "state":
+        if row.get("is_current") and record_is_effective_at(row):
+            return "explicit_state_current"
+        return "explicit_state_prior"
+    return row_type or "graph"
+
+
+def _graph_fact_priority(row: Dict[str, Any]) -> int:
+    fact_class = _graph_fact_class(row)
+    priorities = {
+        "explicit_state_current": 520,
+        "explicit_relation": 430,
+        "conflict": 390,
+        "explicit_state_prior": 310,
+        "inferred_relation": 180,
+    }
+    return priorities.get(fact_class, 0)
+
+
+def _graph_sort_key(row: Dict[str, Any], *, query: str) -> tuple[int, int, int, int, str]:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    if str(row.get("row_type") or "") == "conflict" and isinstance(row.get("conflict_metadata"), dict):
+        metadata = row.get("conflict_metadata") or metadata
+    overlap_count = count_overlap(query, _graph_match_text(row))
+    row["overlap_count"] = overlap_count
+    row["fact_class"] = _graph_fact_class(row)
+    confidence_score = int(round(_graph_metadata_confidence(metadata) * 100))
+    telemetry_score = int(round(graph_priority_adjustment(row) * 100))
+    return (
+        _graph_fact_priority(row),
+        overlap_count,
+        confidence_score,
+        telemetry_score,
+        str(row.get("happened_at") or ""),
+    )
 
 
 def _locked(method: F) -> F:
@@ -247,6 +309,24 @@ class BrainstackStore:
             CREATE INDEX IF NOT EXISTS idx_graph_relations_subject
             ON graph_relations(subject_entity_id, predicate, created_at DESC);
 
+            CREATE TABLE IF NOT EXISTS graph_inferred_relations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_entity_id INTEGER NOT NULL,
+                predicate TEXT NOT NULL,
+                object_entity_id INTEGER,
+                object_text TEXT,
+                source TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY(subject_entity_id) REFERENCES graph_entities(id),
+                FOREIGN KEY(object_entity_id) REFERENCES graph_entities(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_graph_inferred_relations_subject
+            ON graph_inferred_relations(subject_entity_id, predicate, updated_at DESC);
+
             CREATE TABLE IF NOT EXISTS graph_states (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 entity_id INTEGER NOT NULL,
@@ -347,6 +427,8 @@ class BrainstackStore:
     ) -> int:
         now = utc_now_iso()
         normalized_metadata = _normalize_record_metadata(metadata, source=source)
+        normalized_metadata.setdefault("source_kind", "explicit")
+        normalized_metadata.setdefault("graph_kind", "relation")
         cur = self.conn.execute(
             """
             INSERT INTO continuity_events (
@@ -385,6 +467,8 @@ class BrainstackStore:
     ) -> int:
         now = utc_now_iso()
         normalized_metadata = _normalize_record_metadata(metadata, source=source)
+        normalized_metadata.setdefault("source_kind", "explicit")
+        normalized_metadata.setdefault("graph_kind", "relation")
         cur = self.conn.execute(
             """
             INSERT INTO transcript_entries (
@@ -907,6 +991,7 @@ class BrainstackStore:
         target_normalized = self._normalize_entity_name(target_name)
         if not alias_normalized or not target_normalized or alias_normalized == target_normalized:
             return {"status": "noop"}
+        now = utc_now_iso()
 
         alias = self.conn.execute(
             "SELECT id FROM graph_entities WHERE normalized_name = ?",
@@ -923,7 +1008,15 @@ class BrainstackStore:
         self.conn.execute("UPDATE graph_conflicts SET entity_id = ? WHERE entity_id = ?", (target_id, alias_id))
         self.conn.execute("UPDATE graph_relations SET subject_entity_id = ? WHERE subject_entity_id = ?", (target_id, alias_id))
         self.conn.execute(
+            "UPDATE graph_inferred_relations SET subject_entity_id = ? WHERE subject_entity_id = ?",
+            (target_id, alias_id),
+        )
+        self.conn.execute(
             "UPDATE graph_relations SET object_entity_id = ?, object_text = ? WHERE object_entity_id = ?",
+            (target_id, target_name.strip(), alias_id),
+        )
+        self.conn.execute(
+            "UPDATE graph_inferred_relations SET object_entity_id = ?, object_text = ? WHERE object_entity_id = ?",
             (target_id, target_name.strip(), alias_id),
         )
 
@@ -949,16 +1042,45 @@ class BrainstackStore:
             for row in rows[1:]:
                 self.conn.execute("UPDATE graph_relations SET active = 0 WHERE id = ?", (int(row["id"]),))
 
+        inferred_duplicate_groups = self.conn.execute(
+            """
+            SELECT subject_entity_id, predicate, object_entity_id, COUNT(*) AS relation_count
+            FROM graph_inferred_relations
+            WHERE active = 1
+            GROUP BY subject_entity_id, predicate, object_entity_id
+            HAVING COUNT(*) > 1
+            """
+        ).fetchall()
+        for group in inferred_duplicate_groups:
+            rows = self.conn.execute(
+                """
+                SELECT id
+                FROM graph_inferred_relations
+                WHERE active = 1 AND subject_entity_id = ? AND predicate = ? AND object_entity_id = ?
+                ORDER BY id DESC
+                """,
+                (int(group["subject_entity_id"]), str(group["predicate"]), int(group["object_entity_id"])),
+            ).fetchall()
+            for row in rows[1:]:
+                self.conn.execute("UPDATE graph_inferred_relations SET active = 0, updated_at = ? WHERE id = ?", (now, int(row["id"])))
+
         refs = self.conn.execute(
             """
             SELECT
                 (SELECT COUNT(*) FROM graph_states WHERE entity_id = ?) AS state_refs,
                 (SELECT COUNT(*) FROM graph_conflicts WHERE entity_id = ?) AS conflict_refs,
-                (SELECT COUNT(*) FROM graph_relations WHERE subject_entity_id = ? OR object_entity_id = ?) AS relation_refs
+                (SELECT COUNT(*) FROM graph_relations WHERE subject_entity_id = ? OR object_entity_id = ?) AS relation_refs,
+                (SELECT COUNT(*) FROM graph_inferred_relations WHERE subject_entity_id = ? OR object_entity_id = ?) AS inferred_relation_refs
             """,
-            (alias_id, alias_id, alias_id, alias_id),
+            (alias_id, alias_id, alias_id, alias_id, alias_id, alias_id),
         ).fetchone()
-        if refs and int(refs["state_refs"]) == 0 and int(refs["conflict_refs"]) == 0 and int(refs["relation_refs"]) == 0:
+        if (
+            refs
+            and int(refs["state_refs"]) == 0
+            and int(refs["conflict_refs"]) == 0
+            and int(refs["relation_refs"]) == 0
+            and int(refs["inferred_relation_refs"]) == 0
+        ):
             self.conn.execute("DELETE FROM graph_entities WHERE id = ?", (alias_id,))
 
         self.conn.commit()
@@ -990,6 +1112,14 @@ class BrainstackStore:
                 "UPDATE graph_relations SET metadata_json = ? WHERE id = ?",
                 (json.dumps(merged, ensure_ascii=True, sort_keys=True), int(existing["id"])),
             )
+            self.conn.execute(
+                """
+                UPDATE graph_inferred_relations
+                SET active = 0, updated_at = ?
+                WHERE active = 1 AND subject_entity_id = ? AND predicate = ? AND object_entity_id = ?
+                """,
+                (now, subject["id"], predicate, obj["id"]),
+            )
             self.conn.commit()
             return int(existing["id"])
         normalized_metadata = _normalize_record_metadata(metadata, source=source)
@@ -1008,6 +1138,14 @@ class BrainstackStore:
                 json.dumps(normalized_metadata, ensure_ascii=True, sort_keys=True),
                 now,
             ),
+        )
+        self.conn.execute(
+            """
+            UPDATE graph_inferred_relations
+            SET active = 0, updated_at = ?
+            WHERE active = 1 AND subject_entity_id = ? AND predicate = ? AND object_entity_id = ?
+            """,
+            (now, subject["id"], predicate, obj["id"]),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -1038,6 +1176,14 @@ class BrainstackStore:
                 "UPDATE graph_relations SET metadata_json = ? WHERE id = ?",
                 (json.dumps(merged, ensure_ascii=True, sort_keys=True), int(existing["id"])),
             )
+            self.conn.execute(
+                """
+                UPDATE graph_inferred_relations
+                SET active = 0, updated_at = ?
+                WHERE active = 1 AND subject_entity_id = ? AND predicate = ? AND object_entity_id = ?
+                """,
+                (now, subject["id"], predicate, obj["id"]),
+            )
             self.conn.commit()
             return {"status": "unchanged", "relation_id": int(existing["id"])}
         normalized_metadata = _normalize_record_metadata(metadata, source=source)
@@ -1054,6 +1200,92 @@ class BrainstackStore:
                 object_name.strip(),
                 source,
                 json.dumps(normalized_metadata, ensure_ascii=True, sort_keys=True),
+                now,
+            ),
+        )
+        self.conn.execute(
+            """
+            UPDATE graph_inferred_relations
+            SET active = 0, updated_at = ?
+            WHERE active = 1 AND subject_entity_id = ? AND predicate = ? AND object_entity_id = ?
+            """,
+            (now, subject["id"], predicate, obj["id"]),
+        )
+        self.conn.commit()
+        return {"status": "inserted", "relation_id": int(cur.lastrowid)}
+
+    @_locked
+    def upsert_graph_inferred_relation(
+        self,
+        *,
+        subject_name: str,
+        predicate: str,
+        object_name: str,
+        source: str,
+        metadata: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        now = utc_now_iso()
+        subject = self.get_or_create_entity(subject_name)
+        obj = self.get_or_create_entity(object_name)
+        explicit = self.conn.execute(
+            """
+            SELECT id FROM graph_relations
+            WHERE subject_entity_id = ? AND predicate = ? AND object_entity_id = ? AND active = 1
+            LIMIT 1
+            """,
+            (subject["id"], predicate, obj["id"]),
+        ).fetchone()
+        if explicit:
+            self.conn.execute(
+                """
+                UPDATE graph_inferred_relations
+                SET active = 0, updated_at = ?
+                WHERE active = 1 AND subject_entity_id = ? AND predicate = ? AND object_entity_id = ?
+                """,
+                (now, subject["id"], predicate, obj["id"]),
+            )
+            self.conn.commit()
+            return {"status": "shadowed", "relation_id": int(explicit["id"])}
+
+        normalized_metadata = _normalize_record_metadata(metadata, source=source)
+        normalized_metadata.setdefault("source_kind", "inferred")
+        normalized_metadata.setdefault("graph_kind", "relation")
+        existing = self.conn.execute(
+            """
+            SELECT id, metadata_json FROM graph_inferred_relations
+            WHERE subject_entity_id = ? AND predicate = ? AND object_entity_id = ? AND active = 1
+            LIMIT 1
+            """,
+            (subject["id"], predicate, obj["id"]),
+        ).fetchone()
+        if existing:
+            merged = _merge_record_metadata(existing["metadata_json"], normalized_metadata, source=source)
+            self.conn.execute(
+                """
+                UPDATE graph_inferred_relations
+                SET metadata_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (json.dumps(merged, ensure_ascii=True, sort_keys=True), now, int(existing["id"])),
+            )
+            self.conn.commit()
+            return {"status": "unchanged", "relation_id": int(existing["id"])}
+
+        cur = self.conn.execute(
+            """
+            INSERT INTO graph_inferred_relations (
+                subject_entity_id, predicate, object_entity_id, object_text,
+                source, metadata_json, created_at, updated_at, active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                subject["id"],
+                predicate,
+                obj["id"],
+                object_name.strip(),
+                source,
+                json.dumps(normalized_metadata, ensure_ascii=True, sort_keys=True),
+                now,
                 now,
             ),
         )
@@ -1074,6 +1306,8 @@ class BrainstackStore:
         now = utc_now_iso()
         entity = self.get_or_create_entity(subject_name)
         normalized_metadata = _normalize_record_metadata(metadata, source=source)
+        normalized_metadata.setdefault("source_kind", "explicit")
+        normalized_metadata.setdefault("graph_kind", "state")
         temporal = merge_temporal(
             normalized_metadata.get("temporal"),
             {"observed_at": normalized_metadata.get("temporal", {}).get("observed_at") or now},
@@ -1164,6 +1398,8 @@ class BrainstackStore:
                 {"source_ids": [source]},
             )
             prior_metadata = _decode_json_object(current["metadata_json"])
+            prior_metadata.setdefault("source_kind", "explicit")
+            prior_metadata.setdefault("graph_kind", "state")
             if prior_temporal:
                 prior_metadata["temporal"] = prior_temporal
             if prior_provenance:
@@ -1201,6 +1437,8 @@ class BrainstackStore:
 
         if current and supersede:
             updated_prior_metadata = _decode_json_object(current["metadata_json"])
+            updated_prior_metadata.setdefault("source_kind", "explicit")
+            updated_prior_metadata.setdefault("graph_kind", "state")
             updated_prior_metadata["temporal"] = merge_temporal(
                 updated_prior_metadata.get("temporal"),
                 {"valid_to": valid_from, "superseded_by": str(new_state_id)},
@@ -1291,7 +1529,7 @@ class BrainstackStore:
         patterns = build_like_tokens(query)
         if not patterns:
             return []
-        candidate_limit = max(limit * 4, limit)
+        candidate_limit = max(limit * 8, 24)
         state_where = " OR ".join(
             "lower(ge.canonical_name) LIKE ? OR lower(gs.value_text) LIKE ? OR lower(gs.attribute) LIKE ?"
             for _ in patterns
@@ -1304,6 +1542,10 @@ class BrainstackStore:
             "lower(ge.canonical_name) LIKE ? OR lower(gc.attribute) LIKE ? OR lower(gc.candidate_value_text) LIKE ?"
             for _ in patterns
         )
+        inferred_where = " OR ".join(
+            "lower(ge.canonical_name) LIKE ? OR lower(COALESCE(go.canonical_name, gir.object_text, '')) LIKE ? OR lower(gir.predicate) LIKE ?"
+            for _ in patterns
+        )
         params: List[Any] = []
         for pattern in patterns:
             params.extend([pattern, pattern, pattern])
@@ -1311,7 +1553,8 @@ class BrainstackStore:
             params.extend([pattern, pattern, pattern])
         for pattern in patterns:
             params.extend([pattern, pattern, pattern])
-        params.append(limit)
+        for pattern in patterns:
+            params.extend([pattern, pattern, pattern])
         rows = self.conn.execute(
             f"""
             WITH state_hits AS (
@@ -1370,6 +1613,26 @@ class BrainstackStore:
                 JOIN graph_states gs ON gs.id = gc.current_state_id
                 WHERE gc.status = 'open'
                   AND ({conflict_where})
+            ),
+            inferred_relation_hits AS (
+                SELECT 'inferred_relation' AS row_type,
+                       gir.id AS row_id,
+                       ge.canonical_name AS subject,
+                       gir.predicate AS predicate,
+                       COALESCE(go.canonical_name, gir.object_text, '') AS object_value,
+                       1 AS is_current,
+                       gir.updated_at AS happened_at,
+                       '' AS valid_to,
+                       gir.source AS source,
+                       gir.metadata_json AS metadata_json,
+                       '' AS conflict_metadata_json,
+                       '' AS conflict_source,
+                       '' AS conflict_value
+                FROM graph_inferred_relations gir
+                JOIN graph_entities ge ON ge.id = gir.subject_entity_id
+                LEFT JOIN graph_entities go ON go.id = gir.object_entity_id
+                WHERE gir.active = 1
+                  AND ({inferred_where})
             )
             SELECT * FROM (
                 SELECT * FROM state_hits
@@ -1377,22 +1640,17 @@ class BrainstackStore:
                 SELECT * FROM relation_hits
                 UNION ALL
                 SELECT * FROM conflict_hits
+                UNION ALL
+                SELECT * FROM inferred_relation_hits
             )
             ORDER BY happened_at DESC
             LIMIT ?
             """,
-            tuple(params[:-1] + [candidate_limit]),
+            tuple(params + [candidate_limit]),
         ).fetchall()
         parsed = [_row_to_dict(row) for row in rows]
-        parsed.sort(
-            key=lambda item: (
-                3 if item["row_type"] == "conflict" else 0,
-                2 if item["row_type"] == "state" and item.get("is_current") else 0,
-                1 if item["row_type"] == "relation" else 0,
-                str(item.get("happened_at") or ""),
-            ),
-            reverse=True,
-        )
+        parsed = [item for item in parsed if _graph_sort_key(item, query=query)[0] > 0]
+        parsed.sort(key=lambda item: _graph_sort_key(item, query=query), reverse=True)
         return parsed[:limit]
 
     @_locked
@@ -1403,6 +1661,7 @@ class BrainstackStore:
             "state": "graph_states",
             "relation": "graph_relations",
             "conflict": "graph_conflicts",
+            "inferred_relation": "graph_inferred_relations",
         }
         for row in rows:
             row_type = str(row.get("row_type") or "").strip()

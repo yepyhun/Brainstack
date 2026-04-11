@@ -4,6 +4,7 @@ from plugins.memory.brainstack.retrieval import build_system_prompt_block, rende
 
 def test_system_prompt_projects_active_communication_contract(tmp_path):
     store = BrainstackStore(str(tmp_path / "brainstack.db"))
+    store.open()
     store.upsert_profile_item(
         stable_key="identity:name",
         category="identity",
@@ -45,6 +46,7 @@ def test_system_prompt_projects_active_communication_contract(tmp_path):
 
 def test_working_memory_block_hides_contract_rows_from_profile_match(tmp_path):
     store = BrainstackStore(str(tmp_path / "brainstack.db"))
+    store.open()
     store.upsert_profile_item(
         stable_key="preference:communication_style",
         category="preference",

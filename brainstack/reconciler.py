@@ -171,6 +171,38 @@ def _reconcile_relations(
     return actions
 
 
+def _reconcile_inferred_relations(
+    store: BrainstackStore,
+    *,
+    candidates: Iterable[Mapping[str, Any]],
+    metadata: Dict[str, Any],
+    source: str,
+    user_name: str,
+) -> List[Dict[str, Any]]:
+    actions: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        subject_name = _canonicalize_person_subject(candidate.get("subject"), user_name=user_name)
+        object_name = _canonicalize_person_subject(candidate.get("object"), user_name=user_name)
+        outcome = store.upsert_graph_inferred_relation(
+            subject_name=subject_name,
+            predicate=_normalize_text(candidate.get("predicate")).lower(),
+            object_name=object_name,
+            source=source,
+            metadata=_candidate_metadata(
+                candidate,
+                base_metadata=metadata,
+                confidence=float(candidate.get("confidence", 0.62)),
+            ),
+        )
+        status = str(outcome.get("status", "")).lower()
+        if status in {"unchanged", "shadowed"}:
+            action = "NONE"
+        else:
+            action = "ADD"
+        actions.append({"kind": "inferred_relation", "action": action, **candidate, **outcome})
+    return actions
+
+
 def _reconcile_continuity(
     store: BrainstackStore,
     *,
@@ -251,6 +283,15 @@ def reconcile_tier2_candidates(
         _reconcile_relations(
             store,
             candidates=extracted.get("relations", []),
+            metadata=payload,
+            source=source,
+            user_name=user_name,
+        )
+    )
+    actions.extend(
+        _reconcile_inferred_relations(
+            store,
+            candidates=extracted.get("inferred_relations", []),
             metadata=payload,
             source=source,
             user_name=user_name,
