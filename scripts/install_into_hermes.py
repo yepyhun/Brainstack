@@ -549,6 +549,103 @@ def _patch_gateway_status(path: Path, dry_run: bool) -> list[str]:
     return applied
 
 
+def _patch_discord_platform(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    init_anchor = "        self._typing_tasks: Dict[str, asyncio.Task] = {}\n        self._bot_task: Optional[asyncio.Task] = None\n"
+    init_inject = (
+        "        self._typing_tasks: Dict[str, asyncio.Task] = {}\n"
+        "        self._bot_task: Optional[asyncio.Task] = None\n"
+        "        self._slash_sync_task: Optional[asyncio.Task] = None\n"
+    )
+    if "self._slash_sync_task: Optional[asyncio.Task] = None" not in text:
+        text = _replace_once(text, init_anchor, init_inject, label="discord slash sync task field", path=path)
+        applied.append("discord:add_slash_sync_task_field")
+
+    helper_anchor = "        self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'\n\n    async def connect(self) -> bool:\n"
+    helper_inject = (
+        "        self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'\n"
+        "\n"
+        "    async def _sync_slash_commands_background(self) -> None:\n"
+        "        \"\"\"Sync slash commands without blocking Discord readiness.\"\"\"\n"
+        "        if not self._client:\n"
+        "            return\n"
+        "        try:\n"
+        "            synced = await asyncio.wait_for(self._client.tree.sync(), timeout=120)\n"
+        "            logger.info(\"[%s] Synced %d slash command(s)\", self.name, len(synced))\n"
+        "        except asyncio.TimeoutError:\n"
+        "            logger.warning(\"[%s] Slash command sync timed out after startup\", self.name, exc_info=True)\n"
+        "        except Exception as e:  # pragma: no cover - defensive logging\n"
+        "            logger.warning(\"[%s] Slash command sync failed: %s\", self.name, e, exc_info=True)\n"
+        "        finally:\n"
+        "            self._slash_sync_task = None\n"
+        "\n"
+        "    def _ensure_background_slash_sync(self) -> None:\n"
+        "        if self._slash_sync_task and not self._slash_sync_task.done():\n"
+        "            return\n"
+        "        self._slash_sync_task = asyncio.create_task(self._sync_slash_commands_background())\n"
+        "\n"
+        "    async def connect(self) -> bool:\n"
+    )
+    if "async def _sync_slash_commands_background(self) -> None:" not in text:
+        text = _replace_once(text, helper_anchor, helper_inject, label="discord slash sync helpers", path=path)
+        applied.append("discord:add_background_slash_sync")
+
+    ready_old = (
+        "                # Sync slash commands with Discord\n"
+        "                try:\n"
+        "                    synced = await adapter_self._client.tree.sync()\n"
+        "                    logger.info(\"[%s] Synced %d slash command(s)\", adapter_self.name, len(synced))\n"
+        "                except Exception as e:  # pragma: no cover - defensive logging\n"
+        "                    logger.warning(\"[%s] Slash command sync failed: %s\", adapter_self.name, e, exc_info=True)\n"
+        "                adapter_self._ready_event.set()\n"
+    )
+    ready_new = (
+        "                adapter_self._ready_event.set()\n"
+        "                adapter_self._ensure_background_slash_sync()\n"
+    )
+    if "adapter_self._ensure_background_slash_sync()" not in text:
+        text = _replace_once(text, ready_old, ready_new, label="discord ready before slash sync", path=path)
+        applied.append("discord:decouple_ready_from_slash_sync")
+
+    disconnect_anchor = (
+        "        if self._client:\n"
+        "            try:\n"
+        "                await self._client.close()\n"
+        "            except Exception as e:  # pragma: no cover - defensive logging\n"
+        "                logger.warning(\"[%s] Error during disconnect: %s\", self.name, e, exc_info=True)\n"
+        "\n"
+        "        self._running = False\n"
+    )
+    disconnect_inject = (
+        "        if self._client:\n"
+        "            try:\n"
+        "                await self._client.close()\n"
+        "            except Exception as e:  # pragma: no cover - defensive logging\n"
+        "                logger.warning(\"[%s] Error during disconnect: %s\", self.name, e, exc_info=True)\n"
+        "\n"
+        "        if self._slash_sync_task:\n"
+        "            self._slash_sync_task.cancel()\n"
+        "            try:\n"
+        "                await self._slash_sync_task\n"
+        "            except asyncio.CancelledError:\n"
+        "                pass\n"
+        "            except Exception as e:  # pragma: no cover - defensive logging\n"
+        "                logger.debug(\"[%s] Slash sync task cleanup: %s\", self.name, e)\n"
+        "            self._slash_sync_task = None\n"
+        "\n"
+        "        self._running = False\n"
+    )
+    if "Slash sync task cleanup" not in text:
+        text = _replace_once(text, disconnect_anchor, disconnect_inject, label="discord slash sync cleanup", path=path)
+        applied.append("discord:cleanup_background_slash_sync")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -908,6 +1005,7 @@ def main() -> int:
     host_patches.extend(_patch_run_agent(target / "run_agent.py", args.dry_run))
     host_patches.extend(_patch_gateway_run(target / "gateway" / "run.py", args.dry_run))
     host_patches.extend(_patch_gateway_status(target / "gateway" / "status.py", args.dry_run))
+    host_patches.extend(_patch_discord_platform(target / "gateway" / "platforms" / "discord.py", args.dry_run))
     if args.runtime == "docker":
         compose_path = args.compose_file or _default_compose_path(target)
         host_patches.extend(_patch_compose_healthcheck(compose_path, args.dry_run))

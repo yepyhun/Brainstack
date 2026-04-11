@@ -121,6 +121,7 @@ def _check_host_surfaces(target: Path) -> list[Check]:
     loader = _read(target / "plugins" / "memory" / "__init__.py")
     run_agent = _read(target / "run_agent.py")
     gateway_run = _read(target / "gateway" / "run.py")
+    discord_platform = _read(target / "gateway" / "platforms" / "discord.py")
 
     required_provider_terms = [
         "class MemoryProvider",
@@ -186,6 +187,11 @@ def _check_host_surfaces(target: Path) -> list[Check]:
         checks.append(Check("gateway_session_boundary_gate", "pass", "gateway routes session boundaries through a Brainstack-aware finalizer"))
     else:
         checks.append(Check("gateway_session_boundary_gate", "fail", "gateway still lacks a Brainstack-aware session boundary finalizer"))
+
+    if "_ensure_background_slash_sync" in discord_platform and "adapter_self._ensure_background_slash_sync()" in discord_platform:
+        checks.append(Check("discord_readiness_gate", "pass", "Discord readiness is decoupled from slash command sync"))
+    else:
+        checks.append(Check("discord_readiness_gate", "fail", "Discord startup still blocks readiness on slash command sync"))
 
     return checks
 
