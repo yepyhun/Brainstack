@@ -46,6 +46,10 @@ On top of the shelves, Brainstack uses a **risk-aware control plane**:
 - preference-style questions prefer compact profile recall
 - temporal/explanatory questions expand continuity and graph evidence
 - transcript recall is bounded and session-scoped
+- active communication-style rules are packed into a short internal contract and
+  should be applied silently instead of being echoed back to the user
+- bounded retrieval telemetry can gently deprioritize non-core fallback rows
+  without deleting them or overriding temporal truth
 
 ## What is true in the current codebase
 
@@ -81,13 +85,24 @@ brainstack/
   __init__.py
   control_plane.py
   db.py
+  extraction_pipeline.py
   transcript.py
   graph.py
   corpus.py
   retrieval.py
+  stable_memory_guardrails.py
+  temporal.py
+  provenance.py
+  reconciler.py
+  tier1_extractor.py
+  tier2_extractor.py
+  usefulness.py
   donors/
 scripts/
+  brainstack_doctor.py
+  install_into_hermes.py
   brainstack_refresh_donors.py
+  update_hermes_with_brainstack.py
 tests/
 rtk_sidecar.py
 ```
@@ -156,6 +171,7 @@ What the installer does:
 - supports both `docker` and `local` runtime modes through the same installer
 - in `docker` mode, generates `scripts/hermes-brainstack-start.sh` inside the target Hermes checkout
 - in `docker` mode, generates `scripts/hermes-gateway-healthcheck.py` and patches Compose to use readiness-aware health instead of process-only health
+- keeps Brainstack as the owner of personal profile/style memory while still allowing procedural skill usage
 
 What it intentionally does **not** do:
 
@@ -203,6 +219,7 @@ This helper is intentionally small:
 - `logs` = tail live logs
 - `start` / `rebuild` / `full` wait for readiness instead of claiming success as soon as the container exists
 - `purge` / `reset` ask for an explicit `DELETE` confirmation before wiping memory/session state
+- `purge` / `reset` also clear hidden session replay under `/opt/data/sessions/`
 
 ## Doctor checks
 
