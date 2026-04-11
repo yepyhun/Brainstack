@@ -779,6 +779,26 @@ show_status() {
   fi
 }
 
+purge_runtime_state() {
+  CLEANUP_SERVICE="${SERVICE:-hermes-bestie}"
+  docker compose -f "$COMPOSE_FILE" run --rm --no-deps --entrypoint sh "$CLEANUP_SERVICE" -lc '
+    rm -f \
+      /opt/data/gateway_state.json \
+      /opt/data/gateway.pid \
+      /opt/data/channel_directory.json \
+      /opt/data/discord_threads.json \
+      /opt/data/.skills_prompt_snapshot.json \
+      /opt/data/state.db \
+      /opt/data/state.db-shm \
+      /opt/data/state.db-wal \
+      /opt/data/brainstack/brainstack.db \
+      /opt/data/brainstack/brainstack.db-shm \
+      /opt/data/brainstack/brainstack.db-wal
+    rm -rf /opt/data/sessions /opt/data/memories
+    mkdir -p /opt/data/sessions /opt/data/memories /opt/data/brainstack
+  '
+}
+
 case "$ACTION" in
   start)
     dc up -d
@@ -801,6 +821,16 @@ case "$ACTION" in
   stop)
     dc stop
     ;;
+  purge|clear-memory|clear-state)
+    dc stop || true
+    purge_runtime_state
+    ;;
+  reset)
+    dc stop || true
+    purge_runtime_state
+    dc up -d
+    wait_for_ready
+    ;;
   status)
     show_status
     ;;
@@ -812,7 +842,7 @@ case "$ACTION" in
     fi
     ;;
   *)
-    echo "Usage: $0 [start|rebuild|full|stop|status|logs]" >&2
+    echo "Usage: $0 [start|rebuild|full|stop|purge|reset|status|logs]" >&2
     exit 1
     ;;
 esac

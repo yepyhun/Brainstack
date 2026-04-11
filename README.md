@@ -185,6 +185,8 @@ cd /path/to/hermes-agent
 ./scripts/hermes-brainstack-start.sh start
 ./scripts/hermes-brainstack-start.sh rebuild
 ./scripts/hermes-brainstack-start.sh full
+./scripts/hermes-brainstack-start.sh purge
+./scripts/hermes-brainstack-start.sh reset
 ./scripts/hermes-brainstack-start.sh status
 ./scripts/hermes-brainstack-start.sh logs
 ```
@@ -195,6 +197,8 @@ This helper is intentionally small:
 - `rebuild` = rebuild with cache and restart
 - `full` = no-cache pull+build and restart
 - `stop` = stop the running service
+- `purge` = stop the service and clear conversational persistence, including Brainstack DB, state DB, and session replay files
+- `reset` = purge conversational persistence and start the service again
 - `status` = show compose status plus the current readiness summary from `gateway_state.json`
 - `logs` = tail live logs
 - `start` / `rebuild` / `full` wait for readiness instead of claiming success as soon as the container exists
