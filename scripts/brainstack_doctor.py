@@ -151,6 +151,11 @@ def _check_host_surfaces(target: Path) -> list[Check]:
     else:
         checks.append(Check("memory_manager_surface", "pass", "MemoryManager can load, prefetch, sync, and run lifecycle hooks"))
 
+    if "Apply it silently in your reply." in memory_manager and "unless the user explicitly asks about memory behavior or debugging" in memory_manager:
+        checks.append(Check("private_recall_wrapper", "pass", "MemoryManager wraps recalled context as private internal guidance"))
+    else:
+        checks.append(Check("private_recall_wrapper", "fail", "agent/memory_manager.py still exposes recalled context too weakly"))
+
     if "load_memory_provider" in loader and "plugins.memory." in loader:
         checks.append(Check("plugin_loader", "pass", "Hermes memory plugin loader is present"))
     else:

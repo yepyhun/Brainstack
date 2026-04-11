@@ -253,6 +253,28 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
     return applied
 
 
+def _patch_memory_manager(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    old_note = (
+        '        "[System note: The following is recalled memory context, "\n'
+        '        "NOT new user input. Treat as informational background data.]\\n\\n"\n'
+    )
+    new_note = (
+        '        "[System note: The following is private recalled memory context, NOT new user input. "\n'
+        '        "Apply it silently in your reply. Do not mention memory blocks, recalled-memory headings, "\n'
+        '        "or internal memory state unless the user explicitly asks about memory behavior or debugging.]\\n\\n"\n'
+    )
+    if new_note not in text:
+        text = _replace_once(text, old_note, new_note, label="memory_manager private recall note", path=path)
+        applied.append("memory_manager:private_recall_note")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
 def _patch_gateway_run(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
@@ -1107,6 +1129,7 @@ def main() -> int:
 
     host_patches: list[str] = []
     host_patches.extend(_patch_run_agent(target / "run_agent.py", args.dry_run))
+    host_patches.extend(_patch_memory_manager(target / "agent" / "memory_manager.py", args.dry_run))
     host_patches.extend(_patch_gateway_run(target / "gateway" / "run.py", args.dry_run))
     host_patches.extend(_patch_gateway_status(target / "gateway" / "status.py", args.dry_run))
     host_patches.extend(_patch_discord_platform(target / "gateway" / "platforms" / "discord.py", args.dry_run))

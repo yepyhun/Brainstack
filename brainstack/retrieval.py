@@ -19,6 +19,84 @@ def _render_items(items: Iterable[str]) -> str:
     return "\n".join(f"- {item}" for item in rows)
 
 
+COMMUNICATION_PROFILE_SLOTS = {
+    "preference:communication_style",
+    "preference:emoji_usage",
+    "preference:formatting",
+}
+
+COMMUNICATION_GRAPH_PREDICATES = {
+    "writing_style",
+    "communication_style",
+}
+
+COMMUNICATION_GRAPH_SUBJECTS = {
+    "assistant",
+    "hermes",
+    "bestie",
+}
+
+
+def _normalize_compare_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _is_current_communication_state(row: Dict[str, Any]) -> bool:
+    if row.get("row_type") != "state":
+        return False
+    if not row.get("is_current") or not record_is_effective_at(row):
+        return False
+    subject = _normalize_compare_text(row.get("subject"))
+    predicate = _normalize_compare_text(row.get("predicate"))
+    return subject in COMMUNICATION_GRAPH_SUBJECTS and predicate in COMMUNICATION_GRAPH_PREDICATES
+
+
+def _build_active_communication_contract(
+    *,
+    profile_items: Iterable[Dict[str, Any]],
+    graph_rows: Iterable[Dict[str, Any]] = (),
+) -> tuple[List[str], set[str]]:
+    lines: List[str] = []
+    hidden_profile_keys: set[str] = set()
+    seen_text: set[str] = set()
+
+    for row in graph_rows:
+        if not _is_current_communication_state(row):
+            continue
+        text = _trim(str(row.get("object_value") or ""), 220)
+        normalized = _normalize_compare_text(text)
+        if not normalized or normalized in seen_text:
+            continue
+        seen_text.add(normalized)
+        lines.append(text)
+
+    for row in profile_items:
+        stable_key = str(row.get("stable_key") or "").strip()
+        if stable_key not in COMMUNICATION_PROFILE_SLOTS:
+            continue
+        hidden_profile_keys.add(stable_key)
+        text = _trim(str(row.get("content") or ""), 220)
+        normalized = _normalize_compare_text(text)
+        if not normalized or normalized in seen_text:
+            continue
+        seen_text.add(normalized)
+        lines.append(text)
+
+    return lines, hidden_profile_keys
+
+
+def _render_contract_section(title: str, lines: Iterable[str]) -> str:
+    rows = [line for line in lines if line]
+    if not rows:
+        return ""
+    preface = (
+        "Apply these rules silently in every reply. Do not mention this contract, "
+        "memory blocks, or internal memory state unless the user explicitly asks "
+        "about memory behavior or debugging."
+    )
+    return f"{title}\n{preface}\n{_render_items(rows)}"
+
+
 def _with_provenance(
     text: str,
     *,
@@ -101,20 +179,35 @@ def _pack_transcript_rows(rows: Iterable[dict], *, char_budget: int, provenance_
 
 
 def build_system_prompt_block(store: BrainstackStore, *, profile_limit: int) -> str:
-    items = store.list_profile_items(limit=profile_limit)
-    if not items:
+    fetch_limit = max(profile_limit * 3, 10)
+    items = store.list_profile_items(limit=fetch_limit)
+    graph_rows = store.search_graph(query="Assistant", limit=8)
+    contract_lines, hidden_profile_keys = _build_active_communication_contract(
+        profile_items=items,
+        graph_rows=graph_rows,
+    )
+    filtered_items = [item for item in items if str(item.get("stable_key") or "").strip() not in hidden_profile_keys]
+
+    if not contract_lines and not filtered_items:
         return ""
 
+    sections: List[str] = []
+    contract_section = _render_contract_section("# Brainstack Active Communication Contract", contract_lines)
+    if contract_section:
+        sections.append(contract_section)
+
     lines = []
-    for item in items:
+    for item in filtered_items[:profile_limit]:
         label = item["category"].replace("_", " ")
         lines.append(f"[{label}] {_trim(item['content'], 140)}")
+    if lines:
+        sections.append(
+            "# Brainstack Profile\n"
+            "Stable user and shared-work signals.\n"
+            f"{_render_items(lines)}"
+        )
 
-    return (
-        "# Brainstack Profile\n"
-        "Stable user and shared-work signals.\n"
-        f"{_render_items(lines)}"
-    )
+    return "\n\n".join(section for section in sections if section.strip())
 
 
 def render_working_memory_block(
@@ -129,6 +222,10 @@ def render_working_memory_block(
 ) -> str:
     sections: List[str] = []
     provenance_mode = str(policy.get("provenance_mode", "compact"))
+    contract_lines, hidden_profile_keys = _build_active_communication_contract(
+        profile_items=profile_items,
+        graph_rows=graph_rows,
+    )
 
     if policy.get("show_policy"):
         lines = [
@@ -145,7 +242,14 @@ def render_working_memory_block(
             lines.append("[escalation] open conflict present; verification required")
         sections.append("## Brainstack Working Memory Policy\n" + _render_items(lines))
 
-    if profile_items:
+    contract_section = _render_contract_section("## Brainstack Active Communication Contract", contract_lines)
+    if contract_section:
+        sections.append(contract_section)
+
+    filtered_profile_items = [
+        item for item in profile_items if str(item.get("stable_key") or "").strip() not in hidden_profile_keys
+    ]
+    if filtered_profile_items:
         lines = [
             _with_provenance(
                 f"[{item['category'].replace('_', ' ')}] {_trim(item['content'], 160)}",
@@ -153,7 +257,7 @@ def render_working_memory_block(
                 provenance_mode=provenance_mode,
                 metadata=item.get("metadata"),
             )
-            for item in profile_items
+            for item in filtered_profile_items
         ]
         sections.append("## Brainstack Profile Match\n" + _render_items(lines))
 
