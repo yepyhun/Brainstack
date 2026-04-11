@@ -5,7 +5,7 @@ import re
 from typing import Any, Dict, List
 
 
-def _stable_key(category: str, content: str) -> str:
+def build_profile_stable_key(category: str, content: str) -> str:
     normalized = " ".join(content.strip().lower().split())
     digest = hashlib.sha1(f"{category}:{normalized}".encode("utf-8")).hexdigest()
     return f"{category}:{digest[:16]}"
@@ -64,7 +64,7 @@ def extract_profile_candidates(text: str) -> List[Dict[str, Any]]:
     deduped: List[Dict[str, Any]] = []
     seen = set()
     for item in candidates:
-        key = _stable_key(item["category"], item["content"])
+        key = build_profile_stable_key(item["category"], item["content"])
         if key in seen:
             continue
         seen.add(key)

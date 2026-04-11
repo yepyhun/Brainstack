@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import threading
 import time
 from typing import Any, Dict, List
 
@@ -23,10 +24,13 @@ from .db import BrainstackStore
 from .donors import continuity_adapter, corpus_adapter, graph_adapter
 from .donors.registry import get_donor_registry
 from .extraction_pipeline import build_session_message_ingest_plan, build_turn_ingest_plan
+from .reconciler import reconcile_tier2_candidates
 from .retrieval import (
     build_compression_hint,
     build_system_prompt_block,
 )
+from .tier1_extractor import build_profile_stable_key
+from .tier2_extractor import extract_tier2_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +76,17 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._corpus_section_max_chars = int(self._config.get("corpus_section_max_chars", 900))
         self._tier2_idle_window_seconds = int(self._config.get("tier2_idle_window_seconds", 30))
         self._tier2_batch_turn_limit = int(self._config.get("tier2_batch_turn_limit", 5))
+        self._tier2_transcript_limit = int(self._config.get("tier2_transcript_limit", 8))
+        self._tier2_timeout_seconds = float(self._config.get("tier2_timeout_seconds", 15))
+        self._tier2_max_tokens = int(self._config.get("tier2_max_tokens", 900))
         self._last_prefetch_policy: Dict[str, Any] | None = None
         self._last_tier2_schedule: Dict[str, Any] | None = None
         self._pending_tier2_turns = 0
         self._last_turn_monotonic: float | None = None
+        self._tier2_lock = threading.RLock()
+        self._tier2_thread: threading.Thread | None = None
+        self._tier2_running = False
+        self._tier2_followup_requested = False
 
     @property
     def name(self) -> str:
@@ -105,6 +116,9 @@ class BrainstackMemoryProvider(MemoryProvider):
             {"key": "corpus_section_max_chars", "description": "Maximum size of an ingested corpus section", "default": "900"},
             {"key": "tier2_idle_window_seconds", "description": "Idle window before the future Tier-2 batch may be queued", "default": "30"},
             {"key": "tier2_batch_turn_limit", "description": "How many turns may accumulate before the future Tier-2 batch is queued", "default": "5"},
+            {"key": "tier2_transcript_limit", "description": "How many recent transcript turns Tier-2 may read per batch", "default": "8"},
+            {"key": "tier2_timeout_seconds", "description": "Hard timeout for one Tier-2 background extraction run", "default": "15"},
+            {"key": "tier2_max_tokens", "description": "Max output tokens for one Tier-2 extraction response", "default": "900"},
         ]
 
     def save_config(self, values, hermes_home):
@@ -164,6 +178,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         idle_seconds = None if self._last_turn_monotonic is None else max(0.0, now - self._last_turn_monotonic)
         self._last_turn_monotonic = now
         self._turn_counter += 1
+        pending_turns = self._pending_tier2_turns + 1
         continuity_adapter.write_turn_records(
             self._store,
             session_id=sid,
@@ -173,13 +188,14 @@ class BrainstackMemoryProvider(MemoryProvider):
         )
         plan = build_turn_ingest_plan(
             user_content=user_content,
-            pending_turns=self._pending_tier2_turns + 1,
+            pending_turns=pending_turns,
             idle_seconds=idle_seconds,
             idle_window_seconds=self._tier2_idle_window_seconds,
             batch_turn_limit=self._tier2_batch_turn_limit,
         )
-        self._last_tier2_schedule = plan.tier2_schedule.to_dict()
-        self._pending_tier2_turns = plan.tier2_schedule.pending_turns
+        with self._tier2_lock:
+            self._last_tier2_schedule = plan.tier2_schedule.to_dict()
+            self._pending_tier2_turns = plan.tier2_schedule.pending_turns
 
         if not plan.durable_admission.allowed:
             logger.info(
@@ -208,6 +224,8 @@ class BrainstackMemoryProvider(MemoryProvider):
                 turn_number=self._turn_counter,
                 source="sync_turn:user",
             )
+        if plan.tier2_schedule.should_queue:
+            self._queue_tier2_background(session_id=sid, turn_number=self._turn_counter, trigger_reason=plan.tier2_schedule.reason)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return []
@@ -273,6 +291,16 @@ class BrainstackMemoryProvider(MemoryProvider):
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         if not self._store:
             return
+        worker_finished = self._wait_for_tier2_worker(timeout=self._tier2_timeout_seconds + 2.0)
+        if worker_finished and (self._pending_tier2_turns > 0 or self._tier2_followup_requested):
+            try:
+                self._run_tier2_batch(session_id=self._session_id, turn_number=self._turn_counter, trigger_reason="session_end_flush")
+            except Exception:
+                logger.warning("Brainstack Tier-2 session-end flush failed", exc_info=True)
+            finally:
+                with self._tier2_lock:
+                    self._pending_tier2_turns = 0
+                    self._tier2_followup_requested = False
         continuity_adapter.write_snapshot_records(
             self._store,
             session_id=self._session_id,
@@ -320,7 +348,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             return
         if target == "user":
             category = "preference"
-            stable_key = _stable_key(category, content)
+            stable_key = build_profile_stable_key(category, content)
             self._store.upsert_profile_item(
                 stable_key=stable_key,
                 category=category,
@@ -341,9 +369,101 @@ class BrainstackMemoryProvider(MemoryProvider):
         )
 
     def shutdown(self) -> None:
+        self._wait_for_tier2_worker(timeout=self._tier2_timeout_seconds + 2.0)
         if self._store:
             self._store.close()
             self._store = None
         self._last_turn_monotonic = None
         self._pending_tier2_turns = 0
         self._last_tier2_schedule = None
+        self._tier2_followup_requested = False
+        self._tier2_running = False
+        self._tier2_thread = None
+
+    def _queue_tier2_background(self, *, session_id: str, turn_number: int, trigger_reason: str) -> None:
+        with self._tier2_lock:
+            if self._tier2_running:
+                self._tier2_followup_requested = True
+                return
+            self._tier2_running = True
+            worker = threading.Thread(
+                target=self._tier2_worker_loop,
+                kwargs={
+                    "session_id": session_id,
+                    "turn_number": turn_number,
+                    "trigger_reason": trigger_reason,
+                },
+                name="brainstack-tier2",
+                daemon=True,
+            )
+            self._tier2_thread = worker
+            worker.start()
+
+    def _wait_for_tier2_worker(self, *, timeout: float) -> bool:
+        current = threading.current_thread()
+        worker: threading.Thread | None
+        with self._tier2_lock:
+            worker = self._tier2_thread
+        if not worker or worker is current:
+            return True
+        worker.join(timeout=max(0.0, timeout))
+        if worker.is_alive():
+            logger.warning("Brainstack Tier-2 worker did not finish within %.1fs", timeout)
+            return False
+        return True
+
+    def _tier2_worker_loop(self, *, session_id: str, turn_number: int, trigger_reason: str) -> None:
+        current_reason = trigger_reason
+        try:
+            while True:
+                self._run_tier2_batch(session_id=session_id, turn_number=turn_number, trigger_reason=current_reason)
+                with self._tier2_lock:
+                    should_continue = self._tier2_followup_requested
+                    self._tier2_followup_requested = False
+                    if not should_continue:
+                        self._tier2_running = False
+                        self._tier2_thread = None
+                        break
+                    current_reason = "followup_pending_work"
+        except Exception:
+            logger.warning("Brainstack Tier-2 worker failed", exc_info=True)
+            with self._tier2_lock:
+                self._tier2_running = False
+                self._tier2_thread = None
+
+    def _run_tier2_batch(self, *, session_id: str, turn_number: int, trigger_reason: str) -> None:
+        if not self._store:
+            return
+        transcript_rows = [
+            row
+            for row in reversed(self._store.recent_transcript(session_id=session_id, limit=self._tier2_transcript_limit))
+            if str(row.get("kind", "")) == "turn"
+        ]
+        if not transcript_rows:
+            return
+        extractor = self._config.get("_tier2_extractor")
+        if callable(extractor):
+            extracted = extractor(
+                transcript_rows,
+                session_id=session_id,
+                turn_number=turn_number,
+                trigger_reason=trigger_reason,
+            )
+        else:
+            extracted = extract_tier2_candidates(
+                transcript_rows,
+                transcript_limit=self._tier2_transcript_limit,
+                timeout_seconds=self._tier2_timeout_seconds,
+                max_tokens=self._tier2_max_tokens,
+            )
+        reconcile_tier2_candidates(
+            self._store,
+            session_id=session_id,
+            turn_number=turn_number,
+            source=f"tier2:{trigger_reason}",
+            extracted=extracted,
+            metadata={
+                "batch_reason": trigger_reason,
+                "transcript_ids": [int(row["id"]) for row in transcript_rows if row.get("id") is not None],
+            },
+        )

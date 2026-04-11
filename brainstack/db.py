@@ -530,6 +530,19 @@ class BrainstackStore:
         return [dict(row) for row in rows]
 
     @_locked
+    def get_profile_item(self, *, stable_key: str) -> Dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at, active
+            FROM profile_items
+            WHERE stable_key = ?
+            LIMIT 1
+            """,
+            (stable_key,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    @_locked
     def search_profile(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
         fts_query = build_fts_query(query)
         if not fts_query:
@@ -806,6 +819,47 @@ class BrainstackStore:
         return int(cur.lastrowid)
 
     @_locked
+    def upsert_graph_relation(
+        self,
+        *,
+        subject_name: str,
+        predicate: str,
+        object_name: str,
+        source: str,
+        metadata: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        now = utc_now_iso()
+        subject = self.get_or_create_entity(subject_name)
+        obj = self.get_or_create_entity(object_name)
+        existing = self.conn.execute(
+            """
+            SELECT id FROM graph_relations
+            WHERE subject_entity_id = ? AND predicate = ? AND object_entity_id = ? AND active = 1
+            """,
+            (subject["id"], predicate, obj["id"]),
+        ).fetchone()
+        if existing:
+            return {"status": "unchanged", "relation_id": int(existing["id"])}
+        cur = self.conn.execute(
+            """
+            INSERT INTO graph_relations (
+                subject_entity_id, predicate, object_entity_id, object_text, source, metadata_json, created_at, active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                subject["id"],
+                predicate,
+                obj["id"],
+                object_name.strip(),
+                source,
+                json.dumps(metadata or {}, ensure_ascii=True, sort_keys=True),
+                now,
+            ),
+        )
+        self.conn.commit()
+        return {"status": "inserted", "relation_id": int(cur.lastrowid)}
+
+    @_locked
     def upsert_graph_state(
         self,
         *,
@@ -928,6 +982,26 @@ class BrainstackStore:
             (limit,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    @_locked
+    def find_continuity_event(
+        self,
+        *,
+        session_id: str,
+        kind: str,
+        content: str,
+    ) -> Dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT id, session_id, turn_number, kind, content, source, created_at
+            FROM continuity_events
+            WHERE session_id = ? AND kind = ? AND content = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (session_id, kind, content),
+        ).fetchone()
+        return dict(row) if row else None
 
     @_locked
     def search_graph(self, *, query: str, limit: int) -> List[Dict[str, Any]]:

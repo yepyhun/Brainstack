@@ -1,10 +1,14 @@
 """Pragmatic real-world scenario tests for the current Brainstack layer."""
 
 from pathlib import Path
+import threading
+import time
 
 from plugins.memory.brainstack.extraction_pipeline import build_turn_ingest_plan
+from plugins.memory.brainstack.reconciler import reconcile_tier2_candidates
 from plugins.memory.brainstack.stable_memory_guardrails import should_admit_stable_memory
 from plugins.memory.brainstack import BrainstackMemoryProvider
+from plugins.memory.brainstack.tier2_extractor import extract_tier2_candidates
 
 
 def _make_provider(tmp_path, session_id):
@@ -167,5 +171,216 @@ class TestBrainstackRealWorldFlows:
             assert "Biochemistry Notes > Citrate cycle" in block
             assert "ATP production" in block
             assert len(block) < 1600
+        finally:
+            provider.shutdown()
+
+    def test_tier2_extractor_normalizes_multilingual_json_payload(self):
+        def _fake_llm(**kwargs):
+            return {
+                "content": """
+                {
+                  "profile_items": [
+                    {"category": "identity", "content": "User identity: Tomi", "slot": "identity:name", "confidence": 0.96},
+                    {"category": "preference", "content": "Prefer Hungarian replies", "confidence": 0.91}
+                  ],
+                  "states": [
+                    {"subject": "Tomi", "attribute": "location", "value": "Debrecen", "supersede": true, "confidence": 0.88}
+                  ],
+                  "relations": [
+                    {"subject": "Tomi", "predicate": "works on", "object": "Brainstack integration", "confidence": 0.82}
+                  ],
+                  "continuity_summary": "Tomi currently lives in Debrecen and prefers Hungarian replies.",
+                  "decisions": ["Brainstack remains the primary memory path."]
+                }
+                """
+            }
+
+        rows = [
+            {
+                "id": 1,
+                "turn_number": 4,
+                "kind": "turn",
+                "content": "User: Tomi a nevem. Debrecenben élek.\nAssistant: Rendben.",
+            }
+        ]
+        extracted = extract_tier2_candidates(rows, llm_caller=_fake_llm, transcript_limit=4)
+
+        assert extracted["profile_items"][0]["slot"] == "identity:name"
+        assert extracted["states"][0]["attribute"] == "location"
+        assert extracted["relations"][0]["predicate"] == "works_on"
+        assert "Debrecen" in extracted["continuity_summary"]
+        assert extracted["decisions"] == ["Brainstack remains the primary memory path."]
+
+    def test_tier2_reconciler_updates_current_state_and_surfaces_conflict(self, tmp_path):
+        provider = _make_provider(tmp_path, "session-tier2-reconcile")
+        try:
+            reconcile_tier2_candidates(
+                provider._store,
+                session_id="session-tier2-reconcile",
+                turn_number=1,
+                source="tier2:test",
+                extracted={
+                    "profile_items": [{"category": "identity", "content": "User identity: Tomi", "slot": "identity:name", "confidence": 0.95}],
+                    "states": [{"subject": "Tomi", "attribute": "location", "value": "Budapest", "supersede": False, "confidence": 0.9}],
+                    "relations": [],
+                    "continuity_summary": "",
+                    "decisions": [],
+                },
+            )
+            reconcile_tier2_candidates(
+                provider._store,
+                session_id="session-tier2-reconcile",
+                turn_number=2,
+                source="tier2:test",
+                extracted={
+                    "profile_items": [{"category": "identity", "content": "User identity: Tomi", "slot": "identity:name", "confidence": 0.95}],
+                    "states": [{"subject": "Tomi", "attribute": "location", "value": "Debrecen", "supersede": True, "confidence": 0.91}],
+                    "relations": [{"subject": "Tomi", "predicate": "works_on", "object": "Brainstack integration", "confidence": 0.82}],
+                    "continuity_summary": "Tomi moved from Budapest to Debrecen.",
+                    "decisions": ["Brainstack remains the memory owner."],
+                },
+            )
+            report = reconcile_tier2_candidates(
+                provider._store,
+                session_id="session-tier2-reconcile",
+                turn_number=3,
+                source="tier2:test",
+                extracted={
+                    "profile_items": [],
+                    "states": [{"subject": "Tomi", "attribute": "location", "value": "Szeged", "supersede": False, "confidence": 0.7}],
+                    "relations": [{"subject": "Tomi", "predicate": "works_on", "object": "Brainstack integration", "confidence": 0.82}],
+                    "continuity_summary": "Tomi still prefers Brainstack.",
+                    "decisions": ["Brainstack remains the memory owner."],
+                },
+            )
+
+            block = provider.prefetch("Where does Tomi live now and what changed?", session_id="session-tier2-reconcile")
+            conflicts = provider._store.list_graph_conflicts(limit=10)
+
+            assert "Debrecen" in block
+            assert "Budapest" in block
+            assert any(action["action"] == "CONFLICT" for action in report["actions"])
+            assert any(conflict["candidate_value_text"] == "Szeged" for conflict in conflicts)
+        finally:
+            provider.shutdown()
+
+    def test_sync_turn_stays_non_blocking_when_tier2_runs_in_background(self, tmp_path):
+        def _slow_extractor(rows, **kwargs):
+            time.sleep(0.25)
+            return {
+                "profile_items": [{"category": "preference", "content": "Prefer Hungarian replies", "confidence": 0.9}],
+                "states": [],
+                "relations": [],
+                "continuity_summary": "User prefers Hungarian replies.",
+                "decisions": [],
+            }
+
+        base = Path(tmp_path)
+        provider = BrainstackMemoryProvider(
+            config={
+                "db_path": str(base / "brainstack.db"),
+                "tier2_batch_turn_limit": 1,
+                "_tier2_extractor": _slow_extractor,
+            }
+        )
+        provider.initialize("session-tier2-bg", hermes_home=str(base))
+        try:
+            start = time.monotonic()
+            provider.sync_turn("Kérlek, magyarul válaszolj.", "Rendben.", session_id="session-tier2-bg")
+            elapsed = time.monotonic() - start
+
+            assert elapsed < 0.15
+            assert provider._wait_for_tier2_worker(timeout=1.0) is True
+
+            profile_rows = provider._store.list_profile_items(limit=10)
+            assert any("Prefer Hungarian replies" == row["content"] for row in profile_rows)
+        finally:
+            provider.shutdown()
+
+    def test_tier2_followup_work_is_not_dropped_while_worker_is_running(self, tmp_path):
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def _blocking_extractor(rows, **kwargs):
+            batch_text = "\n".join(str(row["content"]) for row in rows)
+            calls.append(batch_text)
+            if len(calls) == 1:
+                started.set()
+                release.wait(timeout=1.0)
+            if "Debrecenben élek" in batch_text:
+                return {
+                    "profile_items": [],
+                    "states": [{"subject": "Tomi", "attribute": "location", "value": "Debrecen", "supersede": True, "confidence": 0.88}],
+                    "relations": [],
+                    "continuity_summary": "Tomi currently lives in Debrecen.",
+                    "decisions": [],
+                }
+            return {
+                "profile_items": [{"category": "identity", "content": "User identity: Tomi", "slot": "identity:name", "confidence": 0.95}],
+                "states": [],
+                "relations": [],
+                "continuity_summary": "",
+                "decisions": [],
+            }
+
+        base = Path(tmp_path)
+        provider = BrainstackMemoryProvider(
+            config={
+                "db_path": str(base / "brainstack.db"),
+                "tier2_batch_turn_limit": 1,
+                "_tier2_extractor": _blocking_extractor,
+            }
+        )
+        provider.initialize("session-followup", hermes_home=str(base))
+        try:
+            provider.sync_turn("Tomi a nevem.", "Ok.", session_id="session-followup")
+            assert started.wait(timeout=1.0) is True
+
+            provider.sync_turn("Debrecenben élek.", "Ok.", session_id="session-followup")
+            release.set()
+
+            assert provider._wait_for_tier2_worker(timeout=2.0) is True
+
+            block = provider.prefetch("Hol lakik Tomi most?", session_id="session-followup")
+            assert len(calls) >= 2
+            assert any("Debrecenben élek" in batch for batch in calls)
+            assert "Debrecen" in block
+        finally:
+            provider.shutdown()
+
+    def test_on_session_end_flushes_pending_tier2_work(self, tmp_path):
+        base = Path(tmp_path)
+        provider = BrainstackMemoryProvider(
+            config={
+                "db_path": str(base / "brainstack.db"),
+                "tier2_batch_turn_limit": 9,
+                "_tier2_extractor": lambda rows, **kwargs: {
+                    "profile_items": [{"category": "shared_work", "content": "We are working on Brainstack integration", "confidence": 0.84}],
+                    "states": [],
+                    "relations": [{"subject": "Tomi", "predicate": "works_on", "object": "Brainstack integration", "confidence": 0.82}],
+                    "continuity_summary": "Current work focuses on Brainstack integration.",
+                    "decisions": ["Built-in memory stays displaced."],
+                },
+            }
+        )
+        provider.initialize("session-end-flush", hermes_home=str(base))
+        try:
+            provider.sync_turn("Most a Brainstack integráción dolgozunk.", "Rendben.", session_id="session-end-flush")
+            provider.on_session_end(
+                [
+                    {"role": "user", "content": "Most a Brainstack integráción dolgozunk."},
+                    {"role": "assistant", "content": "Rendben."},
+                ]
+            )
+
+            profile_rows = provider._store.list_profile_items(limit=10, categories=["shared_work"])
+            graph_rows = provider._store.search_graph(query="Brainstack integration", limit=10)
+            continuity_rows = provider._store.recent_continuity(session_id="session-end-flush", limit=10)
+
+            assert any("Brainstack integration" in row["content"] for row in profile_rows)
+            assert any(row["row_type"] == "relation" and row["object_value"] == "Brainstack integration" for row in graph_rows)
+            assert any(row["kind"] == "decision" and "Built-in memory stays displaced" in row["content"] for row in continuity_rows)
+            assert provider._pending_tier2_turns == 0
         finally:
             provider.shutdown()
