@@ -139,6 +139,12 @@ What the installer does:
 
 - copies `brainstack/` into `plugins/memory/brainstack/`
 - copies `rtk_sidecar.py` when the target Hermes checkout has `agent/`
+- copies Brainstack host helper payload into the target Hermes checkout:
+  - `agent/brainstack_mode.py`
+- patches recognized Hermes host files so Brainstack can be the single live memory owner:
+  - `run_agent.py` strips legacy `memory` and `session_search` tools in Brainstack-only mode
+  - `gateway/run.py` routes reset / resume / expiry boundaries through a Brainstack-aware finalizer
+  - gateway maintenance agents stop carrying the legacy memory toolset in Brainstack-only mode
 - patches recognized Hermes config so:
   - `memory.provider: brainstack`
   - `memory.memory_enabled: false`
@@ -196,6 +202,9 @@ This helper is intentionally small:
 - target checkout really looks like Hermes
 - memory provider/plugin loader surfaces exist
 - Brainstack plugin payload is present and importable
+- Brainstack-only host helper is present
+- `run_agent.py` gates legacy `memory` and `session_search` tool exposure
+- `gateway/run.py` uses a Brainstack-aware session-boundary finalizer instead of legacy builtin-memory flush paths
 - config selects Brainstack and builtin memory is off
 - in `docker` mode: Docker compose uses `gateway run --replace`
 - in `docker` mode: the desktop launcher points at the intended Hermes checkout

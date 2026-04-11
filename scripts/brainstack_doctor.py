@@ -117,8 +117,10 @@ def _check_host_surfaces(target: Path) -> list[Check]:
     checks: list[Check] = []
     memory_provider = _read(target / "agent" / "memory_provider.py")
     memory_manager = _read(target / "agent" / "memory_manager.py")
+    brainstack_mode = _read(target / "agent" / "brainstack_mode.py")
     loader = _read(target / "plugins" / "memory" / "__init__.py")
     run_agent = _read(target / "run_agent.py")
+    gateway_run = _read(target / "gateway" / "run.py")
 
     required_provider_terms = [
         "class MemoryProvider",
@@ -169,6 +171,21 @@ def _check_host_surfaces(target: Path) -> list[Check]:
         checks.append(Check("turn_start_hook", "warn", "on_turn_start exists in provider API but is not called by this Hermes host; Brainstack can still count turns through sync_turn"))
     else:
         checks.append(Check("turn_start_hook", "pass", "run_agent calls memory provider on_turn_start"))
+
+    if "LEGACY_MEMORY_TOOL_NAMES" in brainstack_mode and "is_brainstack_only_mode" in brainstack_mode:
+        checks.append(Check("brainstack_only_helper", "pass", "Brainstack-only host helper is present"))
+    else:
+        checks.append(Check("brainstack_only_helper", "fail", "agent/brainstack_mode.py is missing or incomplete"))
+
+    if "filter_legacy_memory_tool_defs" in run_agent and "LEGACY_MEMORY_TOOL_NAMES" in run_agent:
+        checks.append(Check("legacy_tool_surface_gate", "pass", "run_agent strips legacy memory and session_search tools in Brainstack-only mode"))
+    else:
+        checks.append(Check("legacy_tool_surface_gate", "fail", "run_agent does not gate legacy memory tool surface for Brainstack-only mode"))
+
+    if "_async_finalize_session_memory" in gateway_run and "_finalize_brainstack_session_memory" in gateway_run:
+        checks.append(Check("gateway_session_boundary_gate", "pass", "gateway routes session boundaries through a Brainstack-aware finalizer"))
+    else:
+        checks.append(Check("gateway_session_boundary_gate", "fail", "gateway still lacks a Brainstack-aware session boundary finalizer"))
 
     return checks
 

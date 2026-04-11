@@ -22,6 +22,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PLUGIN = REPO_ROOT / "brainstack"
 SOURCE_RTK = REPO_ROOT / "rtk_sidecar.py"
+SOURCE_HOST_PAYLOAD = REPO_ROOT / "host_payload"
 
 
 def _hash_file(path: Path) -> str:
@@ -50,6 +51,270 @@ def _copy_tree(src: Path, dst: Path, dry_run: bool) -> list[dict[str, str]]:
             dst_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src_file, dst_file)
     return copied
+
+
+def _copy_file(src: Path, dst: Path, dry_run: bool) -> dict[str, str]:
+    copied = {
+        "source": str(src.relative_to(REPO_ROOT)),
+        "target": str(dst),
+        "sha256": _hash_file(src),
+    }
+    if not dry_run:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    return copied
+
+
+def _replace_once(text: str, old: str, new: str, *, label: str, path: Path) -> str:
+    if old not in text:
+        raise RuntimeError(f"Installer patch anchor missing for {label} in {path}")
+    return text.replace(old, new, 1)
+
+
+def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    import_anchor = "from agent.memory_manager import build_memory_context_block\n"
+    import_inject = (
+        "from agent.memory_manager import build_memory_context_block\n"
+        "from agent.brainstack_mode import (\n"
+        "    LEGACY_MEMORY_TOOL_NAMES,\n"
+        "    filter_legacy_memory_tool_defs,\n"
+        "    is_brainstack_only_mode,\n"
+        ")\n"
+    )
+    if "from agent.brainstack_mode import (" not in text:
+        text = _replace_once(text, import_anchor, import_inject, label="run_agent import", path=path)
+        applied.append("run_agent:import_brainstack_mode")
+
+    cfg_anchor = "        except Exception:\n            _agent_cfg = {}\n"
+    cfg_inject = "        except Exception:\n            _agent_cfg = {}\n        self._brainstack_only_mode = is_brainstack_only_mode(_agent_cfg)\n"
+    if "self._brainstack_only_mode = is_brainstack_only_mode(_agent_cfg)" not in text:
+        text = _replace_once(text, cfg_anchor, cfg_inject, label="run_agent mode flag", path=path)
+        applied.append("run_agent:set_brainstack_only_flag")
+
+    filter_anchor = (
+        "        if self._memory_manager and self.tools is not None:\n"
+        "            for _schema in self._memory_manager.get_all_tool_schemas():\n"
+        "                _wrapped = {\"type\": \"function\", \"function\": _schema}\n"
+        "                self.tools.append(_wrapped)\n"
+        "                _tname = _schema.get(\"name\", \"\")\n"
+        "                if _tname:\n"
+        "                    self.valid_tool_names.add(_tname)\n"
+    )
+    filter_inject = filter_anchor + (
+        "        if self.tools is not None:\n"
+        "            filtered_tools = filter_legacy_memory_tool_defs(self.tools, config=_agent_cfg)\n"
+        "            if len(filtered_tools) != len(self.tools):\n"
+        "                self.tools = filtered_tools\n"
+        "                self.valid_tool_names = {\n"
+        "                    tool[\"function\"][\"name\"]\n"
+        "                    for tool in self.tools\n"
+        "                    if tool.get(\"function\", {}).get(\"name\")\n"
+        "                }\n"
+    )
+    if "filtered_tools = filter_legacy_memory_tool_defs(self.tools, config=_agent_cfg)" not in text:
+        text = _replace_once(text, filter_anchor, filter_inject, label="run_agent tool filter", path=path)
+        applied.append("run_agent:filter_legacy_tools")
+
+    invoke_anchor = (
+        "        Handles both agent-level tools (todo, memory, etc.) and registry-dispatched\n"
+        "        tools. Used by the concurrent execution path; the sequential path retains\n"
+        "        its own inline invocation for backward-compatible display handling.\n"
+        "        \"\"\"\n"
+    )
+    invoke_inject = invoke_anchor + (
+        "        if self._brainstack_only_mode and function_name in LEGACY_MEMORY_TOOL_NAMES:\n"
+        "            return json.dumps(\n"
+        "                {\n"
+        "                    \"success\": False,\n"
+        "                    \"error\": f\"{function_name} is disabled while Brainstack owns memory.\",\n"
+        "                }\n"
+        "            )\n"
+    )
+    if "is disabled while Brainstack owns memory." not in text:
+        text = _replace_once(text, invoke_anchor, invoke_inject, label="run_agent invoke guard", path=path)
+        applied.append("run_agent:block_legacy_dispatch")
+
+    seq_anchor = "            if function_name == \"todo\":\n"
+    seq_inject = (
+        "            if self._brainstack_only_mode and function_name in LEGACY_MEMORY_TOOL_NAMES:\n"
+        "                function_result = json.dumps(\n"
+        "                    {\n"
+        "                        \"success\": False,\n"
+        "                        \"error\": f\"{function_name} is disabled while Brainstack owns memory.\",\n"
+        "                    }\n"
+        "                )\n"
+        "                tool_duration = time.time() - tool_start_time\n"
+        "                if self._should_emit_quiet_tool_messages():\n"
+        "                    self._vprint(\n"
+        "                        f\"  {_get_cute_tool_message_impl(function_name, function_args, tool_duration, result=function_result)}\"\n"
+        "                    )\n"
+        "            elif function_name == \"todo\":\n"
+    )
+    if "elif function_name == \"todo\":" not in text or "LEGACY_MEMORY_TOOL_NAMES" not in text:
+        text = _replace_once(text, seq_anchor, seq_inject, label="run_agent sequential guard", path=path)
+        applied.append("run_agent:block_legacy_sequential_path")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_gateway_run(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    import_anchor = "from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType\n"
+    import_inject = (
+        "from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType\n"
+        "from agent.brainstack_mode import is_brainstack_only_mode\n"
+    )
+    if "from agent.brainstack_mode import is_brainstack_only_mode" not in text:
+        text = _replace_once(text, import_anchor, import_inject, label="gateway import", path=path)
+        applied.append("gateway:import_brainstack_mode")
+
+    hooks_anchor = "        from gateway.hooks import HookRegistry\n        self.hooks = HookRegistry()\n"
+    hooks_inject = hooks_anchor + (
+        "\n"
+        "    def _brainstack_only_mode_enabled(self) -> bool:\n"
+        "        try:\n"
+        "            return is_brainstack_only_mode(_load_gateway_config())\n"
+        "        except Exception:\n"
+        "            return False\n"
+        "\n"
+        "    def _maintenance_agent_toolsets(self) -> list[str]:\n"
+        "        if self._brainstack_only_mode_enabled():\n"
+        "            return []\n"
+        "        return [\"memory\"]\n"
+        "\n"
+        "    def _finalize_brainstack_session_memory(\n"
+        "        self,\n"
+        "        session_key: str,\n"
+        "        session_id: str,\n"
+        "    ) -> None:\n"
+        "        history = self.session_store.load_transcript(session_id)\n"
+        "        messages = [\n"
+        "            {\"role\": m.get(\"role\"), \"content\": m.get(\"content\")}\n"
+        "            for m in history or []\n"
+        "            if m.get(\"role\") in (\"user\", \"assistant\") and m.get(\"content\")\n"
+        "        ]\n"
+        "\n"
+        "        cached_agent = None\n"
+        "        lock = getattr(self, \"_agent_cache_lock\", None)\n"
+        "        cache = getattr(self, \"_agent_cache\", None)\n"
+        "        if lock and cache is not None:\n"
+        "            with lock:\n"
+        "                entry = cache.get(session_key)\n"
+        "                if entry and entry[0] is not None:\n"
+        "                    cached_agent = entry[0]\n"
+        "\n"
+        "        if cached_agent and hasattr(cached_agent, \"shutdown_memory_provider\"):\n"
+        "            cached_agent.shutdown_memory_provider(messages)\n"
+        "            return\n"
+        "\n"
+        "        runtime_kwargs = _resolve_runtime_agent_kwargs()\n"
+        "        if not runtime_kwargs.get(\"api_key\"):\n"
+        "            return\n"
+        "\n"
+        "        from run_agent import AIAgent\n"
+        "\n"
+        "        tmp_agent = AIAgent(\n"
+        "            **runtime_kwargs,\n"
+        "            model=_resolve_gateway_model(),\n"
+        "            max_iterations=1,\n"
+        "            quiet_mode=True,\n"
+        "            enabled_toolsets=[],\n"
+        "            session_id=session_id,\n"
+        "        )\n"
+        "        tmp_agent._print_fn = lambda *a, **kw: None\n"
+        "        tmp_agent.shutdown_memory_provider(messages)\n"
+        "\n"
+        "    def _finalize_session_memory_sync(\n"
+        "        self,\n"
+        "        session_key: str,\n"
+        "        session_id: str,\n"
+        "    ) -> None:\n"
+        "        if self._brainstack_only_mode_enabled():\n"
+        "            self._finalize_brainstack_session_memory(session_key, session_id)\n"
+        "            return\n"
+        "        self._flush_memories_for_session(session_id)\n"
+        "\n"
+        "    async def _async_finalize_session_memory(\n"
+        "        self,\n"
+        "        session_key: str,\n"
+        "        session_id: str,\n"
+        "    ) -> None:\n"
+        "        loop = asyncio.get_event_loop()\n"
+        "        await loop.run_in_executor(\n"
+        "            None,\n"
+        "            self._finalize_session_memory_sync,\n"
+        "            session_key,\n"
+        "            session_id,\n"
+        "        )\n"
+    )
+    if "def _brainstack_only_mode_enabled(self) -> bool:" not in text:
+        text = _replace_once(text, hooks_anchor, hooks_inject, label="gateway helper block", path=path)
+        applied.append("gateway:add_boundary_helpers")
+
+    flush_doc_anchor = (
+        "        Synchronous worker — meant to be called via run_in_executor from\n"
+        "        an async context so it doesn't block the event loop.\n"
+        "        \"\"\"\n"
+    )
+    flush_doc_inject = flush_doc_anchor + (
+        "        if self._brainstack_only_mode_enabled():\n"
+        "            logger.debug(\n"
+        "                \"Skipping legacy memory flush for session %s because Brainstack owns memory\",\n"
+        "                old_session_id,\n"
+        "            )\n"
+        "            return\n"
+    )
+    if "Skipping legacy memory flush for session %s because Brainstack owns memory" not in text:
+        text = _replace_once(text, flush_doc_anchor, flush_doc_inject, label="gateway legacy flush guard", path=path)
+        applied.append("gateway:guard_legacy_flush")
+
+    replacements = [
+        (
+            "                                    enabled_toolsets=[\"memory\"],\n",
+            "                                    enabled_toolsets=self._maintenance_agent_toolsets(),\n",
+            "gateway:hygiene_toolsets",
+        ),
+        (
+            "                enabled_toolsets=[\"memory\"],\n",
+            "                enabled_toolsets=self._maintenance_agent_toolsets(),\n",
+            "gateway:compress_toolsets",
+        ),
+        (
+            "                        await self._async_flush_memories(entry.session_id)\n",
+            "                        await self._async_finalize_session_memory(key, entry.session_id)\n",
+            "gateway:expiry_finalize",
+        ),
+        (
+            "                _flush_task = asyncio.create_task(\n                    self._async_flush_memories(old_entry.session_id)\n                )\n",
+            "                _flush_task = asyncio.create_task(\n                    self._async_finalize_session_memory(session_key, old_entry.session_id)\n                )\n",
+            "gateway:reset_finalize",
+        ),
+        (
+            "            _flush_task = asyncio.create_task(\n                self._async_flush_memories(current_entry.session_id)\n            )\n",
+            "            _flush_task = asyncio.create_task(\n                self._async_finalize_session_memory(session_key, current_entry.session_id)\n            )\n",
+            "gateway:resume_finalize",
+        ),
+        (
+            "                        logger.debug(\n                            \"Memory flush completed for session %s\",\n",
+            "                        self._evict_cached_agent(key)\n                        logger.debug(\n                            \"Memory flush completed for session %s\",\n",
+            "gateway:evict_cached_expiry",
+        ),
+    ]
+    for old, new, label in replacements:
+        if new not in text:
+            text = _replace_once(text, old, new, label=label, path=path)
+            applied.append(label)
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -257,6 +522,16 @@ def main() -> int:
     if args.enable:
         config_result = _patch_config(args.config or _default_config_path(target), args.dry_run)
 
+    host_helper_files: list[dict[str, str]] = []
+    if SOURCE_HOST_PAYLOAD.exists():
+        for src_file in _iter_payload_files(SOURCE_HOST_PAYLOAD):
+            rel = src_file.relative_to(SOURCE_HOST_PAYLOAD)
+            host_helper_files.append(_copy_file(src_file, target / rel, args.dry_run))
+
+    host_patches: list[str] = []
+    host_patches.extend(_patch_run_agent(target / "run_agent.py", args.dry_run))
+    host_patches.extend(_patch_gateway_run(target / "gateway" / "run.py", args.dry_run))
+
     manifest = {
         "installed_at": datetime.now(timezone.utc).isoformat(),
         "dry_run": args.dry_run,
@@ -266,6 +541,8 @@ def main() -> int:
         "plugin_target": str(plugin_target),
         "files": files,
         "helper_files": helper_files,
+        "host_helper_files": host_helper_files,
+        "host_patches": host_patches,
         "generated_files": generated_files,
         "config": config_result,
         "secrets_included": False,
@@ -275,6 +552,10 @@ def main() -> int:
     action = "DRY-RUN" if args.dry_run else "INSTALLED"
     print(f"{action} Brainstack payload files: {len(files)}")
     print(f"{action} helper files: {len(helper_files)}")
+    if host_helper_files:
+        print(f"{action} host helper files: {len(host_helper_files)}")
+    if host_patches:
+        print(f"{action} host patches: {len(host_patches)}")
     if generated_files:
         print(f"{action} generated files: {len(generated_files)}")
     if config_result:

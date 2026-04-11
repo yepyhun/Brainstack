@@ -500,3 +500,126 @@ class TestBrainstackRealWorldFlows:
             assert provider._pending_tier2_turns == 0
         finally:
             provider.shutdown()
+
+    def test_everyday_recall_survives_small_talk_and_still_brings_back_preference_and_shared_work(self, tmp_path):
+        base = Path(tmp_path)
+        provider = BrainstackMemoryProvider(
+            config={
+                "db_path": str(base / "brainstack.db"),
+                "tier2_batch_turn_limit": 1,
+                "_tier2_extractor": lambda rows, **kwargs: {
+                    "profile_items": [
+                        {"category": "preference", "content": "Prefer short Hungarian replies", "confidence": 0.93},
+                        {"category": "shared_work", "content": "We are rebuilding Brainstack into Hermes Bestie", "confidence": 0.87},
+                    ],
+                    "states": [],
+                    "relations": [{"subject": "Tomi", "predicate": "works_on", "object": "Brainstack into Hermes Bestie", "confidence": 0.84}],
+                    "continuity_summary": "Tomi prefers short Hungarian replies and current work is the Brainstack plus Hermes Bestie rebuild.",
+                    "decisions": ["Brainstack remains the only memory owner."],
+                },
+            }
+        )
+        provider.initialize("session-everyday-focus", hermes_home=str(base))
+        try:
+            provider.sync_turn(
+                "Kérlek röviden és magyarul válaszolj. Most a Brainstacket rakjuk be a Hermes Bestie-be.",
+                "Rendben.",
+                session_id="session-everyday-focus",
+            )
+            provider.sync_turn(
+                "Közben ma mit egyek ebédre?",
+                "Valami könnyűt.",
+                session_id="session-everyday-focus",
+            )
+            assert provider._wait_for_tier2_worker(timeout=1.0) is True
+
+            block = provider.prefetch(
+                "Do I prefer short Hungarian replies and what are we rebuilding right now?",
+                session_id="session-everyday-focus",
+            )
+
+            assert "## Brainstack Profile Match" in block
+            assert "Prefer short Hungarian replies" in block
+            assert "Brainstack into Hermes Bestie" in block
+            assert "## Brainstack Continuity Match" in block
+        finally:
+            provider.shutdown()
+
+    def test_everyday_recall_surfaces_relationships_not_just_flat_facts(self, tmp_path):
+        base = Path(tmp_path)
+        provider = BrainstackMemoryProvider(
+            config={
+                "db_path": str(base / "brainstack.db"),
+                "tier2_batch_turn_limit": 1,
+                "_tier2_extractor": lambda rows, **kwargs: {
+                    "profile_items": [],
+                    "states": [],
+                    "relations": [
+                        {"subject": "Tomi", "predicate": "works_on", "object": "Brainstack", "confidence": 0.9},
+                        {"subject": "Brainstack", "predicate": "integrates_with", "object": "Hermes Bestie", "confidence": 0.86},
+                    ],
+                    "continuity_summary": "Tomi is working on Brainstack and Brainstack is being integrated with Hermes Bestie.",
+                    "decisions": [],
+                },
+            }
+        )
+        provider.initialize("session-everyday-relations", hermes_home=str(base))
+        try:
+            provider.sync_turn(
+                "Most a Brainstacken dolgozom, és ezt kötjük rá a Hermes Bestie-re.",
+                "Értettem.",
+                session_id="session-everyday-relations",
+            )
+            assert provider._wait_for_tier2_worker(timeout=1.0) is True
+
+            block = provider.prefetch(
+                "Milyen kapcsolatban állok a Brainstackkel, és az mivel van összekötve?",
+                session_id="session-everyday-relations",
+            )
+
+            assert "## Brainstack Graph Truth" in block
+            assert "[relation] Tomi works_on Brainstack" in block
+            assert "[relation] Brainstack integrates_with Hermes Bestie" in block
+        finally:
+            provider.shutdown()
+
+    def test_everyday_recall_keeps_correction_believable_after_ordinary_follow_up(self, tmp_path):
+        base = Path(tmp_path)
+        provider = BrainstackMemoryProvider(
+            config={
+                "db_path": str(base / "brainstack.db"),
+                "tier2_batch_turn_limit": 1,
+                "_tier2_extractor": lambda rows, **kwargs: {
+                    "profile_items": [{"category": "identity", "content": "User identity: Tomi", "slot": "identity:name", "confidence": 0.96}],
+                    "states": [
+                        {"subject": "Tomi", "attribute": "location", "value": "Budapest", "supersede": False, "confidence": 0.84},
+                        {"subject": "Tomi", "attribute": "location", "value": "Debrecen", "supersede": True, "confidence": 0.91},
+                    ] if any("Debrecenben" in row["content"] for row in rows) else [
+                        {"subject": "Tomi", "attribute": "location", "value": "Budapest", "supersede": False, "confidence": 0.84},
+                    ],
+                    "relations": [{"subject": "Tomi", "predicate": "works_on", "object": "Brainstack", "confidence": 0.8}],
+                    "continuity_summary": "Tomi corrected the location from Budapest to Debrecen while continuing the same work.",
+                    "decisions": [],
+                },
+            }
+        )
+        provider.initialize("session-everyday-correction", hermes_home=str(base))
+        try:
+            provider.sync_turn("Budapesten élek és a Brainstacken dolgozom.", "Rendben.", session_id="session-everyday-correction")
+            provider.sync_turn("Javítás: már Debrecenben élek.", "Frissítve.", session_id="session-everyday-correction")
+            provider.sync_turn("Egyébként szeretem a zöld teát.", "Ok.", session_id="session-everyday-correction")
+            assert provider._wait_for_tier2_worker(timeout=1.0) is True
+
+            current_block = provider.prefetch("Tomi location", session_id="session-everyday-correction")
+            changed_block = provider.prefetch(
+                "Hol élek most és mi változott korábban?",
+                session_id="session-everyday-correction",
+            )
+
+            assert "[state:current] Tomi location=Debrecen" in current_block
+            assert "[state:prior] Tomi location=Budapest" not in current_block
+            assert "Debrecen" in changed_block
+            assert "[state:prior] Tomi location=Budapest" in changed_block
+            assert "## Brainstack Graph Truth" in changed_block
+        finally:
+            provider.shutdown()
