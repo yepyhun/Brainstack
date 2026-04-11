@@ -175,9 +175,8 @@ def _patch_gateway_run(path: Path, dry_run: bool) -> list[str]:
         text = _replace_once(text, import_anchor, import_inject, label="gateway import", path=path)
         applied.append("gateway:import_brainstack_mode")
 
-    hooks_anchor = "        from gateway.hooks import HookRegistry\n        self.hooks = HookRegistry()\n"
-    hooks_inject = hooks_anchor + (
-        "\n"
+    hooks_anchor = "    # -- Setup skill availability ----------------------------------------\n\n    def _has_setup_skill(self) -> bool:\n"
+    hooks_inject = (
         "    def _brainstack_only_mode_enabled(self) -> bool:\n"
         "        try:\n"
         "            return is_brainstack_only_mode(_load_gateway_config())\n"
@@ -188,6 +187,39 @@ def _patch_gateway_run(path: Path, dry_run: bool) -> list[str]:
         "        if self._brainstack_only_mode_enabled():\n"
         "            return []\n"
         "        return [\"memory\"]\n"
+        "\n"
+        "    def _derive_gateway_runtime_state(self) -> str:\n"
+        "        if self.adapters:\n"
+        "            return \"degraded\" if self._failed_platforms else \"running\"\n"
+        "        if self._failed_platforms:\n"
+        "            return \"reconnecting\"\n"
+        "        if self._running:\n"
+        "            return \"idle\"\n"
+        "        return \"starting\"\n"
+        "\n"
+        "    def _write_gateway_runtime_status(\n"
+        "        self,\n"
+        "        *,\n"
+        "        gateway_state: str | None = None,\n"
+        "        exit_reason: str | None = None,\n"
+        "        platform: str | None = None,\n"
+        "        platform_state: str | None = None,\n"
+        "        error_code: str | None = None,\n"
+        "        error_message: str | None = None,\n"
+        "    ) -> None:\n"
+        "        try:\n"
+        "            from gateway.status import write_runtime_status\n"
+        "\n"
+        "            write_runtime_status(\n"
+        "                gateway_state=gateway_state if gateway_state is not None else self._derive_gateway_runtime_state(),\n"
+        "                exit_reason=exit_reason,\n"
+        "                platform=platform,\n"
+        "                platform_state=platform_state,\n"
+        "                error_code=error_code,\n"
+        "                error_message=error_message,\n"
+        "            )\n"
+        "        except Exception:\n"
+        "            pass\n"
         "\n"
         "    def _finalize_brainstack_session_memory(\n"
         "        self,\n"
@@ -253,6 +285,8 @@ def _patch_gateway_run(path: Path, dry_run: bool) -> list[str]:
         "            session_key,\n"
         "            session_id,\n"
         "        )\n"
+        "\n"
+        + hooks_anchor
     )
     if "def _brainstack_only_mode_enabled(self) -> bool:" not in text:
         text = _replace_once(text, hooks_anchor, hooks_inject, label="gateway helper block", path=path)
@@ -276,6 +310,11 @@ def _patch_gateway_run(path: Path, dry_run: bool) -> list[str]:
         applied.append("gateway:guard_legacy_flush")
 
     replacements = [
+        (
+            "        try:\n            from gateway.status import write_runtime_status\n            write_runtime_status(gateway_state=\"starting\", exit_reason=None)\n        except Exception:\n            pass\n",
+            "        self._write_gateway_runtime_status(gateway_state=\"starting\", exit_reason=None)\n",
+            "gateway:startup_status",
+        ),
         (
             "                                    enabled_toolsets=[\"memory\"],\n",
             "                                    enabled_toolsets=self._maintenance_agent_toolsets(),\n",
@@ -305,6 +344,141 @@ def _patch_gateway_run(path: Path, dry_run: bool) -> list[str]:
             "                        logger.debug(\n                            \"Memory flush completed for session %s\",\n",
             "                        self._evict_cached_agent(key)\n                        logger.debug(\n                            \"Memory flush completed for session %s\",\n",
             "gateway:evict_cached_expiry",
+        ),
+        (
+            "            logger.info(\"Connecting to %s...\", platform.value)\n            try:\n",
+            "            logger.info(\"Connecting to %s...\", platform.value)\n            self._write_gateway_runtime_status(\n                gateway_state=\"starting\",\n                exit_reason=None,\n                platform=platform.value,\n                platform_state=\"connecting\",\n                error_code=None,\n                error_message=None,\n            )\n            try:\n",
+            "gateway:connect_starting_status",
+        ),
+        (
+            "                    connected_count += 1\n                    logger.info(\"✓ %s connected\", platform.value)\n",
+            "                    connected_count += 1\n                    self._write_gateway_runtime_status(\n                        gateway_state=\"starting\",\n                        exit_reason=None,\n                        platform=platform.value,\n                        platform_state=\"connected\",\n                        error_code=None,\n                        error_message=None,\n                    )\n                    logger.info(\"✓ %s connected\", platform.value)\n",
+            "gateway:connect_success_status",
+        ),
+        (
+            "                    if adapter.has_fatal_error:\n                        target = (\n",
+            "                    if adapter.has_fatal_error:\n                        self._write_gateway_runtime_status(\n                            gateway_state=\"starting\",\n                            exit_reason=None,\n                            platform=platform.value,\n                            platform_state=\"retrying\" if adapter.fatal_error_retryable else \"failed\",\n                            error_code=adapter.fatal_error_code,\n                            error_message=adapter.fatal_error_message,\n                        )\n                        target = (\n",
+            "gateway:connect_fatal_status",
+        ),
+        (
+            "                    else:\n                        startup_retryable_errors.append(\n",
+            "                    else:\n                        self._write_gateway_runtime_status(\n                            gateway_state=\"starting\",\n                            exit_reason=None,\n                            platform=platform.value,\n                            platform_state=\"retrying\",\n                            error_code=\"connect_failed\",\n                            error_message=\"failed to connect\",\n                        )\n                        startup_retryable_errors.append(\n",
+            "gateway:connect_retry_status",
+        ),
+        (
+            "            except Exception as e:\n                logger.error(\"✗ %s error: %s\", platform.value, e)\n                startup_retryable_errors.append(f\"{platform.value}: {e}\")\n",
+            "            except Exception as e:\n                logger.error(\"✗ %s error: %s\", platform.value, e)\n                self._write_gateway_runtime_status(\n                    gateway_state=\"starting\",\n                    exit_reason=None,\n                    platform=platform.value,\n                    platform_state=\"retrying\",\n                    error_code=\"connect_exception\",\n                    error_message=str(e),\n                )\n                startup_retryable_errors.append(f\"{platform.value}: {e}\")\n",
+            "gateway:connect_exception_status",
+        ),
+        (
+            "        self._running = True\n        try:\n            from gateway.status import write_runtime_status\n            write_runtime_status(gateway_state=\"running\", exit_reason=None)\n        except Exception:\n            pass\n",
+            "        self._running = True\n        self._write_gateway_runtime_status(\n            gateway_state=\"degraded\" if self._failed_platforms else \"running\",\n            exit_reason=None,\n        )\n",
+            "gateway:running_status",
+        ),
+        (
+            "                logger.info(\n                    \"%s queued for background reconnection\",\n                    adapter.platform.value,\n                )\n\n        if not self.adapters and not self._failed_platforms:\n",
+            "                logger.info(\n                    \"%s queued for background reconnection\",\n                    adapter.platform.value,\n                )\n\n        self._write_gateway_runtime_status(\n            platform=adapter.platform.value,\n            platform_state=\"retrying\" if adapter.fatal_error_retryable else \"failed\",\n            error_code=adapter.fatal_error_code,\n            error_message=adapter.fatal_error_message,\n        )\n\n        if not self.adapters and not self._failed_platforms:\n",
+            "gateway:fatal_status",
+        ),
+        (
+            "        if not self.adapters and not self._failed_platforms:\n            self._exit_reason = adapter.fatal_error_message or \"All messaging adapters disconnected\"\n",
+            "        if not self.adapters and not self._failed_platforms:\n            self._exit_reason = adapter.fatal_error_message or \"All messaging adapters disconnected\"\n            self._write_gateway_runtime_status(\n                gateway_state=\"startup_failed\",\n                exit_reason=self._exit_reason,\n                platform=adapter.platform.value,\n                platform_state=\"failed\",\n                error_code=adapter.fatal_error_code,\n                error_message=adapter.fatal_error_message,\n            )\n",
+            "gateway:fatal_exit_status",
+        ),
+        (
+            "                logger.info(\n                    \"Reconnecting %s (attempt %d/%d)...\",\n                    platform.value, attempt, _MAX_ATTEMPTS,\n                )\n\n                try:\n",
+            "                logger.info(\n                    \"Reconnecting %s (attempt %d/%d)...\",\n                    platform.value, attempt, _MAX_ATTEMPTS,\n                )\n                self._write_gateway_runtime_status(\n                    gateway_state=\"reconnecting\" if not self.adapters else \"degraded\",\n                    exit_reason=None,\n                    platform=platform.value,\n                    platform_state=\"retrying\",\n                    error_code=None,\n                    error_message=None,\n                )\n\n                try:\n",
+            "gateway:reconnect_attempt_status",
+        ),
+        (
+            "                        self.delivery_router.adapters = self.adapters\n                        del self._failed_platforms[platform]\n                        logger.info(\"✓ %s reconnected successfully\", platform.value)\n",
+            "                        self.delivery_router.adapters = self.adapters\n                        del self._failed_platforms[platform]\n                        self._write_gateway_runtime_status(\n                            gateway_state=\"degraded\" if self._failed_platforms else \"running\",\n                            exit_reason=None,\n                            platform=platform.value,\n                            platform_state=\"connected\",\n                            error_code=None,\n                            error_message=None,\n                        )\n                        logger.info(\"✓ %s reconnected successfully\", platform.value)\n",
+            "gateway:reconnect_success_status",
+        ),
+        (
+            "                            logger.warning(\n                                \"Reconnect %s: non-retryable error (%s), removing from retry queue\",\n                                platform.value, adapter.fatal_error_message,\n                            )\n                            del self._failed_platforms[platform]\n",
+            "                            logger.warning(\n                                \"Reconnect %s: non-retryable error (%s), removing from retry queue\",\n                                platform.value, adapter.fatal_error_message,\n                            )\n                            del self._failed_platforms[platform]\n                            self._write_gateway_runtime_status(\n                                gateway_state=\"degraded\" if self.adapters else \"startup_failed\",\n                                exit_reason=None if self.adapters else adapter.fatal_error_message,\n                                platform=platform.value,\n                                platform_state=\"failed\",\n                                error_code=adapter.fatal_error_code,\n                                error_message=adapter.fatal_error_message,\n                            )\n",
+            "gateway:reconnect_nonretryable_status",
+        ),
+        (
+            "                            backoff = min(30 * (2 ** (attempt - 1)), _BACKOFF_CAP)\n                            info[\"attempts\"] = attempt\n                            info[\"next_retry\"] = time.monotonic() + backoff\n                            logger.info(\n                                \"Reconnect %s failed, next retry in %ds\",\n                                platform.value, backoff,\n                            )\n",
+            "                            backoff = min(30 * (2 ** (attempt - 1)), _BACKOFF_CAP)\n                            info[\"attempts\"] = attempt\n                            info[\"next_retry\"] = time.monotonic() + backoff\n                            self._write_gateway_runtime_status(\n                                gateway_state=\"degraded\" if self.adapters else \"reconnecting\",\n                                exit_reason=None,\n                                platform=platform.value,\n                                platform_state=\"retrying\",\n                                error_code=adapter.fatal_error_code or \"reconnect_failed\",\n                                error_message=adapter.fatal_error_message or f\"next retry in {backoff}s\",\n                            )\n                            logger.info(\n                                \"Reconnect %s failed, next retry in %ds\",\n                                platform.value, backoff,\n                            )\n",
+            "gateway:reconnect_retry_status",
+        ),
+        (
+            "                    backoff = min(30 * (2 ** (attempt - 1)), _BACKOFF_CAP)\n                    info[\"attempts\"] = attempt\n                    info[\"next_retry\"] = time.monotonic() + backoff\n                    logger.warning(\n                        \"Reconnect %s error: %s, next retry in %ds\",\n                        platform.value, e, backoff,\n                    )\n",
+            "                    backoff = min(30 * (2 ** (attempt - 1)), _BACKOFF_CAP)\n                    info[\"attempts\"] = attempt\n                    info[\"next_retry\"] = time.monotonic() + backoff\n                    self._write_gateway_runtime_status(\n                        gateway_state=\"degraded\" if self.adapters else \"reconnecting\",\n                        exit_reason=None,\n                        platform=platform.value,\n                        platform_state=\"retrying\",\n                        error_code=\"reconnect_exception\",\n                        error_message=str(e),\n                    )\n                    logger.warning(\n                        \"Reconnect %s error: %s, next retry in %ds\",\n                        platform.value, e, backoff,\n                    )\n",
+            "gateway:reconnect_exception_status",
+        ),
+        (
+            "                    logger.warning(\n                        \"Giving up reconnecting %s after %d attempts\",\n                        platform.value, info[\"attempts\"],\n                    )\n                    del self._failed_platforms[platform]\n                    continue\n",
+            "                    logger.warning(\n                        \"Giving up reconnecting %s after %d attempts\",\n                        platform.value, info[\"attempts\"],\n                    )\n                    del self._failed_platforms[platform]\n                    self._write_gateway_runtime_status(\n                        gateway_state=\"degraded\" if self.adapters else \"startup_failed\",\n                        exit_reason=None if self.adapters else f\"{platform.value}: reconnect attempts exhausted\",\n                        platform=platform.value,\n                        platform_state=\"failed\",\n                        error_code=\"reconnect_exhausted\",\n                        error_message=f\"reconnect attempts exhausted after {info['attempts']} tries\",\n                    )\n                    continue\n",
+            "gateway:reconnect_exhausted_status",
+        ),
+    ]
+    for old, new, label in replacements:
+        if new not in text:
+            text = _replace_once(text, old, new, label=label, path=path)
+            applied.append(label)
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_gateway_status(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    constant_anchor = '_IS_WINDOWS = sys.platform == "win32"\n'
+    constant_inject = constant_anchor + "_UNSET = object()\n"
+    if "_UNSET = object()" not in text:
+        text = _replace_once(text, constant_anchor, constant_inject, label="gateway status unset sentinel", path=path)
+        applied.append("gateway_status:add_unset")
+
+    old_signature = (
+        "def write_runtime_status(\n"
+        "    *,\n"
+        "    gateway_state: Optional[str] = None,\n"
+        "    exit_reason: Optional[str] = None,\n"
+        "    platform: Optional[str] = None,\n"
+        "    platform_state: Optional[str] = None,\n"
+        "    error_code: Optional[str] = None,\n"
+        "    error_message: Optional[str] = None,\n"
+        ") -> None:\n"
+    )
+    new_signature = (
+        "def write_runtime_status(\n"
+        "    *,\n"
+        "    gateway_state: Any = _UNSET,\n"
+        "    exit_reason: Any = _UNSET,\n"
+        "    platform: Optional[str] = None,\n"
+        "    platform_state: Any = _UNSET,\n"
+        "    error_code: Any = _UNSET,\n"
+        "    error_message: Any = _UNSET,\n"
+        ") -> None:\n"
+    )
+    if new_signature not in text:
+        text = _replace_once(text, old_signature, new_signature, label="gateway status signature", path=path)
+        applied.append("gateway_status:signature")
+
+    replacements = [
+        ("    if gateway_state is not None:\n", "    if gateway_state is not _UNSET:\n", "gateway_status:gateway_state_clear"),
+        ("    if exit_reason is not None:\n", "    if exit_reason is not _UNSET:\n", "gateway_status:exit_reason_clear"),
+        (
+            "        if platform_state is not None:\n            platform_payload[\"state\"] = platform_state\n",
+            "        if platform_state is not _UNSET:\n            if platform_state is None:\n                platform_payload.pop(\"state\", None)\n            else:\n                platform_payload[\"state\"] = platform_state\n",
+            "gateway_status:platform_state_clear",
+        ),
+        (
+            "        if error_code is not None:\n            platform_payload[\"error_code\"] = error_code\n",
+            "        if error_code is not _UNSET:\n            if error_code is None:\n                platform_payload.pop(\"error_code\", None)\n            else:\n                platform_payload[\"error_code\"] = error_code\n",
+            "gateway_status:error_code_clear",
+        ),
+        (
+            "        if error_message is not None:\n            platform_payload[\"error_message\"] = error_message\n",
+            "        if error_message is not _UNSET:\n            if error_message is None:\n                platform_payload.pop(\"error_message\", None)\n            else:\n                platform_payload[\"error_message\"] = error_message\n",
+            "gateway_status:error_message_clear",
         ),
     ]
     for old, new, label in replacements:
@@ -416,13 +590,41 @@ dc() {
 }
 
 ACTION="${1:-start}"
+HEALTHCHECK="$REPO_ROOT/scripts/hermes-gateway-healthcheck.py"
+HERMES_HOME_DIR="$REPO_ROOT/hermes-config/bestie"
+
+wait_for_ready() {
+  if [ ! -f "$HEALTHCHECK" ]; then
+    return 0
+  fi
+  i=0
+  while [ "$i" -lt 45 ]; do
+    if HERMES_HOME="$HERMES_HOME_DIR" python3 "$HEALTHCHECK" --quiet; then
+      HERMES_HOME="$HERMES_HOME_DIR" python3 "$HEALTHCHECK"
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 2
+  done
+  HERMES_HOME="$HERMES_HOME_DIR" python3 "$HEALTHCHECK" || true
+  return 1
+}
+
+show_status() {
+  docker compose -f "$COMPOSE_FILE" ps
+  if [ -f "$HEALTHCHECK" ]; then
+    HERMES_HOME="$HERMES_HOME_DIR" python3 "$HEALTHCHECK" || true
+  fi
+}
 
 case "$ACTION" in
   start)
     dc up -d
+    wait_for_ready
     ;;
   rebuild)
     dc up -d --build
+    wait_for_ready
     ;;
   full|full-rebuild)
     if [ -n "$SERVICE" ]; then
@@ -432,12 +634,13 @@ case "$ACTION" in
       docker compose -f "$COMPOSE_FILE" build --no-cache --pull
       docker compose -f "$COMPOSE_FILE" up -d
     fi
+    wait_for_ready
     ;;
   stop)
     dc stop
     ;;
   status)
-    docker compose -f "$COMPOSE_FILE" ps
+    show_status
     ;;
   logs)
     if [ -n "$SERVICE" ]; then
@@ -459,6 +662,112 @@ esac
         if legacy_path.exists():
             legacy_path.unlink()
     return script_path
+
+
+def _write_docker_healthcheck_script(target: Path, dry_run: bool) -> Path:
+    script_path = target / "scripts" / "hermes-gateway-healthcheck.py"
+    content = """#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def _status_path() -> Path:
+    hermes_home = Path(os.getenv("HERMES_HOME", "/opt/data"))
+    return hermes_home / "gateway_state.json"
+
+
+def _load_status() -> dict:
+    path = _status_path()
+    if not path.exists():
+        raise RuntimeError(f"missing status file: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid status json: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("status payload is not an object")
+    return payload
+
+
+def _evaluate(payload: dict) -> tuple[bool, str]:
+    gateway_state = str(payload.get("gateway_state") or "unknown")
+    exit_reason = payload.get("exit_reason")
+    platforms = payload.get("platforms")
+    if not isinstance(platforms, dict):
+        platforms = {}
+
+    connected = []
+    platform_states = {}
+    for name, info in platforms.items():
+        if not isinstance(info, dict):
+            continue
+        state = str(info.get("state") or "unknown")
+        platform_states[name] = state
+        if state == "connected":
+            connected.append(name)
+
+    if gateway_state in {"running", "degraded"} and connected:
+        return True, f"{gateway_state}; connected={','.join(sorted(connected))}"
+
+    details = [f"gateway_state={gateway_state}"]
+    if exit_reason:
+        details.append(f"exit_reason={exit_reason}")
+    if platform_states:
+        details.append(
+            "platforms=" + ",".join(f"{name}:{state}" for name, state in sorted(platform_states.items()))
+        )
+    else:
+        details.append("platforms=none")
+    return False, "; ".join(details)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Readiness-aware Hermes gateway healthcheck")
+    parser.add_argument("--quiet", action="store_true", help="Only use exit code")
+    args = parser.parse_args()
+
+    try:
+        payload = _load_status()
+        ok, message = _evaluate(payload)
+    except Exception as exc:
+        if not args.quiet:
+            print(f"gateway healthcheck failed: {exc}", file=sys.stderr)
+        return 1
+
+    if not args.quiet:
+        stream = sys.stdout if ok else sys.stderr
+        print(message, file=stream)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"""
+    if not dry_run:
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        script_path.write_text(content, encoding="utf-8")
+        script_path.chmod(0o755)
+    return script_path
+
+
+def _patch_compose_healthcheck(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+    old = '      test: ["CMD-SHELL", "tr \'\\\\000\' \' \' </proc/1/cmdline | grep -q \'hermes gateway run --replace\' || exit 1"]\n'
+    new = '      test: ["CMD", "python3", "/opt/hermes/scripts/hermes-gateway-healthcheck.py", "--quiet"]\n'
+    if new not in text and old in text:
+        text = text.replace(old, new, 1)
+        applied.append("compose:readiness_healthcheck")
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
 
 
 def _run_doctor(target: Path, args: argparse.Namespace, planned_install: bool) -> int:
@@ -517,6 +826,8 @@ def main() -> int:
     if args.runtime == "docker":
         docker_start = _write_docker_start_script(target, args.dry_run)
         generated_files.append({"source": "generated:hermes-brainstack-start.sh", "target": str(docker_start)})
+        docker_healthcheck = _write_docker_healthcheck_script(target, args.dry_run)
+        generated_files.append({"source": "generated:hermes-gateway-healthcheck.py", "target": str(docker_healthcheck)})
 
     config_result = None
     if args.enable:
@@ -531,6 +842,10 @@ def main() -> int:
     host_patches: list[str] = []
     host_patches.extend(_patch_run_agent(target / "run_agent.py", args.dry_run))
     host_patches.extend(_patch_gateway_run(target / "gateway" / "run.py", args.dry_run))
+    host_patches.extend(_patch_gateway_status(target / "gateway" / "status.py", args.dry_run))
+    if args.runtime == "docker":
+        compose_path = args.compose_file or _default_compose_path(target)
+        host_patches.extend(_patch_compose_healthcheck(compose_path, args.dry_run))
 
     manifest = {
         "installed_at": datetime.now(timezone.utc).isoformat(),

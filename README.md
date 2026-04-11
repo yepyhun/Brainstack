@@ -144,6 +144,8 @@ What the installer does:
 - patches recognized Hermes host files so Brainstack can be the single live memory owner:
   - `run_agent.py` strips legacy `memory` and `session_search` tools in Brainstack-only mode
   - `gateway/run.py` routes reset / resume / expiry boundaries through a Brainstack-aware finalizer
+  - `gateway/run.py` also keeps platform runtime status truthful during connect, reconnect, and disconnect paths
+  - `gateway/status.py` is patched so `None` can clear stale `exit_reason` and platform error fields instead of silently preserving old failure state
   - gateway maintenance agents stop carrying the legacy memory toolset in Brainstack-only mode
 - patches recognized Hermes config so:
   - `memory.provider: brainstack`
@@ -153,6 +155,7 @@ What the installer does:
 - runs doctor checks if requested
 - supports both `docker` and `local` runtime modes through the same installer
 - in `docker` mode, generates `scripts/hermes-brainstack-start.sh` inside the target Hermes checkout
+- in `docker` mode, generates `scripts/hermes-gateway-healthcheck.py` and patches Compose to use readiness-aware health instead of process-only health
 
 What it intentionally does **not** do:
 
@@ -192,8 +195,9 @@ This helper is intentionally small:
 - `rebuild` = rebuild with cache and restart
 - `full` = no-cache pull+build and restart
 - `stop` = stop the running service
-- `status` = show compose status
+- `status` = show compose status plus the current readiness summary from `gateway_state.json`
 - `logs` = tail live logs
+- `start` / `rebuild` / `full` wait for readiness instead of claiming success as soon as the container exists
 
 ## Doctor checks
 
@@ -207,6 +211,8 @@ This helper is intentionally small:
 - `gateway/run.py` uses a Brainstack-aware session-boundary finalizer instead of legacy builtin-memory flush paths
 - config selects Brainstack and builtin memory is off
 - in `docker` mode: Docker compose uses `gateway run --replace`
+- in `docker` mode: Docker compose uses a readiness-aware gateway healthcheck rather than a process-only healthcheck
+- in `docker` mode: `scripts/hermes-gateway-healthcheck.py` exists
 - in `docker` mode: the desktop launcher points at the intended Hermes checkout
 - in `local` mode: Docker-specific checks are skipped and the doctor validates the Hermes checkout/config/plugin path without assuming container runtime
 
