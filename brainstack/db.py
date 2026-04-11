@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+from functools import wraps
 import json
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Callable, Dict, Iterable, List, TypeVar
 
 from .transcript import count_overlap, tokenize_match_text
+
+
+F = TypeVar("F", bound=Callable[..., Any])
 
 
 def utc_now_iso() -> str:
@@ -25,10 +30,20 @@ def build_like_tokens(query: str, *, limit: int = 8) -> List[str]:
     return [f"%{token}%" for token in tokens[:limit]]
 
 
+def _locked(method: F) -> F:
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper  # type: ignore[return-value]
+
+
 class BrainstackStore:
     def __init__(self, db_path: str) -> None:
         self._db_path = str(db_path)
         self._conn: sqlite3.Connection | None = None
+        self._lock = threading.RLock()
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -36,14 +51,16 @@ class BrainstackStore:
             raise RuntimeError("BrainstackStore is not open")
         return self._conn
 
+    @_locked
     def open(self) -> None:
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self._db_path)
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
 
+    @_locked
     def close(self) -> None:
         if self._conn is not None:
             self._conn.close()
@@ -230,6 +247,7 @@ class BrainstackStore:
         )
         self.conn.commit()
 
+    @_locked
     def add_continuity_event(
         self,
         *,
@@ -266,6 +284,7 @@ class BrainstackStore:
         self.conn.commit()
         return row_id
 
+    @_locked
     def add_transcript_entry(
         self,
         *,
@@ -301,6 +320,7 @@ class BrainstackStore:
         self.conn.commit()
         return row_id
 
+    @_locked
     def recent_continuity(self, *, session_id: str, limit: int) -> List[Dict[str, Any]]:
         rows = self.conn.execute(
             """
@@ -314,6 +334,7 @@ class BrainstackStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    @_locked
     def search_continuity(self, *, query: str, session_id: str, limit: int) -> List[Dict[str, Any]]:
         fts_query = build_fts_query(query)
         if not fts_query:
@@ -348,6 +369,7 @@ class BrainstackStore:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    @_locked
     def recent_transcript(self, *, session_id: str, limit: int) -> List[Dict[str, Any]]:
         rows = self.conn.execute(
             """
@@ -361,6 +383,7 @@ class BrainstackStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    @_locked
     def search_transcript(self, *, query: str, session_id: str, limit: int) -> List[Dict[str, Any]]:
         tokens = tokenize_match_text(query)
         if not tokens:
@@ -420,6 +443,7 @@ class BrainstackStore:
         )
         return scored[:limit]
 
+    @_locked
     def upsert_profile_item(
         self,
         *,
@@ -488,6 +512,7 @@ class BrainstackStore:
         self.conn.commit()
         return row_id
 
+    @_locked
     def list_profile_items(self, *, limit: int, categories: Iterable[str] | None = None) -> List[Dict[str, Any]]:
         params: list[Any] = []
         sql = """
@@ -504,6 +529,7 @@ class BrainstackStore:
         rows = self.conn.execute(sql, tuple(params)).fetchall()
         return [dict(row) for row in rows]
 
+    @_locked
     def search_profile(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
         fts_query = build_fts_query(query)
         if not fts_query:
@@ -535,6 +561,7 @@ class BrainstackStore:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    @_locked
     def upsert_corpus_document(
         self,
         *,
@@ -575,6 +602,7 @@ class BrainstackStore:
         self.conn.commit()
         return int(cur.lastrowid)
 
+    @_locked
     def replace_corpus_sections(
         self,
         *,
@@ -620,6 +648,7 @@ class BrainstackStore:
         self.conn.commit()
         return inserted
 
+    @_locked
     def ingest_corpus_document(
         self,
         *,
@@ -645,6 +674,7 @@ class BrainstackStore:
         )
         return {"document_id": document_id, "section_count": section_count, "stable_key": stable_key}
 
+    @_locked
     def search_corpus(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
         fts_query = build_fts_query(query)
         if fts_query:
@@ -710,6 +740,7 @@ class BrainstackStore:
     def _normalize_entity_name(self, name: str) -> str:
         return " ".join(name.lower().split())
 
+    @_locked
     def get_or_create_entity(self, name: str) -> Dict[str, Any]:
         now = utc_now_iso()
         normalized = self._normalize_entity_name(name)
@@ -733,6 +764,7 @@ class BrainstackStore:
             "normalized_name": normalized,
         }
 
+    @_locked
     def add_graph_relation(
         self,
         *,
@@ -773,6 +805,7 @@ class BrainstackStore:
         self.conn.commit()
         return int(cur.lastrowid)
 
+    @_locked
     def upsert_graph_state(
         self,
         *,
@@ -879,6 +912,7 @@ class BrainstackStore:
         self.conn.commit()
         return {"status": "inserted", "entity_id": entity["id"], "state_id": new_state_id}
 
+    @_locked
     def list_graph_conflicts(self, *, limit: int) -> List[Dict[str, Any]]:
         rows = self.conn.execute(
             """
@@ -895,6 +929,7 @@ class BrainstackStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    @_locked
     def search_graph(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
         patterns = build_like_tokens(query)
         if not patterns:

@@ -11,10 +11,9 @@ Current provider slice:
 
 from __future__ import annotations
 
-import hashlib
 import logging
-import re
 from pathlib import Path
+import time
 from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
@@ -23,6 +22,7 @@ from .control_plane import build_working_memory_packet
 from .db import BrainstackStore
 from .donors import continuity_adapter, corpus_adapter, graph_adapter
 from .donors.registry import get_donor_registry
+from .extraction_pipeline import build_session_message_ingest_plan, build_turn_ingest_plan
 from .retrieval import (
     build_compression_hint,
     build_system_prompt_block,
@@ -53,74 +53,6 @@ def _normalize_path(value: str, hermes_home: str) -> str:
     return str(Path(value).expanduser())
 
 
-def _stable_key(category: str, content: str) -> str:
-    normalized = " ".join(content.strip().lower().split())
-    digest = hashlib.sha1(f"{category}:{normalized}".encode("utf-8")).hexdigest()
-    return f"{category}:{digest[:16]}"
-
-
-def _split_sentences(text: str) -> List[str]:
-    parts = re.split(r"[.!?\n]+", text)
-    return [part.strip() for part in parts if part and part.strip()]
-
-
-def _extract_profile_candidates(text: str) -> List[Dict[str, Any]]:
-    candidates: List[Dict[str, Any]] = []
-    if not text:
-        return candidates
-
-    for sentence in _split_sentences(text):
-        lowered = sentence.lower()
-
-        identity_match = re.search(
-            r"\b(?:my name is|i am|i'm|call me|a nevem|én vagyok)\s+([A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű0-9_-]{2,40})",
-            sentence,
-            re.IGNORECASE,
-        )
-        if identity_match:
-            value = identity_match.group(1).strip()
-            content = f"User identity: {value}"
-            candidates.append(
-                {
-                    "category": "identity",
-                    "content": content,
-                    "confidence": 0.95,
-                    "source": "heuristic_identity",
-                }
-            )
-
-        if re.search(r"\b(i prefer|i like|i love|i hate|always|never|prefer|szeretem|nem szeretem|inkább|mindig|soha)\b", lowered):
-            candidates.append(
-                {
-                    "category": "preference",
-                    "content": sentence,
-                    "confidence": 0.78,
-                    "source": "heuristic_preference",
-                }
-            )
-
-        if re.search(r"\b(we are working on|i am working on|i'm working on|we were working on|dolgozom|dolgozunk|ezen dolgozunk)\b", lowered):
-            candidates.append(
-                {
-                    "category": "shared_work",
-                    "content": sentence,
-                    "confidence": 0.7,
-                    "source": "heuristic_shared_work",
-                }
-            )
-
-    deduped: List[Dict[str, Any]] = []
-    seen = set()
-    for item in candidates:
-        key = _stable_key(item["category"], item["content"])
-        if key in seen:
-            continue
-        seen.add(key)
-        item["stable_key"] = key
-        deduped.append(item)
-    return deduped[:4]
-
-
 class BrainstackMemoryProvider(MemoryProvider):
     def __init__(self, config: dict | None = None):
         self._config = config or _load_plugin_config()
@@ -138,7 +70,12 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._corpus_match_limit = int(self._config.get("corpus_match_limit", 4))
         self._corpus_char_budget = int(self._config.get("corpus_char_budget", 700))
         self._corpus_section_max_chars = int(self._config.get("corpus_section_max_chars", 900))
+        self._tier2_idle_window_seconds = int(self._config.get("tier2_idle_window_seconds", 30))
+        self._tier2_batch_turn_limit = int(self._config.get("tier2_batch_turn_limit", 5))
         self._last_prefetch_policy: Dict[str, Any] | None = None
+        self._last_tier2_schedule: Dict[str, Any] | None = None
+        self._pending_tier2_turns = 0
+        self._last_turn_monotonic: float | None = None
 
     @property
     def name(self) -> str:
@@ -166,6 +103,8 @@ class BrainstackMemoryProvider(MemoryProvider):
             {"key": "corpus_match_limit", "description": "How many corpus sections to consider per turn", "default": "4"},
             {"key": "corpus_char_budget", "description": "Approximate character budget for packed corpus recall", "default": "700"},
             {"key": "corpus_section_max_chars", "description": "Maximum size of an ingested corpus section", "default": "900"},
+            {"key": "tier2_idle_window_seconds", "description": "Idle window before the future Tier-2 batch may be queued", "default": "30"},
+            {"key": "tier2_batch_turn_limit", "description": "How many turns may accumulate before the future Tier-2 batch is queued", "default": "5"},
         ]
 
     def save_config(self, values, hermes_home):
@@ -221,6 +160,9 @@ class BrainstackMemoryProvider(MemoryProvider):
         if not self._store:
             return
         sid = session_id or self._session_id
+        now = time.monotonic()
+        idle_seconds = None if self._last_turn_monotonic is None else max(0.0, now - self._last_turn_monotonic)
+        self._last_turn_monotonic = now
         self._turn_counter += 1
         continuity_adapter.write_turn_records(
             self._store,
@@ -229,22 +171,43 @@ class BrainstackMemoryProvider(MemoryProvider):
             user_content=user_content,
             assistant_content=assistant_content,
         )
-        for item in _extract_profile_candidates(user_content):
+        plan = build_turn_ingest_plan(
+            user_content=user_content,
+            pending_turns=self._pending_tier2_turns + 1,
+            idle_seconds=idle_seconds,
+            idle_window_seconds=self._tier2_idle_window_seconds,
+            batch_turn_limit=self._tier2_batch_turn_limit,
+        )
+        self._last_tier2_schedule = plan.tier2_schedule.to_dict()
+        self._pending_tier2_turns = plan.tier2_schedule.pending_turns
+
+        if not plan.durable_admission.allowed:
+            logger.info(
+                "Brainstack durable admission denied in sync_turn: reason=%s matched=%s",
+                plan.durable_admission.reason,
+                ",".join(plan.durable_admission.matched_rules) or "-",
+            )
+
+        for item in plan.profile_candidates:
             self._store.upsert_profile_item(
                 stable_key=item["stable_key"],
                 category=item["category"],
                 content=item["content"],
                 source=item["source"],
                 confidence=float(item["confidence"]),
-                metadata={"session_id": sid},
+                metadata={
+                    "session_id": sid,
+                    "admission_reason": plan.durable_admission.reason,
+                },
             )
-        graph_adapter.ingest_turn_graph_candidates(
-            self._store,
-            text=user_content,
-            session_id=sid,
-            turn_number=self._turn_counter,
-            source="sync_turn:user",
-        )
+        if plan.graph_text:
+            graph_adapter.ingest_turn_graph_candidates(
+                self._store,
+                text=plan.graph_text,
+                session_id=sid,
+                turn_number=self._turn_counter,
+                source="sync_turn:user",
+            )
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return []
@@ -321,24 +284,36 @@ class BrainstackMemoryProvider(MemoryProvider):
             max_items=8,
         )
         for message in messages:
-            if message.get("role") != "user":
-                continue
             message_content = str(message.get("content", ""))
-            for item in _extract_profile_candidates(str(message.get("content", ""))):
+            plan = build_session_message_ingest_plan(
+                role=str(message.get("role", "")),
+                content=message_content,
+            )
+            if not plan.durable_admission.allowed and plan.durable_admission.reason not in {"non_user_role", "empty_fact"}:
+                logger.info(
+                    "Brainstack durable admission denied in session_end: reason=%s matched=%s",
+                    plan.durable_admission.reason,
+                    ",".join(plan.durable_admission.matched_rules) or "-",
+                )
+            for item in plan.profile_candidates:
                 self._store.upsert_profile_item(
                     stable_key=item["stable_key"],
                     category=item["category"],
                     content=item["content"],
                     source="session_end_scan",
                     confidence=float(item["confidence"]),
-                    metadata={"session_id": self._session_id},
+                    metadata={
+                        "session_id": self._session_id,
+                        "admission_reason": plan.durable_admission.reason,
+                    },
                 )
-            graph_adapter.ingest_session_graph_candidates(
-                self._store,
-                text=message_content,
-                session_id=self._session_id,
-                source="session_end_scan:user",
-            )
+            if plan.graph_text:
+                graph_adapter.ingest_session_graph_candidates(
+                    self._store,
+                    text=plan.graph_text,
+                    session_id=self._session_id,
+                    source="session_end_scan:user",
+                )
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
         if not self._store or not content or action == "remove":
@@ -369,3 +344,6 @@ class BrainstackMemoryProvider(MemoryProvider):
         if self._store:
             self._store.close()
             self._store = None
+        self._last_turn_monotonic = None
+        self._pending_tier2_turns = 0
+        self._last_tier2_schedule = None

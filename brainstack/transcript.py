@@ -38,6 +38,8 @@ STOPWORDS = {
     "why",
 }
 
+ROLE_PREFIX_RE = re.compile(r"^\s*(user|assistant|system|tool)\s*:\s*", re.IGNORECASE)
+
 
 def format_turn_content(user_content: str, assistant_content: str) -> str:
     user = " ".join(str(user_content or "").split())
@@ -68,6 +70,17 @@ def build_transcript_snapshot(messages: List[Dict[str, Any]], *, label: str, max
     if not lines:
         return ""
     return f"{label} | " + " | ".join(lines)
+
+
+def count_role_prefixed_lines(text: str) -> int:
+    return sum(1 for line in str(text or "").splitlines() if ROLE_PREFIX_RE.match(line))
+
+
+def looks_like_role_transcript_dump(text: str) -> bool:
+    lines = [line for line in str(text or "").splitlines() if line.strip()]
+    if len(lines) < 3:
+        return False
+    return count_role_prefixed_lines(text) >= 2
 
 
 def tokenize_match_text(text: str) -> List[str]:

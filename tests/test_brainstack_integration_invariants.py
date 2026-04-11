@@ -9,6 +9,8 @@ sys.modules.setdefault("firecrawl", types.SimpleNamespace(Firecrawl=object))
 sys.modules.setdefault("fal_client", types.SimpleNamespace())
 
 from plugins.memory.brainstack import BrainstackMemoryProvider
+from plugins.memory.brainstack.extraction_pipeline import Tier2ScheduleDecision, TurnIngestPlan
+from plugins.memory.brainstack.stable_memory_guardrails import StableMemoryAdmissionDecision
 from run_agent import AIAgent
 
 
@@ -100,7 +102,7 @@ class TestBrainstackIntegrationInvariants:
             registry = provider.donor_registry()
             assert set(registry) == {"continuity", "graph_truth", "corpus"}
             assert provider.get_tool_schemas() == []
-            assert "memory" not in agent.valid_tool_names
+            assert agent._memory_store is None
         finally:
             agent._memory_manager.shutdown_all()
 
@@ -139,7 +141,6 @@ class TestBrainstackIntegrationInvariants:
         try:
             assert agent._memory_store is None
             assert agent._memory_manager is not None
-            assert "memory" not in agent.valid_tool_names
 
             provider = agent._memory_manager._providers[-1]
             agent._memory_manager.sync_all("We are proving the replacement contract.", "Continue.")
@@ -147,3 +148,40 @@ class TestBrainstackIntegrationInvariants:
             assert any("replacement contract" in row["content"] for row in rows)
         finally:
             agent._memory_manager.shutdown_all()
+
+    def test_sync_turn_uses_pipeline_plan_for_durable_admission(self, monkeypatch, tmp_path):
+        provider = BrainstackMemoryProvider(config={"db_path": str(tmp_path / "brainstack.db")})
+        provider.initialize("session-pipeline", hermes_home=str(tmp_path))
+        try:
+            fake_plan = TurnIngestPlan(
+                durable_admission=StableMemoryAdmissionDecision(False, "forced_test_reject"),
+                profile_candidates=[],
+                graph_text="Project Atlas is active.",
+                tier2_schedule=Tier2ScheduleDecision(
+                    should_queue=True,
+                    reason="turn_batch_limit",
+                    idle_window_seconds=30,
+                    batch_turn_limit=5,
+                    pending_turns=0,
+                    idle_seconds=0.0,
+                ),
+            )
+            monkeypatch.setattr("plugins.memory.brainstack.build_turn_ingest_plan", lambda **kwargs: fake_plan)
+
+            provider.sync_turn(
+                "My name is Laura. I prefer concise answers.",
+                "Understood.",
+                session_id="session-pipeline",
+            )
+
+            profile_rows = provider._store.list_profile_items(limit=10)
+            graph_rows = provider._store.search_graph(query="Project Atlas", limit=10)
+
+            assert profile_rows == []
+            assert provider._last_tier2_schedule["reason"] == "turn_batch_limit"
+            assert any(
+                row["subject"] == "Project Atlas" and row["object_value"] == "active"
+                for row in graph_rows
+            )
+        finally:
+            provider.shutdown()
