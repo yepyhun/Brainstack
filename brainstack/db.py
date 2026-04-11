@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, TypeVar
 
+from .provenance import merge_provenance, normalize_provenance
+from .temporal import merge_temporal, normalize_temporal_fields
 from .transcript import count_overlap, tokenize_match_text
 
 
@@ -28,6 +30,90 @@ def build_fts_query(query: str) -> str:
 def build_like_tokens(query: str, *, limit: int = 8) -> List[str]:
     tokens = [token.strip().lower() for token in query.replace('"', " ").split() if token.strip()]
     return [f"%{token}%" for token in tokens[:limit]]
+
+
+def _decode_json_object(value: Any) -> Dict[str, Any]:
+    text = str(value or "").strip()
+    if not text:
+        return {}
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _normalize_record_metadata(metadata: Dict[str, Any] | None, *, source: str = "") -> Dict[str, Any]:
+    payload = dict(metadata or {})
+
+    nested_temporal = payload.pop("temporal", None)
+    temporal_payload: Dict[str, Any] = {}
+    if isinstance(nested_temporal, dict):
+        temporal_payload.update(nested_temporal)
+    for key in ("observed_at", "valid_at", "valid_from", "valid_to", "supersedes", "superseded_by", "episode_id"):
+        if key in payload:
+            temporal_payload[key] = payload.pop(key)
+    temporal = normalize_temporal_fields(**temporal_payload)
+
+    nested_provenance = payload.pop("provenance", None)
+    provenance_seed: Dict[str, Any] = {}
+    if source:
+        provenance_seed["source_ids"] = [source]
+    for key in (
+        "session_id",
+        "turn_number",
+        "tier",
+        "target",
+        "admission_reason",
+        "origin",
+        "status_reason",
+        "trace_id",
+        "correlation_id",
+    ):
+        if key in payload:
+            provenance_seed[key] = payload.pop(key)
+    provenance = merge_provenance(provenance_seed, nested_provenance)
+
+    normalized: Dict[str, Any] = dict(payload)
+    if temporal:
+        normalized["temporal"] = temporal
+    if provenance:
+        normalized["provenance"] = provenance
+    return normalized
+
+
+def _merge_record_metadata(
+    existing_metadata_json: Any,
+    incoming_metadata: Dict[str, Any] | None,
+    *,
+    source: str = "",
+) -> Dict[str, Any]:
+    existing = _decode_json_object(existing_metadata_json)
+    incoming = _normalize_record_metadata(incoming_metadata, source=source)
+
+    merged: Dict[str, Any] = {}
+    for payload in (existing, incoming):
+        for key, value in payload.items():
+            if key in {"temporal", "provenance"}:
+                continue
+            merged[key] = value
+
+    temporal = merge_temporal(existing.get("temporal"), incoming.get("temporal"))
+    provenance = merge_provenance(existing.get("provenance"), incoming.get("provenance"))
+    if temporal:
+        merged["temporal"] = temporal
+    if provenance:
+        merged["provenance"] = provenance
+    return merged
+
+
+def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    item = dict(row)
+    if "metadata_json" in item:
+        item["metadata"] = _decode_json_object(item.pop("metadata_json"))
+    if "conflict_metadata_json" in item:
+        item["conflict_metadata"] = _decode_json_object(item.pop("conflict_metadata_json"))
+    return item
 
 
 def _locked(method: F) -> F:
@@ -259,6 +345,7 @@ class BrainstackStore:
         metadata: Dict[str, Any] | None = None,
     ) -> int:
         now = utc_now_iso()
+        normalized_metadata = _normalize_record_metadata(metadata, source=source)
         cur = self.conn.execute(
             """
             INSERT INTO continuity_events (
@@ -271,7 +358,7 @@ class BrainstackStore:
                 kind,
                 content,
                 source,
-                json.dumps(metadata or {}, ensure_ascii=True, sort_keys=True),
+                json.dumps(normalized_metadata, ensure_ascii=True, sort_keys=True),
                 now,
                 now,
             ),
@@ -296,6 +383,7 @@ class BrainstackStore:
         metadata: Dict[str, Any] | None = None,
     ) -> int:
         now = utc_now_iso()
+        normalized_metadata = _normalize_record_metadata(metadata, source=source)
         cur = self.conn.execute(
             """
             INSERT INTO transcript_entries (
@@ -308,7 +396,7 @@ class BrainstackStore:
                 kind,
                 content,
                 source,
-                json.dumps(metadata or {}, ensure_ascii=True, sort_keys=True),
+                json.dumps(normalized_metadata, ensure_ascii=True, sort_keys=True),
                 now,
             ),
         )
@@ -324,7 +412,7 @@ class BrainstackStore:
     def recent_continuity(self, *, session_id: str, limit: int) -> List[Dict[str, Any]]:
         rows = self.conn.execute(
             """
-            SELECT id, session_id, turn_number, kind, content, source, created_at
+            SELECT id, session_id, turn_number, kind, content, source, metadata_json, created_at
             FROM continuity_events
             WHERE session_id = ?
             ORDER BY created_at DESC, id DESC
@@ -332,7 +420,7 @@ class BrainstackStore:
             """,
             (session_id, limit),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [_row_to_dict(row) for row in rows]
 
     @_locked
     def search_continuity(self, *, query: str, session_id: str, limit: int) -> List[Dict[str, Any]]:
@@ -342,7 +430,7 @@ class BrainstackStore:
         try:
             rows = self.conn.execute(
                 """
-                SELECT ce.id, ce.session_id, ce.turn_number, ce.kind, ce.content, ce.source, ce.created_at
+                SELECT ce.id, ce.session_id, ce.turn_number, ce.kind, ce.content, ce.source, ce.metadata_json, ce.created_at
                 FROM continuity_fts fts
                 JOIN continuity_events ce ON ce.id = fts.rowid
                 WHERE continuity_fts MATCH ?
@@ -354,12 +442,12 @@ class BrainstackStore:
                 """,
                 (fts_query, session_id, limit),
             ).fetchall()
-            return [dict(row) for row in rows]
+            return [_row_to_dict(row) for row in rows]
         except sqlite3.OperationalError:
             like = f"%{query.strip()}%"
             rows = self.conn.execute(
                 """
-                SELECT id, session_id, turn_number, kind, content, source, created_at
+                SELECT id, session_id, turn_number, kind, content, source, metadata_json, created_at
                 FROM continuity_events
                 WHERE content LIKE ?
                 ORDER BY CASE WHEN session_id = ? THEN 0 ELSE 1 END, created_at DESC
@@ -367,13 +455,13 @@ class BrainstackStore:
                 """,
                 (like, session_id, limit),
             ).fetchall()
-            return [dict(row) for row in rows]
+            return [_row_to_dict(row) for row in rows]
 
     @_locked
     def recent_transcript(self, *, session_id: str, limit: int) -> List[Dict[str, Any]]:
         rows = self.conn.execute(
             """
-            SELECT id, session_id, turn_number, kind, content, source, created_at
+            SELECT id, session_id, turn_number, kind, content, source, metadata_json, created_at
             FROM transcript_entries
             WHERE session_id = ?
             ORDER BY created_at DESC, id DESC
@@ -381,7 +469,7 @@ class BrainstackStore:
             """,
             (session_id, limit),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [_row_to_dict(row) for row in rows]
 
     @_locked
     def search_transcript(self, *, query: str, session_id: str, limit: int) -> List[Dict[str, Any]]:
@@ -396,7 +484,7 @@ class BrainstackStore:
         try:
             rows = self.conn.execute(
                 """
-                SELECT te.id, te.session_id, te.turn_number, te.kind, te.content, te.source, te.created_at
+                SELECT te.id, te.session_id, te.turn_number, te.kind, te.content, te.source, te.metadata_json, te.created_at
                 FROM transcript_fts fts
                 JOIN transcript_entries te ON te.id = fts.rowid
                 WHERE transcript_fts MATCH ?
@@ -413,7 +501,7 @@ class BrainstackStore:
             where = " OR ".join("lower(content) LIKE ?" for _ in patterns)
             rows = self.conn.execute(
                 f"""
-                SELECT id, session_id, turn_number, kind, content, source, created_at
+                SELECT id, session_id, turn_number, kind, content, source, metadata_json, created_at
                 FROM transcript_entries
                 WHERE session_id = ? AND ({where})
                 ORDER BY created_at DESC
@@ -424,7 +512,7 @@ class BrainstackStore:
 
         scored: List[Dict[str, Any]] = []
         for row in rows:
-            item = dict(row)
+            item = _row_to_dict(row)
             overlap_count = count_overlap(query, item["content"])
             if overlap_count <= 0:
                 continue
@@ -457,10 +545,15 @@ class BrainstackStore:
     ) -> int:
         now = utc_now_iso()
         existing = self.conn.execute(
-            "SELECT id FROM profile_items WHERE stable_key = ?",
+            "SELECT id, metadata_json FROM profile_items WHERE stable_key = ?",
             (stable_key,),
         ).fetchone()
-        meta_json = json.dumps(metadata or {}, ensure_ascii=True, sort_keys=True)
+        normalized_metadata = _merge_record_metadata(
+            existing["metadata_json"] if existing else None,
+            metadata,
+            source=source,
+        )
+        meta_json = json.dumps(normalized_metadata, ensure_ascii=True, sort_keys=True)
 
         if existing:
             row_id = int(existing["id"])
@@ -516,7 +609,7 @@ class BrainstackStore:
     def list_profile_items(self, *, limit: int, categories: Iterable[str] | None = None) -> List[Dict[str, Any]]:
         params: list[Any] = []
         sql = """
-            SELECT id, stable_key, category, content, source, confidence, updated_at
+            SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at
             FROM profile_items
             WHERE active = 1
         """
@@ -527,7 +620,7 @@ class BrainstackStore:
         sql += " ORDER BY confidence DESC, updated_at DESC, id DESC LIMIT ?"
         params.append(limit)
         rows = self.conn.execute(sql, tuple(params)).fetchall()
-        return [dict(row) for row in rows]
+        return [_row_to_dict(row) for row in rows]
 
     @_locked
     def get_profile_item(self, *, stable_key: str) -> Dict[str, Any] | None:
@@ -540,7 +633,7 @@ class BrainstackStore:
             """,
             (stable_key,),
         ).fetchone()
-        return dict(row) if row else None
+        return _row_to_dict(row) if row else None
 
     @_locked
     def search_profile(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
@@ -550,7 +643,7 @@ class BrainstackStore:
         try:
             rows = self.conn.execute(
                 """
-                SELECT pi.id, pi.stable_key, pi.category, pi.content, pi.source, pi.confidence, pi.updated_at
+                SELECT pi.id, pi.stable_key, pi.category, pi.content, pi.source, pi.confidence, pi.metadata_json, pi.updated_at
                 FROM profile_fts fts
                 JOIN profile_items pi ON pi.id = fts.rowid
                 WHERE profile_fts MATCH ? AND pi.active = 1
@@ -559,12 +652,12 @@ class BrainstackStore:
                 """,
                 (fts_query, limit),
             ).fetchall()
-            return [dict(row) for row in rows]
+            return [_row_to_dict(row) for row in rows]
         except sqlite3.OperationalError:
             like = f"%{query.strip()}%"
             rows = self.conn.execute(
                 """
-                SELECT id, stable_key, category, content, source, confidence, updated_at
+                SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at
                 FROM profile_items
                 WHERE active = 1 AND content LIKE ?
                 ORDER BY confidence DESC, updated_at DESC
@@ -572,7 +665,7 @@ class BrainstackStore:
                 """,
                 (like, limit),
             ).fetchall()
-            return [dict(row) for row in rows]
+            return [_row_to_dict(row) for row in rows]
 
     @_locked
     def upsert_corpus_document(
@@ -792,13 +885,20 @@ class BrainstackStore:
         obj = self.get_or_create_entity(object_name)
         existing = self.conn.execute(
             """
-            SELECT id FROM graph_relations
+            SELECT id, metadata_json FROM graph_relations
             WHERE subject_entity_id = ? AND predicate = ? AND object_entity_id = ? AND active = 1
             """,
             (subject["id"], predicate, obj["id"]),
         ).fetchone()
         if existing:
+            merged = _merge_record_metadata(existing["metadata_json"], metadata, source=source)
+            self.conn.execute(
+                "UPDATE graph_relations SET metadata_json = ? WHERE id = ?",
+                (json.dumps(merged, ensure_ascii=True, sort_keys=True), int(existing["id"])),
+            )
+            self.conn.commit()
             return int(existing["id"])
+        normalized_metadata = _normalize_record_metadata(metadata, source=source)
         cur = self.conn.execute(
             """
             INSERT INTO graph_relations (
@@ -811,7 +911,7 @@ class BrainstackStore:
                 obj["id"],
                 object_name.strip(),
                 source,
-                json.dumps(metadata or {}, ensure_ascii=True, sort_keys=True),
+                json.dumps(normalized_metadata, ensure_ascii=True, sort_keys=True),
                 now,
             ),
         )
@@ -833,13 +933,20 @@ class BrainstackStore:
         obj = self.get_or_create_entity(object_name)
         existing = self.conn.execute(
             """
-            SELECT id FROM graph_relations
+            SELECT id, metadata_json FROM graph_relations
             WHERE subject_entity_id = ? AND predicate = ? AND object_entity_id = ? AND active = 1
             """,
             (subject["id"], predicate, obj["id"]),
         ).fetchone()
         if existing:
+            merged = _merge_record_metadata(existing["metadata_json"], metadata, source=source)
+            self.conn.execute(
+                "UPDATE graph_relations SET metadata_json = ? WHERE id = ?",
+                (json.dumps(merged, ensure_ascii=True, sort_keys=True), int(existing["id"])),
+            )
+            self.conn.commit()
             return {"status": "unchanged", "relation_id": int(existing["id"])}
+        normalized_metadata = _normalize_record_metadata(metadata, source=source)
         cur = self.conn.execute(
             """
             INSERT INTO graph_relations (
@@ -852,7 +959,7 @@ class BrainstackStore:
                 obj["id"],
                 object_name.strip(),
                 source,
-                json.dumps(metadata or {}, ensure_ascii=True, sort_keys=True),
+                json.dumps(normalized_metadata, ensure_ascii=True, sort_keys=True),
                 now,
             ),
         )
@@ -872,9 +979,17 @@ class BrainstackStore:
     ) -> Dict[str, Any]:
         now = utc_now_iso()
         entity = self.get_or_create_entity(subject_name)
+        normalized_metadata = _normalize_record_metadata(metadata, source=source)
+        temporal = merge_temporal(
+            normalized_metadata.get("temporal"),
+            {"observed_at": normalized_metadata.get("temporal", {}).get("observed_at") or now},
+        )
+        if temporal:
+            normalized_metadata["temporal"] = temporal
+        valid_from = str(normalized_metadata.get("temporal", {}).get("valid_from") or now)
         current = self.conn.execute(
             """
-            SELECT id, value_text
+            SELECT id, value_text, source, metadata_json, valid_from, valid_to
             FROM graph_states
             WHERE entity_id = ? AND attribute = ? AND is_current = 1
             ORDER BY valid_from DESC, id DESC
@@ -883,22 +998,47 @@ class BrainstackStore:
             (entity["id"], attribute),
         ).fetchone()
         normalized_new = " ".join(value_text.lower().split())
-        meta_json = json.dumps(metadata or {}, ensure_ascii=True, sort_keys=True)
 
         if current and " ".join(str(current["value_text"]).lower().split()) == normalized_new:
+            merged = _merge_record_metadata(current["metadata_json"], normalized_metadata, source=source)
+            self.conn.execute(
+                "UPDATE graph_states SET metadata_json = ? WHERE id = ?",
+                (json.dumps(merged, ensure_ascii=True, sort_keys=True), int(current["id"])),
+            )
+            self.conn.commit()
             return {"status": "unchanged", "entity_id": entity["id"], "state_id": int(current["id"])}
 
         if current and not supersede:
             conflict = self.conn.execute(
                 """
-                SELECT id FROM graph_conflicts
+                SELECT id, metadata_json FROM graph_conflicts
                 WHERE entity_id = ? AND attribute = ? AND current_state_id = ?
                   AND candidate_value_text = ? AND status = 'open'
                 """,
                 (entity["id"], attribute, int(current["id"]), value_text.strip()),
             ).fetchone()
             if conflict:
+                merged = _merge_record_metadata(conflict["metadata_json"], normalized_metadata, source=source)
+                self.conn.execute(
+                    """
+                    UPDATE graph_conflicts
+                    SET metadata_json = ?, candidate_source = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        json.dumps(merged, ensure_ascii=True, sort_keys=True),
+                        source,
+                        now,
+                        int(conflict["id"]),
+                    ),
+                )
+                self.conn.commit()
                 return {"status": "conflict", "entity_id": entity["id"], "conflict_id": int(conflict["id"])}
+            conflict_metadata = _merge_record_metadata(
+                None,
+                normalized_metadata,
+                source=source,
+            )
             cur = self.conn.execute(
                 """
                 INSERT INTO graph_conflicts (
@@ -912,7 +1052,7 @@ class BrainstackStore:
                     int(current["id"]),
                     value_text.strip(),
                     source,
-                    meta_json,
+                    json.dumps(conflict_metadata, ensure_ascii=True, sort_keys=True),
                     now,
                     now,
                 ),
@@ -921,15 +1061,33 @@ class BrainstackStore:
             return {"status": "conflict", "entity_id": entity["id"], "conflict_id": int(cur.lastrowid)}
 
         if current and supersede:
+            prior_temporal = merge_temporal(
+                _decode_json_object(current["metadata_json"]).get("temporal"),
+                {"valid_to": valid_from},
+            )
+            prior_provenance = merge_provenance(
+                _decode_json_object(current["metadata_json"]).get("provenance"),
+                {"source_ids": [source]},
+            )
+            prior_metadata = _decode_json_object(current["metadata_json"])
+            if prior_temporal:
+                prior_metadata["temporal"] = prior_temporal
+            if prior_provenance:
+                prior_metadata["provenance"] = prior_provenance
             self.conn.execute(
                 """
                 UPDATE graph_states
-                SET is_current = 0, valid_to = ?
+                SET is_current = 0, valid_to = ?, metadata_json = ?
                 WHERE id = ?
                 """,
-                (now, int(current["id"])),
+                (
+                    valid_from,
+                    json.dumps(prior_metadata, ensure_ascii=True, sort_keys=True),
+                    int(current["id"]),
+                ),
             )
 
+        state_metadata = _merge_record_metadata(None, normalized_metadata, source=source)
         cur = self.conn.execute(
             """
             INSERT INTO graph_states (
@@ -941,19 +1099,50 @@ class BrainstackStore:
                 attribute,
                 value_text.strip(),
                 source,
-                meta_json,
-                now,
+                json.dumps(state_metadata, ensure_ascii=True, sort_keys=True),
+                valid_from,
             ),
         )
         new_state_id = int(cur.lastrowid)
 
         if current and supersede:
+            updated_prior_metadata = _decode_json_object(current["metadata_json"])
+            updated_prior_metadata["temporal"] = merge_temporal(
+                updated_prior_metadata.get("temporal"),
+                {"valid_to": valid_from, "superseded_by": str(new_state_id)},
+            )
+            updated_prior_metadata["provenance"] = merge_provenance(
+                updated_prior_metadata.get("provenance"),
+                {"source_ids": [source], "replacement_record_id": str(new_state_id)},
+            )
+            self.conn.execute(
+                "UPDATE graph_states SET metadata_json = ? WHERE id = ?",
+                (
+                    json.dumps(updated_prior_metadata, ensure_ascii=True, sort_keys=True),
+                    int(current["id"]),
+                ),
+            )
+            new_state_metadata = _merge_record_metadata(
+                state_metadata,
+                {
+                    "temporal": {"supersedes": str(current["id"]), "valid_from": valid_from},
+                    "provenance": {"replacement_record_id": str(current["id"])},
+                },
+                source=source,
+            )
+            self.conn.execute(
+                "UPDATE graph_states SET metadata_json = ? WHERE id = ?",
+                (
+                    json.dumps(new_state_metadata, ensure_ascii=True, sort_keys=True),
+                    new_state_id,
+                ),
+            )
             self.conn.execute(
                 """
                 INSERT INTO graph_supersessions (prior_state_id, new_state_id, reason, created_at)
                 VALUES (?, ?, ?, ?)
                 """,
-                (int(current["id"]), new_state_id, "superseded_by_new_current_state", now),
+                (int(current["id"]), new_state_id, "superseded_by_new_current_state", valid_from),
             )
             self.conn.commit()
             return {
@@ -971,7 +1160,7 @@ class BrainstackStore:
         rows = self.conn.execute(
             """
             SELECT gc.id, ge.canonical_name AS entity_name, gc.attribute, gs.value_text AS current_value,
-                   gc.candidate_value_text, gc.status, gc.updated_at
+                   gc.candidate_value_text, gc.status, gc.updated_at, gc.metadata_json
             FROM graph_conflicts gc
             JOIN graph_entities ge ON ge.id = gc.entity_id
             JOIN graph_states gs ON gs.id = gc.current_state_id
@@ -981,7 +1170,7 @@ class BrainstackStore:
             """,
             (limit,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [_row_to_dict(row) for row in rows]
 
     @_locked
     def find_continuity_event(
@@ -993,7 +1182,7 @@ class BrainstackStore:
     ) -> Dict[str, Any] | None:
         row = self.conn.execute(
             """
-            SELECT id, session_id, turn_number, kind, content, source, created_at
+            SELECT id, session_id, turn_number, kind, content, source, metadata_json, created_at
             FROM continuity_events
             WHERE session_id = ? AND kind = ? AND content = ?
             ORDER BY id DESC
@@ -1001,13 +1190,14 @@ class BrainstackStore:
             """,
             (session_id, kind, content),
         ).fetchone()
-        return dict(row) if row else None
+        return _row_to_dict(row) if row else None
 
     @_locked
     def search_graph(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
         patterns = build_like_tokens(query)
         if not patterns:
             return []
+        candidate_limit = max(limit * 4, limit)
         state_where = " OR ".join(
             "lower(ge.canonical_name) LIKE ? OR lower(gs.value_text) LIKE ? OR lower(gs.attribute) LIKE ?"
             for _ in patterns
@@ -1037,7 +1227,10 @@ class BrainstackStore:
                        gs.value_text AS object_value,
                        gs.is_current AS is_current,
                        gs.valid_from AS happened_at,
+                       gs.valid_to AS valid_to,
                        gs.source AS source,
+                       gs.metadata_json AS metadata_json,
+                       '' AS conflict_metadata_json,
                        '' AS conflict_source,
                        '' AS conflict_value
                 FROM graph_states gs
@@ -1051,7 +1244,10 @@ class BrainstackStore:
                        COALESCE(go.canonical_name, gr.object_text, '') AS object_value,
                        1 AS is_current,
                        gr.created_at AS happened_at,
+                       '' AS valid_to,
                        gr.source AS source,
+                       gr.metadata_json AS metadata_json,
+                       '' AS conflict_metadata_json,
                        '' AS conflict_source,
                        '' AS conflict_value
                 FROM graph_relations gr
@@ -1066,7 +1262,10 @@ class BrainstackStore:
                        gs.value_text AS object_value,
                        1 AS is_current,
                        gc.updated_at AS happened_at,
+                       '' AS valid_to,
                        gs.source AS source,
+                       gs.metadata_json AS metadata_json,
+                       gc.metadata_json AS conflict_metadata_json,
                        gc.candidate_source AS conflict_source,
                        gc.candidate_value_text AS conflict_value
                 FROM graph_conflicts gc
@@ -1085,6 +1284,16 @@ class BrainstackStore:
             ORDER BY happened_at DESC
             LIMIT ?
             """,
-            tuple(params),
+            tuple(params[:-1] + [candidate_limit]),
         ).fetchall()
-        return [dict(row) for row in rows]
+        parsed = [_row_to_dict(row) for row in rows]
+        parsed.sort(
+            key=lambda item: (
+                3 if item["row_type"] == "conflict" else 0,
+                2 if item["row_type"] == "state" and item.get("is_current") else 0,
+                1 if item["row_type"] == "relation" else 0,
+                str(item.get("happened_at") or ""),
+            ),
+            reverse=True,
+        )
+        return parsed[:limit]

@@ -5,9 +5,11 @@ import threading
 import time
 
 from plugins.memory.brainstack.extraction_pipeline import build_turn_ingest_plan
+from plugins.memory.brainstack.provenance import merge_provenance, summarize_provenance
 from plugins.memory.brainstack.reconciler import reconcile_tier2_candidates
 from plugins.memory.brainstack.stable_memory_guardrails import should_admit_stable_memory
 from plugins.memory.brainstack import BrainstackMemoryProvider
+from plugins.memory.brainstack.temporal import normalize_temporal_fields, record_is_effective_at
 from plugins.memory.brainstack.tier2_extractor import extract_tier2_candidates
 
 
@@ -19,6 +21,42 @@ def _make_provider(tmp_path, session_id):
 
 
 class TestBrainstackRealWorldFlows:
+    def test_temporal_and_provenance_helpers_are_normalized_and_bounded(self):
+        temporal = normalize_temporal_fields(
+            observed_at="2026-04-11T10:00:00Z",
+            valid_at="2026-04-11T10:05:00Z",
+            supersedes="state-1",
+        )
+        assert temporal["observed_at"].startswith("2026-04-11T10:00:00")
+        assert temporal["valid_from"].startswith("2026-04-11T10:05:00")
+        assert temporal["supersedes"] == "state-1"
+
+        effective = record_is_effective_at(
+            {
+                "valid_from": "2026-04-11T10:00:00+00:00",
+                "valid_to": "2026-04-11T12:00:00+00:00",
+                "metadata": {},
+            },
+            as_of="2026-04-11T11:00:00+00:00",
+        )
+        expired = record_is_effective_at(
+            {
+                "valid_from": "2026-04-11T10:00:00+00:00",
+                "valid_to": "2026-04-11T12:00:00+00:00",
+                "metadata": {},
+            },
+            as_of="2026-04-11T13:00:00+00:00",
+        )
+        assert effective is True
+        assert expired is False
+
+        provenance = merge_provenance(
+            {"source_ids": ["tier2:test"], "turn_number": 1},
+            {"source_ids": ["sync_turn", "tier2:test"], "admission_reason": "allowed"},
+        )
+        assert provenance["source_ids"] == ["sync_turn", "tier2:test"]
+        assert summarize_provenance(provenance).startswith("sources=")
+
     def test_tier0_hygiene_rejects_known_noise_families_but_allows_direct_self_statement(self):
         blocked = {
             "markdown_table": "| Column | Value |\n| --- | --- |\n| Preference | concise |",
@@ -148,6 +186,21 @@ class TestBrainstackRealWorldFlows:
         finally:
             provider.shutdown()
 
+    def test_non_temporal_graph_query_prefers_current_truth_without_history_spam(self, tmp_path):
+        provider = _make_provider(tmp_path, "session-graph-compact")
+        try:
+            provider.sync_turn("Project Atlas is active.", "Noted.", session_id="session-graph-compact")
+            provider.sync_turn("Project Atlas is paused now.", "Noted.", session_id="session-graph-compact")
+
+            block = provider.prefetch(
+                "Project Atlas status?",
+                session_id="session-graph-compact",
+            )
+            assert "[state:current] Project Atlas status=paused" in block
+            assert "[state:prior] Project Atlas status=active" not in block
+        finally:
+            provider.shutdown()
+
     def test_corpus_recall_returns_relevant_bounded_document_sections(self, tmp_path):
         provider = _make_provider(tmp_path, "session-corpus")
         try:
@@ -234,7 +287,14 @@ class TestBrainstackRealWorldFlows:
                 source="tier2:test",
                 extracted={
                     "profile_items": [{"category": "identity", "content": "User identity: Tomi", "slot": "identity:name", "confidence": 0.95}],
-                    "states": [{"subject": "Tomi", "attribute": "location", "value": "Debrecen", "supersede": True, "confidence": 0.91}],
+                    "states": [{
+                        "subject": "Tomi",
+                        "attribute": "location",
+                        "value": "Debrecen",
+                        "supersede": True,
+                        "confidence": 0.91,
+                        "metadata": {"provenance": {"trace_id": "tier2-second-pass"}},
+                    }],
                     "relations": [{"subject": "Tomi", "predicate": "works_on", "object": "Brainstack integration", "confidence": 0.82}],
                     "continuity_summary": "Tomi moved from Budapest to Debrecen.",
                     "decisions": ["Brainstack remains the memory owner."],
@@ -261,6 +321,62 @@ class TestBrainstackRealWorldFlows:
             assert "Budapest" in block
             assert any(action["action"] == "CONFLICT" for action in report["actions"])
             assert any(conflict["candidate_value_text"] == "Szeged" for conflict in conflicts)
+            current_location = next(
+                row for row in provider._store.search_graph(query="Debrecen", limit=10)
+                if row["row_type"] == "state" and row.get("is_current")
+            )
+            assert current_location["metadata"]["temporal"]["supersedes"]
+            assert "tier2:test" in current_location["metadata"]["provenance"]["source_ids"]
+        finally:
+            provider.shutdown()
+
+    def test_conflict_prefetch_surfaces_bounded_basis_when_provenance_expands(self, tmp_path):
+        provider = _make_provider(tmp_path, "session-conflict-basis")
+        try:
+            reconcile_tier2_candidates(
+                provider._store,
+                session_id="session-conflict-basis",
+                turn_number=1,
+                source="tier2:test",
+                extracted={
+                    "profile_items": [],
+                    "states": [{
+                        "subject": "Tomi",
+                        "attribute": "location",
+                        "value": "Debrecen",
+                        "supersede": False,
+                        "confidence": 0.92,
+                        "metadata": {"provenance": {"trace_id": "state-1"}},
+                    }],
+                    "relations": [],
+                    "continuity_summary": "",
+                    "decisions": [],
+                },
+            )
+            reconcile_tier2_candidates(
+                provider._store,
+                session_id="session-conflict-basis",
+                turn_number=2,
+                source="tier2:test",
+                extracted={
+                    "profile_items": [],
+                    "states": [{
+                        "subject": "Tomi",
+                        "attribute": "location",
+                        "value": "Szeged",
+                        "supersede": False,
+                        "confidence": 0.51,
+                        "metadata": {"provenance": {"trace_id": "state-2"}},
+                    }],
+                    "relations": [],
+                    "continuity_summary": "",
+                    "decisions": [],
+                },
+            )
+            block = provider.prefetch("Where does Tomi live now?", session_id="session-conflict-basis")
+            assert "[conflict] Tomi location current=Debrecen candidate=Szeged" in block
+            assert "candidate_source=tier2:test" in block
+            assert "sources=tier2:test" in block
         finally:
             provider.shutdown()
 

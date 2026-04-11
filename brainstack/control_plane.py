@@ -95,6 +95,7 @@ class WorkingMemoryPolicy:
     collapse_mode: str
     provenance_mode: str
     confidence_band: str
+    show_graph_history: bool
     conflict_escalation: bool
     tool_avoidance_allowed: bool
     tool_avoidance_reason: str
@@ -135,6 +136,7 @@ def _initial_policy(
         collapse_mode="balanced",
         provenance_mode="compact",
         confidence_band="medium",
+        show_graph_history=False,
         conflict_escalation=False,
         tool_avoidance_allowed=False,
         tool_avoidance_reason="policy not finalized",
@@ -163,6 +165,7 @@ def _initial_policy(
 
     if analysis.explanatory:
         policy.mode = "balanced"
+        policy.show_graph_history = True
         policy.graph_limit = max(policy.graph_limit, min(graph_limit, 3))
         policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 3))
         policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 650))
@@ -172,6 +175,7 @@ def _initial_policy(
 
     if analysis.temporal:
         policy.mode = "balanced"
+        policy.show_graph_history = True
         policy.graph_limit = max(policy.graph_limit, min(graph_limit, 4))
         policy.continuity_match_limit = max(policy.continuity_match_limit, min(continuity_match_limit, 3))
 
@@ -179,6 +183,7 @@ def _initial_policy(
         policy.mode = "deep"
         policy.collapse_mode = "minimal"
         policy.provenance_mode = "expanded"
+        policy.show_graph_history = True
         policy.show_policy = True
         policy.transcript_limit = 0
         policy.transcript_char_budget = 0
@@ -267,6 +272,7 @@ def build_working_memory_packet(
         policy.mode = "deep"
         policy.collapse_mode = "minimal"
         policy.provenance_mode = "expanded"
+        policy.show_graph_history = True
         policy.conflict_escalation = True
         policy.show_policy = True
 

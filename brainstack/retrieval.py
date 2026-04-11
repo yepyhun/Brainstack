@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List
 
 from .db import BrainstackStore
+from .provenance import summarize_provenance
+from .temporal import record_is_effective_at
 
 
 def _trim(value: str, max_len: int = 220) -> str:
@@ -17,12 +19,22 @@ def _render_items(items: Iterable[str]) -> str:
     return "\n".join(f"- {item}" for item in rows)
 
 
-def _with_provenance(text: str, *, source: str = "", extra: str = "", provenance_mode: str = "compact") -> str:
+def _with_provenance(
+    text: str,
+    *,
+    source: str = "",
+    extra: str = "",
+    provenance_mode: str = "compact",
+    metadata: Dict[str, Any] | None = None,
+) -> str:
     if provenance_mode != "expanded":
         return text
     parts = []
     if source:
         parts.append(f"source={source}")
+    basis = summarize_provenance((metadata or {}).get("provenance"))
+    if basis:
+        parts.append(basis)
     if extra:
         parts.append(extra)
     if not parts:
@@ -80,6 +92,7 @@ def _pack_transcript_rows(rows: Iterable[dict], *, char_budget: int, provenance_
             source=str(row.get("source", "")),
             extra=extra,
             provenance_mode=provenance_mode,
+            metadata=row.get("metadata"),
         )
         packed.append(line if len(line) <= remaining else _trim(line, remaining))
         if sum(len(item) for item in packed) >= budget:
@@ -138,6 +151,7 @@ def render_working_memory_block(
                 f"[{item['category'].replace('_', ' ')}] {_trim(item['content'], 160)}",
                 source=str(item.get("source", "")),
                 provenance_mode=provenance_mode,
+                metadata=item.get("metadata"),
             )
             for item in profile_items
         ]
@@ -149,6 +163,7 @@ def render_working_memory_block(
                 f"[{item['kind']}] {_trim(item['content'])}",
                 source=str(item.get("source", "")),
                 provenance_mode=provenance_mode,
+                metadata=item.get("metadata"),
             )
             for item in matched
         ]
@@ -160,6 +175,7 @@ def render_working_memory_block(
                 f"[{item['kind']}] {_trim(item['content'])}",
                 source=str(item.get("source", "")),
                 provenance_mode=provenance_mode,
+                metadata=item.get("metadata"),
             )
             for item in recent
         ]
@@ -174,8 +190,31 @@ def render_working_memory_block(
         sections.append("## Brainstack Transcript Evidence\n" + _render_items(packed_transcript))
 
     if graph_rows:
+        show_graph_history = bool(policy.get("show_graph_history", False))
+        conflicts = [row for row in graph_rows if row["row_type"] == "conflict"]
+        current_states = [
+            row for row in graph_rows if row["row_type"] == "state" and row.get("is_current") and record_is_effective_at(row)
+        ]
+        prior_states = [row for row in graph_rows if row["row_type"] == "state" and not row.get("is_current")]
+        relations = [row for row in graph_rows if row["row_type"] == "relation"]
+        ordered_rows = conflicts + current_states
+        if show_graph_history or conflicts:
+            ordered_rows.extend(prior_states)
+        ordered_rows.extend(relations)
+
         lines = []
-        for row in graph_rows:
+        seen = set()
+        for row in ordered_rows:
+            row_key = (
+                row["row_type"],
+                row.get("subject"),
+                row.get("predicate"),
+                row.get("object_value"),
+                row.get("conflict_value"),
+            )
+            if row_key in seen:
+                continue
+            seen.add(row_key)
             if row["row_type"] == "relation":
                 text = f"[relation] {row['subject']} {row['predicate']} {row['object_value']}"
                 lines.append(
@@ -183,6 +222,7 @@ def render_working_memory_block(
                         text,
                         source=str(row.get("source", "")),
                         provenance_mode=provenance_mode,
+                        metadata=row.get("metadata"),
                     )
                 )
             elif row["row_type"] == "conflict":
@@ -190,12 +230,17 @@ def render_working_memory_block(
                     f"[conflict] {row['subject']} {row['predicate']} "
                     f"current={row['object_value']} candidate={row['conflict_value']}"
                 )
+                conflict_basis = summarize_provenance((row.get("conflict_metadata") or {}).get("provenance"))
+                extra = f"candidate_source={row.get('conflict_source', '')}"
+                if conflict_basis:
+                    extra = f"{extra} ; candidate_basis={conflict_basis}" if extra else f"candidate_basis={conflict_basis}"
                 lines.append(
                     _with_provenance(
                         text,
                         source=str(row.get("source", "")),
-                        extra=f"candidate_source={row.get('conflict_source', '')}",
+                        extra=extra,
                         provenance_mode=provenance_mode,
+                        metadata=row.get("metadata"),
                     )
                 )
             else:
@@ -206,6 +251,7 @@ def render_working_memory_block(
                         text,
                         source=str(row.get("source", "")),
                         provenance_mode=provenance_mode,
+                        metadata=row.get("metadata"),
                     )
                 )
         sections.append("## Brainstack Graph Truth\n" + _render_items(lines))
@@ -253,6 +299,7 @@ def build_prefetch_block(
             "tool_avoidance_allowed": True,
             "tool_avoidance_reason": "legacy prefetch path",
             "show_policy": False,
+            "show_graph_history": False,
             "transcript_char_budget": transcript_char_budget,
             "corpus_char_budget": corpus_char_budget,
         },

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Mapping
 
 from .db import BrainstackStore
+from .provenance import merge_provenance
 from .tier1_extractor import build_profile_stable_key
 
 
@@ -18,6 +19,25 @@ def _profile_stable_key(candidate: Mapping[str, Any]) -> str:
     return build_profile_stable_key(category, _normalize_text(candidate.get("content")))
 
 
+def _candidate_metadata(
+    candidate: Mapping[str, Any],
+    *,
+    base_metadata: Mapping[str, Any],
+    confidence: float,
+) -> Dict[str, Any]:
+    payload = dict(base_metadata)
+    payload["confidence"] = float(confidence)
+    raw_metadata = candidate.get("metadata")
+    if isinstance(raw_metadata, Mapping):
+        payload.update(raw_metadata)
+    raw_temporal = candidate.get("temporal")
+    if isinstance(raw_temporal, Mapping):
+        payload["temporal"] = {**payload.get("temporal", {}), **raw_temporal}
+    candidate_provenance = candidate.get("provenance") if isinstance(candidate.get("provenance"), Mapping) else None
+    payload["provenance"] = merge_provenance(payload.get("provenance"), candidate_provenance)
+    return payload
+
+
 def _reconcile_profile_items(
     store: BrainstackStore,
     *,
@@ -27,6 +47,7 @@ def _reconcile_profile_items(
     source: str,
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
+    base_metadata = {"session_id": session_id, "turn_number": turn_number, "tier": "tier2"}
     for candidate in candidates:
         category = _normalize_text(candidate.get("category")).lower()
         content = _normalize_text(candidate.get("content"))
@@ -44,11 +65,11 @@ def _reconcile_profile_items(
             content=content,
             source=source,
             confidence=float(candidate.get("confidence", 0.75)),
-            metadata={
-                "session_id": session_id,
-                "turn_number": turn_number,
-                "tier": "tier2",
-            },
+            metadata=_candidate_metadata(
+                candidate,
+                base_metadata=base_metadata,
+                confidence=float(candidate.get("confidence", 0.75)),
+            ),
         )
         actions.append(
             {
@@ -77,7 +98,11 @@ def _reconcile_states(
             value_text=_normalize_text(candidate.get("value")),
             source=source,
             supersede=bool(candidate.get("supersede", False)),
-            metadata={**metadata, "confidence": float(candidate.get("confidence", 0.82))},
+            metadata=_candidate_metadata(
+                candidate,
+                base_metadata=metadata,
+                confidence=float(candidate.get("confidence", 0.82)),
+            ),
         )
         status = str(outcome.get("status", "")).lower()
         if status == "unchanged":
@@ -106,7 +131,11 @@ def _reconcile_relations(
             predicate=_normalize_text(candidate.get("predicate")).lower(),
             object_name=_normalize_text(candidate.get("object")),
             source=source,
-            metadata={**metadata, "confidence": float(candidate.get("confidence", 0.8))},
+            metadata=_candidate_metadata(
+                candidate,
+                base_metadata=metadata,
+                confidence=float(candidate.get("confidence", 0.8)),
+            ),
         )
         action = "NONE" if outcome["status"] == "unchanged" else "ADD"
         actions.append({"kind": "relation", "action": action, **candidate, **outcome})
