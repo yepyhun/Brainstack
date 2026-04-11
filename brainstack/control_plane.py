@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 from .db import BrainstackStore
 from .retrieval import render_working_memory_block
 from .transcript import has_meaningful_transcript_evidence
+from .usefulness import graph_priority_adjustment, profile_priority_adjustment
 
 HIGH_STAKES_TERMS = (
     "safe",
@@ -96,6 +97,33 @@ def _merge_profile_rows(*groups: List[Dict[str, Any]], limit: int) -> List[Dict[
             if len(merged) >= limit:
                 return merged
     return merged
+
+
+def _rank_profile_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+    ranked = list(enumerate(rows))
+    ranked.sort(
+        key=lambda item: (
+            profile_priority_adjustment(item[1]),
+            -0.05 * item[0],
+            float(item[1].get("confidence") or 0.0),
+            str(item[1].get("updated_at") or ""),
+        ),
+        reverse=True,
+    )
+    return [row for _, row in ranked[:limit]]
+
+
+def _rank_graph_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+    ranked = list(enumerate(rows))
+    ranked.sort(
+        key=lambda item: (
+            graph_priority_adjustment(item[1]),
+            -0.05 * item[0],
+            str(item[1].get("happened_at") or ""),
+        ),
+        reverse=True,
+    )
+    return [row for _, row in ranked[:limit]]
 
 
 def _same_session_profile_boost(
@@ -263,18 +291,27 @@ def build_working_memory_packet(
         corpus_char_budget=corpus_char_budget,
     )
 
-    profile_items = store.search_profile(query=query, limit=policy.profile_limit) if policy.profile_limit > 0 else []
+    profile_search_limit = max(policy.profile_limit * 4, policy.profile_limit)
+    profile_items = store.search_profile(query=query, limit=profile_search_limit) if policy.profile_limit > 0 else []
+    matched_profile_keys = {
+        str(item.get("stable_key") or "").strip() for item in profile_items if str(item.get("stable_key") or "").strip()
+    }
     boosted_profile_items = _same_session_profile_boost(
         store,
         session_id=session_id,
         limit=min(max(policy.profile_limit, 2), 4),
     )
+    boosted_profile_keys = {
+        str(item.get("stable_key") or "").strip() for item in boosted_profile_items if str(item.get("stable_key") or "").strip()
+    }
     if boosted_profile_items:
         profile_items = _merge_profile_rows(
             boosted_profile_items,
             profile_items,
-            limit=max(policy.profile_limit, len(boosted_profile_items)),
+            limit=max(profile_search_limit, len(boosted_profile_items)),
         )
+    if profile_items:
+        profile_items = _rank_profile_rows(profile_items, limit=policy.profile_limit)
     matched = (
         store.search_continuity(query=query, session_id=session_id, limit=policy.continuity_match_limit)
         if policy.continuity_match_limit > 0
@@ -286,7 +323,10 @@ def build_working_memory_packet(
         recent = store.recent_continuity(session_id=session_id, limit=max(policy.continuity_recent_limit * 2, 2))
         recent = [item for item in recent if item["id"] not in matched_ids][: policy.continuity_recent_limit]
 
-    graph_rows = store.search_graph(query=query, limit=policy.graph_limit) if policy.graph_limit > 0 else []
+    graph_search_limit = max(policy.graph_limit * 4, policy.graph_limit)
+    graph_rows = store.search_graph(query=query, limit=graph_search_limit) if policy.graph_limit > 0 else []
+    if graph_rows:
+        graph_rows = _rank_graph_rows(graph_rows, limit=policy.graph_limit)
     corpus_rows = (
         store.search_corpus(query=query, limit=max(policy.corpus_limit * 3, policy.corpus_limit))
         if policy.corpus_limit > 0
@@ -367,6 +407,20 @@ def build_working_memory_packet(
         graph_rows=graph_rows,
         corpus_rows=corpus_rows,
     )
+    if profile_items:
+        store.record_profile_retrievals(
+            rows=[
+                {
+                    "stable_key": row.get("stable_key"),
+                    "matched": str(row.get("stable_key") or "").strip() in matched_profile_keys,
+                    "fallback": str(row.get("stable_key") or "").strip() in boosted_profile_keys
+                    and str(row.get("stable_key") or "").strip() not in matched_profile_keys,
+                }
+                for row in profile_items
+            ]
+        )
+    if graph_rows:
+        store.record_graph_retrievals(rows=graph_rows)
     return {
         "analysis": asdict(analysis),
         "policy": asdict(policy),

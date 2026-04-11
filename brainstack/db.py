@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, Iterable, List, TypeVar
 from .provenance import merge_provenance, normalize_provenance
 from .temporal import merge_temporal, normalize_temporal_fields
 from .transcript import count_overlap, tokenize_match_text
+from .usefulness import apply_retrieval_telemetry
 
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -634,6 +635,36 @@ class BrainstackStore:
             (stable_key,),
         ).fetchone()
         return _row_to_dict(row) if row else None
+
+    @_locked
+    def record_profile_retrievals(self, *, rows: Iterable[Dict[str, Any]]) -> int:
+        updated = 0
+        now = utc_now_iso()
+        for row in rows:
+            stable_key = str(row.get("stable_key") or "").strip()
+            if not stable_key:
+                continue
+            existing = self.conn.execute(
+                "SELECT id, metadata_json FROM profile_items WHERE stable_key = ?",
+                (stable_key,),
+            ).fetchone()
+            if not existing:
+                continue
+            metadata = _decode_json_object(existing["metadata_json"])
+            metadata = apply_retrieval_telemetry(
+                metadata,
+                matched=bool(row.get("matched")),
+                fallback=bool(row.get("fallback")),
+                served_at=now,
+            )
+            self.conn.execute(
+                "UPDATE profile_items SET metadata_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(metadata, ensure_ascii=True, sort_keys=True), now, int(existing["id"])),
+            )
+            updated += 1
+        if updated:
+            self.conn.commit()
+        return updated
 
     @_locked
     def search_profile(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
@@ -1285,6 +1316,7 @@ class BrainstackStore:
             f"""
             WITH state_hits AS (
                 SELECT 'state' AS row_type,
+                       gs.id AS row_id,
                        ge.canonical_name AS subject,
                        gs.attribute AS predicate,
                        gs.value_text AS object_value,
@@ -1302,6 +1334,7 @@ class BrainstackStore:
             ),
             relation_hits AS (
                 SELECT 'relation' AS row_type,
+                       gr.id AS row_id,
                        ge.canonical_name AS subject,
                        gr.predicate AS predicate,
                        COALESCE(go.canonical_name, gr.object_text, '') AS object_value,
@@ -1320,6 +1353,7 @@ class BrainstackStore:
             ),
             conflict_hits AS (
                 SELECT 'conflict' AS row_type,
+                       gc.id AS row_id,
                        ge.canonical_name AS subject,
                        gc.attribute AS predicate,
                        gs.value_text AS object_value,
@@ -1360,3 +1394,40 @@ class BrainstackStore:
             reverse=True,
         )
         return parsed[:limit]
+
+    @_locked
+    def record_graph_retrievals(self, *, rows: Iterable[Dict[str, Any]]) -> int:
+        updated = 0
+        now = utc_now_iso()
+        table_by_type = {
+            "state": "graph_states",
+            "relation": "graph_relations",
+            "conflict": "graph_conflicts",
+        }
+        for row in rows:
+            row_type = str(row.get("row_type") or "").strip()
+            row_id = int(row.get("row_id") or 0)
+            table = table_by_type.get(row_type)
+            if not table or row_id <= 0:
+                continue
+            existing = self.conn.execute(
+                f"SELECT metadata_json FROM {table} WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+            if not existing:
+                continue
+            metadata = _decode_json_object(existing["metadata_json"])
+            metadata = apply_retrieval_telemetry(
+                metadata,
+                matched=True,
+                fallback=False,
+                served_at=now,
+            )
+            self.conn.execute(
+                f"UPDATE {table} SET metadata_json = ?{', updated_at = ?' if table == 'graph_conflicts' else ''} WHERE id = ?",
+                ((json.dumps(metadata, ensure_ascii=True, sort_keys=True), now, row_id) if table == "graph_conflicts" else (json.dumps(metadata, ensure_ascii=True, sort_keys=True), row_id)),
+            )
+            updated += 1
+        if updated:
+            self.conn.commit()
+        return updated
