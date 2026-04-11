@@ -80,6 +80,7 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
         "from agent.memory_manager import build_memory_context_block\n"
         "from agent.brainstack_mode import (\n"
         "    LEGACY_MEMORY_TOOL_NAMES,\n"
+        "    blocked_brainstack_only_tool_error,\n"
         "    filter_legacy_memory_tool_defs,\n"
         "    is_brainstack_only_mode,\n"
         ")\n"
@@ -118,6 +119,61 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
         text = _replace_once(text, filter_anchor, filter_inject, label="run_agent tool filter", path=path)
         applied.append("run_agent:filter_legacy_tools")
 
+    guidance_anchor = (
+        "        if \"session_search\" in self.valid_tool_names:\n"
+        "            tool_guidance.append(SESSION_SEARCH_GUIDANCE)\n"
+        "        if \"skill_manage\" in self.valid_tool_names:\n"
+        "            tool_guidance.append(SKILLS_GUIDANCE)\n"
+    )
+    guidance_inject = (
+        "        if \"session_search\" in self.valid_tool_names:\n"
+        "            tool_guidance.append(SESSION_SEARCH_GUIDANCE)\n"
+        "        if \"skill_manage\" in self.valid_tool_names:\n"
+        "            if self._brainstack_only_mode:\n"
+        "                tool_guidance.append(\n"
+        "                    \"Use skill_manage only for reusable procedures or workflows. Never store personal profile, identity, communication style, or project memory there while Brainstack owns memory.\"\n"
+        "                )\n"
+        "            else:\n"
+        "                tool_guidance.append(SKILLS_GUIDANCE)\n"
+    )
+    if "Never store personal profile, identity, communication style, or project memory there while Brainstack owns memory." not in text:
+        text = _replace_once(text, guidance_anchor, guidance_inject, label="run_agent skill guidance", path=path)
+        applied.append("run_agent:scope_skill_guidance")
+
+    nudge_anchor = (
+        "            if (self._skill_nudge_interval > 0\n"
+        "                    and \"skill_manage\" in self.valid_tool_names):\n"
+        "                self._iters_since_skill += 1\n"
+    )
+    nudge_inject = (
+        "            if (self._skill_nudge_interval > 0\n"
+        "                    and \"skill_manage\" in self.valid_tool_names\n"
+        "                    and not self._brainstack_only_mode):\n"
+        "                self._iters_since_skill += 1\n"
+    )
+    if "and not self._brainstack_only_mode):\n                self._iters_since_skill += 1" not in text:
+        text = _replace_once(text, nudge_anchor, nudge_inject, label="run_agent skill nudge counter", path=path)
+        applied.append("run_agent:disable_skill_nudge_counter_in_brainstack_only")
+
+    review_anchor = (
+        "        if (self._skill_nudge_interval > 0\n"
+        "                and self._iters_since_skill >= self._skill_nudge_interval\n"
+        "                and \"skill_manage\" in self.valid_tool_names):\n"
+        "            _should_review_skills = True\n"
+        "            self._iters_since_skill = 0\n"
+    )
+    review_inject = (
+        "        if (self._skill_nudge_interval > 0\n"
+        "                and self._iters_since_skill >= self._skill_nudge_interval\n"
+        "                and \"skill_manage\" in self.valid_tool_names\n"
+        "                and not self._brainstack_only_mode):\n"
+        "            _should_review_skills = True\n"
+        "            self._iters_since_skill = 0\n"
+    )
+    if "and not self._brainstack_only_mode):\n            _should_review_skills = True" not in text:
+        text = _replace_once(text, review_anchor, review_inject, label="run_agent skill nudge review gate", path=path)
+        applied.append("run_agent:disable_skill_nudge_review_in_brainstack_only")
+
     invoke_anchor = (
         "        Handles both agent-level tools (todo, memory, etc.) and registry-dispatched\n"
         "        tools. Used by the concurrent execution path; the sequential path retains\n"
@@ -125,25 +181,27 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
         "        \"\"\"\n"
     )
     invoke_inject = invoke_anchor + (
-        "        if self._brainstack_only_mode and function_name in LEGACY_MEMORY_TOOL_NAMES:\n"
+        "        brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)\n"
+        "        if self._brainstack_only_mode and brainstack_only_error:\n"
         "            return json.dumps(\n"
         "                {\n"
         "                    \"success\": False,\n"
-        "                    \"error\": f\"{function_name} is disabled while Brainstack owns memory.\",\n"
+        "                    \"error\": brainstack_only_error,\n"
         "                }\n"
         "            )\n"
     )
-    if "is disabled while Brainstack owns memory." not in text:
+    if "brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)" not in text:
         text = _replace_once(text, invoke_anchor, invoke_inject, label="run_agent invoke guard", path=path)
         applied.append("run_agent:block_legacy_dispatch")
 
     seq_anchor = "            if function_name == \"todo\":\n"
     seq_inject = (
-        "            if self._brainstack_only_mode and function_name in LEGACY_MEMORY_TOOL_NAMES:\n"
+        "            brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)\n"
+        "            if self._brainstack_only_mode and brainstack_only_error:\n"
         "                function_result = json.dumps(\n"
         "                    {\n"
         "                        \"success\": False,\n"
-        "                        \"error\": f\"{function_name} is disabled while Brainstack owns memory.\",\n"
+        "                        \"error\": brainstack_only_error,\n"
         "                    }\n"
         "                )\n"
         "                tool_duration = time.time() - tool_start_time\n"
@@ -153,7 +211,7 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
         "                    )\n"
         "            elif function_name == \"todo\":\n"
     )
-    if "elif function_name == \"todo\":" not in text or "LEGACY_MEMORY_TOOL_NAMES" not in text:
+    if "brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)" not in text or "elif function_name == \"todo\":" not in text:
         text = _replace_once(text, seq_anchor, seq_inject, label="run_agent sequential guard", path=path)
         applied.append("run_agent:block_legacy_sequential_path")
 
@@ -517,6 +575,13 @@ def _default_config_path(target: Path) -> Path:
     if bestie.exists():
         return bestie
     return target / "config.yaml"
+
+
+def _default_compose_path(target: Path) -> Path:
+    bestie = target / "docker-compose.bestie.yml"
+    if bestie.exists():
+        return bestie
+    return target / "docker-compose.yml"
 
 
 def _patch_config(config_path: Path, dry_run: bool) -> dict[str, Any]:

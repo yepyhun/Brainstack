@@ -16,6 +16,24 @@ def _split_sentences(text: str) -> List[str]:
     return [part.strip() for part in parts if part and part.strip()]
 
 
+def _slotted_candidate(
+    *,
+    category: str,
+    slot: str,
+    content: str,
+    confidence: float,
+    source: str,
+) -> Dict[str, Any]:
+    return {
+        "category": category,
+        "slot": slot,
+        "stable_key": f"{category}:{slot}",
+        "content": content,
+        "confidence": confidence,
+        "source": source,
+    }
+
+
 def extract_profile_candidates(text: str) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
     if not text:
@@ -31,14 +49,83 @@ def extract_profile_candidates(text: str) -> List[Dict[str, Any]]:
         )
         if identity_match:
             value = identity_match.group(1).strip()
-            content = f"User identity: {value}"
             candidates.append(
-                {
-                    "category": "identity",
-                    "content": content,
-                    "confidence": 0.95,
-                    "source": "heuristic_identity",
-                }
+                _slotted_candidate(
+                    category="identity",
+                    slot="identity:name",
+                    content=value,
+                    confidence=0.95,
+                    source="heuristic_identity",
+                )
+            )
+
+        age_match = re.search(
+            r"\b([0-9]{1,3})\s*(?:years? old|éves)\b",
+            lowered,
+            re.IGNORECASE,
+        )
+        if age_match:
+            candidates.append(
+                _slotted_candidate(
+                    category="identity",
+                    slot="identity:age",
+                    content=f"{age_match.group(1).strip()} years old",
+                    confidence=0.9,
+                    source="heuristic_identity",
+                )
+            )
+
+        if "vibecoder" in lowered or "nem developer" in lowered or "not developer" in lowered:
+            candidates.append(
+                _slotted_candidate(
+                    category="identity",
+                    slot="identity:skill_level",
+                    content="Vibecoder (not a professional developer)",
+                    confidence=0.88,
+                    source="heuristic_identity",
+                )
+            )
+
+        if "emoji" in lowered or "emoj" in lowered:
+            candidates.append(
+                _slotted_candidate(
+                    category="preference",
+                    slot="preference:emoji_usage",
+                    content="Minimize emoji usage; only use them if truly fitting or funny.",
+                    confidence=0.9,
+                    source="heuristic_preference",
+                )
+            )
+
+        if (
+            "szakzsargon" in lowered
+            or "jargon" in lowered
+            or "könnyen megérthetően" in lowered
+            or "érthetően" in lowered
+            or "accessible" in lowered
+            or "easy-to-understand" in lowered
+            or "not developer" in lowered
+            or "nem developer" in lowered
+        ):
+            candidates.append(
+                _slotted_candidate(
+                    category="preference",
+                    slot="preference:communication_style",
+                    content="Avoid technical jargon and explain logic in an accessible, easy-to-understand way without being condescending.",
+                    confidence=0.9,
+                    source="heuristic_preference",
+                )
+            )
+
+        if "humanizer" in lowered or "em dash" in lowered or "dash jele" in lowered or "—" in sentence:
+            candidates.append(
+                _slotted_candidate(
+                    category="preference",
+                    slot="preference:formatting",
+                    content="Follow the 'humanizer' format: no em dashes, no marketing fluff, no repetitive triplets, no filler phrases, and no excessive validation/nodding.",
+                    confidence=0.9,
+                    source="heuristic_preference",
+                )
             )
 
         if re.search(r"\b(i prefer|i like|i love|i hate|always|never|prefer|szeretem|nem szeretem|inkább|mindig|soha)\b", lowered):
@@ -64,7 +151,7 @@ def extract_profile_candidates(text: str) -> List[Dict[str, Any]]:
     deduped: List[Dict[str, Any]] = []
     seen = set()
     for item in candidates:
-        key = build_profile_stable_key(item["category"], item["content"])
+        key = item.get("stable_key") or build_profile_stable_key(item["category"], item["content"])
         if key in seen:
             continue
         seen.add(key)

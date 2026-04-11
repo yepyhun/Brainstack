@@ -81,6 +81,45 @@ def _contains_any(query: str, terms: tuple[str, ...]) -> bool:
     return any(term in lowered for term in terms)
 
 
+def _merge_profile_rows(*groups: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for group in groups:
+        for row in group:
+            stable_key = str(row.get("stable_key") or "").strip()
+            fallback_key = f"{row.get('category')}::{row.get('content')}"
+            key = stable_key or fallback_key
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(row)
+            if len(merged) >= limit:
+                return merged
+    return merged
+
+
+def _same_session_profile_boost(
+    store: BrainstackStore,
+    *,
+    session_id: str,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    if not session_id or limit <= 0:
+        return []
+    rows = store.list_profile_items(limit=max(limit * 3, 8), categories=("identity", "preference", "shared_work"))
+    boosted: List[Dict[str, Any]] = []
+    for row in rows:
+        metadata = row.get("metadata") or {}
+        provenance = metadata.get("provenance") if isinstance(metadata.get("provenance"), dict) else {}
+        row_session = metadata.get("session_id") or provenance.get("session_id")
+        if row_session != session_id:
+            continue
+        boosted.append(row)
+        if len(boosted) >= limit:
+            break
+    return boosted
+
+
 @dataclass
 class QueryAnalysis:
     high_stakes: bool
@@ -225,6 +264,17 @@ def build_working_memory_packet(
     )
 
     profile_items = store.search_profile(query=query, limit=policy.profile_limit) if policy.profile_limit > 0 else []
+    boosted_profile_items = _same_session_profile_boost(
+        store,
+        session_id=session_id,
+        limit=min(max(policy.profile_limit, 2), 4),
+    )
+    if boosted_profile_items:
+        profile_items = _merge_profile_rows(
+            boosted_profile_items,
+            profile_items,
+            limit=max(policy.profile_limit, len(boosted_profile_items)),
+        )
     matched = (
         store.search_continuity(query=query, session_id=session_id, limit=policy.continuity_match_limit)
         if policy.continuity_match_limit > 0
@@ -277,6 +327,8 @@ def build_working_memory_packet(
         policy.show_policy = True
 
     if analysis.preference and profile_items and not analysis.high_stakes and not conflict_present:
+        policy.confidence_band = "high"
+    elif boosted_profile_items and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "high"
     elif analysis.temporal and graph_rows and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "high" if support_shelves >= 2 else "medium"

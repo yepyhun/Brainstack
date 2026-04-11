@@ -170,6 +170,31 @@ class TestBrainstackRealWorldFlows:
         finally:
             reader.shutdown()
 
+    def test_same_session_prefetch_boosts_fresh_style_preferences_for_unrelated_followup(self, tmp_path):
+        provider = _make_provider(tmp_path, "session-style")
+        try:
+            provider.sync_turn(
+                (
+                    "Tominak hívnak 19 éves vagyok. "
+                    "Nem developer vagyok, kerüld a szakzsargont, "
+                    "könnyen megérthetően fogalmazz. "
+                    "Ne használj emojikat."
+                ),
+                "Értettem.",
+                session_id="session-style",
+            )
+
+            block = provider.prefetch(
+                "Segíts átgondolni a BrainStack projekt következő lépését.",
+                session_id="session-style",
+            )
+
+            assert "## Brainstack Profile Match" in block
+            assert "Avoid technical jargon" in block
+            assert "Minimize emoji usage" in block
+        finally:
+            provider.shutdown()
+
     def test_temporal_graph_truth_shows_current_and_prior_state(self, tmp_path):
         provider = _make_provider(tmp_path, "session-graph")
         try:
@@ -327,6 +352,68 @@ class TestBrainstackRealWorldFlows:
             )
             assert current_location["metadata"]["temporal"]["supersedes"]
             assert "tier2:test" in current_location["metadata"]["provenance"]["source_ids"]
+        finally:
+            provider.shutdown()
+
+    def test_reconciler_merges_user_alias_into_named_graph_relation(self, tmp_path):
+        provider = _make_provider(tmp_path, "session-alias")
+        try:
+            reconcile_tier2_candidates(
+                provider._store,
+                session_id="session-alias",
+                turn_number=1,
+                source="tier2:test",
+                extracted={
+                    "profile_items": [
+                        {
+                            "category": "identity",
+                            "content": "User identity: Tomi",
+                            "slot": "identity:name",
+                            "confidence": 0.95,
+                        }
+                    ],
+                    "states": [],
+                    "relations": [],
+                    "continuity_summary": "",
+                    "decisions": [],
+                },
+            )
+            reconcile_tier2_candidates(
+                provider._store,
+                session_id="session-alias",
+                turn_number=2,
+                source="tier2:test",
+                extracted={
+                    "profile_items": [],
+                    "states": [],
+                    "relations": [
+                        {
+                            "subject": "User",
+                            "predicate": "leads",
+                            "object": "BrainStack",
+                            "confidence": 0.88,
+                        }
+                    ],
+                    "continuity_summary": "",
+                    "decisions": [],
+                },
+            )
+
+            graph_rows = provider._store.search_graph(query="BrainStack", limit=10)
+            assert any(
+                row.get("row_type") == "relation"
+                and row.get("subject") == "Tomi"
+                and row.get("predicate") == "leads"
+                and row.get("object_value") == "BrainStack"
+                for row in graph_rows
+            )
+            assert not any(
+                row.get("row_type") == "relation"
+                and row.get("subject") == "User"
+                and row.get("predicate") == "leads"
+                and row.get("object_value") == "BrainStack"
+                for row in graph_rows
+            )
         finally:
             provider.shutdown()
 

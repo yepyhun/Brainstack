@@ -11,6 +11,7 @@ sys.modules.setdefault("fal_client", types.SimpleNamespace())
 from plugins.memory.brainstack import BrainstackMemoryProvider
 from plugins.memory.brainstack.extraction_pipeline import Tier2ScheduleDecision, TurnIngestPlan
 from plugins.memory.brainstack.stable_memory_guardrails import StableMemoryAdmissionDecision
+from agent.brainstack_mode import blocked_brainstack_only_tool_error
 from run_agent import AIAgent
 
 
@@ -185,3 +186,25 @@ class TestBrainstackIntegrationInvariants:
             )
         finally:
             provider.shutdown()
+
+    def test_scoped_skill_manage_boundary_blocks_personal_memory_but_keeps_procedural_skill_learning(self):
+        blocked = blocked_brainstack_only_tool_error(
+            "skill_manage",
+            {
+                "action": "create",
+                "name": "tomi-user-profile",
+                "content": "Store Tomi's communication preferences.",
+            },
+        )
+        allowed = blocked_brainstack_only_tool_error(
+            "skill_manage",
+            {
+                "action": "create",
+                "name": "git-rebase-recovery",
+                "content": "Reusable workflow for recovering a broken rebase.",
+            },
+        )
+
+        assert blocked is not None
+        assert "personal profile" in blocked
+        assert allowed is None

@@ -11,6 +11,30 @@ def _normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
 
 
+def _extract_identity_name(value: Any) -> str:
+    text = _normalize_text(value)
+    lowered = text.lower()
+    if lowered.startswith("user identity:"):
+        return _normalize_text(text.split(":", 1)[1])
+    return text
+
+
+def _current_user_name(store: BrainstackStore) -> str:
+    item = store.get_profile_item(stable_key="identity:identity:name")
+    if not item:
+        return ""
+    return _extract_identity_name(item.get("content"))
+
+
+def _canonicalize_person_subject(name: Any, *, user_name: str) -> str:
+    normalized = _normalize_text(name)
+    if not normalized:
+        return ""
+    if user_name and normalized.lower() in {"user", "the user"}:
+        return user_name
+    return normalized
+
+
 def _profile_stable_key(candidate: Mapping[str, Any]) -> str:
     category = _normalize_text(candidate.get("category")).lower()
     slot = _normalize_text(candidate.get("slot")).lower()
@@ -89,11 +113,13 @@ def _reconcile_states(
     candidates: Iterable[Mapping[str, Any]],
     metadata: Dict[str, Any],
     source: str,
+    user_name: str,
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
     for candidate in candidates:
+        subject_name = _canonicalize_person_subject(candidate.get("subject"), user_name=user_name)
         outcome = store.upsert_graph_state(
-            subject_name=_normalize_text(candidate.get("subject")),
+            subject_name=subject_name,
             attribute=_normalize_text(candidate.get("attribute")).lower(),
             value_text=_normalize_text(candidate.get("value")),
             source=source,
@@ -123,13 +149,16 @@ def _reconcile_relations(
     candidates: Iterable[Mapping[str, Any]],
     metadata: Dict[str, Any],
     source: str,
+    user_name: str,
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
     for candidate in candidates:
+        subject_name = _canonicalize_person_subject(candidate.get("subject"), user_name=user_name)
+        object_name = _canonicalize_person_subject(candidate.get("object"), user_name=user_name)
         outcome = store.upsert_graph_relation(
-            subject_name=_normalize_text(candidate.get("subject")),
+            subject_name=subject_name,
             predicate=_normalize_text(candidate.get("predicate")).lower(),
-            object_name=_normalize_text(candidate.get("object")),
+            object_name=object_name,
             source=source,
             metadata=_candidate_metadata(
                 candidate,
@@ -204,12 +233,18 @@ def reconcile_tier2_candidates(
             source=source,
         )
     )
+    user_name = _current_user_name(store)
+    if user_name:
+        merge_action = store.merge_entity_alias(alias_name="User", target_name=user_name)
+        if merge_action.get("status") == "merged":
+            actions.append({"kind": "graph_entity", "action": "MERGE_ALIAS", **merge_action, "target_name": user_name})
     actions.extend(
         _reconcile_states(
             store,
             candidates=extracted.get("states", []),
             metadata=payload,
             source=source,
+            user_name=user_name,
         )
     )
     actions.extend(
@@ -218,6 +253,7 @@ def reconcile_tier2_candidates(
             candidates=extracted.get("relations", []),
             metadata=payload,
             source=source,
+            user_name=user_name,
         )
     )
     actions.extend(

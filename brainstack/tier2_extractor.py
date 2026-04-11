@@ -11,6 +11,28 @@ logger = logging.getLogger(__name__)
 _JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 _PREDICATE_RE = re.compile(r"[^a-z0-9_]+")
 _SLOT_RE = re.compile(r"[^a-z0-9:_-]+")
+_SLOT_ALIASES = {
+    "name": "identity:name",
+    "identity_name": "identity:name",
+    "identity:name": "identity:name",
+    "age": "identity:age",
+    "identity_age": "identity:age",
+    "identity:age": "identity:age",
+    "skill_level": "identity:skill_level",
+    "identity_skill_level": "identity:skill_level",
+    "identity:skill_level": "identity:skill_level",
+    "emoji": "preference:emoji_usage",
+    "emojis": "preference:emoji_usage",
+    "emoji_usage": "preference:emoji_usage",
+    "preference:emoji_usage": "preference:emoji_usage",
+    "preference:emojis": "preference:emoji_usage",
+    "communication": "preference:communication_style",
+    "communication_style": "preference:communication_style",
+    "preference:communication_style": "preference:communication_style",
+    "formatting": "preference:formatting",
+    "humanizer": "preference:formatting",
+    "preference:formatting": "preference:formatting",
+}
 
 
 def _normalize_text(value: Any) -> str:
@@ -32,7 +54,7 @@ def _normalize_predicate(value: Any) -> str:
 
 def _normalize_slot(value: Any) -> str:
     normalized = _SLOT_RE.sub("_", _normalize_text(value).lower()).strip("_")
-    return normalized
+    return _SLOT_ALIASES.get(normalized, normalized)
 
 
 def _extract_text_content(response: Any) -> str:

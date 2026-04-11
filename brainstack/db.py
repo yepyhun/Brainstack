@@ -871,6 +871,69 @@ class BrainstackStore:
         }
 
     @_locked
+    def merge_entity_alias(self, *, alias_name: str, target_name: str) -> Dict[str, Any]:
+        alias_normalized = self._normalize_entity_name(alias_name)
+        target_normalized = self._normalize_entity_name(target_name)
+        if not alias_normalized or not target_normalized or alias_normalized == target_normalized:
+            return {"status": "noop"}
+
+        alias = self.conn.execute(
+            "SELECT id FROM graph_entities WHERE normalized_name = ?",
+            (alias_normalized,),
+        ).fetchone()
+        if not alias:
+            return {"status": "noop"}
+
+        target = self.get_or_create_entity(target_name)
+        alias_id = int(alias["id"])
+        target_id = int(target["id"])
+
+        self.conn.execute("UPDATE graph_states SET entity_id = ? WHERE entity_id = ?", (target_id, alias_id))
+        self.conn.execute("UPDATE graph_conflicts SET entity_id = ? WHERE entity_id = ?", (target_id, alias_id))
+        self.conn.execute("UPDATE graph_relations SET subject_entity_id = ? WHERE subject_entity_id = ?", (target_id, alias_id))
+        self.conn.execute(
+            "UPDATE graph_relations SET object_entity_id = ?, object_text = ? WHERE object_entity_id = ?",
+            (target_id, target_name.strip(), alias_id),
+        )
+
+        duplicate_groups = self.conn.execute(
+            """
+            SELECT subject_entity_id, predicate, object_entity_id, COUNT(*) AS relation_count
+            FROM graph_relations
+            WHERE active = 1
+            GROUP BY subject_entity_id, predicate, object_entity_id
+            HAVING COUNT(*) > 1
+            """
+        ).fetchall()
+        for group in duplicate_groups:
+            rows = self.conn.execute(
+                """
+                SELECT id
+                FROM graph_relations
+                WHERE active = 1 AND subject_entity_id = ? AND predicate = ? AND object_entity_id = ?
+                ORDER BY id DESC
+                """,
+                (int(group["subject_entity_id"]), str(group["predicate"]), int(group["object_entity_id"])),
+            ).fetchall()
+            for row in rows[1:]:
+                self.conn.execute("UPDATE graph_relations SET active = 0 WHERE id = ?", (int(row["id"]),))
+
+        refs = self.conn.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM graph_states WHERE entity_id = ?) AS state_refs,
+                (SELECT COUNT(*) FROM graph_conflicts WHERE entity_id = ?) AS conflict_refs,
+                (SELECT COUNT(*) FROM graph_relations WHERE subject_entity_id = ? OR object_entity_id = ?) AS relation_refs
+            """,
+            (alias_id, alias_id, alias_id, alias_id),
+        ).fetchone()
+        if refs and int(refs["state_refs"]) == 0 and int(refs["conflict_refs"]) == 0 and int(refs["relation_refs"]) == 0:
+            self.conn.execute("DELETE FROM graph_entities WHERE id = ?", (alias_id,))
+
+        self.conn.commit()
+        return {"status": "merged", "alias_id": alias_id, "target_id": target_id}
+
+    @_locked
     def add_graph_relation(
         self,
         *,
