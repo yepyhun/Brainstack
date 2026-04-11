@@ -71,22 +71,55 @@ def _replace_once(text: str, old: str, new: str, *, label: str, path: Path) -> s
     return text.replace(old, new, 1)
 
 
+def _replace_once_any(
+    text: str,
+    replacements: list[tuple[str, str]],
+    *,
+    label: str,
+    path: Path,
+) -> str:
+    for old, new in replacements:
+        if old in text:
+            return text.replace(old, new, 1)
+    raise RuntimeError(f"Installer patch anchor missing for {label} in {path}")
+
+
 def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
 
-    import_anchor = "from agent.memory_manager import build_memory_context_block\n"
-    import_inject = (
-        "from agent.memory_manager import build_memory_context_block\n"
-        "from agent.brainstack_mode import (\n"
-        "    LEGACY_MEMORY_TOOL_NAMES,\n"
-        "    blocked_brainstack_only_tool_error,\n"
-        "    filter_legacy_memory_tool_defs,\n"
-        "    is_brainstack_only_mode,\n"
-        ")\n"
-    )
     if "from agent.brainstack_mode import (" not in text:
-        text = _replace_once(text, import_anchor, import_inject, label="run_agent import", path=path)
+        text = _replace_once_any(
+            text,
+            [
+                (
+                    "from agent.memory_manager import build_memory_context_block\n",
+                    "from agent.memory_manager import build_memory_context_block\n"
+                    "from agent.brainstack_mode import (\n"
+                    "    LEGACY_MEMORY_TOOL_NAMES,\n"
+                    "    blocked_brainstack_only_tool_error,\n"
+                    "    filter_legacy_memory_tool_defs,\n"
+                    "    is_brainstack_only_mode,\n"
+                    ")\n",
+                ),
+                (
+                    "from agent.memory_manager import (\n"
+                    "    build_memory_context_block,\n"
+                    ")\n",
+                    "from agent.memory_manager import (\n"
+                    "    build_memory_context_block,\n"
+                    ")\n"
+                    "from agent.brainstack_mode import (\n"
+                    "    LEGACY_MEMORY_TOOL_NAMES,\n"
+                    "    blocked_brainstack_only_tool_error,\n"
+                    "    filter_legacy_memory_tool_defs,\n"
+                    "    is_brainstack_only_mode,\n"
+                    ")\n",
+                ),
+            ],
+            label="run_agent import",
+            path=path,
+        )
         applied.append("run_agent:import_brainstack_mode")
 
     cfg_anchor = "        except Exception:\n            _agent_cfg = {}\n"
@@ -224,13 +257,34 @@ def _patch_gateway_run(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
 
-    import_anchor = "from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType\n"
-    import_inject = (
-        "from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType\n"
-        "from agent.brainstack_mode import is_brainstack_only_mode\n"
-    )
     if "from agent.brainstack_mode import is_brainstack_only_mode" not in text:
-        text = _replace_once(text, import_anchor, import_inject, label="gateway import", path=path)
+        text = _replace_once_any(
+            text,
+            [
+                (
+                    "from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType\n",
+                    "from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType\n"
+                    "from agent.brainstack_mode import is_brainstack_only_mode\n",
+                ),
+                (
+                    "from gateway.platforms.base import (\n"
+                    "    BasePlatformAdapter,\n"
+                    "    MessageEvent,\n"
+                    "    MessageType,\n"
+                    "    merge_pending_message_event,\n"
+                    ")\n",
+                    "from gateway.platforms.base import (\n"
+                    "    BasePlatformAdapter,\n"
+                    "    MessageEvent,\n"
+                    "    MessageType,\n"
+                    "    merge_pending_message_event,\n"
+                    ")\n"
+                    "from agent.brainstack_mode import is_brainstack_only_mode\n",
+                ),
+            ],
+            label="gateway import",
+            path=path,
+        )
         applied.append("gateway:import_brainstack_mode")
 
     hooks_anchor = "    # -- Setup skill availability ----------------------------------------\n\n    def _has_setup_skill(self) -> bool:\n"
