@@ -779,6 +779,24 @@ show_status() {
   fi
 }
 
+confirm_destructive_reset() {
+  echo "======================================"
+  echo "WARNING: DELETE EVERY MEMORY"
+  echo "======================================"
+  echo "Ez torolni fogja:"
+  echo "- Brainstack adatbazist"
+  echo "- session replay fajlokat"
+  echo "- state.db tartalmat"
+  echo "- memories cache-t"
+  echo "======================================"
+  printf "Ird be pontosan hogy DELETE: "
+  read -r CONFIRM
+  if [ "$CONFIRM" != "DELETE" ]; then
+    echo "Megszakitva."
+    exit 1
+  fi
+}
+
 purge_runtime_state() {
   CLEANUP_SERVICE="${SERVICE:-hermes-bestie}"
   docker compose -f "$COMPOSE_FILE" run --rm --no-deps --entrypoint sh "$CLEANUP_SERVICE" -lc '
@@ -822,10 +840,12 @@ case "$ACTION" in
     dc stop
     ;;
   purge|clear-memory|clear-state)
+    confirm_destructive_reset
     dc stop || true
     purge_runtime_state
     ;;
   reset)
+    confirm_destructive_reset
     dc stop || true
     purge_runtime_state
     dc up -d

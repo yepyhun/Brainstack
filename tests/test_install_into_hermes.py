@@ -8,6 +8,9 @@ def test_generated_start_script_carries_full_purge_and_reset_actions(tmp_path: P
     content = script_path.read_text(encoding="utf-8")
 
     assert "purge_runtime_state()" in content
+    assert "confirm_destructive_reset()" in content
+    assert 'WARNING: DELETE EVERY MEMORY' in content
+    assert 'Ird be pontosan hogy DELETE: ' in content
     assert "rm -rf /opt/data/sessions /opt/data/memories" in content
     assert "purge|clear-memory|clear-state)" in content
     assert "reset)" in content

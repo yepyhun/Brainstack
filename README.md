@@ -202,6 +202,7 @@ This helper is intentionally small:
 - `status` = show compose status plus the current readiness summary from `gateway_state.json`
 - `logs` = tail live logs
 - `start` / `rebuild` / `full` wait for readiness instead of claiming success as soon as the container exists
+- `purge` / `reset` ask for an explicit `DELETE` confirmation before wiping memory/session state
 
 ## Doctor checks
 
