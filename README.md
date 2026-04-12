@@ -74,6 +74,39 @@ On top of the shelves, Brainstack uses a **risk-aware control plane**:
   - `Chroma` is the active corpus semantic backend target
 - L1 now consumes a stable executive retrieval contract instead of hardcoding backend specifics.
 - Cross-store ingest consistency is treated as shell work, not as optional follow-up glue.
+- Conversation history now participates in semantic retrieval through the same embedded `Chroma` path used for corpus recall.
+- Retrieved conversational evidence now carries explicit date labels when known, instead of relying only on implicit ordering.
+- Prompt-side evidence priority is now explicit in the rendered working-memory block:
+  - specific, non-conflicted recalled facts should outrank generic prior knowledge
+  - this is intentionally narrower than a blind “always trust memory” rule
+
+## Current proof status
+
+The current codebase is past the broad donor-first recovery track, but it is **not** claiming full restoration yet.
+
+What is currently true:
+
+- the Phase `20` first final-boss benchmark came in at `3 / 15`
+- Phase `20.1` repaired benchmark-exposed memory-fidelity gaps without rolling back the donor-first architecture
+- the post-`20.1` final-boss rerun improved to `9 / 15`
+
+That means:
+
+- the architecture recovery is materially working
+- the remaining blocker is no longer a broad shell-vs-donor problem
+- the remaining blocker is a narrower **high-precision conversational fact retrieval** problem
+
+The next recorded corrective direction is therefore:
+
+- better exact-fact turn selection
+- better update/supersession preference for fresher values
+- better packing fidelity for answer-bearing details
+- bounded query decomposition only where truly needed
+
+This repository should currently be read as:
+
+- **architecturally recovered enough to prove direction**
+- **not yet strong enough to claim full donor-level final-boss fidelity**
 
 ## What this repo is not claiming
 
