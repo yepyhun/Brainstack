@@ -323,6 +323,7 @@ def retrieve_executive_context(
         )
 
     temporal_rows = _round_robin(recent_rows, temporal_graph_rows)
+    graph_status = store.graph_backend_channel_status()
 
     merged: Dict[str, EvidenceCandidate] = {}
     _merge_channel(merged, channel_name="keyword", rows=keyword_profile_rows, shelf="profile")
@@ -368,7 +369,12 @@ def retrieve_executive_context(
             status=str(semantic_status.get("status") or "degraded"),
         ),
         _channel_status("keyword", keyword_rows),
-        _channel_status("graph", graph_rows),
+        _channel_status(
+            "graph",
+            graph_rows,
+            reason=str(graph_status.get("reason") or ""),
+            status=str(graph_status.get("status") or "degraded"),
+        ),
         _channel_status("temporal", temporal_rows),
     ]
 

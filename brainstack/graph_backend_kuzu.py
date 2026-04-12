@@ -105,22 +105,27 @@ class KuzuGraphBackend:
             raise RuntimeError("KuzuGraphBackend is not open")
         return self._conn
 
+    def _execute(self, query: str, params: Dict[str, Any] | None = None):
+        if params is None:
+            return self.conn.execute(query)
+        return self.conn.execute(query, params)
+
     def open(self) -> None:
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._db = kuzu.Database(self._db_path)
         self._conn = kuzu.Connection(self._db)
-        self.conn.execute(SCHEMA_QUERIES)
+        self._execute(SCHEMA_QUERIES)
 
     def close(self) -> None:
         self._conn = None
         self._db = None
 
     def is_empty(self) -> bool:
-        rows = self.conn.execute("MATCH (e:Entity) RETURN count(e) AS count").get_next()
+        rows = self._execute("MATCH (e:Entity) RETURN count(e) AS count").get_next()
         return int(rows[0] or 0) == 0
 
     def _ensure_entity(self, entity: Dict[str, Any]) -> None:
-        self.conn.execute(
+        self._execute(
             """
             MERGE (e:Entity {id: $id})
             SET e.canonical_name = $canonical_name,
@@ -138,17 +143,19 @@ class KuzuGraphBackend:
     def publish_entity_subgraph(self, snapshot: Dict[str, Any]) -> None:
         entity = snapshot["entity"]
         entity_id = int(entity["id"])
-        self._ensure_entity(entity)
-        self.conn.execute("MATCH (s:State) WHERE s.entity_id = $entity_id DETACH DELETE s", {"entity_id": entity_id})
-        self.conn.execute("MATCH (c:Conflict) WHERE c.entity_id = $entity_id DETACH DELETE c", {"entity_id": entity_id})
-        self.conn.execute("MATCH (e:Entity {id: $entity_id})-[r:RELATES_TO]->(:Entity) DELETE r", {"entity_id": entity_id})
-        self.conn.execute(
-            "MATCH (e:Entity {id: $entity_id})-[r:INFERRED_RELATES_TO]->(:Entity) DELETE r",
-            {"entity_id": entity_id},
-        )
+        self._execute("BEGIN TRANSACTION")
+        try:
+            self._ensure_entity(entity)
+            self._execute("MATCH (s:State) WHERE s.entity_id = $entity_id DETACH DELETE s", {"entity_id": entity_id})
+            self._execute("MATCH (c:Conflict) WHERE c.entity_id = $entity_id DETACH DELETE c", {"entity_id": entity_id})
+            self._execute("MATCH (e:Entity {id: $entity_id})-[r:RELATES_TO]->(:Entity) DELETE r", {"entity_id": entity_id})
+            self._execute(
+                "MATCH (e:Entity {id: $entity_id})-[r:INFERRED_RELATES_TO]->(:Entity) DELETE r",
+                {"entity_id": entity_id},
+            )
 
-        for state in snapshot.get("states", []):
-            self.conn.execute(
+            for state in snapshot.get("states", []):
+                self._execute(
                 """
                 CREATE (s:State {
                     id: $id,
@@ -175,8 +182,8 @@ class KuzuGraphBackend:
                 },
             )
 
-        for conflict in snapshot.get("conflicts", []):
-            self.conn.execute(
+            for conflict in snapshot.get("conflicts", []):
+                self._execute(
                 """
                 CREATE (c:Conflict {
                     id: $id,
@@ -207,10 +214,10 @@ class KuzuGraphBackend:
                 },
             )
 
-        for relation in snapshot.get("relations", []):
-            target = relation["object_entity"]
-            self._ensure_entity(target)
-            self.conn.execute(
+            for relation in snapshot.get("relations", []):
+                target = relation["object_entity"]
+                self._ensure_entity(target)
+                self._execute(
                 """
                 MATCH (a:Entity {id: $source_id}), (b:Entity {id: $target_id})
                 CREATE (a)-[:RELATES_TO {
@@ -234,10 +241,10 @@ class KuzuGraphBackend:
                 },
             )
 
-        for relation in snapshot.get("inferred_relations", []):
-            target = relation["object_entity"]
-            self._ensure_entity(target)
-            self.conn.execute(
+            for relation in snapshot.get("inferred_relations", []):
+                target = relation["object_entity"]
+                self._ensure_entity(target)
+                self._execute(
                 """
                 MATCH (a:Entity {id: $source_id}), (b:Entity {id: $target_id})
                 CREATE (a)-[:INFERRED_RELATES_TO {
@@ -262,6 +269,13 @@ class KuzuGraphBackend:
                     "active": bool(relation.get("active", True)),
                 },
             )
+            self._execute("COMMIT")
+        except Exception:
+            try:
+                self._execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
 
     def _seed_entity_ids(self, query: str, *, limit: int) -> List[int]:
         tokens = _tokens(query)

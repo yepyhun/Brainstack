@@ -225,6 +225,7 @@ class BrainstackStore:
         self._corpus_db_path = str(corpus_db_path or default_corpus_db)
         self._conn: sqlite3.Connection | None = None
         self._graph_backend = None
+        self._graph_backend_error = ""
         self._corpus_backend = None
         self._corpus_backend_error = ""
         self._lock = threading.RLock()
@@ -246,6 +247,7 @@ class BrainstackStore:
         self._graph_backend = create_graph_backend(self._graph_backend_name, db_path=self._graph_db_path)
         if self._graph_backend is not None:
             self._graph_backend.open()
+            self._graph_backend_error = ""
             self._bootstrap_graph_backend_if_needed()
         self._corpus_backend = create_corpus_backend(self._corpus_backend_name, db_path=self._corpus_db_path)
         if self._corpus_backend is not None:
@@ -1454,6 +1456,23 @@ class BrainstackStore:
             "reason": f"Semantic corpus retrieval is served by {self._corpus_backend.target_name}.",
         }
 
+    @_locked
+    def graph_backend_channel_status(self) -> Dict[str, str]:
+        if self._graph_backend is None:
+            return {
+                "status": "degraded",
+                "reason": "Graph backend retrieval is disabled until a donor-aligned graph backend is configured.",
+            }
+        if self._graph_backend_error:
+            return {
+                "status": "degraded",
+                "reason": f"Graph backend retrieval is unhealthy and fell back to SQLite: {self._graph_backend_error}",
+            }
+        return {
+            "status": "active",
+            "reason": f"Graph retrieval is served by {self._graph_backend.target_name}.",
+        }
+
     def _normalize_entity_name(self, name: str) -> str:
         return " ".join(name.lower().split())
 
@@ -2248,13 +2267,26 @@ class BrainstackStore:
     def list_graph_conflicts(self, *, limit: int) -> List[Dict[str, Any]]:
         if self._graph_backend is None:
             return self._sqlite_list_graph_conflicts(limit=limit)
-        return self._graph_backend.list_graph_conflicts(limit=limit)
+        try:
+            rows = self._graph_backend.list_graph_conflicts(limit=limit)
+        except Exception as exc:
+            self._graph_backend_error = str(exc)
+            logger.warning("Brainstack graph conflict lookup failed; falling back to SQLite: %s", exc)
+            return self._sqlite_list_graph_conflicts(limit=limit)
+        self._graph_backend_error = ""
+        return rows
 
     @_locked
     def search_graph(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
         if self._graph_backend is None:
             return self._sqlite_search_graph(query=query, limit=limit)
-        rows = self._graph_backend.search_graph(query=query, limit=max(limit * 8, 24))
+        try:
+            rows = self._graph_backend.search_graph(query=query, limit=max(limit * 8, 24))
+        except Exception as exc:
+            self._graph_backend_error = str(exc)
+            logger.warning("Brainstack graph search failed; falling back to SQLite: %s", exc)
+            return self._sqlite_search_graph(query=query, limit=limit)
+        self._graph_backend_error = ""
         rows = [item for item in rows if _graph_sort_key(item, query=query)[0] > 0]
         rows.sort(key=lambda item: _graph_sort_key(item, query=query), reverse=True)
         return rows[:limit]
