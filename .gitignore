@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .pytest_cache/
 reports/longmemeval/*.json
+reports/phase20/*.json

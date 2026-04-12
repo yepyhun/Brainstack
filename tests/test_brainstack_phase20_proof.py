@@ -1,0 +1,248 @@
+import logging
+import re
+import sys
+import types
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+if "agent" not in sys.modules:
+    agent_module = types.ModuleType("agent")
+    agent_module.__path__ = []
+    sys.modules["agent"] = agent_module
+
+if "agent.memory_provider" not in sys.modules:
+    memory_provider_module = types.ModuleType("agent.memory_provider")
+
+    class MemoryProvider:  # pragma: no cover - import shim for source tests
+        pass
+
+    memory_provider_module.MemoryProvider = MemoryProvider
+    sys.modules["agent.memory_provider"] = memory_provider_module
+
+if "hermes_constants" not in sys.modules:
+    hermes_constants = types.ModuleType("hermes_constants")
+    hermes_constants.get_hermes_home = lambda: REPO_ROOT
+    sys.modules["hermes_constants"] = hermes_constants
+
+from brainstack.control_plane import build_working_memory_packet
+from brainstack.corpus_backend_chroma import ChromaCorpusBackend
+from brainstack.db import BrainstackStore
+
+
+class DeterministicEmbeddingFunction:
+    def __call__(self, input):
+        rows = []
+        for text in list(input):
+            vector = [0.0] * 8
+            for token in re.findall(r"[^\W_]+", str(text or "").lower(), flags=re.UNICODE):
+                slot = hash(token) % len(vector)
+                vector[slot] += 1.0
+            magnitude = sum(value * value for value in vector) ** 0.5 or 1.0
+            rows.append([value / magnitude for value in vector])
+        return rows
+
+
+def _patch_embeddings(monkeypatch):
+    monkeypatch.setattr(
+        ChromaCorpusBackend,
+        "_build_embedding_function",
+        lambda self: DeterministicEmbeddingFunction(),
+    )
+
+
+def _open_store(tmp_path: Path) -> BrainstackStore:
+    store = BrainstackStore(
+        str(tmp_path / "brainstack.db"),
+        graph_backend="kuzu",
+        graph_db_path=str(tmp_path / "brainstack.kuzu"),
+        corpus_backend="chroma",
+        corpus_db_path=str(tmp_path / "brainstack.chroma"),
+    )
+    store.open()
+    return store
+
+
+def _seed_shared_facts(store: BrainstackStore) -> None:
+    store.add_continuity_event(
+        session_id="phase20",
+        turn_number=1,
+        kind="turn",
+        content="We are working on Project Atlas and answers should stay concise.",
+        source="test",
+    )
+    store.add_continuity_event(
+        session_id="phase20",
+        turn_number=2,
+        kind="turn",
+        content="Project Atlas is the active effort right now.",
+        source="test",
+    )
+    store.add_graph_relation(
+        subject_name="Project Atlas",
+        predicate="integrates_with",
+        object_name="Hermes Bestie",
+        source="test",
+    )
+    store.ingest_corpus_document(
+        stable_key="atlas:biochem",
+        title="Biochemistry Notes",
+        doc_kind="doc",
+        source="test",
+        sections=[
+            {
+                "heading": "Citrate cycle",
+                "content": "The citrate cycle connects carbohydrate metabolism to ATP production.",
+            },
+            {
+                "heading": "Glycolysis",
+                "content": "Glycolysis happens in the cytosol before the citrate cycle.",
+            },
+        ],
+    )
+
+
+def _packet(
+    store: BrainstackStore,
+    *,
+    query: str,
+    graph_limit: int,
+    corpus_limit: int,
+) -> dict:
+    return build_working_memory_packet(
+        store,
+        query=query,
+        session_id="phase20",
+        profile_match_limit=0,
+        continuity_recent_limit=2,
+        continuity_match_limit=2,
+        transcript_match_limit=0,
+        transcript_char_budget=0,
+        graph_limit=graph_limit,
+        corpus_limit=corpus_limit,
+        corpus_char_budget=480,
+    )
+
+
+def _channel(packet: dict, name: str) -> dict:
+    return next(item for item in packet["channels"] if item["name"] == name)
+
+
+def test_stream_a_can_isolate_l1_smartening_without_graph_or_corpus(monkeypatch, tmp_path):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        _seed_shared_facts(store)
+        packet = _packet(
+            store,
+            query="What are we working on and how should you answer?",
+            graph_limit=0,
+            corpus_limit=0,
+        )
+        assert "## Brainstack Continuity Match" in packet["block"] or "## Brainstack Recent Continuity" in packet["block"]
+        assert "Project Atlas" in packet["block"]
+        assert "concise" in packet["block"]
+        assert "## Brainstack Graph Truth" not in packet["block"]
+        assert "## Brainstack Corpus Recall" not in packet["block"]
+        assert _channel(packet, "graph")["candidate_count"] == 0
+        assert _channel(packet, "semantic")["candidate_count"] == 0
+        assert _channel(packet, "keyword")["candidate_count"] > 0 or _channel(packet, "temporal")["candidate_count"] > 0
+    finally:
+        store.close()
+
+
+def test_stream_b_proves_graph_delta_above_l1_baseline(monkeypatch, tmp_path):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        _seed_shared_facts(store)
+        baseline = _packet(
+            store,
+            query="What does Project Atlas integrate with?",
+            graph_limit=0,
+            corpus_limit=0,
+        )
+        graph_enabled = _packet(
+            store,
+            query="What does Project Atlas integrate with?",
+            graph_limit=3,
+            corpus_limit=0,
+        )
+        assert "## Brainstack Graph Truth" not in baseline["block"]
+        assert "## Brainstack Graph Truth" in graph_enabled["block"]
+        assert "Project Atlas integrates_with Hermes Bestie" in graph_enabled["block"]
+        assert _channel(graph_enabled, "graph")["candidate_count"] > 0
+    finally:
+        store.close()
+
+
+def test_stream_c_proves_corpus_delta_above_non_corpus_baseline(monkeypatch, tmp_path):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        _seed_shared_facts(store)
+        baseline = _packet(
+            store,
+            query="How does the citrate cycle connect to energy production?",
+            graph_limit=0,
+            corpus_limit=0,
+        )
+        corpus_enabled = _packet(
+            store,
+            query="How does the citrate cycle connect to energy production?",
+            graph_limit=0,
+            corpus_limit=2,
+        )
+        assert "## Brainstack Corpus Recall" not in baseline["block"]
+        assert "## Brainstack Corpus Recall" in corpus_enabled["block"]
+        assert "ATP production" in corpus_enabled["block"]
+        semantic = _channel(corpus_enabled, "semantic")
+        assert semantic["status"] == "active"
+        assert semantic["candidate_count"] > 0
+    finally:
+        store.close()
+
+
+def test_cross_store_publish_journal_tracks_graph_and_corpus_targets(monkeypatch, tmp_path):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        _seed_shared_facts(store)
+        published = store.list_publish_journal(status="published", limit=20)
+        targets = {row["target_name"] for row in published}
+        assert "graph.kuzu" in targets
+        assert "corpus.chroma" in targets
+    finally:
+        store.close()
+
+
+def test_cross_store_degradation_remains_coherent(monkeypatch, tmp_path, caplog):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        _seed_shared_facts(store)
+        graph_backend = store._graph_backend
+        corpus_backend = store._corpus_backend
+        assert graph_backend is not None
+        assert corpus_backend is not None
+
+        graph_backend.search_graph = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("graph degraded"))
+        corpus_backend.search_semantic = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("corpus degraded"))
+
+        with caplog.at_level(logging.WARNING):
+            packet = _packet(
+                store,
+                query="What are we working on and how does the citrate cycle relate to energy?",
+                graph_limit=3,
+                corpus_limit=2,
+            )
+
+        assert "Project Atlas" in packet["block"] or "citrate cycle" in packet["block"]
+        assert _channel(packet, "graph")["status"] == "degraded"
+        assert _channel(packet, "semantic")["status"] == "degraded"
+        assert any("graph degraded" in record.message or "corpus degraded" in record.message for record in caplog.records)
+    finally:
+        store.close()
