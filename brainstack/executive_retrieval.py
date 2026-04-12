@@ -128,7 +128,11 @@ def _should_attempt_route_hint(query: str) -> bool:
     structural_markers = sum(1 for marker in (",", ":", ";", "/", "=") if marker in normalized)
     if structural_markers >= 2:
         return True
-    return structural_markers >= 1 and any(char.isdigit() for char in normalized)
+    if structural_markers >= 1 and any(char.isdigit() for char in normalized):
+        return True
+    if len(tokens) >= 8 and len(normalized) >= 45:
+        return True
+    return normalized.endswith("?") and len(tokens) >= 6 and len(normalized) >= 38
 
 
 def _default_route_resolver(query: str) -> Dict[str, Any]:

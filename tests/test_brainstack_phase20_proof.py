@@ -454,6 +454,10 @@ def test_phase20_3_temporal_route_falls_back_when_only_one_distinct_temporal_anc
 
 def test_phase20_3_routing_hint_gate_does_not_trigger_on_plain_question_mark_only():
     assert _should_attempt_route_hint("What are we working on right now?") is False
+    assert _should_attempt_route_hint("What are my running shoes?") is False
+    assert _should_attempt_route_hint("How much money did I raise for charity in total?") is True
+    assert _should_attempt_route_hint("Which book did I finish reading first?") is True
+    assert _should_attempt_route_hint("What is the order of the three trips I took?") is True
     assert _should_attempt_route_hint("Order these events: ShopRite, Walmart coupon, Ibotta") is True
 
 
