@@ -244,6 +244,13 @@ def build_working_memory_packet(
     graph_rows = retrieval["graph_rows"]
     corpus_rows = retrieval["corpus_rows"]
     channels = retrieval["channels"]
+    routing = retrieval.get("routing", {"requested_mode": "fact", "applied_mode": "fact"})
+
+    if routing.get("applied_mode") == "temporal":
+        policy.transcript_char_budget = max(policy.transcript_char_budget, 720)
+        policy.show_graph_history = True
+    elif routing.get("applied_mode") == "aggregate":
+        policy.transcript_char_budget = max(policy.transcript_char_budget, 960)
 
     support_channels = sum(
         1
@@ -326,6 +333,6 @@ def build_working_memory_packet(
         "channels": channels,
         "fused_candidates": retrieval["fused_candidates"],
         "decomposition": retrieval.get("decomposition", {"used": False, "queries": [query]}),
-        "routing": retrieval.get("routing", {"requested_mode": "fact", "applied_mode": "fact"}),
+        "routing": routing,
         "block": block,
     }

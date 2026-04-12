@@ -31,6 +31,7 @@ if "hermes_constants" not in sys.modules:
 from brainstack.control_plane import build_working_memory_packet
 from brainstack.corpus_backend_chroma import ChromaCorpusBackend
 from brainstack.db import BrainstackStore
+from brainstack.executive_retrieval import _should_attempt_route_hint
 
 
 class DeterministicEmbeddingFunction:
@@ -366,7 +367,7 @@ def test_phase20_3_aggregate_route_widens_cross_session_recall_with_explicit_bou
         assert packet["routing"]["requested_mode"] == "aggregate"
         assert packet["routing"]["applied_mode"] == "aggregate"
         assert packet["routing"]["bounds"]["kind"] == "row_cap"
-        assert packet["routing"]["bounds"]["session_cap"] == 4
+        assert packet["routing"]["bounds"]["transcript"] >= 6
         assert "120 miles" in packet["block"]
         assert "180 miles" in packet["block"]
         assert "210 miles" in packet["block"]
@@ -379,12 +380,25 @@ def test_phase20_3_route_remains_fail_open_when_structural_mode_is_too_thin(monk
     _patch_embeddings(monkeypatch)
     store = _open_store(tmp_path)
     try:
-        _seed_shared_facts(store)
-        packet = _packet(
+        store.add_continuity_event(
+            session_id="phase20",
+            turn_number=1,
+            kind="turn",
+            content="Project Atlas is the active effort right now.",
+            source="test",
+        )
+        packet = build_working_memory_packet(
             store,
             query="What are we working on right now?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=1,
+            transcript_match_limit=0,
+            transcript_char_budget=0,
             graph_limit=0,
             corpus_limit=0,
+            corpus_char_budget=0,
             route_resolver=lambda _query: {"mode": "aggregate", "reason": "thin route test"},
         )
 
@@ -394,6 +408,53 @@ def test_phase20_3_route_remains_fail_open_when_structural_mode_is_too_thin(monk
         assert "Project Atlas" in packet["block"]
     finally:
         store.close()
+
+
+def test_phase20_3_temporal_route_falls_back_when_only_one_distinct_temporal_anchor(monkeypatch, tmp_path):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        for turn_number, text in enumerate(
+            [
+                "User: I updated the Atlas note. Assistant: Logged.",
+                "User: I clarified the same Atlas note. Assistant: Logged.",
+            ],
+            start=1,
+        ):
+            store.add_transcript_entry(
+                session_id="phase20",
+                turn_number=turn_number,
+                kind="turn",
+                content=text,
+                source="test",
+                created_at="2024-04-15T00:00:00+00:00",
+            )
+
+        packet = build_working_memory_packet(
+            store,
+            query="Which Atlas note happened first?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=0,
+            transcript_match_limit=1,
+            transcript_char_budget=520,
+            graph_limit=0,
+            corpus_limit=0,
+            corpus_char_budget=0,
+            route_resolver=lambda _query: {"mode": "temporal", "reason": "fallback test"},
+        )
+
+        assert packet["routing"]["requested_mode"] == "temporal"
+        assert packet["routing"]["applied_mode"] == "fact"
+        assert packet["routing"]["fallback_used"] is True
+    finally:
+        store.close()
+
+
+def test_phase20_3_routing_hint_gate_does_not_trigger_on_plain_question_mark_only():
+    assert _should_attempt_route_hint("What are we working on right now?") is False
+    assert _should_attempt_route_hint("Order these events: ShopRite, Walmart coupon, Ibotta") is True
 
 
 def test_phase20_2_exact_numeric_value_change_auto_supersedes_current_graph_state(monkeypatch, tmp_path):

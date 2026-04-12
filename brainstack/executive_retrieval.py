@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List
 
 from .db import BrainstackStore
@@ -19,10 +20,9 @@ TEMPORAL_CONTINUITY_CAP = 3
 TEMPORAL_RECENT_CAP = 3
 TEMPORAL_TRANSCRIPT_CAP = 3
 TEMPORAL_GRAPH_CAP = 3
-AGGREGATE_CONTINUITY_CAP = 4
-AGGREGATE_TRANSCRIPT_CAP = 4
+AGGREGATE_CONTINUITY_CAP = 6
+AGGREGATE_TRANSCRIPT_CAP = 6
 AGGREGATE_GRAPH_CAP = 2
-AGGREGATE_SESSION_CAP = 4
 
 logger = logging.getLogger(__name__)
 
@@ -125,10 +125,10 @@ def _should_attempt_route_hint(query: str) -> bool:
     tokens = tokenize_match_text(normalized)
     if len(tokens) < ROUTING_HINT_MIN_TOKENS:
         return False
-    structural_markers = sum(1 for marker in ("?", ",", ":", ";", "/", "=") if marker in normalized)
-    if structural_markers > 0:
+    structural_markers = sum(1 for marker in (",", ":", ";", "/", "=") if marker in normalized)
+    if structural_markers >= 2:
         return True
-    return any(char.isdigit() for char in normalized)
+    return structural_markers >= 1 and any(char.isdigit() for char in normalized)
 
 
 def _default_route_resolver(query: str) -> Dict[str, Any]:
@@ -246,11 +246,33 @@ def _row_time_value(row: Dict[str, Any]) -> str:
     )
 
 
+def _parse_time_value(raw: str) -> datetime | None:
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        pass
+    candidate = value.split("T", 1)[0] if "T" in value else value[:10]
+    try:
+        return datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+
+
+def _temporal_anchor_key(row: Dict[str, Any]) -> str:
+    raw = _row_time_value(row)
+    parsed = _parse_time_value(raw)
+    return parsed.isoformat() if parsed is not None else raw
+
+
 def _sort_rows_chronologically(rows: Iterable[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
     deduped = _dedupe_rows(rows)
     deduped.sort(
         key=lambda row: (
-            0 if _row_time_value(row) else 1,
+            0 if _parse_time_value(_row_time_value(row)) is not None else 1,
+            _parse_time_value(_row_time_value(row)) or datetime.max,
             _row_time_value(row),
             int(row.get("turn_number") or 0),
             int(row.get("id") or row.get("row_id") or 0),
@@ -274,26 +296,19 @@ def _aggregate_diverse_rows(
     rows: Iterable[Dict[str, Any]],
     *,
     limit: int,
-    session_cap: int,
 ) -> List[Dict[str, Any]]:
     ranked = sorted(_dedupe_rows(rows), key=_aggregate_row_priority, reverse=True)
-    selected: List[Dict[str, Any]] = []
-    seen_keys: set[str] = set()
-    session_count = 0
+    primary: List[Dict[str, Any]] = []
+    secondary: List[Dict[str, Any]] = []
+    seen_sessions: set[str] = set()
     for row in ranked:
-        row_key = _row_unique_key(row)
-        if row_key in seen_keys:
-            continue
         session_key = str(row.get("session_id") or "").strip()
-        if session_key and session_key not in {str(item.get("session_id") or "").strip() for item in selected}:
-            session_count += 1
-            if session_count > session_cap:
-                continue
-        selected.append(row)
-        seen_keys.add(row_key)
-        if len(selected) >= limit:
-            return selected
-    return selected[:limit]
+        if session_key and session_key not in seen_sessions:
+            primary.append(row)
+            seen_sessions.add(session_key)
+        else:
+            secondary.append(row)
+    return (primary + secondary)[:limit]
 
 
 def _fact_sort_key(candidate: EvidenceCandidate) -> tuple[Any, ...]:
@@ -347,28 +362,22 @@ def _route_limits(
             "continuity": limits["continuity_match_limit"],
             "transcript": limits["transcript_limit"],
             "graph": limits["graph_limit"],
-            "session_cap": AGGREGATE_SESSION_CAP,
         }
     return limits
 
 
 def _route_has_support(route: RetrievalRoute, selected: Dict[str, List[Dict[str, Any]]]) -> bool:
     if route.applied_mode == ROUTE_AGGREGATE:
-        sessions = {
-            str(row.get("session_id") or "").strip()
-            for name in ("matched", "recent", "transcript_rows")
-            for row in selected.get(name, ())
-            if str(row.get("session_id") or "").strip()
-        }
-        return len(sessions) >= 2
+        total = sum(len(selected.get(name, ())) for name in ("matched", "transcript_rows"))
+        return total >= 2
     if route.applied_mode == ROUTE_TEMPORAL:
-        timed = sum(
-            1
+        anchors = {
+            _temporal_anchor_key(row)
             for name in ("matched", "recent", "transcript_rows", "graph_rows")
             for row in selected.get(name, ())
-            if _row_time_value(row)
-        )
-        return timed >= 2
+            if _temporal_anchor_key(row)
+        }
+        return len(anchors) >= 2
     return True
 
 
@@ -410,13 +419,11 @@ def _select_aggregate_rows(
         "matched": _aggregate_diverse_rows(
             keyword_continuity_rows,
             limit=limits["continuity_match_limit"],
-            session_cap=AGGREGATE_SESSION_CAP,
         ),
         "recent": [],
         "transcript_rows": _aggregate_diverse_rows(
             _round_robin(semantic_conversation_rows, keyword_transcript_rows),
             limit=limits["transcript_limit"],
-            session_cap=AGGREGATE_SESSION_CAP,
         ),
         "graph_rows": _graph_channel_rows(graph_rows, limit=limits["graph_limit"]),
         "corpus_rows": [],
