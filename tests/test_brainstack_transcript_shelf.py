@@ -136,6 +136,71 @@ class TestBrainstackTranscriptShelf:
         finally:
             provider.shutdown()
 
+    def test_prefetch_keeps_previous_occupation_tail_detail_without_mid_word_truncation(self, tmp_path):
+        provider = _make_provider(
+            tmp_path,
+            "session-transcript-occupation",
+            continuity_match_limit=2,
+            continuity_recent_limit=0,
+            transcript_match_limit=2,
+            transcript_char_budget=420,
+            corpus_backend="sqlite",
+        )
+        try:
+            provider.sync_turn(
+                (
+                    "In my new role as a senior marketing analyst I'm automating reporting workflows, "
+                    "but in my previous occupation I worked as a marketing specialist at a small startup "
+                    "building consumer apps for parents."
+                ),
+                "Saved.",
+                session_id="session-transcript-occupation",
+                event_time="2024-05-24T00:00:00+00:00",
+            )
+
+            block = provider.prefetch(
+                "What was my previous occupation?",
+                session_id="session-transcript-occupation",
+            )
+
+            assert "marketing specialist at a small startup" in block
+            assert "startu..." not in block
+        finally:
+            provider.shutdown()
+
+    def test_prefetch_prefers_numeric_result_turn_when_query_asks_for_total(self, tmp_path):
+        provider = _make_provider(
+            tmp_path,
+            "session-transcript-charity",
+            continuity_match_limit=2,
+            continuity_recent_limit=0,
+            transcript_match_limit=2,
+            transcript_char_budget=560,
+            corpus_backend="sqlite",
+        )
+        try:
+            provider.sync_turn(
+                "I'm planning a charity cycling event and a Facebook Fundraiser for the local shelter.",
+                "That sounds like a thoughtful plan.",
+                session_id="session-transcript-charity",
+                event_time="2024-03-20T00:00:00+00:00",
+            )
+            provider.sync_turn(
+                "The fundraiser is done now, and in total I raised exactly $1,250 for the shelter.",
+                "Great result.",
+                session_id="session-transcript-charity",
+                event_time="2024-03-28T00:00:00+00:00",
+            )
+
+            block = provider.prefetch(
+                "How much money did I raise for charity in total?",
+                session_id="session-transcript-charity",
+            )
+
+            assert "$1,250" in block
+        finally:
+            provider.shutdown()
+
     def test_search_transcript_is_scoped_to_current_session(self, tmp_path):
         provider = _make_provider(tmp_path, "session-a")
         try:

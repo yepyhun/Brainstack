@@ -143,7 +143,7 @@ def test_stream_a_can_isolate_l1_smartening_without_graph_or_corpus(monkeypatch,
             corpus_limit=0,
         )
         assert "## Brainstack Evidence Priority" in packet["block"]
-        assert "prefer it over generic prior knowledge" in packet["block"]
+        assert "prefer it over assistant suggestions or generic prior knowledge" in packet["block"]
         assert "## Brainstack Active Communication Contract" not in packet["block"]
         assert "## Brainstack Continuity Match" in packet["block"] or "## Brainstack Recent Continuity" in packet["block"]
         assert "Project Atlas" in packet["block"]
@@ -205,6 +205,114 @@ def test_stream_c_proves_corpus_delta_above_non_corpus_baseline(monkeypatch, tmp
         semantic = _channel(corpus_enabled, "semantic")
         assert semantic["status"] == "active"
         assert semantic["candidate_count"] > 0
+    finally:
+        store.close()
+
+
+def test_phase20_2_query_decomposition_can_collect_multi_event_transcript_evidence(monkeypatch, tmp_path):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        store.add_transcript_entry(
+            session_id="phase20",
+            turn_number=1,
+            kind="turn",
+            content=(
+                "User: I signed up for the ShopRite rewards program today. "
+                "Assistant: Nice."
+            ),
+            source="test",
+            created_at="2024-04-15T00:00:00+00:00",
+        )
+        store.add_transcript_entry(
+            session_id="phase20",
+            turn_number=2,
+            kind="turn",
+            content=(
+                "User: I used a Buy One Get One Free Walmart coupon on Luvs diapers. "
+                "Assistant: Great savings."
+            ),
+            source="test",
+            created_at="2024-04-09T00:00:00+00:00",
+        )
+        store.add_transcript_entry(
+            session_id="phase20",
+            turn_number=3,
+            kind="turn",
+            content=(
+                "User: I redeemed Ibotta cashback for a $10 Amazon gift card. "
+                "Assistant: Nice."
+            ),
+            source="test",
+            created_at="2024-04-10T00:00:00+00:00",
+        )
+
+        packet = build_working_memory_packet(
+            store,
+            query="What was the order of these events: ShopRite, Walmart coupon, Ibotta?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=0,
+            transcript_match_limit=3,
+            transcript_char_budget=720,
+            graph_limit=0,
+            corpus_limit=0,
+            corpus_char_budget=0,
+            query_decomposer=lambda _query: [
+                "ShopRite rewards program signup",
+                "Walmart coupon Luvs diapers",
+                "Ibotta cashback Amazon gift card",
+            ],
+        )
+
+        assert packet["decomposition"]["used"] is True
+        assert packet["decomposition"]["queries"] == [
+            "ShopRite rewards program signup",
+            "Walmart coupon Luvs diapers",
+            "Ibotta cashback Amazon gift card",
+        ]
+        assert "## Brainstack Transcript Evidence" in packet["block"]
+        assert "ShopRite rewards program" in packet["block"]
+        assert "Walmart coupon" in packet["block"]
+        assert "Ibotta cashback" in packet["block"]
+    finally:
+        store.close()
+
+
+def test_phase20_2_exact_numeric_value_change_auto_supersedes_current_graph_state(monkeypatch, tmp_path):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        first = store.upsert_graph_state(
+            subject_name="Coin collection",
+            attribute="pre_1920_count",
+            value_text="37 coins",
+            source="test",
+            supersede=False,
+        )
+        second = store.upsert_graph_state(
+            subject_name="Coin collection",
+            attribute="pre_1920_count",
+            value_text="38 coins",
+            source="test",
+            supersede=False,
+        )
+
+        rows = store.search_graph(query="Coin collection", limit=10)
+        current = next(
+            row for row in rows
+            if row["row_type"] == "state" and row.get("is_current") and row["object_value"] == "38 coins"
+        )
+        prior = next(
+            row for row in rows
+            if row["row_type"] == "state" and not row.get("is_current") and row["object_value"] == "37 coins"
+        )
+
+        assert first["status"] == "inserted"
+        assert second["status"] == "superseded"
+        assert current["metadata"]["temporal"]["supersedes"]
+        assert prior["metadata"]["temporal"]["superseded_by"]
     finally:
         store.close()
 

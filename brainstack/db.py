@@ -20,6 +20,7 @@ from .usefulness import apply_retrieval_telemetry, graph_priority_adjustment
 
 F = TypeVar("F", bound=Callable[..., Any])
 logger = logging.getLogger(__name__)
+NUMERIC_TOKEN_RE = re.compile(r"\d+(?::\d+)?(?:\.\d+)?")
 
 
 def utc_now_iso() -> str:
@@ -60,6 +61,24 @@ def _decode_json_object(value: Any) -> Dict[str, Any]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _numeric_signature(value: Any) -> tuple[str, ...]:
+    return tuple(NUMERIC_TOKEN_RE.findall(str(value or "")))
+
+
+def _should_auto_supersede_exact_value(current_value: Any, new_value: Any) -> bool:
+    current_text = " ".join(str(current_value or "").strip().split())
+    new_text = " ".join(str(new_value or "").strip().split())
+    if not current_text or not new_text or current_text == new_text:
+        return False
+    if len(current_text) > 96 or len(new_text) > 96:
+        return False
+    current_signature = _numeric_signature(current_text)
+    new_signature = _numeric_signature(new_text)
+    if not current_signature or not new_signature:
+        return False
+    return current_signature != new_signature
 
 
 def _normalize_record_metadata(metadata: Dict[str, Any] | None, *, source: str = "") -> Dict[str, Any]:
@@ -2043,6 +2062,18 @@ class BrainstackStore:
             )
             self.conn.commit()
             return {"status": "unchanged", "entity_id": entity["id"], "state_id": int(current["id"])}
+
+        if current and not supersede and _should_auto_supersede_exact_value(current["value_text"], value_text):
+            supersede = True
+            normalized_metadata = _merge_record_metadata(
+                None,
+                {
+                    **normalized_metadata,
+                    "exact_value_update": True,
+                    "status_reason": "numeric_exact_value_change",
+                },
+                source=source,
+            )
 
         if current and not supersede:
             conflict = self.conn.execute(

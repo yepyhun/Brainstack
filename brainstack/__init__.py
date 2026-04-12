@@ -184,6 +184,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             graph_limit=self._graph_match_limit,
             corpus_limit=self._corpus_match_limit,
             corpus_char_budget=self._corpus_char_budget,
+            query_decomposer=self._config.get("_query_decomposer"),
         )
         self._last_prefetch_policy = packet["policy"]
         return packet["block"]

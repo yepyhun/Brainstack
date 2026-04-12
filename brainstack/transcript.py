@@ -41,19 +41,50 @@ STOPWORDS = {
 ROLE_PREFIX_RE = re.compile(r"^\s*(user|assistant|system|tool)\s*:\s*", re.IGNORECASE)
 
 
+def trim_text_boundary(text: Any, *, max_len: int = 220, soft_overshoot: int = 24) -> str:
+    normalized = " ".join(str(text or "").split())
+    if len(normalized) <= max_len:
+        return normalized
+
+    upper_bound = min(len(normalized), max_len + max(0, soft_overshoot))
+    forward_window = normalized[max_len:upper_bound]
+
+    for index, char in enumerate(forward_window, start=max_len):
+        if char in ".!?;:)]":
+            snippet = normalized[: index + 1].rstrip()
+            return snippet if len(snippet) >= len(normalized) else f"{snippet}..."
+
+    for index, char in enumerate(forward_window, start=max_len):
+        if char.isspace():
+            snippet = normalized[:index].rstrip()
+            return snippet if len(snippet) >= len(normalized) else f"{snippet}..."
+
+    backward_window = normalized[:max_len]
+    boundary = max(
+        backward_window.rfind(" "),
+        backward_window.rfind("."),
+        backward_window.rfind(","),
+        backward_window.rfind(";"),
+        backward_window.rfind(":"),
+        backward_window.rfind(")"),
+    )
+    if boundary >= int(max_len * 0.6):
+        snippet = backward_window[:boundary].rstrip()
+        return snippet if len(snippet) >= len(normalized) else f"{snippet}..."
+
+    fallback = normalized[: max(0, max_len - 3)].rstrip()
+    return fallback if len(fallback) >= len(normalized) else f"{fallback}..."
+
+
 def format_turn_content(user_content: str, assistant_content: str) -> str:
     user = " ".join(str(user_content or "").split())
     assistant = " ".join(str(assistant_content or "").split())
     return f"User: {user}\nAssistant: {assistant}".strip()
 
 
-def build_turn_summary(user_content: str, assistant_content: str, *, max_len: int = 140) -> str:
-    user = " ".join(str(user_content or "").split())
-    assistant = " ".join(str(assistant_content or "").split())
-    if len(user) > max_len:
-        user = user[: max_len - 3].rstrip() + "..."
-    if len(assistant) > max_len:
-        assistant = assistant[: max_len - 3].rstrip() + "..."
+def build_turn_summary(user_content: str, assistant_content: str, *, max_len: int = 220) -> str:
+    user = trim_text_boundary(user_content, max_len=max_len)
+    assistant = trim_text_boundary(assistant_content, max_len=max_len)
     return f"user: {user} | assistant: {assistant}".strip()
 
 
@@ -61,11 +92,9 @@ def build_transcript_snapshot(messages: List[Dict[str, Any]], *, label: str, max
     lines: List[str] = []
     for message in messages[-max_items:]:
         role = str(message.get("role", "unknown")).strip() or "unknown"
-        content = " ".join(str(message.get("content", "")).split())
+        content = trim_text_boundary(message.get("content", ""), max_len=220)
         if not content:
             continue
-        if len(content) > 220:
-            content = content[:217].rstrip() + "..."
         lines.append(f"{role}: {content}")
     if not lines:
         return ""

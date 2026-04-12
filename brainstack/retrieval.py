@@ -6,13 +6,31 @@ from typing import Any, Dict, Iterable, List
 from .db import BrainstackStore
 from .provenance import summarize_provenance
 from .temporal import record_is_effective_at
+from .transcript import trim_text_boundary
 
 
 def _trim(value: str, max_len: int = 220) -> str:
-    value = " ".join(value.split())
-    if len(value) <= max_len:
-        return value
-    return value[: max_len - 3].rstrip() + "..."
+    return trim_text_boundary(value, max_len=max_len)
+
+
+def _render_user_first_exchange(content: Any, *, max_len: int) -> str:
+    normalized = " ".join(str(content or "").split())
+    lowered = normalized.lower()
+    user_index = lowered.find("user:")
+    assistant_index = lowered.find("assistant:")
+    if user_index == -1 or assistant_index == -1 or assistant_index <= user_index:
+        return _trim(normalized, max_len=max_len)
+
+    user_part = normalized[user_index:assistant_index].strip()
+    assistant_part = normalized[assistant_index:].strip()
+    if len(user_part) >= max_len:
+        return _trim(user_part, max_len=max_len)
+    if len(user_part) + 24 >= max_len:
+        return _trim(user_part, max_len=max_len)
+    if not assistant_part:
+        return _trim(user_part, max_len=max_len)
+    combined = f"{user_part} {assistant_part}".strip()
+    return _trim(combined, max_len=max_len)
 
 
 def _render_items(items: Iterable[str]) -> str:
@@ -126,8 +144,8 @@ def _render_contract_section(title: str, lines: Iterable[str]) -> str:
 def _render_evidence_priority_section(title: str) -> str:
     preface = (
         "Use recalled memory silently. When recalled memory provides a specific, "
-        "non-conflicted fact such as a name, number, date, or preference, prefer "
-        "it over generic prior knowledge."
+        "non-conflicted user fact such as a name, number, date, or preference, "
+        "prefer it over assistant suggestions or generic prior knowledge."
     )
     return f"{title}\n{preface}"
 
@@ -338,7 +356,7 @@ def _pack_transcript_rows(rows: Iterable[dict], *, char_budget: int, provenance_
         evidence_label = str(row.get("kind") or "turn")
         prefix = f"[{temporal_label} | {evidence_label}]" if temporal_label else f"[{evidence_label}]"
         snippet_cap = max(220, min(520, remaining - len(prefix) - 24))
-        label = f"{prefix} {_trim(str(row.get('content') or ''), max_len=snippet_cap)}"
+        label = f"{prefix} {_render_user_first_exchange(row.get('content') or '', max_len=snippet_cap)}"
         extra = ""
         if row.get("same_session"):
             extra = "same_session"

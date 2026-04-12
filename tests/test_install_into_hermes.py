@@ -109,7 +109,7 @@ def test_memory_manager_patch_hardens_private_recall_wrapper(tmp_path: Path):
     assert "memory_manager:private_recall_note" in applied
     assert "Apply it silently in your reply." in content
     assert "unless the user explicitly asks about memory behavior or debugging" in content
-    assert "prefer it over generic prior knowledge" in content
+    assert "prefer it over assistant suggestions or generic prior knowledge" in content
 
 
 def test_patch_config_sets_embedded_graph_and_corpus_defaults(tmp_path: Path):

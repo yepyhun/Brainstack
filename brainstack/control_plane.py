@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Dict
+from typing import Any, Callable, Dict, List
 
 from .db import BrainstackStore
 from .executive_retrieval import retrieve_executive_context
@@ -213,6 +213,7 @@ def build_working_memory_packet(
     graph_limit: int,
     corpus_limit: int,
     corpus_char_budget: int,
+    query_decomposer: Callable[[str], List[str]] | None = None,
 ) -> Dict[str, Any]:
     analysis = analyze_query(query)
     policy = _initial_policy(
@@ -233,6 +234,7 @@ def build_working_memory_packet(
         session_id=session_id,
         analysis=asdict(analysis),
         policy=asdict(policy),
+        query_decomposer=query_decomposer,
     )
 
     profile_items = retrieval["profile_items"]
@@ -323,5 +325,6 @@ def build_working_memory_packet(
         "policy": asdict(policy),
         "channels": channels,
         "fused_candidates": retrieval["fused_candidates"],
+        "decomposition": retrieval.get("decomposition", {"used": False, "queries": [query]}),
         "block": block,
     }
