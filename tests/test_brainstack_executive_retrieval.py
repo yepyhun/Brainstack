@@ -30,7 +30,7 @@ def test_build_working_memory_packet_marks_semantic_channel_degraded(tmp_path):
 
     semantic = next(channel for channel in packet["channels"] if channel["name"] == "semantic")
     assert semantic["status"] == "degraded"
-    assert "No fake semantic stand-in" in semantic["reason"]
+    assert "disabled" in semantic["reason"]
     store.close()
 
 

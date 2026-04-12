@@ -2,7 +2,11 @@
 
 Brainstack is a Hermes-native composite memory provider and local memory substrate.
 
-It currently runs **inside Hermes-Agent as a direct `MemoryProvider` plugin**, not as a standalone API-first memory server. The local store is separated so tightly scoped sidecars can share the same SQLite state, but runtime memory ownership stays with Brainstack.
+It currently runs **inside Hermes-Agent as a direct `MemoryProvider` plugin**, not as a standalone API-first memory server. Runtime memory ownership stays with Brainstack, while the storage layer is now split by responsibility:
+
+- `SQLite` for shell/session/profile/transcript state
+- embedded `Kuzu` for L2 graph truth
+- embedded `Chroma` for L3 semantic corpus retrieval
 
 ## Core inspiration
 
@@ -64,7 +68,12 @@ On top of the shelves, Brainstack uses a **risk-aware control plane**:
   - `brainstack/donors/corpus_adapter.py`
 - Donor baselines are tracked via a **bounded refresh workflow**, not hidden copy-paste drift.
 - The refresh script can report local adapter state and optionally run local smoke checks.
-- The current Brainstack baseline is **SQLite/FTS based** and does **not** require TEI/Jina or any external embedding service.
+- The current Brainstack baseline is **embedded-backend based**:
+  - `SQLite` keeps shell state and lexical corpus fallback
+  - `Kuzu` is the active graph backend target
+  - `Chroma` is the active corpus semantic backend target
+- L1 now consumes a stable executive retrieval contract instead of hardcoding backend specifics.
+- Cross-store ingest consistency is treated as shell work, not as optional follow-up glue.
 
 ## What this repo is not claiming
 
@@ -88,6 +97,8 @@ This repository is a focused Brainstack slice containing:
 brainstack/
   __init__.py
   control_plane.py
+  corpus_backend.py
+  corpus_backend_chroma.py
   db.py
   graph_backend.py
   graph_backend_kuzu.py
@@ -174,6 +185,8 @@ What the installer does:
   - `memory.user_profile_enabled: false`
   - `plugins.brainstack.graph_backend: kuzu`
   - `plugins.brainstack.graph_db_path: $HERMES_HOME/brainstack/brainstack.kuzu`
+  - `plugins.brainstack.corpus_backend: chroma`
+  - `plugins.brainstack.corpus_db_path: $HERMES_HOME/brainstack/brainstack.chroma`
 - writes a sanitized `.brainstack-install-manifest.json`
 - runs doctor checks if requested
 - supports both `docker` and `local` runtime modes through the same installer

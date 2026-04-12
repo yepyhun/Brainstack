@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from scripts.install_into_hermes import (
+    _patch_config,
     _patch_gateway_run,
     _patch_memory_manager,
     _patch_run_agent,
@@ -108,3 +109,17 @@ def test_memory_manager_patch_hardens_private_recall_wrapper(tmp_path: Path):
     assert "memory_manager:private_recall_note" in applied
     assert "Apply it silently in your reply." in content
     assert "unless the user explicitly asks about memory behavior or debugging" in content
+
+
+def test_patch_config_sets_embedded_graph_and_corpus_defaults(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("memory:\n  provider: hermes\n", encoding="utf-8")
+
+    result = _patch_config(config_path, dry_run=False)
+    content = config_path.read_text(encoding="utf-8")
+
+    assert result["memory_provider"] == "brainstack"
+    assert "graph_backend: kuzu" in content
+    assert "graph_db_path: $HERMES_HOME/brainstack/brainstack.kuzu" in content
+    assert "corpus_backend: chroma" in content
+    assert "corpus_db_path: $HERMES_HOME/brainstack/brainstack.chroma" in content

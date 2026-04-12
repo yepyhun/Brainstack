@@ -24,6 +24,8 @@ REQUIRED_PLUGIN_FILES = [
     "__init__.py",
     "plugin.yaml",
     "db.py",
+    "corpus_backend.py",
+    "corpus_backend_chroma.py",
     "graph_backend.py",
     "graph_backend_kuzu.py",
     "retrieval.py",
@@ -295,6 +297,8 @@ def _check_config(config_path: Path, planned_install: bool) -> list[Check]:
     brainstack = plugins.get("brainstack", {}) if isinstance(plugins.get("brainstack", {}), dict) else {}
     graph_backend = str(brainstack.get("graph_backend") or "kuzu").strip().lower()
     graph_db_path = str(brainstack.get("graph_db_path") or "").strip()
+    corpus_backend = str(brainstack.get("corpus_backend") or "chroma").strip().lower()
+    corpus_db_path = str(brainstack.get("corpus_db_path") or "").strip()
 
     if graph_backend == "kuzu":
         checks.append(Check("graph_backend_target", "pass", "plugins.brainstack.graph_backend targets embedded Kuzu"))
@@ -313,6 +317,24 @@ def _check_config(config_path: Path, planned_install: bool) -> list[Check]:
         checks.append(Check("graph_backend_target", "pass", "graph backend is not Kuzu yet, but installer will set it"))
     else:
         checks.append(Check("graph_backend_target", "fail", f"plugins.brainstack.graph_backend is {graph_backend!r}, expected 'kuzu'"))
+
+    if corpus_backend == "chroma":
+        checks.append(Check("corpus_backend_target", "pass", "plugins.brainstack.corpus_backend targets embedded Chroma"))
+        if corpus_db_path:
+            checks.append(Check("corpus_backend_path", "pass", "plugins.brainstack.corpus_db_path is configured"))
+        elif planned_install:
+            checks.append(Check("corpus_backend_path", "pass", "plugins.brainstack.corpus_db_path will be added by installer"))
+        else:
+            checks.append(Check("corpus_backend_path", "warn", "plugins.brainstack.corpus_db_path is absent; provider defaults will be used"))
+        try:
+            importlib.import_module("chromadb")
+            checks.append(Check("corpus_backend_dependency", "pass", "Python chromadb package is importable"))
+        except Exception:
+            checks.append(Check("corpus_backend_dependency", "fail", "Python chromadb package is missing for corpus_backend='chroma'"))
+    elif planned_install:
+        checks.append(Check("corpus_backend_target", "pass", "corpus backend is not Chroma yet, but installer will set it"))
+    else:
+        checks.append(Check("corpus_backend_target", "fail", f"plugins.brainstack.corpus_backend is {corpus_backend!r}, expected 'chroma'"))
 
     return checks
 

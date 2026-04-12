@@ -314,6 +314,8 @@ def build_working_memory_packet(
         )
     if graph_rows:
         store.record_graph_retrievals(rows=graph_rows)
+    if corpus_rows:
+        store.record_corpus_retrievals(rows=corpus_rows)
     return {
         "analysis": asdict(analysis),
         "policy": asdict(policy),

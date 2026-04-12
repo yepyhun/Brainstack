@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, TypeVar
 
+from .corpus_backend import create_corpus_backend
 from .graph_backend import create_graph_backend
 from .provenance import merge_provenance, normalize_provenance
 from .temporal import merge_temporal, normalize_temporal_fields, record_is_effective_at
@@ -210,13 +211,20 @@ class BrainstackStore:
         *,
         graph_backend: str = "sqlite",
         graph_db_path: str | None = None,
+        corpus_backend: str = "sqlite",
+        corpus_db_path: str | None = None,
     ) -> None:
         self._db_path = str(db_path)
         self._graph_backend_name = str(graph_backend or "sqlite").strip().lower()
         default_graph_db = str(Path(self._db_path).with_suffix(".kuzu"))
         self._graph_db_path = str(graph_db_path or default_graph_db)
+        self._corpus_backend_name = str(corpus_backend or "sqlite").strip().lower()
+        default_corpus_db = str(Path(self._db_path).with_suffix(".chroma"))
+        self._corpus_db_path = str(corpus_db_path or default_corpus_db)
         self._conn: sqlite3.Connection | None = None
         self._graph_backend = None
+        self._corpus_backend = None
+        self._corpus_backend_error = ""
         self._lock = threading.RLock()
 
     @property
@@ -237,9 +245,18 @@ class BrainstackStore:
         if self._graph_backend is not None:
             self._graph_backend.open()
             self._bootstrap_graph_backend_if_needed()
+        self._corpus_backend = create_corpus_backend(self._corpus_backend_name, db_path=self._corpus_db_path)
+        if self._corpus_backend is not None:
+            self._corpus_backend.open()
+            self._corpus_backend_error = ""
+            self._bootstrap_corpus_backend_if_needed()
+            self._replay_corpus_publications_if_needed()
 
     @_locked
     def close(self) -> None:
+        if self._corpus_backend is not None:
+            self._corpus_backend.close()
+            self._corpus_backend = None
         if self._graph_backend is not None:
             self._graph_backend.close()
             self._graph_backend = None
@@ -473,6 +490,43 @@ class BrainstackStore:
         ]
         for entity_id in entity_ids:
             self._publish_entity_subgraph(entity_id)
+
+    def _bootstrap_corpus_backend_if_needed(self) -> None:
+        if self._corpus_backend is None or not self._corpus_backend.is_empty():
+            return
+        document_ids = [
+            int(row["id"])
+            for row in self.conn.execute(
+                "SELECT id FROM corpus_documents WHERE active = 1 ORDER BY updated_at ASC, id ASC"
+            ).fetchall()
+        ]
+        for document_id in document_ids:
+            self._publish_corpus_document(document_id)
+
+    def _replay_corpus_publications_if_needed(self) -> None:
+        if self._corpus_backend is None:
+            return
+        pending = self.conn.execute(
+            """
+            SELECT object_key
+            FROM publish_journal
+            WHERE target_name = ? AND object_kind = 'corpus_document' AND status IN ('pending', 'failed')
+            ORDER BY updated_at ASC, id ASC
+            """,
+            (self._corpus_backend.target_name,),
+        ).fetchall()
+        seen: set[str] = set()
+        for row in pending:
+            stable_key = str(row["object_key"] or "").strip()
+            if not stable_key or stable_key in seen:
+                continue
+            seen.add(stable_key)
+            document = self.conn.execute(
+                "SELECT id FROM corpus_documents WHERE stable_key = ? AND active = 1",
+                (stable_key,),
+            ).fetchone()
+            if document:
+                self._publish_corpus_document(int(document["id"]))
 
     def _upsert_publish_journal(
         self,
@@ -739,6 +793,75 @@ class BrainstackStore:
         self._upsert_publish_journal(
             target_name=target_name,
             object_kind="entity_subgraph",
+            object_key=object_key,
+            payload=snapshot,
+            status="published",
+            published=True,
+        )
+
+    def _corpus_document_snapshot(self, document_id: int) -> Dict[str, Any]:
+        document_row = self.conn.execute(
+            """
+            SELECT id, stable_key, title, doc_kind, source, metadata_json, updated_at, active
+            FROM corpus_documents
+            WHERE id = ?
+            """,
+            (document_id,),
+        ).fetchone()
+        if not document_row:
+            raise RuntimeError(f"Missing corpus document for snapshot: {document_id}")
+        document = _row_to_dict(document_row)
+        section_rows = self.conn.execute(
+            """
+            SELECT
+                id AS section_id,
+                section_index,
+                heading,
+                content,
+                token_estimate,
+                metadata_json
+            FROM corpus_sections
+            WHERE document_id = ?
+            ORDER BY section_index ASC, id ASC
+            """,
+            (document_id,),
+        ).fetchall()
+        sections = [_row_to_dict(row) for row in section_rows]
+        return {"document": document, "sections": sections}
+
+    def _publish_corpus_document(self, document_id: int) -> None:
+        if self._corpus_backend is None:
+            return
+        snapshot = self._corpus_document_snapshot(document_id)
+        document = dict(snapshot.get("document") or {})
+        object_key = str(document.get("stable_key") or "").strip()
+        if not object_key:
+            raise RuntimeError(f"Corpus snapshot missing stable_key for document {document_id}")
+        target_name = self._corpus_backend.target_name
+        self._upsert_publish_journal(
+            target_name=target_name,
+            object_kind="corpus_document",
+            object_key=object_key,
+            payload=snapshot,
+            status="pending",
+        )
+        try:
+            self._corpus_backend.publish_document(snapshot)
+        except Exception as exc:
+            self._corpus_backend_error = str(exc)
+            self._upsert_publish_journal(
+                target_name=target_name,
+                object_kind="corpus_document",
+                object_key=object_key,
+                payload=snapshot,
+                status="failed",
+                last_error=self._corpus_backend_error,
+            )
+            raise
+        self._corpus_backend_error = ""
+        self._upsert_publish_journal(
+            target_name=target_name,
+            object_kind="corpus_document",
             object_key=object_key,
             payload=snapshot,
             status="published",
@@ -1224,6 +1347,8 @@ class BrainstackStore:
             title=title,
             sections=sections,
         )
+        if self._corpus_backend is not None:
+            self._publish_corpus_document(document_id)
         return {"document_id": document_id, "section_count": section_count, "stable_key": stable_key}
 
     @_locked
@@ -1252,7 +1377,11 @@ class BrainstackStore:
                     """,
                     (fts_query, limit),
                 ).fetchall()
-                return [dict(row) for row in rows]
+                output = [dict(row) for row in rows]
+                for row in output:
+                    row["retrieval_source"] = "corpus.keyword"
+                    row["match_mode"] = "keyword"
+                return output
             except sqlite3.OperationalError:
                 pass
 
@@ -1287,7 +1416,40 @@ class BrainstackStore:
             """,
             tuple(patterns + patterns + patterns + [limit]),
         ).fetchall()
-        return [dict(row) for row in rows]
+        output = [dict(row) for row in rows]
+        for row in output:
+            row["retrieval_source"] = "corpus.keyword"
+            row["match_mode"] = "keyword"
+        return output
+
+    @_locked
+    def search_corpus_semantic(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
+        if self._corpus_backend is None:
+            return []
+        try:
+            rows = self._corpus_backend.search_semantic(query=query, limit=limit)
+        except Exception as exc:
+            self._corpus_backend_error = str(exc)
+            return []
+        self._corpus_backend_error = ""
+        return rows
+
+    @_locked
+    def corpus_semantic_channel_status(self) -> Dict[str, str]:
+        if self._corpus_backend is None:
+            return {
+                "status": "degraded",
+                "reason": "Corpus semantic retrieval is disabled until a donor-aligned corpus backend is configured.",
+            }
+        if self._corpus_backend_error:
+            return {
+                "status": "degraded",
+                "reason": f"Corpus semantic retrieval backend is unhealthy: {self._corpus_backend_error}",
+            }
+        return {
+            "status": "active",
+            "reason": f"Semantic corpus retrieval is served by {self._corpus_backend.target_name}.",
+        }
 
     def _normalize_entity_name(self, name: str) -> str:
         return " ".join(name.lower().split())
@@ -2126,6 +2288,36 @@ class BrainstackStore:
             self.conn.execute(
                 f"UPDATE {table} SET metadata_json = ?{', updated_at = ?' if table == 'graph_conflicts' else ''} WHERE id = ?",
                 ((json.dumps(metadata, ensure_ascii=True, sort_keys=True), now, row_id) if table == "graph_conflicts" else (json.dumps(metadata, ensure_ascii=True, sort_keys=True), row_id)),
+            )
+            updated += 1
+        if updated:
+            self.conn.commit()
+        return updated
+
+    @_locked
+    def record_corpus_retrievals(self, *, rows: Iterable[Dict[str, Any]]) -> int:
+        updated = 0
+        now = utc_now_iso()
+        for row in rows:
+            section_id = int(row.get("section_id") or 0)
+            if section_id <= 0:
+                continue
+            existing = self.conn.execute(
+                "SELECT metadata_json FROM corpus_sections WHERE id = ?",
+                (section_id,),
+            ).fetchone()
+            if not existing:
+                continue
+            metadata = _decode_json_object(existing["metadata_json"])
+            metadata = apply_retrieval_telemetry(
+                metadata,
+                matched=True,
+                fallback=False,
+                served_at=now,
+            )
+            self.conn.execute(
+                "UPDATE corpus_sections SET metadata_json = ? WHERE id = ?",
+                (json.dumps(metadata, ensure_ascii=True, sort_keys=True), section_id),
             )
             updated += 1
         if updated:

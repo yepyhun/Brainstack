@@ -8,10 +8,6 @@ from .transcript import has_meaningful_transcript_evidence
 from .usefulness import graph_priority_adjustment, profile_priority_adjustment
 
 RRF_K = 60
-SEMANTIC_CHANNEL_REASON = (
-    "Phase 17 keeps the semantic leg explicit-but-degraded until donor-backed "
-    "vector retrieval lands. No fake semantic stand-in is allowed."
-)
 
 
 @dataclass
@@ -194,8 +190,15 @@ def _select_rows(
     seen_graph_keys: set[tuple[str, int]] = set()
     seen_corpus_keys: set[tuple[int, int]] = set()
 
+    def materialize(candidate: EvidenceCandidate) -> Dict[str, Any]:
+        row = dict(candidate.row)
+        row["_brainstack_rrf_score"] = candidate.rrf_score
+        row["_brainstack_channels"] = sorted(candidate.channel_ranks)
+        row["_brainstack_channel_ranks"] = dict(candidate.channel_ranks)
+        return row
+
     for candidate in candidates:
-        row = candidate.row
+        row = materialize(candidate)
         if candidate.shelf == "profile" and len(profile_items) < profile_limit:
             stable_key = str(row.get("stable_key") or "").strip()
             if stable_key and stable_key not in seen_profile_keys:
@@ -286,6 +289,11 @@ def retrieve_executive_context(
         if corpus_limit > 0
         else []
     )
+    semantic_corpus_rows = (
+        store.search_corpus_semantic(query=query, limit=max(corpus_limit * 4, 8))
+        if corpus_limit > 0
+        else []
+    )
     keyword_rows = _round_robin(
         keyword_profile_rows,
         keyword_continuity_rows,
@@ -321,6 +329,7 @@ def retrieve_executive_context(
     _merge_channel(merged, channel_name="keyword", rows=keyword_continuity_rows, shelf="continuity_match")
     _merge_channel(merged, channel_name="keyword", rows=keyword_transcript_rows, shelf="transcript")
     _merge_channel(merged, channel_name="keyword", rows=keyword_corpus_rows, shelf="corpus")
+    _merge_channel(merged, channel_name="semantic", rows=semantic_corpus_rows, shelf="corpus")
     _merge_channel(merged, channel_name="graph", rows=graph_rows, shelf="graph")
     _merge_channel(merged, channel_name="temporal", rows=recent_rows, shelf="continuity_recent")
     _merge_channel(merged, channel_name="temporal", rows=temporal_graph_rows, shelf="graph")
@@ -350,8 +359,14 @@ def retrieve_executive_context(
     if transcript_rows and not has_meaningful_transcript_evidence(query, transcript_rows):
         selected["transcript_rows"] = []
 
+    semantic_status = store.corpus_semantic_channel_status()
     channels = [
-        _channel_status("semantic", [], reason=SEMANTIC_CHANNEL_REASON, status="degraded"),
+        _channel_status(
+            "semantic",
+            semantic_corpus_rows,
+            reason=str(semantic_status.get("reason") or ""),
+            status=str(semantic_status.get("status") or "degraded"),
+        ),
         _channel_status("keyword", keyword_rows),
         _channel_status("graph", graph_rows),
         _channel_status("temporal", temporal_rows),

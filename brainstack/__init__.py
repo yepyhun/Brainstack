@@ -103,10 +103,13 @@ class BrainstackMemoryProvider(MemoryProvider):
 
         default_db = f"{display_hermes_home()}/brainstack/brainstack.db"
         default_graph_db = f"{display_hermes_home()}/brainstack/brainstack.kuzu"
+        default_corpus_db = f"{display_hermes_home()}/brainstack/brainstack.chroma"
         return [
             {"key": "db_path", "description": "SQLite database path", "default": default_db},
             {"key": "graph_backend", "description": "Active graph backend (kuzu recommended)", "default": "kuzu"},
             {"key": "graph_db_path", "description": "Embedded graph database path", "default": default_graph_db},
+            {"key": "corpus_backend", "description": "Active corpus backend (chroma recommended)", "default": "chroma"},
+            {"key": "corpus_db_path", "description": "Embedded corpus database path", "default": default_corpus_db},
             {"key": "profile_prompt_limit", "description": "How many stable profile items to keep always-on", "default": "6"},
             {"key": "profile_match_limit", "description": "How many profile matches to inject per turn", "default": "4"},
             {"key": "continuity_recent_limit", "description": "How many recent continuity items to inject", "default": "4"},
@@ -144,11 +147,20 @@ class BrainstackMemoryProvider(MemoryProvider):
         hermes_home = str(kwargs.get("hermes_home") or "")
         default_db = f"{hermes_home}/brainstack/brainstack.db" if hermes_home else "brainstack.db"
         default_graph_db = f"{hermes_home}/brainstack/brainstack.kuzu" if hermes_home else "brainstack.kuzu"
+        default_corpus_db = f"{hermes_home}/brainstack/brainstack.chroma" if hermes_home else "brainstack.chroma"
         db_path = _normalize_path(str(self._config.get("db_path", default_db)), hermes_home)
         graph_db_path = _normalize_path(str(self._config.get("graph_db_path", default_graph_db)), hermes_home)
         graph_backend = str(self._config.get("graph_backend", "kuzu") or "kuzu")
+        corpus_backend = str(self._config.get("corpus_backend", "sqlite") or "sqlite")
+        corpus_db_path = _normalize_path(str(self._config.get("corpus_db_path", default_corpus_db)), hermes_home)
         self._session_id = session_id
-        self._store = BrainstackStore(db_path, graph_backend=graph_backend, graph_db_path=graph_db_path)
+        self._store = BrainstackStore(
+            db_path,
+            graph_backend=graph_backend,
+            graph_db_path=graph_db_path,
+            corpus_backend=corpus_backend,
+            corpus_db_path=corpus_db_path,
+        )
         self._store.open()
 
     def system_prompt_block(self) -> str:

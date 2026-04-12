@@ -219,24 +219,36 @@ def _pack_corpus_rows(rows: Iterable[dict], *, char_budget: int, provenance_mode
     budget = max(180, int(char_budget))
     packed: List[str] = []
     seen = set()
+    seen_snippets = set()
+    per_document_count: Dict[int, int] = {}
     for row in rows:
         row_key = (row["document_id"], row["section_index"])
         if row_key in seen:
             continue
         seen.add(row_key)
+        document_id = int(row.get("document_id") or 0)
+        if per_document_count.get(document_id, 0) >= 2:
+            continue
 
         label = row["title"]
         heading = str(row.get("heading") or "").strip()
         if heading and heading != row["title"]:
             label = f"{label} > {heading}"
+        content = str(row.get("content") or "").strip()
+        snippet_fingerprint = _normalize_compare_text(" ".join(content.split())[:220])
+        if snippet_fingerprint and snippet_fingerprint in seen_snippets:
+            continue
 
         remaining = budget - sum(len(item) for item in packed)
         snippet_cap = max(120, min(220, remaining - len(label) - 24))
-        line = f"[{row['doc_kind']}] {label}: {_trim(row['content'], snippet_cap)}"
+        line = f"[{row['doc_kind']}] {label}: {_trim(content, snippet_cap)}"
         line = _with_provenance(line, source=str(row.get("source", "")), provenance_mode=provenance_mode)
         if packed and remaining < len(line):
             break
         packed.append(line if len(line) <= remaining else _trim(line, remaining))
+        if snippet_fingerprint:
+            seen_snippets.add(snippet_fingerprint)
+        per_document_count[document_id] = per_document_count.get(document_id, 0) + 1
         if sum(len(item) for item in packed) >= budget:
             break
     return packed
