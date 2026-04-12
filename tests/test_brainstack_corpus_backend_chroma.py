@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import math
 import re
 import sys
@@ -168,5 +169,60 @@ def test_chroma_publish_journal_tracks_failure_then_successful_replay(tmp_path, 
         replayed = next(row for row in published_rows if row["object_key"] == "brainstack:l3")
         assert replayed["attempt_count"] >= 1
         assert replayed["published_at"]
+    finally:
+        store.close()
+
+
+def test_chroma_publish_replaces_sections_without_losing_document_identity(tmp_path, monkeypatch):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        store.ingest_corpus_document(
+            stable_key="brainstack:l3",
+            title="Brainstack Layer 3",
+            doc_kind="doc",
+            source="test",
+            sections=[
+                {"heading": "One", "content": "First section about raw retrieval."},
+                {"heading": "Two", "content": "Second section about bounded packing."},
+                {"heading": "Three", "content": "Third section about semantic search."},
+            ],
+        )
+        store.ingest_corpus_document(
+            stable_key="brainstack:l3",
+            title="Brainstack Layer 3",
+            doc_kind="doc",
+            source="test",
+            sections=[
+                {"heading": "One", "content": "First section about raw retrieval."},
+                {"heading": "Two", "content": "Second section about bounded packing."},
+            ],
+        )
+
+        backend = store._corpus_backend
+        assert backend is not None
+        payload = backend.collection.get(where={"stable_key": "brainstack:l3"}, include=[])
+        ids = sorted(str(item) for item in (payload.get("ids") or []))
+        assert ids == ["brainstack:l3:0", "brainstack:l3:1"]
+    finally:
+        store.close()
+
+
+def test_semantic_search_logs_warning_and_degrades_when_backend_raises(tmp_path, monkeypatch, caplog):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        backend = store._corpus_backend
+        assert backend is not None
+        monkeypatch.setattr(backend, "search_semantic", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("search boom")))
+
+        with caplog.at_level(logging.WARNING):
+            rows = store.search_corpus_semantic(query="atlas roadmap", limit=3)
+
+        assert rows == []
+        status = store.corpus_semantic_channel_status()
+        assert status["status"] == "degraded"
+        assert "search boom" in status["reason"]
+        assert any("Brainstack corpus semantic search failed" in record.message for record in caplog.records)
     finally:
         store.close()

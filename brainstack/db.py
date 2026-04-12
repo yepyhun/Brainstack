@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import wraps
+import logging
 import json
 import re
 import sqlite3
@@ -18,6 +19,7 @@ from .usefulness import apply_retrieval_telemetry, graph_priority_adjustment
 
 
 F = TypeVar("F", bound=Callable[..., Any])
+logger = logging.getLogger(__name__)
 
 
 def utc_now_iso() -> str:
@@ -1430,6 +1432,7 @@ class BrainstackStore:
             rows = self._corpus_backend.search_semantic(query=query, limit=limit)
         except Exception as exc:
             self._corpus_backend_error = str(exc)
+            logger.warning("Brainstack corpus semantic search failed: %s", exc)
             return []
         self._corpus_backend_error = ""
         return rows

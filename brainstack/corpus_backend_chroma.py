@@ -56,9 +56,8 @@ class ChromaCorpusBackend:
         stable_key = str(document.get("stable_key") or "").strip()
         if not stable_key:
             raise RuntimeError("Corpus snapshot is missing stable_key")
-
-        self.collection.delete(where={"stable_key": stable_key})
         if not sections:
+            self.collection.delete(where={"stable_key": stable_key})
             return
 
         ids: List[str] = []
@@ -100,7 +99,13 @@ class ChromaCorpusBackend:
             )
 
         if ids:
-            self.collection.add(ids=ids, documents=documents, metadatas=metadatas)
+            self.collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
+
+        existing = self.collection.get(where={"stable_key": stable_key}, include=[])
+        existing_ids = [str(item) for item in (existing.get("ids") or [])]
+        stale_ids = [item for item in existing_ids if item not in ids]
+        if stale_ids:
+            self.collection.delete(ids=stale_ids)
 
     def search_semantic(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
         result = self.collection.query(
