@@ -62,7 +62,7 @@ def test_build_working_memory_packet_records_profile_and_graph_retrieval_telemet
 
     style_packet = build_working_memory_packet(
         store,
-        query="How should you write?",
+        query="Explain things without jargon.",
         session_id="session-usefulness",
         profile_match_limit=4,
         continuity_recent_limit=2,
@@ -77,8 +77,10 @@ def test_build_working_memory_packet_records_profile_and_graph_retrieval_telemet
     assert profile is not None
     telemetry = (profile.get("metadata") or {}).get("retrieval_telemetry") or {}
     assert telemetry.get("served_count") == 1
-    assert telemetry.get("fallback_served_count") == 1
+    assert telemetry.get("match_served_count") == 1
+    assert telemetry.get("fallback_served_count") == 0
     assert "## Brainstack Active Communication Contract" in style_packet["block"]
+    assert any(channel["name"] == "semantic" and channel["status"] == "degraded" for channel in style_packet["channels"])
     store.close()
 
     graph_store = BrainstackStore(str(tmp_path / "graph.db"))

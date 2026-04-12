@@ -122,6 +122,7 @@ class TestBrainstackRealWorldFlows:
         assert waiting.tier2_schedule.should_queue is False
         assert waiting.tier2_schedule.reason == "waiting_for_batch"
         assert waiting.tier2_schedule.pending_turns == 4
+        assert waiting.profile_candidates == []
 
         queued = build_turn_ingest_plan(
             user_content="I prefer concise answers.",
@@ -133,6 +134,7 @@ class TestBrainstackRealWorldFlows:
         assert queued.tier2_schedule.should_queue is True
         assert queued.tier2_schedule.reason == "turn_batch_limit"
         assert queued.tier2_schedule.pending_turns == 0
+        assert queued.profile_candidates == []
 
     def test_cross_session_prefetch_recalls_preference_and_shared_work(self, tmp_path):
         writer = _make_provider(tmp_path, "session-a")
@@ -163,14 +165,13 @@ class TestBrainstackRealWorldFlows:
                 "Do I prefer concise answers and what project are we working on?",
                 session_id="session-b",
             )
-            assert "## Brainstack Profile Match" in block
+            assert "## Brainstack Continuity Match" in block
             assert "I prefer concise answers" in block
             assert "We are working on Project Atlas" in block
-            assert "## Brainstack Continuity Match" in block
         finally:
             reader.shutdown()
 
-    def test_same_session_prefetch_boosts_fresh_style_preferences_for_unrelated_followup(self, tmp_path):
+    def test_same_session_prefetch_surfaces_fresh_style_preferences_through_recent_continuity(self, tmp_path):
         provider = _make_provider(tmp_path, "session-style")
         try:
             provider.sync_turn(
@@ -189,9 +190,10 @@ class TestBrainstackRealWorldFlows:
                 session_id="session-style",
             )
 
-            assert "## Brainstack Profile Match" in block
-            assert "Avoid technical jargon" in block
-            assert "Minimize emoji usage" in block
+            assert "## Brainstack Recent Continuity" in block or "## Brainstack Continuity Match" in block
+            assert "kerüld a szakzsargont" in block
+            assert "Ne használj emojikat" in block
+            assert "## Brainstack Profile Match" not in block
         finally:
             provider.shutdown()
 

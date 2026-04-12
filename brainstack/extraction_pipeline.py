@@ -4,7 +4,6 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, List
 
 from .stable_memory_guardrails import StableMemoryAdmissionDecision, should_admit_stable_memory
-from .tier1_extractor import extract_profile_candidates
 
 
 @dataclass(frozen=True)
@@ -79,7 +78,6 @@ def build_turn_ingest_plan(
     batch_turn_limit: int,
 ) -> TurnIngestPlan:
     admission = should_admit_stable_memory(fact_text=user_content)
-    profile_candidates = extract_profile_candidates(user_content) if admission.allowed else []
     schedule = _plan_tier2_schedule(
         pending_turns=pending_turns,
         idle_seconds=idle_seconds,
@@ -88,7 +86,10 @@ def build_turn_ingest_plan(
     )
     return TurnIngestPlan(
         durable_admission=admission,
-        profile_candidates=profile_candidates,
+        # Phase 17 removes handwritten Tier-1 semantic/profile inference from the
+        # live ingest path. Durable profile writes now belong to the Tier-2 path
+        # or explicit memory writes, not language-specific slot guessing here.
+        profile_candidates=[],
         graph_text=user_content,
         tier2_schedule=schedule,
     )
@@ -102,9 +103,8 @@ def build_session_message_ingest_plan(*, role: str, content: str) -> SessionMess
             graph_text="",
         )
     admission = should_admit_stable_memory(fact_text=content)
-    profile_candidates = extract_profile_candidates(content) if admission.allowed else []
     return SessionMessageIngestPlan(
         durable_admission=admission,
-        profile_candidates=profile_candidates,
+        profile_candidates=[],
         graph_text=content,
     )

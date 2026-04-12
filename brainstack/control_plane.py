@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from .db import BrainstackStore
+from .executive_retrieval import retrieve_executive_context
 from .retrieval import render_working_memory_block
-from .transcript import has_meaningful_transcript_evidence
-from .usefulness import graph_priority_adjustment, profile_priority_adjustment
 
 HIGH_STAKES_TERMS = (
     "safe",
@@ -80,72 +79,6 @@ PREFERENCE_TERMS = (
 def _contains_any(query: str, terms: tuple[str, ...]) -> bool:
     lowered = query.lower()
     return any(term in lowered for term in terms)
-
-
-def _merge_profile_rows(*groups: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
-    merged: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-    for group in groups:
-        for row in group:
-            stable_key = str(row.get("stable_key") or "").strip()
-            fallback_key = f"{row.get('category')}::{row.get('content')}"
-            key = stable_key or fallback_key
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(row)
-            if len(merged) >= limit:
-                return merged
-    return merged
-
-
-def _rank_profile_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
-    ranked = list(enumerate(rows))
-    ranked.sort(
-        key=lambda item: (
-            profile_priority_adjustment(item[1]),
-            -0.05 * item[0],
-            float(item[1].get("confidence") or 0.0),
-            str(item[1].get("updated_at") or ""),
-        ),
-        reverse=True,
-    )
-    return [row for _, row in ranked[:limit]]
-
-
-def _rank_graph_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
-    ranked = list(enumerate(rows))
-    ranked.sort(
-        key=lambda item: (
-            graph_priority_adjustment(item[1]),
-            -0.05 * item[0],
-            str(item[1].get("happened_at") or ""),
-        ),
-        reverse=True,
-    )
-    return [row for _, row in ranked[:limit]]
-
-
-def _same_session_profile_boost(
-    store: BrainstackStore,
-    *,
-    session_id: str,
-    limit: int,
-) -> List[Dict[str, Any]]:
-    if not session_id or limit <= 0:
-        return []
-    rows = store.list_profile_items(limit=max(limit * 3, 8), categories=("identity", "preference", "shared_work"))
-    boosted: List[Dict[str, Any]] = []
-    for row in rows:
-        metadata = row.get("metadata") or {}
-        provenance = metadata.get("provenance") if isinstance(metadata.get("provenance"), dict) else {}
-        row_session = metadata.get("session_id") or provenance.get("session_id")
-        if row_session != session_id:
-            continue
-        boosted.append(row)
-        if len(boosted) >= limit:
-            break
-    return boosted
 
 
 @dataclass
@@ -223,7 +156,7 @@ def _initial_policy(
         policy.collapse_mode = "aggressive"
         policy.profile_limit = max(policy.profile_limit, min(profile_match_limit, 4))
         policy.continuity_match_limit = min(continuity_match_limit, 1)
-        policy.continuity_recent_limit = min(continuity_recent_limit, 1)
+        policy.continuity_recent_limit = max(1, min(continuity_recent_limit, 2))
         policy.transcript_limit = 0
         policy.transcript_char_budget = 0
         policy.graph_limit = 1
@@ -245,6 +178,7 @@ def _initial_policy(
         policy.show_graph_history = True
         policy.graph_limit = max(policy.graph_limit, min(graph_limit, 4))
         policy.continuity_match_limit = max(policy.continuity_match_limit, min(continuity_match_limit, 3))
+        policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
 
     if analysis.high_stakes:
         policy.mode = "deep"
@@ -291,70 +225,26 @@ def build_working_memory_packet(
         corpus_char_budget=corpus_char_budget,
     )
 
-    profile_search_limit = max(policy.profile_limit * 4, policy.profile_limit)
-    profile_items = store.search_profile(query=query, limit=profile_search_limit) if policy.profile_limit > 0 else []
-    matched_profile_keys = {
-        str(item.get("stable_key") or "").strip() for item in profile_items if str(item.get("stable_key") or "").strip()
-    }
-    boosted_profile_items = _same_session_profile_boost(
+    retrieval = retrieve_executive_context(
         store,
+        query=query,
         session_id=session_id,
-        limit=min(max(policy.profile_limit, 2), 4),
+        analysis=asdict(analysis),
+        policy=asdict(policy),
     )
-    boosted_profile_keys = {
-        str(item.get("stable_key") or "").strip() for item in boosted_profile_items if str(item.get("stable_key") or "").strip()
-    }
-    if boosted_profile_items:
-        profile_items = _merge_profile_rows(
-            boosted_profile_items,
-            profile_items,
-            limit=max(profile_search_limit, len(boosted_profile_items)),
-        )
-    if profile_items:
-        profile_items = _rank_profile_rows(profile_items, limit=policy.profile_limit)
-    matched = (
-        store.search_continuity(query=query, session_id=session_id, limit=policy.continuity_match_limit)
-        if policy.continuity_match_limit > 0
-        else []
-    )
-    matched_ids = {item["id"] for item in matched}
-    recent = []
-    if policy.continuity_recent_limit > 0:
-        recent = store.recent_continuity(session_id=session_id, limit=max(policy.continuity_recent_limit * 2, 2))
-        recent = [item for item in recent if item["id"] not in matched_ids][: policy.continuity_recent_limit]
 
-    graph_search_limit = max(policy.graph_limit * 4, policy.graph_limit)
-    graph_rows = store.search_graph(query=query, limit=graph_search_limit) if policy.graph_limit > 0 else []
-    if graph_rows:
-        graph_rows = _rank_graph_rows(graph_rows, limit=policy.graph_limit)
-    corpus_rows = (
-        store.search_corpus(query=query, limit=max(policy.corpus_limit * 3, policy.corpus_limit))
-        if policy.corpus_limit > 0
-        else []
-    )
-    transcript_rows: List[Dict[str, Any]] = []
+    profile_items = retrieval["profile_items"]
+    matched = retrieval["matched"]
+    recent = retrieval["recent"]
+    transcript_rows = retrieval["transcript_rows"]
+    graph_rows = retrieval["graph_rows"]
+    corpus_rows = retrieval["corpus_rows"]
+    channels = retrieval["channels"]
 
-    if policy.transcript_limit > 0:
-        transcript_candidates = store.search_transcript(
-            query=query,
-            session_id=session_id,
-            limit=max(policy.transcript_limit * 3, policy.transcript_limit),
-        )
-        continuity_is_compact = (not matched) or all(len(str(item.get("content", ""))) <= 220 for item in matched)
-        transcript_allowed = (
-            continuity_is_compact
-            and not profile_items
-            and not graph_rows
-            and not corpus_rows
-            and has_meaningful_transcript_evidence(query, transcript_candidates)
-        )
-        if transcript_allowed:
-            transcript_rows = transcript_candidates[: policy.transcript_limit]
-
-    support_shelves = sum(
+    support_channels = sum(
         1
-        for rows in (profile_items, matched or recent, transcript_rows, graph_rows, corpus_rows)
-        if rows
+        for channel in channels
+        if channel.get("status") == "active" and int(channel.get("candidate_count") or 0) > 0
     )
     conflict_present = any(row["row_type"] == "conflict" for row in graph_rows)
 
@@ -366,17 +256,15 @@ def build_working_memory_packet(
         policy.conflict_escalation = True
         policy.show_policy = True
 
-    if analysis.preference and profile_items and not analysis.high_stakes and not conflict_present:
-        policy.confidence_band = "high"
-    elif boosted_profile_items and not analysis.high_stakes and not conflict_present:
+    if analysis.preference and (profile_items or recent) and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "high"
     elif analysis.temporal and graph_rows and not analysis.high_stakes and not conflict_present:
-        policy.confidence_band = "high" if support_shelves >= 2 else "medium"
+        policy.confidence_band = "high" if support_channels >= 2 else "medium"
     elif transcript_rows and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "medium"
-    elif support_shelves >= 3 and not analysis.high_stakes and not conflict_present:
+    elif support_channels >= 3 and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "high"
-    elif support_shelves >= 1 and not conflict_present:
+    elif support_channels >= 1 and not conflict_present:
         policy.confidence_band = "medium"
     else:
         policy.confidence_band = "low"
@@ -407,14 +295,19 @@ def build_working_memory_packet(
         graph_rows=graph_rows,
         corpus_rows=corpus_rows,
     )
+
     if profile_items:
+        matched_profile_keys = {
+            str(item.get("stable_key") or "").strip()
+            for item in retrieval["profile_items"]
+            if str(item.get("stable_key") or "").strip()
+        }
         store.record_profile_retrievals(
             rows=[
                 {
                     "stable_key": row.get("stable_key"),
                     "matched": str(row.get("stable_key") or "").strip() in matched_profile_keys,
-                    "fallback": str(row.get("stable_key") or "").strip() in boosted_profile_keys
-                    and str(row.get("stable_key") or "").strip() not in matched_profile_keys,
+                    "fallback": False,
                 }
                 for row in profile_items
             ]
@@ -424,5 +317,7 @@ def build_working_memory_packet(
     return {
         "analysis": asdict(analysis),
         "policy": asdict(policy),
+        "channels": channels,
+        "fused_candidates": retrieval["fused_candidates"],
         "block": block,
     }

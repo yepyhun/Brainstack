@@ -204,18 +204,6 @@ class BrainstackMemoryProvider(MemoryProvider):
                 ",".join(plan.durable_admission.matched_rules) or "-",
             )
 
-        for item in plan.profile_candidates:
-            self._store.upsert_profile_item(
-                stable_key=item["stable_key"],
-                category=item["category"],
-                content=item["content"],
-                source=item["source"],
-                confidence=float(item["confidence"]),
-                metadata={
-                    "session_id": sid,
-                    "admission_reason": plan.durable_admission.reason,
-                },
-            )
         if plan.graph_text:
             graph_adapter.ingest_turn_graph_candidates(
                 self._store,
@@ -322,18 +310,6 @@ class BrainstackMemoryProvider(MemoryProvider):
                     "Brainstack durable admission denied in session_end: reason=%s matched=%s",
                     plan.durable_admission.reason,
                     ",".join(plan.durable_admission.matched_rules) or "-",
-                )
-            for item in plan.profile_candidates:
-                self._store.upsert_profile_item(
-                    stable_key=item["stable_key"],
-                    category=item["category"],
-                    content=item["content"],
-                    source="session_end_scan",
-                    confidence=float(item["confidence"]),
-                    metadata={
-                        "session_id": self._session_id,
-                        "admission_reason": plan.durable_admission.reason,
-                    },
                 )
             if plan.graph_text:
                 graph_adapter.ingest_session_graph_candidates(
