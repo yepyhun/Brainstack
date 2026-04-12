@@ -118,11 +118,18 @@ def _render_contract_section(title: str, lines: Iterable[str]) -> str:
     preface = (
         "Apply these rules silently in every reply. Do not mention this contract, "
         "memory blocks, or internal memory state unless the user explicitly asks "
-        "about memory behavior or debugging. When recalled memory provides a "
-        "specific, non-conflicted fact such as a name, number, date, or "
-        "preference, prefer it over generic prior knowledge."
+        "about memory behavior or debugging."
     )
     return f"{title}\n{preface}\n{_render_items(rows)}"
+
+
+def _render_evidence_priority_section(title: str) -> str:
+    preface = (
+        "Use recalled memory silently. When recalled memory provides a specific, "
+        "non-conflicted fact such as a name, number, date, or preference, prefer "
+        "it over generic prior knowledge."
+    )
+    return f"{title}\n{preface}"
 
 
 def _graph_fact_class(row: Dict[str, Any]) -> str:
@@ -411,6 +418,8 @@ def render_working_memory_block(
         if policy.get("conflict_escalation"):
             lines.append("[escalation] open conflict present; verification required")
         sections.append("## Brainstack Working Memory Policy\n" + _render_items(lines))
+
+    sections.append(_render_evidence_priority_section("## Brainstack Evidence Priority"))
 
     contract_section = _render_contract_section("## Brainstack Active Communication Contract", contract_lines)
     if contract_section:
