@@ -226,3 +226,49 @@ def test_semantic_search_logs_warning_and_degrades_when_backend_raises(tmp_path,
         assert any("Brainstack corpus semantic search failed" in record.message for record in caplog.records)
     finally:
         store.close()
+
+
+def test_conversation_transcript_is_published_to_chroma_and_found_semantically(tmp_path, monkeypatch):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        store.add_transcript_entry(
+            session_id="phase20",
+            turn_number=1,
+            kind="turn",
+            content="User: I used Uber Eats and Grubhub this month.\nAssistant: Saved.",
+            source="test",
+            created_at="2024-03-15T00:00:00+00:00",
+        )
+
+        rows = store.search_conversation_semantic(
+            query="How many food delivery services have I used?",
+            session_id="phase20",
+            limit=3,
+        )
+        assert rows
+        assert rows[0]["match_mode"] == "semantic"
+        assert rows[0]["retrieval_source"] == "conversation.semantic"
+        assert "Uber Eats" in rows[0]["content"]
+
+        packet = build_working_memory_packet(
+            store,
+            query="How many food delivery services have I used?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=0,
+            transcript_match_limit=2,
+            transcript_char_budget=560,
+            graph_limit=0,
+            corpus_limit=0,
+            corpus_char_budget=0,
+        )
+        assert "## Brainstack Transcript Evidence" in packet["block"]
+        assert "Uber Eats" in packet["block"]
+        assert "2024-03-15" in packet["block"]
+        semantic = next(channel for channel in packet["channels"] if channel["name"] == "semantic")
+        assert semantic["status"] == "active"
+        assert semantic["candidate_count"] > 0
+    finally:
+        store.close()

@@ -144,8 +144,8 @@ def _initial_policy(
         profile_limit=min(profile_match_limit, 3),
         continuity_match_limit=min(continuity_match_limit, 2),
         continuity_recent_limit=min(continuity_recent_limit, 1),
-        transcript_limit=min(transcript_match_limit, 1),
-        transcript_char_budget=min(transcript_char_budget, 260),
+        transcript_limit=min(transcript_match_limit, 2),
+        transcript_char_budget=min(transcript_char_budget, 520),
         graph_limit=min(graph_limit, 2),
         corpus_limit=min(corpus_limit, 2),
         corpus_char_budget=min(corpus_char_budget, 360),
@@ -170,8 +170,8 @@ def _initial_policy(
         policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 3))
         policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 650))
         policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
-        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 1))
-        policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 300))
+        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
+        policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 640))
 
     if analysis.temporal:
         policy.mode = "balanced"
@@ -179,6 +179,8 @@ def _initial_policy(
         policy.graph_limit = max(policy.graph_limit, min(graph_limit, 4))
         policy.continuity_match_limit = max(policy.continuity_match_limit, min(continuity_match_limit, 3))
         policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
+        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
+        policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 640))
 
     if analysis.high_stakes:
         policy.mode = "deep"

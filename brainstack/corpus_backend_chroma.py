@@ -68,6 +68,7 @@ class ChromaCorpusBackend:
         source = str(document.get("source") or "").strip()
         updated_at = str(document.get("updated_at") or "").strip()
         document_id = int(document.get("id") or 0)
+        semantic_class = str(document.get("semantic_class") or "corpus").strip() or "corpus"
         document_metadata = json.dumps(document.get("metadata") or {}, ensure_ascii=True, sort_keys=True)
 
         for section in sections:
@@ -85,6 +86,7 @@ class ChromaCorpusBackend:
                 {
                     "document_id": document_id,
                     "stable_key": stable_key,
+                    "semantic_class": semantic_class,
                     "title": title,
                     "doc_kind": doc_kind,
                     "source": source,
@@ -107,12 +109,21 @@ class ChromaCorpusBackend:
         if stale_ids:
             self.collection.delete(ids=stale_ids)
 
-    def search_semantic(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
-        result = self.collection.query(
-            query_texts=[str(query or "")],
-            n_results=max(1, int(limit)),
-            include=["documents", "metadatas", "distances"],
-        )
+    def search_semantic(
+        self,
+        *,
+        query: str,
+        limit: int,
+        where: Dict[str, Any] | None = None,
+    ) -> List[Dict[str, Any]]:
+        query_kwargs = {
+            "query_texts": [str(query or "")],
+            "n_results": max(1, int(limit)),
+            "include": ["documents", "metadatas", "distances"],
+        }
+        if where:
+            query_kwargs["where"] = dict(where)
+        result = self.collection.query(**query_kwargs)
         documents = list((result.get("documents") or [[]])[0] or [])
         metadatas = list((result.get("metadatas") or [[]])[0] or [])
         distances = list((result.get("distances") or [[]])[0] or [])
@@ -137,6 +148,7 @@ class ChromaCorpusBackend:
                     "token_estimate": int(payload.get("token_estimate") or max(1, len(content) // 4)),
                     "metadata": {
                         "stable_key": str(payload.get("stable_key") or ""),
+                        "semantic_class": str(payload.get("semantic_class") or ""),
                         "document": _decode_json_object(payload.get("document_metadata_json")),
                         "section": _decode_json_object(payload.get("section_metadata_json")),
                     },

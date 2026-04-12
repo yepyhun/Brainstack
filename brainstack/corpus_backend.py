@@ -14,7 +14,13 @@ class CorpusBackend(Protocol):
 
     def publish_document(self, snapshot: Dict[str, Any]) -> None: ...
 
-    def search_semantic(self, *, query: str, limit: int) -> List[Dict[str, Any]]: ...
+    def search_semantic(
+        self,
+        *,
+        query: str,
+        limit: int,
+        where: Dict[str, Any] | None = None,
+    ) -> List[Dict[str, Any]]: ...
 
 
 def create_corpus_backend(kind: str, *, db_path: str) -> CorpusBackend | None:

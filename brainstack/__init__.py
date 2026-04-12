@@ -68,8 +68,8 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._continuity_recent_limit = int(self._config.get("continuity_recent_limit", 4))
         self._continuity_match_limit = int(self._config.get("continuity_match_limit", 4))
         self._compression_snapshot_limit = int(self._config.get("compression_snapshot_limit", 6))
-        self._transcript_match_limit = int(self._config.get("transcript_match_limit", 1))
-        self._transcript_char_budget = int(self._config.get("transcript_char_budget", 280))
+        self._transcript_match_limit = int(self._config.get("transcript_match_limit", 2))
+        self._transcript_char_budget = int(self._config.get("transcript_char_budget", 560))
         self._graph_match_limit = int(self._config.get("graph_match_limit", 6))
         self._corpus_match_limit = int(self._config.get("corpus_match_limit", 4))
         self._corpus_char_budget = int(self._config.get("corpus_char_budget", 700))
@@ -114,8 +114,8 @@ class BrainstackMemoryProvider(MemoryProvider):
             {"key": "profile_match_limit", "description": "How many profile matches to inject per turn", "default": "4"},
             {"key": "continuity_recent_limit", "description": "How many recent continuity items to inject", "default": "4"},
             {"key": "continuity_match_limit", "description": "How many query-matched continuity items to inject", "default": "4"},
-            {"key": "transcript_match_limit", "description": "How many transcript evidence lines may be injected when strongly supported", "default": "1"},
-            {"key": "transcript_char_budget", "description": "Approximate character budget for transcript evidence when it is allowed", "default": "280"},
+            {"key": "transcript_match_limit", "description": "How many transcript evidence lines may be injected when strongly supported", "default": "2"},
+            {"key": "transcript_char_budget", "description": "Approximate character budget for transcript evidence when it is allowed", "default": "560"},
             {"key": "graph_match_limit", "description": "How many graph-truth items to inject per turn", "default": "6"},
             {"key": "corpus_match_limit", "description": "How many corpus sections to consider per turn", "default": "4"},
             {"key": "corpus_char_budget", "description": "Approximate character budget for packed corpus recall", "default": "700"},
@@ -151,7 +151,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         db_path = _normalize_path(str(self._config.get("db_path", default_db)), hermes_home)
         graph_db_path = _normalize_path(str(self._config.get("graph_db_path", default_graph_db)), hermes_home)
         graph_backend = str(self._config.get("graph_backend", "kuzu") or "kuzu")
-        corpus_backend = str(self._config.get("corpus_backend", "sqlite") or "sqlite")
+        corpus_backend = str(self._config.get("corpus_backend", "chroma") or "chroma")
         corpus_db_path = _normalize_path(str(self._config.get("corpus_db_path", default_corpus_db)), hermes_home)
         self._session_id = session_id
         self._store = BrainstackStore(
@@ -188,7 +188,14 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._last_prefetch_policy = packet["policy"]
         return packet["block"]
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+    def sync_turn(
+        self,
+        user_content: str,
+        assistant_content: str,
+        *,
+        session_id: str = "",
+        event_time: str | None = None,
+    ) -> None:
         if not self._store:
             return
         sid = session_id or self._session_id
@@ -203,6 +210,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             turn_number=self._turn_counter,
             user_content=user_content,
             assistant_content=assistant_content,
+            created_at=event_time,
         )
         plan = build_turn_ingest_plan(
             user_content=user_content,

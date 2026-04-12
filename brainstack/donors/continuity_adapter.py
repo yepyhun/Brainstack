@@ -12,6 +12,7 @@ def write_turn_records(
     turn_number: int,
     user_content: str,
     assistant_content: str,
+    created_at: str | None = None,
 ) -> None:
     store.add_continuity_event(
         session_id=session_id,
@@ -19,6 +20,7 @@ def write_turn_records(
         kind="turn",
         content=build_turn_summary(user_content, assistant_content),
         source="sync_turn",
+        created_at=created_at,
     )
     store.add_transcript_entry(
         session_id=session_id,
@@ -26,6 +28,7 @@ def write_turn_records(
         kind="turn",
         content=format_turn_content(user_content, assistant_content),
         source="sync_turn",
+        created_at=created_at,
     )
 
 
@@ -39,6 +42,7 @@ def write_snapshot_records(
     kind: str,
     source: str,
     max_items: int,
+    created_at: str | None = None,
 ) -> str:
     summary = build_transcript_snapshot(messages, label=label, max_items=max_items)
     if not summary:
@@ -49,6 +53,7 @@ def write_snapshot_records(
         kind=kind,
         content=summary,
         source=source,
+        created_at=created_at,
     )
     store.add_transcript_entry(
         session_id=session_id,
@@ -56,5 +61,6 @@ def write_snapshot_records(
         kind=kind,
         content=summary,
         source=source,
+        created_at=created_at,
     )
     return summary

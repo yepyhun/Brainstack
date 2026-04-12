@@ -154,6 +154,8 @@ def _build_config(home: Path) -> Dict[str, Any]:
         "plugins": {
             "brainstack": {
                 "db_path": str(home / "brainstack" / "brainstack.db"),
+                "graph_backend": "kuzu",
+                "corpus_backend": "chroma",
                 "tier2_timeout_seconds": 60,
                 "tier2_max_tokens": 400,
             }
@@ -226,14 +228,19 @@ def _seed_brainstack_kernel(
     messages: List[Dict[str, Any]] = []
     try:
         benchmark_session_id = f"longmemeval:{entry.get('question_id')}:seed"
-        for idx, upstream_session_id, _session_date, session in _iter_entry_sessions(entry, oracle_only=oracle_only):
+        for idx, upstream_session_id, session_date, session in _iter_entry_sessions(entry, oracle_only=oracle_only):
             total_sessions += 1
             for user_message, assistant_response in _iter_session_exchange_pairs(session):
                 if user_message:
                     messages.append({"role": "user", "content": user_message})
                 if assistant_response:
                     messages.append({"role": "assistant", "content": assistant_response})
-                provider.sync_turn(user_message, assistant_response, session_id=benchmark_session_id)
+                provider.sync_turn(
+                    user_message,
+                    assistant_response,
+                    session_id=benchmark_session_id,
+                    event_time=session_date or None,
+                )
                 total_turns += 1
         if total_turns and hasattr(provider, "_run_tier2_batch"):
             provider._run_tier2_batch(

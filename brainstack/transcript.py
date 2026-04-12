@@ -104,4 +104,9 @@ def count_overlap(query: str, content: str) -> int:
 
 
 def has_meaningful_transcript_evidence(query: str, rows: Iterable[Dict[str, Any]]) -> bool:
-    return any(int(row.get("overlap_count", 0)) > 0 for row in rows)
+    for row in rows:
+        if int(row.get("overlap_count", 0)) > 0:
+            return True
+        if str(row.get("match_mode") or "").strip() == "semantic" and float(row.get("semantic_score") or 0.0) > 0.0:
+            return True
+    return False

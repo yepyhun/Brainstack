@@ -57,23 +57,6 @@ def _extract_graph_candidates(text: str) -> List[Dict[str, Any]]:
                 }
             )
 
-        role_match = re.search(
-            r"(?P<subject>[A-Z][A-Za-z0-9_ /-]{1,60}?)\s+is\s+an?\s+(?P<value>[A-Za-z][A-Za-z0-9_ /-]{1,80})",
-            cleaned,
-        )
-        if role_match:
-            value = _clean_value(role_match.group("value"))
-            if value.lower() not in STATUS_WORDS:
-                candidates.append(
-                    {
-                        "kind": "state",
-                        "subject": _clean_value(role_match.group("subject")),
-                        "attribute": "role",
-                        "value": value,
-                        "supersede": _should_supersede(cleaned),
-                    }
-                )
-
         status_match = re.search(
             r"(?P<subject>[A-Z][A-Za-z0-9_ /-]{1,60}?)\s+is\s+(?P<value>active|paused|archived|completed|retired|pending)(?:\s+now|\s+currently)?",
             cleaned,

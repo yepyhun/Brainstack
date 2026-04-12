@@ -506,31 +506,53 @@ class BrainstackStore:
         ]
         for document_id in document_ids:
             self._publish_corpus_document(document_id)
+        transcript_ids = [
+            int(row["id"])
+            for row in self.conn.execute(
+                "SELECT id FROM transcript_entries ORDER BY created_at ASC, id ASC"
+            ).fetchall()
+        ]
+        for transcript_id in transcript_ids:
+            self._publish_conversation_transcript(transcript_id, raise_on_error=False)
 
     def _replay_corpus_publications_if_needed(self) -> None:
         if self._corpus_backend is None:
             return
         pending = self.conn.execute(
             """
-            SELECT object_key
+            SELECT object_kind, object_key
             FROM publish_journal
-            WHERE target_name = ? AND object_kind = 'corpus_document' AND status IN ('pending', 'failed')
+            WHERE target_name = ? AND object_kind IN ('corpus_document', 'conversation_transcript') AND status IN ('pending', 'failed')
             ORDER BY updated_at ASC, id ASC
             """,
             (self._corpus_backend.target_name,),
         ).fetchall()
-        seen: set[str] = set()
+        seen: set[tuple[str, str]] = set()
         for row in pending:
-            stable_key = str(row["object_key"] or "").strip()
-            if not stable_key or stable_key in seen:
+            object_kind = str(row["object_kind"] or "").strip()
+            object_key = str(row["object_key"] or "").strip()
+            composite = (object_kind, object_key)
+            if not object_kind or not object_key or composite in seen:
                 continue
-            seen.add(stable_key)
-            document = self.conn.execute(
-                "SELECT id FROM corpus_documents WHERE stable_key = ? AND active = 1",
-                (stable_key,),
-            ).fetchone()
-            if document:
-                self._publish_corpus_document(int(document["id"]))
+            seen.add(composite)
+            if object_kind == "corpus_document":
+                document = self.conn.execute(
+                    "SELECT id FROM corpus_documents WHERE stable_key = ? AND active = 1",
+                    (object_key,),
+                ).fetchone()
+                if document:
+                    self._publish_corpus_document(int(document["id"]))
+                continue
+            if object_kind == "conversation_transcript":
+                transcript_id = self._parse_conversation_object_key(object_key)
+                if transcript_id is None:
+                    continue
+                transcript_row = self.conn.execute(
+                    "SELECT id FROM transcript_entries WHERE id = ?",
+                    (transcript_id,),
+                ).fetchone()
+                if transcript_row:
+                    self._publish_conversation_transcript(transcript_id, raise_on_error=False)
 
     def _upsert_publish_journal(
         self,
@@ -595,6 +617,130 @@ class BrainstackStore:
                 ),
             )
         self.conn.commit()
+
+    def _conversation_semantic_object_key(self, transcript_id: int) -> str:
+        return f"transcript:{int(transcript_id)}"
+
+    def _parse_conversation_object_key(self, object_key: str) -> int | None:
+        text = str(object_key or "").strip()
+        if not text.startswith("transcript:"):
+            return None
+        try:
+            return int(text.split(":", 1)[1])
+        except (TypeError, ValueError):
+            return None
+
+    def _conversation_transcript_snapshot(self, transcript_id: int) -> Dict[str, Any]:
+        row = self.conn.execute(
+            """
+            SELECT id, session_id, turn_number, kind, content, source, metadata_json, created_at
+            FROM transcript_entries
+            WHERE id = ?
+            """,
+            (transcript_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"Transcript entry {transcript_id} is missing")
+        item = _row_to_dict(row)
+        metadata = dict(item.get("metadata") or {})
+        stable_key = (
+            f"conversation:{item['session_id']}:{int(item.get('turn_number') or 0)}:{int(item['id'])}"
+        )
+        document = {
+            "id": int(item["id"]),
+            "stable_key": stable_key,
+            "title": f"Conversation turn {int(item.get('turn_number') or 0)}",
+            "doc_kind": "conversation",
+            "source": str(item.get("source") or ""),
+            "updated_at": str(item.get("created_at") or ""),
+            "semantic_class": "conversation",
+            "metadata": {
+                **metadata,
+                "semantic_class": "conversation",
+                "session_id": str(item.get("session_id") or ""),
+                "turn_number": int(item.get("turn_number") or 0),
+                "record_kind": str(item.get("kind") or "turn"),
+                "transcript_id": int(item["id"]),
+                "created_at": str(item.get("created_at") or ""),
+            },
+        }
+        sections = [
+            {
+                "section_id": int(item["id"]),
+                "section_index": 0,
+                "heading": str(item.get("kind") or "turn"),
+                "content": str(item.get("content") or ""),
+                "token_estimate": max(1, len(str(item.get("content") or "")) // 4),
+                "metadata": {
+                    **metadata,
+                    "semantic_class": "conversation",
+                    "session_id": str(item.get("session_id") or ""),
+                    "turn_number": int(item.get("turn_number") or 0),
+                    "record_kind": str(item.get("kind") or "turn"),
+                    "transcript_id": int(item["id"]),
+                    "created_at": str(item.get("created_at") or ""),
+                },
+            }
+        ]
+        return {"document": document, "sections": sections}
+
+    def _publish_semantic_snapshot(
+        self,
+        *,
+        object_kind: str,
+        object_key: str,
+        snapshot: Dict[str, Any],
+        raise_on_error: bool,
+    ) -> None:
+        if self._corpus_backend is None:
+            return
+        target_name = self._corpus_backend.target_name
+        self._upsert_publish_journal(
+            target_name=target_name,
+            object_kind=object_kind,
+            object_key=object_key,
+            payload=snapshot,
+            status="pending",
+        )
+        try:
+            self._corpus_backend.publish_document(snapshot)
+        except Exception as exc:
+            self._corpus_backend_error = str(exc)
+            self._upsert_publish_journal(
+                target_name=target_name,
+                object_kind=object_kind,
+                object_key=object_key,
+                payload=snapshot,
+                status="failed",
+                last_error=self._corpus_backend_error,
+            )
+            if raise_on_error:
+                raise
+            logger.warning(
+                "Brainstack semantic publication failed for %s %s: %s",
+                object_kind,
+                object_key,
+                exc,
+            )
+            return
+        self._corpus_backend_error = ""
+        self._upsert_publish_journal(
+            target_name=target_name,
+            object_kind=object_kind,
+            object_key=object_key,
+            payload=snapshot,
+            status="published",
+            published=True,
+        )
+
+    def _publish_conversation_transcript(self, transcript_id: int, *, raise_on_error: bool) -> None:
+        snapshot = self._conversation_transcript_snapshot(transcript_id)
+        self._publish_semantic_snapshot(
+            object_kind="conversation_transcript",
+            object_key=self._conversation_semantic_object_key(transcript_id),
+            snapshot=snapshot,
+            raise_on_error=raise_on_error,
+        )
 
     @_locked
     def list_publish_journal(self, *, target_name: str | None = None, status: str | None = None, limit: int = 100) -> List[Dict[str, Any]]:
@@ -841,35 +987,11 @@ class BrainstackStore:
         object_key = str(document.get("stable_key") or "").strip()
         if not object_key:
             raise RuntimeError(f"Corpus snapshot missing stable_key for document {document_id}")
-        target_name = self._corpus_backend.target_name
-        self._upsert_publish_journal(
-            target_name=target_name,
+        self._publish_semantic_snapshot(
             object_kind="corpus_document",
             object_key=object_key,
-            payload=snapshot,
-            status="pending",
-        )
-        try:
-            self._corpus_backend.publish_document(snapshot)
-        except Exception as exc:
-            self._corpus_backend_error = str(exc)
-            self._upsert_publish_journal(
-                target_name=target_name,
-                object_kind="corpus_document",
-                object_key=object_key,
-                payload=snapshot,
-                status="failed",
-                last_error=self._corpus_backend_error,
-            )
-            raise
-        self._corpus_backend_error = ""
-        self._upsert_publish_journal(
-            target_name=target_name,
-            object_kind="corpus_document",
-            object_key=object_key,
-            payload=snapshot,
-            status="published",
-            published=True,
+            snapshot=snapshot,
+            raise_on_error=True,
         )
 
     @_locked
@@ -882,8 +1004,12 @@ class BrainstackStore:
         content: str,
         source: str,
         metadata: Dict[str, Any] | None = None,
+        created_at: str | None = None,
     ) -> int:
-        now = utc_now_iso()
+        now = str(created_at or "").strip() or utc_now_iso()
+        if created_at:
+            metadata = dict(metadata or {})
+            metadata.setdefault("observed_at", now)
         normalized_metadata = _normalize_record_metadata(metadata, source=source)
         normalized_metadata.setdefault("source_kind", "explicit")
         normalized_metadata.setdefault("graph_kind", "relation")
@@ -922,8 +1048,12 @@ class BrainstackStore:
         content: str,
         source: str,
         metadata: Dict[str, Any] | None = None,
+        created_at: str | None = None,
     ) -> int:
-        now = utc_now_iso()
+        now = str(created_at or "").strip() or utc_now_iso()
+        if created_at:
+            metadata = dict(metadata or {})
+            metadata.setdefault("observed_at", now)
         normalized_metadata = _normalize_record_metadata(metadata, source=source)
         normalized_metadata.setdefault("source_kind", "explicit")
         normalized_metadata.setdefault("graph_kind", "relation")
@@ -949,6 +1079,8 @@ class BrainstackStore:
             (row_id, content, session_id, kind),
         )
         self.conn.commit()
+        if self._corpus_backend is not None:
+            self._publish_conversation_transcript(row_id, raise_on_error=False)
         return row_id
 
     @_locked
@@ -1430,8 +1562,23 @@ class BrainstackStore:
     def search_corpus_semantic(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
         if self._corpus_backend is None:
             return []
+        return self._search_semantic_backend(
+            query=query,
+            limit=limit,
+            where={"semantic_class": "corpus"},
+        )
+
+    def _search_semantic_backend(
+        self,
+        *,
+        query: str,
+        limit: int,
+        where: Dict[str, Any] | None = None,
+    ) -> List[Dict[str, Any]]:
+        if self._corpus_backend is None:
+            return []
         try:
-            rows = self._corpus_backend.search_semantic(query=query, limit=limit)
+            rows = self._corpus_backend.search_semantic(query=query, limit=limit, where=where)
         except Exception as exc:
             self._corpus_backend_error = str(exc)
             logger.warning("Brainstack corpus semantic search failed: %s", exc)
@@ -1440,20 +1587,66 @@ class BrainstackStore:
         return rows
 
     @_locked
+    def search_conversation_semantic(self, *, query: str, session_id: str, limit: int) -> List[Dict[str, Any]]:
+        rows = self._search_semantic_backend(
+            query=query,
+            limit=max(limit * 4, 8),
+            where={"semantic_class": "conversation"},
+        )
+        output: List[Dict[str, Any]] = []
+        for row in rows:
+            metadata = dict(row.get("metadata") or {})
+            document_meta = dict(metadata.get("document") or {})
+            transcript_id = int(document_meta.get("transcript_id") or row.get("section_id") or 0)
+            if transcript_id <= 0:
+                continue
+            created_at = str(document_meta.get("created_at") or "")
+            item = {
+                "id": transcript_id,
+                "session_id": str(document_meta.get("session_id") or ""),
+                "turn_number": int(document_meta.get("turn_number") or 0),
+                "kind": str(document_meta.get("record_kind") or "turn"),
+                "content": str(row.get("content") or ""),
+                "source": str(row.get("source") or ""),
+                "metadata": {
+                    **metadata,
+                    "semantic_class": "conversation",
+                    "transcript_id": transcript_id,
+                },
+                "created_at": created_at,
+                "same_session": str(document_meta.get("session_id") or "") == session_id,
+                "semantic_score": float(row.get("semantic_score") or 0.0),
+                "retrieval_source": "conversation.semantic",
+                "match_mode": "semantic",
+            }
+            output.append(item)
+        output.sort(
+            key=lambda item: (
+                1 if item["same_session"] else 0,
+                float(item.get("semantic_score") or 0.0),
+                str(item.get("created_at") or ""),
+                int(item.get("turn_number") or 0),
+                int(item.get("id") or 0),
+            ),
+            reverse=True,
+        )
+        return output[:limit]
+
+    @_locked
     def corpus_semantic_channel_status(self) -> Dict[str, str]:
         if self._corpus_backend is None:
             return {
                 "status": "degraded",
-                "reason": "Corpus semantic retrieval is disabled until a donor-aligned corpus backend is configured.",
+                "reason": "Semantic retrieval is disabled until a donor-aligned corpus backend is configured.",
             }
         if self._corpus_backend_error:
             return {
                 "status": "degraded",
-                "reason": f"Corpus semantic retrieval backend is unhealthy: {self._corpus_backend_error}",
+                "reason": f"Semantic retrieval backend is unhealthy: {self._corpus_backend_error}",
             }
         return {
             "status": "active",
-            "reason": f"Semantic corpus retrieval is served by {self._corpus_backend.target_name}.",
+            "reason": f"Semantic retrieval is served by {self._corpus_backend.target_name}.",
         }
 
     @_locked

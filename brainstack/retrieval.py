@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, Iterable, List
 
 from .db import BrainstackStore
@@ -39,6 +40,31 @@ COMMUNICATION_GRAPH_SUBJECTS = {
 
 def _normalize_compare_text(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().split())
+
+
+def _row_metadata(row: Dict[str, Any]) -> Dict[str, Any]:
+    payload = row.get("metadata")
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _row_temporal_label(row: Dict[str, Any]) -> str:
+    metadata = _row_metadata(row)
+    temporal = metadata.get("temporal") if isinstance(metadata.get("temporal"), dict) else {}
+    raw = (
+        str(temporal.get("observed_at") or "").strip()
+        or str(row.get("created_at") or "").strip()
+        or str(row.get("happened_at") or "").strip()
+    )
+    if not raw:
+        return ""
+    try:
+        label = datetime.fromisoformat(raw.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        label = raw.split("T", 1)[0] if "T" in raw else raw[:10]
+    turn_number = int(row.get("turn_number") or 0)
+    if turn_number > 0:
+        return f"{label} | turn {turn_number}"
+    return label
 
 
 def _is_current_communication_state(row: Dict[str, Any]) -> bool:
@@ -92,7 +118,9 @@ def _render_contract_section(title: str, lines: Iterable[str]) -> str:
     preface = (
         "Apply these rules silently in every reply. Do not mention this contract, "
         "memory blocks, or internal memory state unless the user explicitly asks "
-        "about memory behavior or debugging."
+        "about memory behavior or debugging. When recalled memory provides a "
+        "specific, non-conflicted fact such as a name, number, date, or "
+        "preference, prefer it over generic prior knowledge."
     )
     return f"{title}\n{preface}\n{_render_items(rows)}"
 
@@ -240,7 +268,7 @@ def _pack_corpus_rows(rows: Iterable[dict], *, char_budget: int, provenance_mode
             continue
 
         remaining = budget - sum(len(item) for item in packed)
-        snippet_cap = max(120, min(220, remaining - len(label) - 24))
+        snippet_cap = max(140, min(360, remaining - len(label) - 24))
         line = f"[{row['doc_kind']}] {label}: {_trim(content, snippet_cap)}"
         line = _with_provenance(line, source=str(row.get("source", "")), provenance_mode=provenance_mode)
         if packed and remaining < len(line):
@@ -254,8 +282,39 @@ def _pack_corpus_rows(rows: Iterable[dict], *, char_budget: int, provenance_mode
     return packed
 
 
+def _pack_continuity_rows(rows: Iterable[dict], *, char_budget: int, provenance_mode: str) -> List[str]:
+    budget = max(220, int(char_budget))
+    packed: List[str] = []
+    seen = set()
+    for row in rows:
+        row_key = (str(row.get("session_id") or ""), int(row.get("id") or 0))
+        if row_key in seen:
+            continue
+        seen.add(row_key)
+
+        remaining = budget - sum(len(item) for item in packed)
+        if packed and remaining < 120:
+            break
+
+        temporal_label = _row_temporal_label(row)
+        evidence_label = str(row.get("kind") or "turn")
+        prefix = f"[{temporal_label} | {evidence_label}]" if temporal_label else f"[{evidence_label}]"
+        snippet_cap = max(180, min(420, remaining - len(prefix) - 24))
+        line = f"{prefix} {_trim(str(row.get('content') or ''), snippet_cap)}"
+        line = _with_provenance(
+            line,
+            source=str(row.get("source", "")),
+            provenance_mode=provenance_mode,
+            metadata=row.get("metadata"),
+        )
+        packed.append(line if len(line) <= remaining else _trim(line, remaining))
+        if sum(len(item) for item in packed) >= budget:
+            break
+    return packed
+
+
 def _pack_transcript_rows(rows: Iterable[dict], *, char_budget: int, provenance_mode: str) -> List[str]:
-    budget = max(160, int(char_budget))
+    budget = max(240, int(char_budget))
     packed: List[str] = []
     seen = set()
     for row in rows:
@@ -265,10 +324,14 @@ def _pack_transcript_rows(rows: Iterable[dict], *, char_budget: int, provenance_
         seen.add(row_key)
 
         remaining = budget - sum(len(item) for item in packed)
-        if packed and remaining < 80:
+        if packed and remaining < 120:
             break
 
-        label = f"[{row['kind']}] {_trim(row['content'], max_len=max(100, min(220, remaining - 24)))}"
+        temporal_label = _row_temporal_label(row)
+        evidence_label = str(row.get("kind") or "turn")
+        prefix = f"[{temporal_label} | {evidence_label}]" if temporal_label else f"[{evidence_label}]"
+        snippet_cap = max(220, min(520, remaining - len(prefix) - 24))
+        label = f"{prefix} {_trim(str(row.get('content') or ''), max_len=snippet_cap)}"
         extra = ""
         if row.get("same_session"):
             extra = "same_session"
@@ -369,27 +432,19 @@ def render_working_memory_block(
         sections.append("## Brainstack Profile Match\n" + _render_items(lines))
 
     if matched:
-        lines = [
-            _with_provenance(
-                f"[{item['kind']}] {_trim(item['content'])}",
-                source=str(item.get("source", "")),
-                provenance_mode=provenance_mode,
-                metadata=item.get("metadata"),
-            )
-            for item in matched
-        ]
+        lines = _pack_continuity_rows(
+            matched,
+            char_budget=max(320, min(900, 260 * max(1, len(matched)))),
+            provenance_mode=provenance_mode,
+        )
         sections.append("## Brainstack Continuity Match\n" + _render_items(lines))
 
     if recent:
-        lines = [
-            _with_provenance(
-                f"[{item['kind']}] {_trim(item['content'])}",
-                source=str(item.get("source", "")),
-                provenance_mode=provenance_mode,
-                metadata=item.get("metadata"),
-            )
-            for item in recent
-        ]
+        lines = _pack_continuity_rows(
+            recent,
+            char_budget=max(240, min(640, 220 * max(1, len(recent)))),
+            provenance_mode=provenance_mode,
+        )
         sections.append("## Brainstack Recent Continuity\n" + _render_items(lines))
 
     packed_transcript = _pack_transcript_rows(

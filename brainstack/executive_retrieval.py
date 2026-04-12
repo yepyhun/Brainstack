@@ -289,6 +289,11 @@ def retrieve_executive_context(
         if corpus_limit > 0
         else []
     )
+    semantic_conversation_rows = (
+        store.search_conversation_semantic(query=query, session_id=session_id, limit=max(transcript_limit * 4, 8))
+        if transcript_limit > 0
+        else []
+    )
     semantic_corpus_rows = (
         store.search_corpus_semantic(query=query, limit=max(corpus_limit * 4, 8))
         if corpus_limit > 0
@@ -330,6 +335,7 @@ def retrieve_executive_context(
     _merge_channel(merged, channel_name="keyword", rows=keyword_continuity_rows, shelf="continuity_match")
     _merge_channel(merged, channel_name="keyword", rows=keyword_transcript_rows, shelf="transcript")
     _merge_channel(merged, channel_name="keyword", rows=keyword_corpus_rows, shelf="corpus")
+    _merge_channel(merged, channel_name="semantic", rows=semantic_conversation_rows, shelf="transcript")
     _merge_channel(merged, channel_name="semantic", rows=semantic_corpus_rows, shelf="corpus")
     _merge_channel(merged, channel_name="graph", rows=graph_rows, shelf="graph")
     _merge_channel(merged, channel_name="temporal", rows=recent_rows, shelf="continuity_recent")
@@ -364,7 +370,7 @@ def retrieve_executive_context(
     channels = [
         _channel_status(
             "semantic",
-            semantic_corpus_rows,
+            semantic_conversation_rows + semantic_corpus_rows,
             reason=str(semantic_status.get("reason") or ""),
             status=str(semantic_status.get("status") or "degraded"),
         ),

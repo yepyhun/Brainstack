@@ -1,8 +1,34 @@
 """Focused tests for the Brainstack transcript shelf."""
 
 from pathlib import Path
+import sys
+import types
 
-from plugins.memory.brainstack import BrainstackMemoryProvider
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+if "agent" not in sys.modules:
+    agent_module = types.ModuleType("agent")
+    agent_module.__path__ = []
+    sys.modules["agent"] = agent_module
+
+if "agent.memory_provider" not in sys.modules:
+    memory_provider_module = types.ModuleType("agent.memory_provider")
+
+    class MemoryProvider:  # pragma: no cover - import shim for source tests
+        pass
+
+    memory_provider_module.MemoryProvider = MemoryProvider
+    sys.modules["agent.memory_provider"] = memory_provider_module
+
+if "hermes_constants" not in sys.modules:
+    hermes_constants = types.ModuleType("hermes_constants")
+    hermes_constants.get_hermes_home = lambda: REPO_ROOT
+    sys.modules["hermes_constants"] = hermes_constants
+
+from brainstack import BrainstackMemoryProvider
 
 
 def _make_provider(tmp_path, session_id: str, **config):
@@ -78,6 +104,35 @@ class TestBrainstackTranscriptShelf:
             assert "Nora" in block
             assert len(block) < 1400
             assert provider._last_prefetch_policy["transcript_limit"] == 1
+        finally:
+            provider.shutdown()
+
+    def test_prefetch_keeps_event_date_and_specific_tail_detail_when_transcript_is_rendered(self, tmp_path):
+        provider = _make_provider(
+            tmp_path,
+            "session-transcript-dates",
+            continuity_match_limit=1,
+            continuity_recent_limit=0,
+            transcript_match_limit=2,
+            transcript_char_budget=560,
+            corpus_backend="sqlite",
+        )
+        try:
+            provider.sync_turn(
+                "I recently bought an eyeshadow palette at Sephora and earned 50 points, bringing my total to exactly 100 points.",
+                "Saved.",
+                session_id="session-transcript-dates",
+                event_time="2024-04-02T00:00:00+00:00",
+            )
+
+            block = provider.prefetch(
+                "How many Sephora points do I have now?",
+                session_id="session-transcript-dates",
+            )
+
+            assert "## Brainstack Transcript Evidence" in block
+            assert "2024-04-02" in block
+            assert "100 points" in block
         finally:
             provider.shutdown()
 
