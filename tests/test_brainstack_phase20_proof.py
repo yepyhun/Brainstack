@@ -143,7 +143,7 @@ def test_stream_a_can_isolate_l1_smartening_without_graph_or_corpus(monkeypatch,
             corpus_limit=0,
         )
         assert "## Brainstack Evidence Priority" in packet["block"]
-        assert "prefer it over assistant suggestions or generic prior knowledge" in packet["block"]
+        assert "treat it as authoritative over assistant suggestions or generic prior knowledge" in packet["block"]
         assert "## Brainstack Active Communication Contract" not in packet["block"]
         assert "## Brainstack Continuity Match" in packet["block"] or "## Brainstack Recent Continuity" in packet["block"]
         assert "Project Atlas" in packet["block"]
@@ -315,6 +315,16 @@ def test_phase20_2_exact_numeric_value_change_auto_supersedes_current_graph_stat
         assert prior["metadata"]["temporal"]["superseded_by"]
     finally:
         store.close()
+
+
+def test_phase20_2_tokenization_stays_unicode_safe_without_language_stopword_lists():
+    from brainstack.transcript import tokenize_match_text
+
+    tokens = tokenize_match_text("Mi történt a ShopRite és Ibotta eseményekkel?")
+
+    assert "shoprite" in tokens
+    assert "ibotta" in tokens
+    assert "assistant" not in tokenize_match_text("Assistant: ShopRite update")
 
 
 def test_cross_store_publish_journal_tracks_graph_and_corpus_targets(monkeypatch, tmp_path):

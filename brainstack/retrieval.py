@@ -145,7 +145,9 @@ def _render_evidence_priority_section(title: str) -> str:
     preface = (
         "Use recalled memory silently. When recalled memory provides a specific, "
         "non-conflicted user fact such as a name, number, date, or preference, "
-        "prefer it over assistant suggestions or generic prior knowledge."
+        "treat it as authoritative over assistant suggestions or generic prior "
+        "knowledge unless another recalled fact in this memory block conflicts "
+        "with it."
     )
     return f"{title}\n{preface}"
 

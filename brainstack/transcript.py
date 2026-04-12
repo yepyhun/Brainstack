@@ -4,39 +4,13 @@ import re
 from typing import Any, Dict, Iterable, List, Set
 
 
-STOPWORDS = {
-    "a",
-    "an",
-    "and",
-    "are",
-    "az",
-    "be",
-    "by",
-    "did",
-    "do",
-    "for",
-    "from",
-    "how",
-    "i",
-    "is",
-    "it",
-    "mi",
-    "mit",
-    "of",
-    "on",
-    "or",
-    "that",
-    "the",
-    "to",
-    "van",
-    "volt",
-    "was",
-    "we",
-    "what",
-    "when",
-    "who",
-    "why",
+STRUCTURAL_TOKENS = {
+    "assistant",
+    "system",
+    "tool",
+    "user",
 }
+TOKEN_RE = re.compile(r"[^\W_]+(?:[-_][^\W_]+)*", re.UNICODE)
 
 ROLE_PREFIX_RE = re.compile(r"^\s*(user|assistant|system|tool)\s*:\s*", re.IGNORECASE)
 
@@ -113,11 +87,11 @@ def looks_like_role_transcript_dump(text: str) -> bool:
 
 
 def tokenize_match_text(text: str) -> List[str]:
-    tokens = re.findall(r"[A-Za-z0-9ÁÉÍÓÖŐÚÜŰáéíóöőúüű_-]+", str(text or "").lower())
+    tokens = TOKEN_RE.findall(str(text or "").casefold())
     seen: Set[str] = set()
     cleaned: List[str] = []
     for token in tokens:
-        if len(token) < 3 or token in STOPWORDS or token in seen:
+        if len(token) < 3 or token in STRUCTURAL_TOKENS or token in seen:
             continue
         seen.add(token)
         cleaned.append(token)

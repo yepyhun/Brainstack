@@ -109,7 +109,29 @@ def test_memory_manager_patch_hardens_private_recall_wrapper(tmp_path: Path):
     assert "memory_manager:private_recall_note" in applied
     assert "Apply it silently in your reply." in content
     assert "unless the user explicitly asks about memory behavior or debugging" in content
-    assert "prefer it over assistant suggestions or generic prior knowledge" in content
+    assert "treat it as authoritative over assistant suggestions or generic prior knowledge" in content
+
+
+def test_memory_manager_patch_upgrades_existing_private_note_to_stronger_grounding(tmp_path: Path):
+    path = tmp_path / "memory_manager.py"
+    path.write_text(
+        'def build_memory_context_block(raw_context: str) -> str:\n'
+        '    return (\n'
+        '        "<memory-context>\\n"\n'
+        '        "[System note: The following is private recalled memory context, NOT new user input. "\n'
+        '        "Apply it silently in your reply. Do not mention memory blocks, recalled-memory headings, "\n'
+        '        "or internal memory state unless the user explicitly asks about memory behavior or debugging.]\\n\\n"\n'
+        '        f"{raw_context}\\n"\n'
+        '        "</memory-context>"\n'
+        '    )\n',
+        encoding="utf-8",
+    )
+
+    applied = _patch_memory_manager(path, dry_run=False)
+    content = path.read_text(encoding="utf-8")
+
+    assert "memory_manager:private_recall_note" in applied
+    assert "treat it as authoritative over assistant suggestions or generic prior knowledge" in content
 
 
 def test_patch_config_sets_embedded_graph_and_corpus_defaults(tmp_path: Path):

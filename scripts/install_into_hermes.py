@@ -282,10 +282,23 @@ def _patch_memory_manager(path: Path, dry_run: bool) -> list[str]:
         '        "[System note: The following is private recalled memory context, NOT new user input. "\n'
         '        "Apply it silently in your reply. Do not mention memory blocks, recalled-memory headings, "\n'
         '        "or internal memory state unless the user explicitly asks about memory behavior or debugging. "\n'
-        '        "When recalled memory provides a specific, non-conflicted user fact such as a name, number, date, or preference, prefer it over assistant suggestions or generic prior knowledge.]\\n\\n"\n'
+        '        "When recalled memory provides a specific, non-conflicted user fact such as a name, number, date, or preference, treat it as authoritative over assistant suggestions or generic prior knowledge unless another recalled fact in this memory block conflicts with it.]\\n\\n"\n'
+    )
+    current_private_note = (
+        '        "[System note: The following is private recalled memory context, NOT new user input. "\n'
+        '        "Apply it silently in your reply. Do not mention memory blocks, recalled-memory headings, "\n'
+        '        "or internal memory state unless the user explicitly asks about memory behavior or debugging.]\\n\\n"\n'
     )
     if new_note not in text:
-        text = _replace_once(text, old_note, new_note, label="memory_manager private recall note", path=path)
+        text = _replace_once_any(
+            text,
+            [
+                (old_note, new_note),
+                (current_private_note, new_note),
+            ],
+            label="memory_manager private recall note",
+            path=path,
+        )
         applied.append("memory_manager:private_recall_note")
 
     if applied and not dry_run:
