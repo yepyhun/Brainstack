@@ -89,6 +89,8 @@ brainstack/
   __init__.py
   control_plane.py
   db.py
+  graph_backend.py
+  graph_backend_kuzu.py
   extraction_pipeline.py
   transcript.py
   graph.py
@@ -170,6 +172,8 @@ What the installer does:
   - `memory.provider: brainstack`
   - `memory.memory_enabled: false`
   - `memory.user_profile_enabled: false`
+  - `plugins.brainstack.graph_backend: kuzu`
+  - `plugins.brainstack.graph_db_path: $HERMES_HOME/brainstack/brainstack.kuzu`
 - writes a sanitized `.brainstack-install-manifest.json`
 - runs doctor checks if requested
 - supports both `docker` and `local` runtime modes through the same installer

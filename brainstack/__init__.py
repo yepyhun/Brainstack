@@ -102,8 +102,11 @@ class BrainstackMemoryProvider(MemoryProvider):
         from hermes_constants import display_hermes_home
 
         default_db = f"{display_hermes_home()}/brainstack/brainstack.db"
+        default_graph_db = f"{display_hermes_home()}/brainstack/brainstack.kuzu"
         return [
             {"key": "db_path", "description": "SQLite database path", "default": default_db},
+            {"key": "graph_backend", "description": "Active graph backend (kuzu recommended)", "default": "kuzu"},
+            {"key": "graph_db_path", "description": "Embedded graph database path", "default": default_graph_db},
             {"key": "profile_prompt_limit", "description": "How many stable profile items to keep always-on", "default": "6"},
             {"key": "profile_match_limit", "description": "How many profile matches to inject per turn", "default": "4"},
             {"key": "continuity_recent_limit", "description": "How many recent continuity items to inject", "default": "4"},
@@ -140,9 +143,12 @@ class BrainstackMemoryProvider(MemoryProvider):
     def initialize(self, session_id: str, **kwargs) -> None:
         hermes_home = str(kwargs.get("hermes_home") or "")
         default_db = f"{hermes_home}/brainstack/brainstack.db" if hermes_home else "brainstack.db"
+        default_graph_db = f"{hermes_home}/brainstack/brainstack.kuzu" if hermes_home else "brainstack.kuzu"
         db_path = _normalize_path(str(self._config.get("db_path", default_db)), hermes_home)
+        graph_db_path = _normalize_path(str(self._config.get("graph_db_path", default_graph_db)), hermes_home)
+        graph_backend = str(self._config.get("graph_backend", "kuzu") or "kuzu")
         self._session_id = session_id
-        self._store = BrainstackStore(db_path)
+        self._store = BrainstackStore(db_path, graph_backend=graph_backend, graph_db_path=graph_db_path)
         self._store.open()
 
     def system_prompt_block(self) -> str:

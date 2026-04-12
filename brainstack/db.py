@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from functools import wraps
 import json
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, TypeVar
 
+from .graph_backend import create_graph_backend
 from .provenance import merge_provenance, normalize_provenance
 from .temporal import merge_temporal, normalize_temporal_fields, record_is_effective_at
 from .transcript import count_overlap, tokenize_match_text
@@ -21,16 +23,29 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _query_tokens(query: str, *, limit: int) -> List[str]:
+    seen: set[str] = set()
+    output: List[str] = []
+    for token in re.findall(r"[^\W_]+", str(query or "").lower(), flags=re.UNICODE):
+        cleaned = token.strip()
+        if len(cleaned) < 2 or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        output.append(cleaned)
+        if len(output) >= limit:
+            break
+    return output
+
+
 def build_fts_query(query: str) -> str:
-    tokens = [token.strip() for token in query.replace('"', " ").split() if token.strip()]
+    tokens = _query_tokens(query, limit=12)
     if not tokens:
         return ""
-    return " OR ".join(f'"{token}"' for token in tokens[:8])
+    return " OR ".join(f'"{token}"' for token in tokens)
 
 
 def build_like_tokens(query: str, *, limit: int = 8) -> List[str]:
-    tokens = [token.strip().lower() for token in query.replace('"', " ").split() if token.strip()]
-    return [f"%{token}%" for token in tokens[:limit]]
+    return [f"%{token}%" for token in _query_tokens(query, limit=limit)]
 
 
 def _decode_json_object(value: Any) -> Dict[str, Any]:
@@ -189,9 +204,19 @@ def _locked(method: F) -> F:
 
 
 class BrainstackStore:
-    def __init__(self, db_path: str) -> None:
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        graph_backend: str = "sqlite",
+        graph_db_path: str | None = None,
+    ) -> None:
         self._db_path = str(db_path)
+        self._graph_backend_name = str(graph_backend or "sqlite").strip().lower()
+        default_graph_db = str(Path(self._db_path).with_suffix(".kuzu"))
+        self._graph_db_path = str(graph_db_path or default_graph_db)
         self._conn: sqlite3.Connection | None = None
+        self._graph_backend = None
         self._lock = threading.RLock()
 
     @property
@@ -208,9 +233,16 @@ class BrainstackStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
+        self._graph_backend = create_graph_backend(self._graph_backend_name, db_path=self._graph_db_path)
+        if self._graph_backend is not None:
+            self._graph_backend.open()
+            self._bootstrap_graph_backend_if_needed()
 
     @_locked
     def close(self) -> None:
+        if self._graph_backend is not None:
+            self._graph_backend.close()
+            self._graph_backend = None
         if self._conn is not None:
             self._conn.close()
             self._conn = None
@@ -371,6 +403,24 @@ class BrainstackStore:
             CREATE INDEX IF NOT EXISTS idx_graph_conflicts_entity
             ON graph_conflicts(entity_id, attribute, status, updated_at DESC);
 
+            CREATE TABLE IF NOT EXISTS publish_journal (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_name TEXT NOT NULL,
+                object_kind TEXT NOT NULL,
+                object_key TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                published_at TEXT,
+                UNIQUE(target_name, object_kind, object_key)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_publish_journal_target_status
+            ON publish_journal(target_name, status, updated_at DESC);
+
             CREATE TABLE IF NOT EXISTS corpus_documents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 stable_key TEXT NOT NULL UNIQUE,
@@ -413,6 +463,287 @@ class BrainstackStore:
             """
         )
         self.conn.commit()
+
+    def _bootstrap_graph_backend_if_needed(self) -> None:
+        if self._graph_backend is None or not self._graph_backend.is_empty():
+            return
+        entity_ids = [
+            int(row["id"])
+            for row in self.conn.execute("SELECT id FROM graph_entities ORDER BY id ASC").fetchall()
+        ]
+        for entity_id in entity_ids:
+            self._publish_entity_subgraph(entity_id)
+
+    def _upsert_publish_journal(
+        self,
+        *,
+        target_name: str,
+        object_kind: str,
+        object_key: str,
+        payload: Dict[str, Any],
+        status: str = "pending",
+        last_error: str = "",
+        published: bool = False,
+    ) -> None:
+        now = utc_now_iso()
+        published_at = now if published else None
+        existing = self.conn.execute(
+            """
+            SELECT id, attempt_count FROM publish_journal
+            WHERE target_name = ? AND object_kind = ? AND object_key = ?
+            """,
+            (target_name, object_kind, object_key),
+        ).fetchone()
+        payload_json = json.dumps(payload, ensure_ascii=True, sort_keys=True)
+        if existing:
+            attempt_count = int(existing["attempt_count"] or 0)
+            self.conn.execute(
+                """
+                UPDATE publish_journal
+                SET payload_json = ?, status = ?, last_error = ?, updated_at = ?, published_at = ?,
+                    attempt_count = CASE WHEN ? = 'failed' THEN ? + 1 ELSE attempt_count END
+                WHERE id = ?
+                """,
+                (
+                    payload_json,
+                    status,
+                    last_error,
+                    now,
+                    published_at,
+                    status,
+                    attempt_count,
+                    int(existing["id"]),
+                ),
+            )
+        else:
+            self.conn.execute(
+                """
+                INSERT INTO publish_journal (
+                    target_name, object_kind, object_key, payload_json, status,
+                    attempt_count, last_error, created_at, updated_at, published_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    target_name,
+                    object_kind,
+                    object_key,
+                    payload_json,
+                    status,
+                    0 if status != "failed" else 1,
+                    last_error,
+                    now,
+                    now,
+                    published_at,
+                ),
+            )
+        self.conn.commit()
+
+    @_locked
+    def list_publish_journal(self, *, target_name: str | None = None, status: str | None = None, limit: int = 100) -> List[Dict[str, Any]]:
+        where: List[str] = []
+        params: List[Any] = []
+        if target_name:
+            where.append("target_name = ?")
+            params.append(target_name)
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        where_clause = f"WHERE {' AND '.join(where)}" if where else ""
+        rows = self.conn.execute(
+            f"""
+            SELECT id, target_name, object_kind, object_key, payload_json, status,
+                   attempt_count, last_error, created_at, updated_at, published_at
+            FROM publish_journal
+            {where_clause}
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            tuple(params + [limit]),
+        ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def _entity_snapshot(self, entity_id: int) -> Dict[str, Any]:
+        entity_row = self.conn.execute(
+            """
+            SELECT id, canonical_name, normalized_name, COALESCE(updated_at, created_at) AS updated_at
+            FROM graph_entities
+            WHERE id = ?
+            """,
+            (entity_id,),
+        ).fetchone()
+        if not entity_row:
+            raise RuntimeError(f"Missing graph entity for snapshot: {entity_id}")
+        entity = dict(entity_row)
+
+        state_rows = self.conn.execute(
+            """
+            SELECT 'state' AS row_type,
+                   gs.id AS row_id,
+                   ge.canonical_name AS subject,
+                   gs.attribute AS predicate,
+                   gs.value_text AS object_value,
+                   gs.is_current AS is_current,
+                   gs.valid_from AS happened_at,
+                   gs.valid_to AS valid_to,
+                   gs.source AS source,
+                   gs.metadata_json AS metadata_json,
+                   '' AS conflict_metadata_json,
+                   '' AS conflict_source,
+                   '' AS conflict_value,
+                   1 AS active
+            FROM graph_states gs
+            JOIN graph_entities ge ON ge.id = gs.entity_id
+            WHERE gs.entity_id = ?
+            ORDER BY gs.valid_from DESC, gs.id DESC
+            """,
+            (entity_id,),
+        ).fetchall()
+        states = [_row_to_dict(row) for row in state_rows]
+
+        conflict_rows = self.conn.execute(
+            """
+            SELECT 'conflict' AS row_type,
+                   gc.id AS row_id,
+                   ge.canonical_name AS subject,
+                   gc.attribute AS predicate,
+                   gs.value_text AS object_value,
+                   1 AS is_current,
+                   gc.updated_at AS happened_at,
+                   '' AS valid_to,
+                   gs.source AS source,
+                   gs.metadata_json AS metadata_json,
+                   gc.metadata_json AS conflict_metadata_json,
+                   gc.candidate_source AS conflict_source,
+                   gc.candidate_value_text AS conflict_value,
+                   1 AS active,
+                   gc.current_state_id AS current_state_id
+            FROM graph_conflicts gc
+            JOIN graph_entities ge ON ge.id = gc.entity_id
+            JOIN graph_states gs ON gs.id = gc.current_state_id
+            WHERE gc.entity_id = ? AND gc.status = 'open'
+            ORDER BY gc.updated_at DESC, gc.id DESC
+            """,
+            (entity_id,),
+        ).fetchall()
+        conflicts = [_row_to_dict(row) for row in conflict_rows]
+
+        relation_rows = self.conn.execute(
+            """
+            SELECT 'relation' AS row_type,
+                   gr.id AS row_id,
+                   ge.canonical_name AS subject,
+                   gr.predicate AS predicate,
+                   COALESCE(go.canonical_name, gr.object_text, '') AS object_value,
+                   1 AS is_current,
+                   gr.created_at AS happened_at,
+                   '' AS valid_to,
+                   gr.source AS source,
+                   gr.metadata_json AS metadata_json,
+                   '' AS conflict_metadata_json,
+                   '' AS conflict_source,
+                   '' AS conflict_value,
+                   gr.active AS active,
+                   go.id AS object_entity_id,
+                   go.canonical_name AS object_canonical_name,
+                   go.normalized_name AS object_normalized_name
+            FROM graph_relations gr
+            JOIN graph_entities ge ON ge.id = gr.subject_entity_id
+            LEFT JOIN graph_entities go ON go.id = gr.object_entity_id
+            WHERE gr.subject_entity_id = ?
+            ORDER BY gr.created_at DESC, gr.id DESC
+            """,
+            (entity_id,),
+        ).fetchall()
+        relations = []
+        for row in relation_rows:
+            item = _row_to_dict(row)
+            item["object_entity"] = {
+                "id": int(item.pop("object_entity_id") or 0),
+                "canonical_name": str(item.pop("object_canonical_name") or item.get("object_value") or ""),
+                "normalized_name": str(item.pop("object_normalized_name") or ""),
+                "updated_at": "",
+            }
+            relations.append(item)
+
+        inferred_rows = self.conn.execute(
+            """
+            SELECT 'inferred_relation' AS row_type,
+                   gir.id AS row_id,
+                   ge.canonical_name AS subject,
+                   gir.predicate AS predicate,
+                   COALESCE(go.canonical_name, gir.object_text, '') AS object_value,
+                   1 AS is_current,
+                   gir.updated_at AS happened_at,
+                   '' AS valid_to,
+                   gir.source AS source,
+                   gir.metadata_json AS metadata_json,
+                   '' AS conflict_metadata_json,
+                   '' AS conflict_source,
+                   '' AS conflict_value,
+                   gir.active AS active,
+                   go.id AS object_entity_id,
+                   go.canonical_name AS object_canonical_name,
+                   go.normalized_name AS object_normalized_name
+            FROM graph_inferred_relations gir
+            JOIN graph_entities ge ON ge.id = gir.subject_entity_id
+            LEFT JOIN graph_entities go ON go.id = gir.object_entity_id
+            WHERE gir.subject_entity_id = ?
+            ORDER BY gir.updated_at DESC, gir.id DESC
+            """,
+            (entity_id,),
+        ).fetchall()
+        inferred_relations = []
+        for row in inferred_rows:
+            item = _row_to_dict(row)
+            item["object_entity"] = {
+                "id": int(item.pop("object_entity_id") or 0),
+                "canonical_name": str(item.pop("object_canonical_name") or item.get("object_value") or ""),
+                "normalized_name": str(item.pop("object_normalized_name") or ""),
+                "updated_at": "",
+            }
+            inferred_relations.append(item)
+
+        return {
+            "entity": entity,
+            "states": states,
+            "conflicts": conflicts,
+            "relations": relations,
+            "inferred_relations": inferred_relations,
+        }
+
+    def _publish_entity_subgraph(self, entity_id: int) -> None:
+        if self._graph_backend is None:
+            return
+        snapshot = self._entity_snapshot(entity_id)
+        target_name = self._graph_backend.target_name
+        object_key = str(entity_id)
+        self._upsert_publish_journal(
+            target_name=target_name,
+            object_kind="entity_subgraph",
+            object_key=object_key,
+            payload=snapshot,
+            status="pending",
+        )
+        try:
+            self._graph_backend.publish_entity_subgraph(snapshot)
+        except Exception as exc:
+            self._upsert_publish_journal(
+                target_name=target_name,
+                object_kind="entity_subgraph",
+                object_key=object_key,
+                payload=snapshot,
+                status="failed",
+                last_error=str(exc),
+            )
+            raise
+        self._upsert_publish_journal(
+            target_name=target_name,
+            object_kind="entity_subgraph",
+            object_key=object_key,
+            payload=snapshot,
+            status="published",
+            published=True,
+        )
 
     @_locked
     def add_continuity_event(
@@ -1087,7 +1418,7 @@ class BrainstackStore:
         return {"status": "merged", "alias_id": alias_id, "target_id": target_id}
 
     @_locked
-    def add_graph_relation(
+    def _sqlite_add_graph_relation(
         self,
         *,
         subject_name: str,
@@ -1151,7 +1482,7 @@ class BrainstackStore:
         return int(cur.lastrowid)
 
     @_locked
-    def upsert_graph_relation(
+    def _sqlite_upsert_graph_relation(
         self,
         *,
         subject_name: str,
@@ -1215,7 +1546,7 @@ class BrainstackStore:
         return {"status": "inserted", "relation_id": int(cur.lastrowid)}
 
     @_locked
-    def upsert_graph_inferred_relation(
+    def _sqlite_upsert_graph_inferred_relation(
         self,
         *,
         subject_name: str,
@@ -1293,7 +1624,7 @@ class BrainstackStore:
         return {"status": "inserted", "relation_id": int(cur.lastrowid)}
 
     @_locked
-    def upsert_graph_state(
+    def _sqlite_upsert_graph_state(
         self,
         *,
         subject_name: str,
@@ -1488,7 +1819,7 @@ class BrainstackStore:
         return {"status": "inserted", "entity_id": entity["id"], "state_id": new_state_id}
 
     @_locked
-    def list_graph_conflicts(self, *, limit: int) -> List[Dict[str, Any]]:
+    def _sqlite_list_graph_conflicts(self, *, limit: int) -> List[Dict[str, Any]]:
         rows = self.conn.execute(
             """
             SELECT gc.id, ge.canonical_name AS entity_name, gc.attribute, gs.value_text AS current_value,
@@ -1525,7 +1856,7 @@ class BrainstackStore:
         return _row_to_dict(row) if row else None
 
     @_locked
-    def search_graph(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
+    def _sqlite_search_graph(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
         patterns = build_like_tokens(query)
         if not patterns:
             return []
@@ -1652,6 +1983,116 @@ class BrainstackStore:
         parsed = [item for item in parsed if _graph_sort_key(item, query=query)[0] > 0]
         parsed.sort(key=lambda item: _graph_sort_key(item, query=query), reverse=True)
         return parsed[:limit]
+
+    @_locked
+    def add_graph_relation(
+        self,
+        *,
+        subject_name: str,
+        predicate: str,
+        object_name: str,
+        source: str,
+        metadata: Dict[str, Any] | None = None,
+    ) -> int:
+        relation_id = self._sqlite_add_graph_relation(
+            subject_name=subject_name,
+            predicate=predicate,
+            object_name=object_name,
+            source=source,
+            metadata=metadata,
+        )
+        if self._graph_backend is not None:
+            subject = self.get_or_create_entity(subject_name)
+            obj = self.get_or_create_entity(object_name)
+            self._publish_entity_subgraph(int(subject["id"]))
+            self._publish_entity_subgraph(int(obj["id"]))
+        return relation_id
+
+    @_locked
+    def upsert_graph_relation(
+        self,
+        *,
+        subject_name: str,
+        predicate: str,
+        object_name: str,
+        source: str,
+        metadata: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        outcome = self._sqlite_upsert_graph_relation(
+            subject_name=subject_name,
+            predicate=predicate,
+            object_name=object_name,
+            source=source,
+            metadata=metadata,
+        )
+        if self._graph_backend is not None:
+            subject = self.get_or_create_entity(subject_name)
+            obj = self.get_or_create_entity(object_name)
+            self._publish_entity_subgraph(int(subject["id"]))
+            self._publish_entity_subgraph(int(obj["id"]))
+        return outcome
+
+    @_locked
+    def upsert_graph_inferred_relation(
+        self,
+        *,
+        subject_name: str,
+        predicate: str,
+        object_name: str,
+        source: str,
+        metadata: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        outcome = self._sqlite_upsert_graph_inferred_relation(
+            subject_name=subject_name,
+            predicate=predicate,
+            object_name=object_name,
+            source=source,
+            metadata=metadata,
+        )
+        if self._graph_backend is not None:
+            subject = self.get_or_create_entity(subject_name)
+            obj = self.get_or_create_entity(object_name)
+            self._publish_entity_subgraph(int(subject["id"]))
+            self._publish_entity_subgraph(int(obj["id"]))
+        return outcome
+
+    @_locked
+    def upsert_graph_state(
+        self,
+        *,
+        subject_name: str,
+        attribute: str,
+        value_text: str,
+        source: str,
+        supersede: bool = False,
+        metadata: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        outcome = self._sqlite_upsert_graph_state(
+            subject_name=subject_name,
+            attribute=attribute,
+            value_text=value_text,
+            source=source,
+            supersede=supersede,
+            metadata=metadata,
+        )
+        if self._graph_backend is not None and int(outcome.get("entity_id") or 0) > 0:
+            self._publish_entity_subgraph(int(outcome["entity_id"]))
+        return outcome
+
+    @_locked
+    def list_graph_conflicts(self, *, limit: int) -> List[Dict[str, Any]]:
+        if self._graph_backend is None:
+            return self._sqlite_list_graph_conflicts(limit=limit)
+        return self._graph_backend.list_graph_conflicts(limit=limit)
+
+    @_locked
+    def search_graph(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
+        if self._graph_backend is None:
+            return self._sqlite_search_graph(query=query, limit=limit)
+        rows = self._graph_backend.search_graph(query=query, limit=max(limit * 8, 24))
+        rows = [item for item in rows if _graph_sort_key(item, query=query)[0] > 0]
+        rows.sort(key=lambda item: _graph_sort_key(item, query=query), reverse=True)
+        return rows[:limit]
 
     @_locked
     def record_graph_retrievals(self, *, rows: Iterable[Dict[str, Any]]) -> int:

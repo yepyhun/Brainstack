@@ -24,6 +24,8 @@ REQUIRED_PLUGIN_FILES = [
     "__init__.py",
     "plugin.yaml",
     "db.py",
+    "graph_backend.py",
+    "graph_backend_kuzu.py",
     "retrieval.py",
     "control_plane.py",
     "graph.py",
@@ -289,6 +291,28 @@ def _check_config(config_path: Path, planned_install: bool) -> list[Check]:
         checks.append(Check("brainstack_plugin_config", "pass", "plugins.brainstack config will be created by installer"))
     else:
         checks.append(Check("brainstack_plugin_config", "warn", "plugins.brainstack config section is absent; provider will use defaults"))
+
+    brainstack = plugins.get("brainstack", {}) if isinstance(plugins.get("brainstack", {}), dict) else {}
+    graph_backend = str(brainstack.get("graph_backend") or "kuzu").strip().lower()
+    graph_db_path = str(brainstack.get("graph_db_path") or "").strip()
+
+    if graph_backend == "kuzu":
+        checks.append(Check("graph_backend_target", "pass", "plugins.brainstack.graph_backend targets embedded Kuzu"))
+        if graph_db_path:
+            checks.append(Check("graph_backend_path", "pass", "plugins.brainstack.graph_db_path is configured"))
+        elif planned_install:
+            checks.append(Check("graph_backend_path", "pass", "plugins.brainstack.graph_db_path will be added by installer"))
+        else:
+            checks.append(Check("graph_backend_path", "warn", "plugins.brainstack.graph_db_path is absent; provider defaults will be used"))
+        try:
+            importlib.import_module("kuzu")
+            checks.append(Check("graph_backend_dependency", "pass", "Python kuzu package is importable"))
+        except Exception:
+            checks.append(Check("graph_backend_dependency", "fail", "Python kuzu package is missing for graph_backend='kuzu'"))
+    elif planned_install:
+        checks.append(Check("graph_backend_target", "pass", "graph backend is not Kuzu yet, but installer will set it"))
+    else:
+        checks.append(Check("graph_backend_target", "fail", f"plugins.brainstack.graph_backend is {graph_backend!r}, expected 'kuzu'"))
 
     return checks
 

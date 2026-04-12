@@ -793,6 +793,8 @@ def _patch_config(config_path: Path, dry_run: bool) -> dict[str, Any]:
         brainstack = {}
         config["plugins"]["brainstack"] = brainstack
     brainstack.setdefault("db_path", "$HERMES_HOME/brainstack/brainstack.db")
+    brainstack.setdefault("graph_backend", "kuzu")
+    brainstack.setdefault("graph_db_path", "$HERMES_HOME/brainstack/brainstack.kuzu")
     brainstack.setdefault("profile_prompt_limit", 6)
     brainstack.setdefault("profile_match_limit", 4)
     brainstack.setdefault("continuity_recent_limit", 4)
