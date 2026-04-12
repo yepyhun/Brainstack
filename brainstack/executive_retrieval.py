@@ -10,9 +10,19 @@ from .transcript import has_meaningful_transcript_evidence, tokenize_match_text
 from .usefulness import graph_priority_adjustment, profile_priority_adjustment
 
 RRF_K = 60
-MAX_DECOMPOSED_SUBQUERIES = 3
-DECOMPOSITION_MIN_TOKENS = 6
-DECOMPOSITION_MIN_CHARS = 32
+ROUTE_FACT = "fact"
+ROUTE_TEMPORAL = "temporal"
+ROUTE_AGGREGATE = "aggregate"
+ROUTING_HINT_MIN_TOKENS = 5
+ROUTING_HINT_MIN_CHARS = 28
+TEMPORAL_CONTINUITY_CAP = 3
+TEMPORAL_RECENT_CAP = 3
+TEMPORAL_TRANSCRIPT_CAP = 3
+TEMPORAL_GRAPH_CAP = 3
+AGGREGATE_CONTINUITY_CAP = 4
+AGGREGATE_TRANSCRIPT_CAP = 4
+AGGREGATE_GRAPH_CAP = 2
+AGGREGATE_SESSION_CAP = 4
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +47,16 @@ class EvidenceCandidate:
         current = self.channel_ranks.get(name)
         if current is None or rank < current:
             self.channel_ranks[name] = rank
+
+
+@dataclass
+class RetrievalRoute:
+    requested_mode: str = ROUTE_FACT
+    applied_mode: str = ROUTE_FACT
+    source: str = "default"
+    reason: str = ""
+    fallback_used: bool = False
+    bounds: Dict[str, Any] = field(default_factory=dict)
 
 
 def _normalize_text(value: Any) -> str:
@@ -98,26 +118,29 @@ def _candidate_priority_bonus(candidate: EvidenceCandidate) -> float:
     return bonus
 
 
-def _should_attempt_query_decomposition(query: str) -> bool:
+def _should_attempt_route_hint(query: str) -> bool:
     normalized = _normalize_text(query)
-    if len(normalized) < DECOMPOSITION_MIN_CHARS:
+    if len(normalized) < ROUTING_HINT_MIN_CHARS:
         return False
     tokens = tokenize_match_text(normalized)
-    if len(tokens) < DECOMPOSITION_MIN_TOKENS:
+    if len(tokens) < ROUTING_HINT_MIN_TOKENS:
         return False
-    structural_markers = sum(1 for marker in ("?", ",", ":", ";", "\"") if marker in normalized)
-    return structural_markers > 0
+    structural_markers = sum(1 for marker in ("?", ",", ":", ";", "/", "=") if marker in normalized)
+    if structural_markers > 0:
+        return True
+    return any(char.isdigit() for char in normalized)
 
 
-def _default_query_decomposer(query: str) -> List[str]:
+def _default_route_resolver(query: str) -> Dict[str, Any]:
     messages = [
         {
             "role": "system",
             "content": (
-                "You help Brainstack decompose a user query into at most three short, searchable sub-queries.\n"
-                "Return JSON only with the schema {\"sub_queries\": [\"...\", \"...\"]}.\n"
-                "If decomposition would not materially improve retrieval, return {\"sub_queries\": []}.\n"
-                "Keep wording close to the user's language and concrete named events or entities."
+                "You classify Brainstack memory retrieval questions into one of three modes.\n"
+                "Return JSON only with the schema {\"mode\": \"fact|temporal|aggregate\", \"reason\": \"...\"}.\n"
+                "Use temporal when the user needs ordering, before/after comparison, date difference, or change over time.\n"
+                "Use aggregate when the user needs totals, counts across multiple events, or exhaustive collection.\n"
+                "Use fact for ordinary fact lookup or if uncertain."
             ),
         },
         {
@@ -126,46 +149,61 @@ def _default_query_decomposer(query: str) -> List[str]:
         },
     ]
     response = _default_llm_caller(
-        task="memory_prefetch_decomposition",
+        task="memory_prefetch_routing_hint",
         messages=messages,
         timeout=6.0,
-        max_tokens=180,
+        max_tokens=120,
     )
     payload = _extract_json_object(_extract_text_content(response))
-    items = payload.get("sub_queries")
-    if not isinstance(items, list):
-        return []
-    return [_normalize_text(item) for item in items if _normalize_text(item)]
+    return {
+        "mode": _normalize_text(payload.get("mode")),
+        "reason": _normalize_text(payload.get("reason")),
+    }
 
 
-def _resolve_search_queries(
+def _resolve_route(
     query: str,
     *,
-    query_decomposer: Callable[[str], List[str]] | None,
-) -> List[str]:
+    route_resolver: Callable[[str], Dict[str, Any] | str] | None,
+) -> RetrievalRoute:
     normalized = _normalize_text(query)
-    if not normalized or not _should_attempt_query_decomposition(normalized):
-        return [normalized]
+    route = RetrievalRoute(reason="fact route default")
+    if not normalized:
+        return route
 
-    decomposer = query_decomposer or _default_query_decomposer
+    resolver = route_resolver
+    source = "injected"
+    if resolver is None and _should_attempt_route_hint(normalized):
+        resolver = _default_route_resolver
+        source = "llm_hint"
+    if resolver is None:
+        return route
+
     try:
-        proposed = decomposer(normalized)
+        payload = resolver(normalized)
     except Exception as exc:
-        logger.warning("Brainstack query decomposition failed: %s", exc)
-        return [normalized]
+        logger.warning("Brainstack route resolution failed: %s", exc)
+        route.source = "fallback"
+        route.reason = f"route hint failed: {exc}"
+        return route
 
-    output: List[str] = []
-    seen: set[str] = set()
-    for item in proposed[:MAX_DECOMPOSED_SUBQUERIES]:
-        text = _normalize_text(item)
-        if not text:
-            continue
-        lowered = text.lower()
-        if lowered == normalized.lower() or lowered in seen:
-            continue
-        seen.add(lowered)
-        output.append(text)
-    return output if len(output) >= 2 else [normalized]
+    if isinstance(payload, str):
+        mode = _normalize_text(payload).lower()
+        reason = ""
+    elif isinstance(payload, dict):
+        mode = _normalize_text(payload.get("mode")).lower()
+        reason = _normalize_text(payload.get("reason"))
+        source = _normalize_text(payload.get("source")) or source
+    else:
+        return route
+
+    if mode not in {ROUTE_FACT, ROUTE_TEMPORAL, ROUTE_AGGREGATE}:
+        return route
+    route.requested_mode = mode
+    route.applied_mode = mode
+    route.source = source
+    route.reason = reason
+    return route
 
 
 def _round_robin(*groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -176,6 +214,213 @@ def _round_robin(*groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if index < len(group):
                 output.append(group[index])
     return output
+
+
+def _row_unique_key(row: Dict[str, Any]) -> str:
+    if "row_type" in row:
+        return f"graph:{row.get('row_type')}:{int(row.get('row_id') or 0)}"
+    if "document_id" in row:
+        return f"corpus:{int(row.get('document_id') or 0)}:{int(row.get('section_index') or 0)}"
+    return f"{str(row.get('session_id') or '')}:{int(row.get('id') or 0)}"
+
+
+def _dedupe_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    output: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        key = _row_unique_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(dict(row))
+    return output
+
+
+def _row_time_value(row: Dict[str, Any]) -> str:
+    metadata = row.get("metadata")
+    temporal = metadata.get("temporal") if isinstance(metadata, dict) and isinstance(metadata.get("temporal"), dict) else {}
+    return (
+        str(temporal.get("observed_at") or "").strip()
+        or str(row.get("created_at") or "").strip()
+        or str(row.get("happened_at") or "").strip()
+    )
+
+
+def _sort_rows_chronologically(rows: Iterable[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+    deduped = _dedupe_rows(rows)
+    deduped.sort(
+        key=lambda row: (
+            0 if _row_time_value(row) else 1,
+            _row_time_value(row),
+            int(row.get("turn_number") or 0),
+            int(row.get("id") or row.get("row_id") or 0),
+        ),
+    )
+    return deduped[:limit]
+
+
+def _aggregate_row_priority(row: Dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        1 if bool(row.get("same_session")) else 0,
+        float(row.get("semantic_score") or 0.0),
+        int(row.get("overlap_count") or 0),
+        _row_time_value(row),
+        int(row.get("turn_number") or 0),
+        int(row.get("id") or 0),
+    )
+
+
+def _aggregate_diverse_rows(
+    rows: Iterable[Dict[str, Any]],
+    *,
+    limit: int,
+    session_cap: int,
+) -> List[Dict[str, Any]]:
+    ranked = sorted(_dedupe_rows(rows), key=_aggregate_row_priority, reverse=True)
+    selected: List[Dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    session_count = 0
+    for row in ranked:
+        row_key = _row_unique_key(row)
+        if row_key in seen_keys:
+            continue
+        session_key = str(row.get("session_id") or "").strip()
+        if session_key and session_key not in {str(item.get("session_id") or "").strip() for item in selected}:
+            session_count += 1
+            if session_count > session_cap:
+                continue
+        selected.append(row)
+        seen_keys.add(row_key)
+        if len(selected) >= limit:
+            return selected
+    return selected[:limit]
+
+
+def _fact_sort_key(candidate: EvidenceCandidate) -> tuple[Any, ...]:
+    bonus = _candidate_priority_bonus(candidate)
+    return (
+        candidate.rrf_score + bonus,
+        bonus,
+        len(candidate.channel_ranks),
+        1 if candidate.shelf == "transcript" else 0,
+        1 if candidate.shelf == "graph" else 0,
+        1 if candidate.shelf == "profile" else 0,
+    )
+
+
+def _route_limits(
+    *,
+    route: RetrievalRoute,
+    profile_limit: int,
+    continuity_match_limit: int,
+    continuity_recent_limit: int,
+    transcript_limit: int,
+    graph_limit: int,
+    corpus_limit: int,
+) -> Dict[str, int]:
+    limits = {
+        "profile_limit": profile_limit,
+        "continuity_match_limit": continuity_match_limit,
+        "continuity_recent_limit": continuity_recent_limit,
+        "transcript_limit": transcript_limit,
+        "graph_limit": graph_limit,
+        "corpus_limit": corpus_limit,
+    }
+    if route.applied_mode == ROUTE_TEMPORAL:
+        limits["continuity_match_limit"] = max(limits["continuity_match_limit"], TEMPORAL_CONTINUITY_CAP)
+        limits["continuity_recent_limit"] = max(limits["continuity_recent_limit"], TEMPORAL_RECENT_CAP)
+        limits["transcript_limit"] = max(limits["transcript_limit"], TEMPORAL_TRANSCRIPT_CAP)
+        limits["graph_limit"] = max(limits["graph_limit"], TEMPORAL_GRAPH_CAP)
+        route.bounds = {
+            "kind": "row_cap",
+            "continuity": limits["continuity_match_limit"],
+            "recent": limits["continuity_recent_limit"],
+            "transcript": limits["transcript_limit"],
+            "graph": limits["graph_limit"],
+        }
+    elif route.applied_mode == ROUTE_AGGREGATE:
+        limits["continuity_match_limit"] = max(limits["continuity_match_limit"], AGGREGATE_CONTINUITY_CAP)
+        limits["transcript_limit"] = max(limits["transcript_limit"], AGGREGATE_TRANSCRIPT_CAP)
+        limits["graph_limit"] = max(limits["graph_limit"], AGGREGATE_GRAPH_CAP)
+        route.bounds = {
+            "kind": "row_cap",
+            "continuity": limits["continuity_match_limit"],
+            "transcript": limits["transcript_limit"],
+            "graph": limits["graph_limit"],
+            "session_cap": AGGREGATE_SESSION_CAP,
+        }
+    return limits
+
+
+def _route_has_support(route: RetrievalRoute, selected: Dict[str, List[Dict[str, Any]]]) -> bool:
+    if route.applied_mode == ROUTE_AGGREGATE:
+        sessions = {
+            str(row.get("session_id") or "").strip()
+            for name in ("matched", "recent", "transcript_rows")
+            for row in selected.get(name, ())
+            if str(row.get("session_id") or "").strip()
+        }
+        return len(sessions) >= 2
+    if route.applied_mode == ROUTE_TEMPORAL:
+        timed = sum(
+            1
+            for name in ("matched", "recent", "transcript_rows", "graph_rows")
+            for row in selected.get(name, ())
+            if _row_time_value(row)
+        )
+        return timed >= 2
+    return True
+
+
+def _select_temporal_rows(
+    *,
+    keyword_continuity_rows: List[Dict[str, Any]],
+    recent_rows: List[Dict[str, Any]],
+    keyword_transcript_rows: List[Dict[str, Any]],
+    semantic_conversation_rows: List[Dict[str, Any]],
+    graph_rows: List[Dict[str, Any]],
+    limits: Dict[str, int],
+) -> Dict[str, List[Dict[str, Any]]]:
+    return {
+        "profile_items": [],
+        "matched": _sort_rows_chronologically(
+            _round_robin(keyword_continuity_rows, recent_rows),
+            limit=limits["continuity_match_limit"],
+        ),
+        "recent": _sort_rows_chronologically(recent_rows, limit=limits["continuity_recent_limit"]),
+        "transcript_rows": _sort_rows_chronologically(
+            _round_robin(semantic_conversation_rows, keyword_transcript_rows),
+            limit=limits["transcript_limit"],
+        ),
+        "graph_rows": _temporal_graph_rows(graph_rows, limit=limits["graph_limit"]),
+        "corpus_rows": [],
+    }
+
+
+def _select_aggregate_rows(
+    *,
+    keyword_continuity_rows: List[Dict[str, Any]],
+    keyword_transcript_rows: List[Dict[str, Any]],
+    semantic_conversation_rows: List[Dict[str, Any]],
+    graph_rows: List[Dict[str, Any]],
+    limits: Dict[str, int],
+) -> Dict[str, List[Dict[str, Any]]]:
+    return {
+        "profile_items": [],
+        "matched": _aggregate_diverse_rows(
+            keyword_continuity_rows,
+            limit=limits["continuity_match_limit"],
+            session_cap=AGGREGATE_SESSION_CAP,
+        ),
+        "recent": [],
+        "transcript_rows": _aggregate_diverse_rows(
+            _round_robin(semantic_conversation_rows, keyword_transcript_rows),
+            limit=limits["transcript_limit"],
+            session_cap=AGGREGATE_SESSION_CAP,
+        ),
+        "graph_rows": _graph_channel_rows(graph_rows, limit=limits["graph_limit"]),
+        "corpus_rows": [],
+    }
 
 
 def _collect_query_rows(
@@ -420,7 +665,7 @@ def retrieve_executive_context(
     session_id: str,
     analysis: Dict[str, Any],
     policy: Dict[str, Any],
-    query_decomposer: Callable[[str], List[str]] | None = None,
+    route_resolver: Callable[[str], Dict[str, Any] | str] | None = None,
 ) -> Dict[str, Any]:
     profile_limit = max(int(policy.get("profile_limit", 0)), 0)
     continuity_match_limit = max(int(policy.get("continuity_match_limit", 0)), 0)
@@ -428,10 +673,23 @@ def retrieve_executive_context(
     transcript_limit = max(int(policy.get("transcript_limit", 0)), 0)
     graph_limit = max(int(policy.get("graph_limit", 0)), 0)
     corpus_limit = max(int(policy.get("corpus_limit", 0)), 0)
-    search_queries = _resolve_search_queries(query, query_decomposer=query_decomposer)
-    if len(search_queries) > 1:
-        continuity_match_limit = max(continuity_match_limit, min(len(search_queries), MAX_DECOMPOSED_SUBQUERIES))
-        transcript_limit = max(transcript_limit, min(len(search_queries), MAX_DECOMPOSED_SUBQUERIES))
+    route = _resolve_route(query, route_resolver=route_resolver)
+    limits = _route_limits(
+        route=route,
+        profile_limit=profile_limit,
+        continuity_match_limit=continuity_match_limit,
+        continuity_recent_limit=continuity_recent_limit,
+        transcript_limit=transcript_limit,
+        graph_limit=graph_limit,
+        corpus_limit=corpus_limit,
+    )
+    search_queries = [_normalize_text(query)]
+    profile_limit = limits["profile_limit"]
+    continuity_match_limit = limits["continuity_match_limit"]
+    continuity_recent_limit = limits["continuity_recent_limit"]
+    transcript_limit = limits["transcript_limit"]
+    graph_limit = limits["graph_limit"]
+    corpus_limit = limits["corpus_limit"]
 
     keyword_profile_rows = (
         _profile_keyword_rows(
@@ -533,7 +791,11 @@ def retrieve_executive_context(
         else []
     )
     temporal_graph_rows = []
-    if graph_limit > 0 and (bool(analysis.get("temporal")) or bool(analysis.get("preference"))):
+    if graph_limit > 0 and (
+        route.applied_mode == ROUTE_TEMPORAL
+        or bool(analysis.get("temporal"))
+        or bool(analysis.get("preference"))
+    ):
         temporal_graph_rows = _temporal_graph_rows(
             _collect_query_rows(
                 shelf="graph",
@@ -560,20 +822,9 @@ def retrieve_executive_context(
     _merge_channel(merged, channel_name="temporal", rows=recent_rows, shelf="continuity_recent")
     _merge_channel(merged, channel_name="temporal", rows=temporal_graph_rows, shelf="graph")
 
-    fused = sorted(
-        merged.values(),
-        key=lambda candidate: (
-            candidate.rrf_score + _candidate_priority_bonus(candidate),
-            _candidate_priority_bonus(candidate),
-            len(candidate.channel_ranks),
-            1 if candidate.shelf == "transcript" else 0,
-            1 if candidate.shelf == "graph" else 0,
-            1 if candidate.shelf == "profile" else 0,
-        ),
-        reverse=True,
-    )
+    fused = sorted(merged.values(), key=_fact_sort_key, reverse=True)
 
-    selected = _select_rows(
+    fact_selected = _select_rows(
         fused,
         profile_limit=profile_limit,
         continuity_match_limit=continuity_match_limit,
@@ -582,10 +833,32 @@ def retrieve_executive_context(
         graph_limit=graph_limit,
         corpus_limit=corpus_limit,
     )
+    selected = fact_selected
+    if route.applied_mode == ROUTE_TEMPORAL:
+        selected = _select_temporal_rows(
+            keyword_continuity_rows=keyword_continuity_rows,
+            recent_rows=recent_rows,
+            keyword_transcript_rows=keyword_transcript_rows,
+            semantic_conversation_rows=semantic_conversation_rows,
+            graph_rows=graph_rows,
+            limits=limits,
+        )
+    elif route.applied_mode == ROUTE_AGGREGATE:
+        selected = _select_aggregate_rows(
+            keyword_continuity_rows=keyword_continuity_rows,
+            keyword_transcript_rows=keyword_transcript_rows,
+            semantic_conversation_rows=semantic_conversation_rows,
+            graph_rows=graph_rows,
+            limits=limits,
+        )
 
     transcript_rows = selected["transcript_rows"]
     if transcript_rows and not has_meaningful_transcript_evidence(query, transcript_rows):
         selected["transcript_rows"] = []
+    if route.applied_mode != ROUTE_FACT and not _route_has_support(route, selected):
+        route.fallback_used = True
+        route.applied_mode = ROUTE_FACT
+        selected = fact_selected
 
     semantic_status = store.corpus_semantic_channel_status()
     channels = [
@@ -619,7 +892,9 @@ def retrieve_executive_context(
             for candidate in fused
         ],
         "decomposition": {
-            "used": len(search_queries) > 1,
+            "used": False,
             "queries": list(search_queries),
+            "legacy_disabled": True,
         },
+        "routing": asdict(route),
     }

@@ -213,7 +213,7 @@ def build_working_memory_packet(
     graph_limit: int,
     corpus_limit: int,
     corpus_char_budget: int,
-    query_decomposer: Callable[[str], List[str]] | None = None,
+    route_resolver: Callable[[str], Dict[str, Any] | str] | None = None,
 ) -> Dict[str, Any]:
     analysis = analyze_query(query)
     policy = _initial_policy(
@@ -234,7 +234,7 @@ def build_working_memory_packet(
         session_id=session_id,
         analysis=asdict(analysis),
         policy=asdict(policy),
-        query_decomposer=query_decomposer,
+        route_resolver=route_resolver,
     )
 
     profile_items = retrieval["profile_items"]
@@ -326,5 +326,6 @@ def build_working_memory_packet(
         "channels": channels,
         "fused_candidates": retrieval["fused_candidates"],
         "decomposition": retrieval.get("decomposition", {"used": False, "queries": [query]}),
+        "routing": retrieval.get("routing", {"requested_mode": "fact", "applied_mode": "fact"}),
         "block": block,
     }

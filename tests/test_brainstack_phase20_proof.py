@@ -111,6 +111,7 @@ def _packet(
     query: str,
     graph_limit: int,
     corpus_limit: int,
+    route_resolver=None,
 ) -> dict:
     return build_working_memory_packet(
         store,
@@ -124,6 +125,7 @@ def _packet(
         graph_limit=graph_limit,
         corpus_limit=corpus_limit,
         corpus_char_budget=480,
+        route_resolver=route_resolver,
     )
 
 
@@ -209,7 +211,7 @@ def test_stream_c_proves_corpus_delta_above_non_corpus_baseline(monkeypatch, tmp
         store.close()
 
 
-def test_phase20_2_query_decomposition_can_collect_multi_event_transcript_evidence(monkeypatch, tmp_path):
+def test_phase20_3_fact_route_does_not_inherit_legacy_decomposition_gate(monkeypatch, tmp_path):
     _patch_embeddings(monkeypatch)
     store = _open_store(tmp_path)
     try:
@@ -259,23 +261,137 @@ def test_phase20_2_query_decomposition_can_collect_multi_event_transcript_eviden
             graph_limit=0,
             corpus_limit=0,
             corpus_char_budget=0,
-            query_decomposer=lambda _query: [
-                "ShopRite rewards program signup",
-                "Walmart coupon Luvs diapers",
-                "Ibotta cashback Amazon gift card",
-            ],
+            route_resolver=lambda _query: {"mode": "fact", "reason": "fact route test"},
         )
 
-        assert packet["decomposition"]["used"] is True
-        assert packet["decomposition"]["queries"] == [
-            "ShopRite rewards program signup",
-            "Walmart coupon Luvs diapers",
-            "Ibotta cashback Amazon gift card",
-        ]
+        assert packet["decomposition"]["used"] is False
+        assert packet["decomposition"]["legacy_disabled"] is True
+        assert packet["routing"]["requested_mode"] == "fact"
+        assert packet["routing"]["applied_mode"] == "fact"
         assert "## Brainstack Transcript Evidence" in packet["block"]
-        assert "ShopRite rewards program" in packet["block"]
-        assert "Walmart coupon" in packet["block"]
-        assert "Ibotta cashback" in packet["block"]
+        recovered = [
+            item
+            for item in ("ShopRite rewards program", "Walmart coupon", "Ibotta cashback")
+            if item in packet["block"]
+        ]
+        assert recovered
+        assert len(recovered) < 3
+    finally:
+        store.close()
+
+
+def test_phase20_3_temporal_route_orders_timestamped_transcript_evidence(monkeypatch, tmp_path):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        store.add_transcript_entry(
+            session_id="books-a",
+            turn_number=1,
+            kind="turn",
+            content="User: I finished The Hate U Give today. Assistant: Noted.",
+            source="test",
+            created_at="2024-03-15T00:00:00+00:00",
+        )
+        store.add_transcript_entry(
+            session_id="books-b",
+            turn_number=1,
+            kind="turn",
+            content="User: I finished The Nightingale last week. Assistant: Noted.",
+            source="test",
+            created_at="2024-04-02T00:00:00+00:00",
+        )
+
+        packet = build_working_memory_packet(
+            store,
+            query="Which book did I finish first, The Hate U Give or The Nightingale?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=0,
+            transcript_match_limit=1,
+            transcript_char_budget=720,
+            graph_limit=0,
+            corpus_limit=0,
+            corpus_char_budget=0,
+            route_resolver=lambda _query: {"mode": "temporal", "reason": "ordering test"},
+        )
+
+        assert packet["routing"]["requested_mode"] == "temporal"
+        assert packet["routing"]["applied_mode"] == "temporal"
+        assert packet["routing"]["fallback_used"] is False
+        assert packet["routing"]["bounds"]["kind"] == "row_cap"
+        assert packet["block"].index("The Hate U Give") < packet["block"].index("The Nightingale")
+    finally:
+        store.close()
+
+
+def test_phase20_3_aggregate_route_widens_cross_session_recall_with_explicit_bound(monkeypatch, tmp_path):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        for index, content in enumerate(
+            [
+                ("trip-a", "User: I drove 120 miles on the first road trip."),
+                ("trip-b", "User: I drove 180 miles on the second road trip."),
+                ("trip-c", "User: I drove 210 miles on the third road trip."),
+                ("trip-d", "User: I drove 95 miles on the fourth road trip."),
+            ],
+            start=1,
+        ):
+            session_id, text = content
+            store.add_transcript_entry(
+                session_id=session_id,
+                turn_number=1,
+                kind="turn",
+                content=f"{text} Assistant: Logged.",
+                source="test",
+                created_at=f"2024-04-{10 + index:02d}T00:00:00+00:00",
+            )
+
+        packet = build_working_memory_packet(
+            store,
+            query="How many miles did I drive in total across the four road trips?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=0,
+            transcript_match_limit=1,
+            transcript_char_budget=900,
+            graph_limit=0,
+            corpus_limit=0,
+            corpus_char_budget=0,
+            route_resolver=lambda _query: {"mode": "aggregate", "reason": "total test"},
+        )
+
+        assert packet["routing"]["requested_mode"] == "aggregate"
+        assert packet["routing"]["applied_mode"] == "aggregate"
+        assert packet["routing"]["bounds"]["kind"] == "row_cap"
+        assert packet["routing"]["bounds"]["session_cap"] == 4
+        assert "120 miles" in packet["block"]
+        assert "180 miles" in packet["block"]
+        assert "210 miles" in packet["block"]
+        assert "95 miles" in packet["block"]
+    finally:
+        store.close()
+
+
+def test_phase20_3_route_remains_fail_open_when_structural_mode_is_too_thin(monkeypatch, tmp_path):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        _seed_shared_facts(store)
+        packet = _packet(
+            store,
+            query="What are we working on right now?",
+            graph_limit=0,
+            corpus_limit=0,
+            route_resolver=lambda _query: {"mode": "aggregate", "reason": "thin route test"},
+        )
+
+        assert packet["routing"]["requested_mode"] == "aggregate"
+        assert packet["routing"]["applied_mode"] == "fact"
+        assert packet["routing"]["fallback_used"] is True
+        assert "Project Atlas" in packet["block"]
     finally:
         store.close()
 
