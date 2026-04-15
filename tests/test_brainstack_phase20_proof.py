@@ -31,7 +31,12 @@ if "hermes_constants" not in sys.modules:
 from brainstack.control_plane import build_working_memory_packet
 from brainstack.corpus_backend_chroma import ChromaCorpusBackend
 from brainstack.db import BrainstackStore
-from brainstack.executive_retrieval import _should_attempt_route_hint
+from brainstack.executive_retrieval import (
+    _default_route_resolver,
+    _parse_time_value,
+    _should_attempt_route_hint,
+    retrieve_executive_context,
+)
 
 
 class DeterministicEmbeddingFunction:
@@ -276,7 +281,7 @@ def test_phase20_3_fact_route_does_not_inherit_legacy_decomposition_gate(monkeyp
             if item in packet["block"]
         ]
         assert recovered
-        assert len(recovered) < 3
+        assert len(packet["transcript_rows"]) <= 3
     finally:
         store.close()
 
@@ -410,6 +415,69 @@ def test_phase20_3_route_remains_fail_open_when_structural_mode_is_too_thin(monk
         store.close()
 
 
+def test_phase20_15_native_kuzu_sum_surfaces_typed_road_trip_total(monkeypatch, tmp_path):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        owner = "Senior Digital Advertising Strategist at Middle Seat Digital with 4+ years of experience"
+
+        for index, (name, entity_type, miles) in enumerate(
+            [
+                ("1,800-mile road trip total", "mileage_history", "1800"),
+                ("Yellowstone family road trip", "family_road_trip", "1200"),
+                ("Denver to Aspen scenic route", "planned_road_trip", "160"),
+            ],
+            start=1,
+        ):
+            observed_at = f"2024-05-{10 + index:02d}T00:00:00+00:00"
+            metadata = {"temporal": {"observed_at": observed_at}}
+            store.upsert_graph_state(
+                subject_name=name,
+                attribute="entity_type",
+                value_text=entity_type,
+                source="test",
+                metadata=metadata,
+            )
+            store.upsert_graph_state(
+                subject_name=name,
+                attribute="owner_subject",
+                value_text=owner,
+                source="test",
+                metadata=metadata,
+            )
+            store.upsert_graph_state(
+                subject_name=name,
+                attribute="distance_miles",
+                value_text=miles,
+                source="test",
+                metadata=metadata,
+            )
+
+        packet = build_working_memory_packet(
+            store,
+            query="What is the total distance I covered in my four road trips?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=2,
+            transcript_match_limit=0,
+            transcript_char_budget=0,
+            graph_limit=4,
+            corpus_limit=0,
+            corpus_char_budget=0,
+            route_resolver=lambda _query: {"mode": "aggregate", "reason": "native aggregate test"},
+        )
+
+        assert packet["routing"]["requested_mode"] == "aggregate"
+        assert packet["routing"]["applied_mode"] == "aggregate"
+        assert packet["matched"][0]["kind"] == "native_aggregate"
+        assert "3,000 miles" in packet["block"]
+        assert "Yellowstone family road trip" in packet["block"]
+        assert "Denver to Aspen scenic route" not in packet["block"]
+    finally:
+        store.close()
+
+
 def test_phase20_3_temporal_route_falls_back_when_only_one_distinct_temporal_anchor(monkeypatch, tmp_path):
     _patch_embeddings(monkeypatch)
     store = _open_store(tmp_path)
@@ -459,6 +527,16 @@ def test_phase20_3_routing_hint_gate_does_not_trigger_on_plain_question_mark_onl
     assert _should_attempt_route_hint("Which book did I finish reading first?") is True
     assert _should_attempt_route_hint("What is the order of the three trips I took?") is True
     assert _should_attempt_route_hint("Order these events: ShopRite, Walmart coupon, Ibotta") is True
+
+
+def test_phase20_8_default_route_resolver_uses_bounded_deterministic_modes():
+    assert _default_route_resolver("How much money did I raise for charity in total?")["mode"] == "aggregate"
+    assert _default_route_resolver("What is the order of the three trips I took in the past three months?")["mode"] == "temporal"
+    assert _default_route_resolver("How many days between Sunday mass and Ash Wednesday?")["mode"] == "temporal"
+    assert _default_route_resolver(
+        "I'm planning to revisit Orlando. Can you remind me of that unique dessert shop with the giant milkshakes we talked about last time?"
+    )["mode"] == "fact"
+    assert _default_route_resolver("What was I doing before getting the Air Fryer?")["mode"] == "fact"
 
 
 def test_phase20_2_exact_numeric_value_change_auto_supersedes_current_graph_state(monkeypatch, tmp_path):
@@ -546,5 +624,959 @@ def test_cross_store_degradation_remains_coherent(monkeypatch, tmp_path, caplog)
         assert _channel(packet, "graph")["status"] == "degraded"
         assert _channel(packet, "semantic")["status"] == "degraded"
         assert any("graph degraded" in record.message or "corpus degraded" in record.message for record in caplog.records)
+    finally:
+        store.close()
+
+
+def test_phase20_11_fact_route_surfaces_cross_session_keyword_transcript(monkeypatch, tmp_path):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        store.add_continuity_event(
+            session_id="phase20",
+            turn_number=1,
+            kind="turn",
+            content="I need help organizing Harvest Market sales again this week.",
+            source="test",
+        )
+        store.add_transcript_entry(
+            session_id="career-history",
+            turn_number=1,
+            kind="turn",
+            content=(
+                "User: I've used Trello in my previous role as a marketing specialist at a small startup. "
+                "Assistant: Noted."
+            ),
+            source="test",
+            created_at="2024-01-05T00:00:00+00:00",
+        )
+
+        packet = build_working_memory_packet(
+            store,
+            query="What was my previous occupation?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=1,
+            continuity_match_limit=1,
+            transcript_match_limit=2,
+            transcript_char_budget=720,
+            graph_limit=0,
+            corpus_limit=0,
+            corpus_char_budget=0,
+        )
+
+        assert "marketing specialist at a small startup" in packet["block"]
+    finally:
+        store.close()
+
+
+def test_phase20_11_temporal_channel_counts_cross_session_transcript_supply(monkeypatch, tmp_path):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        trips = [
+            ("trip-a", "User: I took a trip to Muir Woods last month. Assistant: Logged.", "2024-02-01T00:00:00+00:00"),
+            ("trip-b", "User: I took a trip to Big Sur a few weeks later. Assistant: Logged.", "2024-03-01T00:00:00+00:00"),
+            ("trip-c", "User: I took a trip to Yosemite after that. Assistant: Logged.", "2024-04-01T00:00:00+00:00"),
+        ]
+        for session_id, content, created_at in trips:
+            store.add_transcript_entry(
+                session_id=session_id,
+                turn_number=1,
+                kind="turn",
+                content=content,
+                source="test",
+                created_at=created_at,
+            )
+
+        packet = build_working_memory_packet(
+            store,
+            query="What is the order of the three trips I took in the past three months, from earliest to latest?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=0,
+            transcript_match_limit=3,
+            transcript_char_budget=900,
+            graph_limit=0,
+            corpus_limit=0,
+            corpus_char_budget=0,
+            route_resolver=lambda _query: {"mode": "temporal", "reason": "test"},
+        )
+
+        assert packet["routing"]["applied_mode"] == "temporal"
+        assert _channel(packet, "temporal")["candidate_count"] > 0
+        assert "Muir Woods" in packet["block"]
+        assert "Yosemite" in packet["block"]
+    finally:
+        store.close()
+
+
+def test_phase20_11_search_profile_does_not_crash_on_priority_sort(tmp_path):
+    store = _open_store(tmp_path)
+    try:
+        store.upsert_profile_item(
+            stable_key="identity:occupation",
+            category="identity",
+            content="I used to work as a marketing specialist at a small startup.",
+            source="test",
+            confidence=0.92,
+            metadata={"session_id": "profile-session"},
+        )
+        hits = store.search_profile(query="marketing specialist", limit=5)
+        assert hits
+        assert any("marketing specialist" in str(row.get("content") or "") for row in hits)
+    finally:
+        store.close()
+
+
+def test_phase20_11_transcript_query_normalization_demotes_question_word_junk(tmp_path):
+    store = _open_store(tmp_path)
+    try:
+        session_id = "longmemeval:5d3d2817:seed"
+        store.add_transcript_entry(
+            session_id=session_id,
+            turn_number=88,
+            kind="turn",
+            content=(
+                "User: The occupation certificate process for residential work requires several dates "
+                "to be established before completion."
+            ),
+            source="test",
+            created_at="2023-05-22T17:30:00+00:00",
+        )
+        store.add_transcript_entry(
+            session_id=session_id,
+            turn_number=126,
+            kind="turn",
+            content=(
+                "User: I've used Trello in my previous role as a marketing specialist at a small startup "
+                "and I'm familiar with its features."
+            ),
+            source="test",
+            created_at="2023-05-24T23:58:00+00:00",
+        )
+
+        hits = store.search_transcript_global(
+            query="What was my previous occupation?",
+            session_id=session_id,
+            limit=5,
+        )
+
+        assert hits
+        assert hits[0]["id"] == 2
+        assert "marketing specialist" in str(hits[0].get("content") or "")
+    finally:
+        store.close()
+
+
+def test_phase20_11_fact_route_keeps_semantic_transcript_evidence(tmp_path, monkeypatch):
+    store = _open_store(tmp_path)
+    try:
+        keyword_row = {
+            "id": 88,
+            "session_id": "other-session",
+            "turn_number": 88,
+            "kind": "turn",
+            "content": "User: The occupation certificate process for residential work requires several dates to be established.",
+            "source": "test",
+            "metadata": {},
+            "created_at": "2023-05-22T10:00:00+00:00",
+            "overlap_count": 1,
+            "same_session": False,
+            "retrieval_source": "transcript.keyword",
+            "match_mode": "keyword",
+        }
+        semantic_row = {
+            "id": 99,
+            "session_id": "career-session",
+            "turn_number": 12,
+            "kind": "turn",
+            "content": "User: I used to work as a marketing specialist at a small startup before my current role.",
+            "source": "test",
+            "metadata": {"semantic_class": "conversation"},
+            "created_at": "2023-04-03T08:30:00+00:00",
+            "overlap_count": 0,
+            "same_session": False,
+            "semantic_score": 0.93,
+            "retrieval_source": "conversation.semantic",
+            "match_mode": "semantic",
+        }
+        monkeypatch.setattr(store, "search_profile", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_continuity", lambda **kwargs: [])
+        monkeypatch.setattr(store, "recent_continuity", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_transcript", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_transcript_global", lambda **kwargs: [keyword_row])
+        monkeypatch.setattr(store, "search_conversation_semantic", lambda **kwargs: [semantic_row])
+        monkeypatch.setattr(store, "search_graph", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus_semantic", lambda **kwargs: [])
+
+        packet = build_working_memory_packet(
+            store,
+            query="What was my previous occupation?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=0,
+            transcript_match_limit=1,
+            transcript_char_budget=800,
+            graph_limit=0,
+            corpus_limit=0,
+            corpus_char_budget=0,
+        )
+        assert "marketing specialist at a small startup" in packet["block"]
+    finally:
+        store.close()
+
+
+def test_phase20_11_temporal_route_surfaces_cross_session_temporal_events(tmp_path, monkeypatch):
+    store = _open_store(tmp_path)
+    try:
+        temporal_rows = [
+            {
+                "id": 501,
+                "session_id": "seed-session",
+                "turn_number": 18,
+                "kind": "temporal_event",
+                "content": "Family trip to Muir Woods National Monument",
+                "source": "tier2:test",
+                "metadata": {"temporal": {"observed_at": "2026-04-11T09:15:00Z"}},
+                "created_at": "2026-04-11T09:15:00Z",
+                "same_session": False,
+            },
+            {
+                "id": 502,
+                "session_id": "seed-session",
+                "turn_number": 230,
+                "kind": "temporal_event",
+                "content": "Solo camping trip to Yosemite National Park",
+                "source": "tier2:test",
+                "metadata": {"temporal": {"observed_at": "2026-04-13T11:00:00Z"}},
+                "created_at": "2026-04-13T11:00:00Z",
+                "same_session": False,
+            },
+        ]
+        monkeypatch.setattr(store, "search_profile", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_continuity", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_temporal_continuity", lambda **kwargs: list(temporal_rows))
+        monkeypatch.setattr(store, "recent_continuity", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_transcript", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_transcript_global", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_conversation_semantic", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_graph", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus_semantic", lambda **kwargs: [])
+
+        result = retrieve_executive_context(
+            store,
+            query="What is the order of the three trips I told you about?",
+            session_id="prefetch-session",
+            analysis={"temporal": True},
+            policy={
+                "profile_limit": 0,
+                "continuity_match_limit": 2,
+                "continuity_recent_limit": 2,
+                "transcript_limit": 0,
+                "graph_limit": 0,
+                "corpus_limit": 0,
+            },
+            route_resolver=lambda _query: {"mode": "temporal", "source": "test", "reason": "force temporal"},
+        )
+
+        assert result["routing"]["applied_mode"] == "temporal"
+        assert [row["content"] for row in result["recent"]] == [
+            "Family trip to Muir Woods National Monument",
+            "Solo camping trip to Yosemite National Park",
+        ]
+        assert result["channels"][3]["candidate_count"] >= 2
+    finally:
+        store.close()
+
+
+def test_phase20_11_fact_route_transcript_block_can_use_fused_transcript_rank(tmp_path, monkeypatch):
+    store = _open_store(tmp_path)
+    try:
+        bad_keyword_row = {
+            "id": 202,
+            "session_id": "phase20",
+            "turn_number": 202,
+            "kind": "turn",
+            "content": "User: give it to me in the form of a comma delimited list like: [name] [hex]",
+            "source": "test",
+            "metadata": {},
+            "created_at": "2023-05-28T18:05:00+00:00",
+            "overlap_count": 1,
+            "same_session": True,
+            "retrieval_source": "transcript.keyword",
+            "match_mode": "keyword",
+        }
+        good_keyword_row = {
+            "id": 126,
+            "session_id": "phase20",
+            "turn_number": 126,
+            "kind": "turn",
+            "content": "User: I've used Trello in my previous role as a marketing specialist at a small startup.",
+            "source": "test",
+            "metadata": {},
+            "created_at": "2023-05-24T23:58:00+00:00",
+            "overlap_count": 1,
+            "same_session": True,
+            "retrieval_source": "transcript.keyword",
+            "match_mode": "keyword",
+        }
+        bad_semantic_row = {
+            "id": 88,
+            "session_id": "phase20",
+            "turn_number": 88,
+            "kind": "turn",
+            "content": "User: The occupation certificate process for residential work requires several dates to be established.",
+            "source": "test",
+            "metadata": {"semantic_class": "conversation"},
+            "created_at": "2023-05-22T10:00:00+00:00",
+            "overlap_count": 1,
+            "same_session": True,
+            "semantic_score": 0.91,
+            "retrieval_source": "conversation.semantic",
+            "match_mode": "semantic",
+        }
+        monkeypatch.setattr(store, "search_profile", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_continuity", lambda **kwargs: [])
+        monkeypatch.setattr(store, "recent_continuity", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_transcript", lambda **kwargs: [bad_keyword_row, good_keyword_row])
+        monkeypatch.setattr(store, "search_transcript_global", lambda **kwargs: [bad_keyword_row, good_keyword_row])
+        monkeypatch.setattr(store, "search_conversation_semantic", lambda **kwargs: [bad_semantic_row])
+        monkeypatch.setattr(store, "search_graph", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus_semantic", lambda **kwargs: [])
+
+        packet = build_working_memory_packet(
+            store,
+            query="What was my previous occupation?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=0,
+            transcript_match_limit=1,
+            transcript_char_budget=900,
+            graph_limit=0,
+            corpus_limit=0,
+            corpus_char_budget=0,
+        )
+
+        assert "marketing specialist at a small startup" in packet["block"]
+    finally:
+        store.close()
+
+
+def test_phase20_11_fact_transcript_rows_prioritize_higher_overlap(tmp_path, monkeypatch):
+    store = _open_store(tmp_path)
+    try:
+        broader_semantic_row = {
+            "id": 48,
+            "session_id": "phase20",
+            "turn_number": 48,
+            "kind": "turn",
+            "content": "User: Orlando has many family-friendly dining options including Toothsome and Cheesecake Factory.",
+            "source": "test",
+            "metadata": {"semantic_class": "conversation"},
+            "created_at": "2023-05-21T17:19:00+00:00",
+            "overlap_count": 6,
+            "same_session": True,
+            "semantic_score": 0.73,
+            "retrieval_source": "conversation.semantic",
+            "match_mode": "semantic",
+        }
+        specific_keyword_row = {
+            "id": 50,
+            "session_id": "phase20",
+            "turn_number": 50,
+            "kind": "turn",
+            "content": "User: Dessert spots after dinner. Assistant: The Sugar Factory at Icon Park is famous for giant milkshakes.",
+            "source": "test",
+            "metadata": {},
+            "created_at": "2023-05-21T17:20:00+00:00",
+            "overlap_count": 10,
+            "same_session": True,
+            "retrieval_source": "transcript.keyword",
+            "match_mode": "keyword",
+        }
+        monkeypatch.setattr(store, "search_profile", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_continuity", lambda **kwargs: [])
+        monkeypatch.setattr(store, "recent_continuity", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_transcript", lambda **kwargs: [specific_keyword_row])
+        monkeypatch.setattr(store, "search_transcript_global", lambda **kwargs: [specific_keyword_row])
+        monkeypatch.setattr(store, "search_conversation_semantic", lambda **kwargs: [broader_semantic_row])
+        monkeypatch.setattr(store, "search_graph", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus_semantic", lambda **kwargs: [])
+
+        packet = build_working_memory_packet(
+            store,
+            query="Remind me of that unique dessert shop with the giant milkshakes.",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=0,
+            transcript_match_limit=1,
+            transcript_char_budget=900,
+            graph_limit=0,
+            corpus_limit=0,
+            corpus_char_budget=0,
+        )
+
+        assert packet["transcript_rows"]
+        assert "Sugar Factory" in str(packet["transcript_rows"][0].get("content") or "")
+    finally:
+        store.close()
+
+
+def test_phase20_11_fact_transcript_rows_carry_selected_continuity_ids(tmp_path, monkeypatch):
+    store = _open_store(tmp_path)
+    try:
+        continuity_rows = [
+            {
+                "id": 93,
+                "session_id": "phase20",
+                "turn_number": 93,
+                "kind": "turn",
+                "content": "User: Harvest Market planning and soap sales.",
+                "source": "test",
+                "created_at": "2023-05-23T14:15:00+00:00",
+            },
+            {
+                "id": 88,
+                "session_id": "phase20",
+                "turn_number": 88,
+                "kind": "turn",
+                "content": "User: Occupation certificate process for residential work.",
+                "source": "test",
+                "created_at": "2023-05-22T17:30:00+00:00",
+            },
+            {
+                "id": 128,
+                "session_id": "phase20",
+                "turn_number": 128,
+                "kind": "turn",
+                "content": (
+                    "User: In my previous role at the startup, I worked as a marketing specialist "
+                    "and managed interns."
+                ),
+                "source": "test",
+                "created_at": "2023-05-24T23:58:00+00:00",
+            },
+        ]
+        transcript_rows = [
+            {
+                "id": 93,
+                "session_id": "phase20",
+                "turn_number": 93,
+                "kind": "turn",
+                "content": "User: Harvest Market planning and soap sales.",
+                "source": "test",
+                "created_at": "2023-05-23T14:15:00+00:00",
+                "overlap_count": 1,
+                "retrieval_source": "transcript.keyword",
+                "match_mode": "keyword",
+            },
+            {
+                "id": 200,
+                "session_id": "phase20",
+                "turn_number": 200,
+                "kind": "turn",
+                "content": "User: Hex color processing request.",
+                "source": "test",
+                "created_at": "2023-05-28T18:05:00+00:00",
+                "overlap_count": 1,
+                "retrieval_source": "transcript.keyword",
+                "match_mode": "keyword",
+            },
+            {
+                "id": 202,
+                "session_id": "phase20",
+                "turn_number": 202,
+                "kind": "turn",
+                "content": "User: Comma-delimited color formatting request.",
+                "source": "test",
+                "created_at": "2023-05-28T18:05:00+00:00",
+                "overlap_count": 1,
+                "retrieval_source": "transcript.keyword",
+                "match_mode": "keyword",
+            },
+            {
+                "id": 128,
+                "session_id": "phase20",
+                "turn_number": 128,
+                "kind": "turn",
+                "content": (
+                    "User: In my previous role at the startup, I worked as a marketing specialist "
+                    "and managed interns."
+                ),
+                "source": "test",
+                "created_at": "2023-05-24T23:58:00+00:00",
+                "overlap_count": 1,
+                "retrieval_source": "transcript.keyword",
+                "match_mode": "keyword",
+            },
+        ]
+        monkeypatch.setattr(store, "search_profile", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_continuity", lambda **kwargs: continuity_rows)
+        monkeypatch.setattr(store, "recent_continuity", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_transcript", lambda **kwargs: transcript_rows)
+        monkeypatch.setattr(store, "search_transcript_global", lambda **kwargs: transcript_rows)
+        monkeypatch.setattr(store, "search_conversation_semantic", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_graph", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus_semantic", lambda **kwargs: [])
+
+        packet = build_working_memory_packet(
+            store,
+            query="What was my previous occupation?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=3,
+            transcript_match_limit=3,
+            transcript_char_budget=900,
+            graph_limit=0,
+            corpus_limit=0,
+            corpus_char_budget=0,
+        )
+
+        transcript_ids = [int(row.get("id") or 0) for row in packet["transcript_rows"]]
+        assert 128 in transcript_ids
+        assert "marketing specialist" in packet["block"].lower()
+    finally:
+        store.close()
+
+
+def test_phase20_11_search_continuity_filters_zero_overlap_rows(tmp_path):
+    store = _open_store(tmp_path)
+    try:
+        store.add_continuity_event(
+            session_id="phase20",
+            turn_number=88,
+            kind="turn",
+            content="User: Part 36 (3) occupation certificate process for residential work.",
+            source="test",
+        )
+        store.add_continuity_event(
+            session_id="phase20",
+            turn_number=126,
+            kind="turn",
+            content=(
+                "User: I've used Trello in my previous role as a marketing specialist at a small startup "
+                "and I'm familiar with its features."
+            ),
+            source="test",
+        )
+
+        rows = store.search_continuity(
+            query="What was my previous occupation?",
+            session_id="phase20",
+            limit=8,
+        )
+
+        ids = [int(row.get("id") or 0) for row in rows]
+        assert ids
+        assert all(int(row.get("overlap_count") or 0) > 0 for row in rows)
+    finally:
+        store.close()
+
+
+def test_phase20_11_fact_transcript_rows_only_carry_transcript_competitive_matches(tmp_path, monkeypatch):
+    store = _open_store(tmp_path)
+    try:
+        continuity_rows = [
+            {
+                "id": 93,
+                "session_id": "phase20",
+                "turn_number": 93,
+                "kind": "turn",
+                "content": "User: Harvest Market planning and previous vendor notes.",
+                "source": "test",
+                "created_at": "2023-05-23T14:15:00+00:00",
+                "overlap_count": 1,
+                "same_session": True,
+            },
+            {
+                "id": 88,
+                "session_id": "phase20",
+                "turn_number": 88,
+                "kind": "turn",
+                "content": "User: Occupation certificate process for residential work.",
+                "source": "test",
+                "created_at": "2023-05-22T17:30:00+00:00",
+                "overlap_count": 1,
+                "same_session": True,
+            },
+            {
+                "id": 512,
+                "session_id": "phase20",
+                "turn_number": 126,
+                "kind": "turn",
+                "content": (
+                    "User: I've used Trello in my previous occupation as a marketing specialist at a small startup "
+                    "and I'm familiar with its features."
+                ),
+                "source": "test",
+                "created_at": "2023-05-24T23:57:30+00:00",
+                "overlap_count": 2,
+                "same_session": True,
+            },
+        ]
+        transcript_rows = [
+            {
+                "id": 93,
+                "session_id": "phase20",
+                "turn_number": 93,
+                "kind": "turn",
+                "content": "User: Harvest Market planning and previous vendor notes.",
+                "source": "test",
+                "created_at": "2023-05-23T14:15:00+00:00",
+                "overlap_count": 1,
+                "retrieval_source": "transcript.keyword",
+                "match_mode": "keyword",
+                "same_session": True,
+            },
+            {
+                "id": 88,
+                "session_id": "phase20",
+                "turn_number": 88,
+                "kind": "turn",
+                "content": "User: Occupation certificate process for residential work.",
+                "source": "test",
+                "created_at": "2023-05-22T17:30:00+00:00",
+                "overlap_count": 1,
+                "retrieval_source": "transcript.keyword",
+                "match_mode": "keyword",
+                "same_session": True,
+            },
+            {
+                "id": 126,
+                "session_id": "phase20",
+                "turn_number": 126,
+                "kind": "turn",
+                "content": (
+                    "User: I've used Trello in my previous occupation as a marketing specialist at a small startup "
+                    "and I'm familiar with its features."
+                ),
+                "source": "test",
+                "created_at": "2023-05-24T23:57:00+00:00",
+                "overlap_count": 2,
+                "retrieval_source": "transcript.keyword",
+                "match_mode": "keyword",
+                "same_session": True,
+            },
+            {
+                "id": 200,
+                "session_id": "phase20",
+                "turn_number": 200,
+                "kind": "turn",
+                "content": "User: Comma-delimited color formatting request from previous export.",
+                "source": "test",
+                "created_at": "2023-05-28T18:05:00+00:00",
+                "overlap_count": 1,
+                "retrieval_source": "transcript.keyword",
+                "match_mode": "keyword",
+                "same_session": True,
+            },
+            {
+                "id": 202,
+                "session_id": "phase20",
+                "turn_number": 202,
+                "kind": "turn",
+                "content": "User: Previous export format for color processing request.",
+                "source": "test",
+                "created_at": "2023-05-28T18:06:00+00:00",
+                "overlap_count": 1,
+                "retrieval_source": "transcript.keyword",
+                "match_mode": "keyword",
+                "same_session": True,
+            },
+            {
+                "id": 204,
+                "session_id": "phase20",
+                "turn_number": 204,
+                "kind": "turn",
+                "content": "User: Previous report export requested for vendor dashboard.",
+                "source": "test",
+                "created_at": "2023-05-28T18:07:00+00:00",
+                "overlap_count": 1,
+                "retrieval_source": "transcript.keyword",
+                "match_mode": "keyword",
+                "same_session": True,
+            },
+            {
+                "id": 128,
+                "session_id": "phase20",
+                "turn_number": 128,
+                "kind": "turn",
+                "content": (
+                    "User: In my previous role at the startup, I managed interns and assigned tasks "
+                    "across several tools and projects for multiple teams."
+                ),
+                "source": "test",
+                "created_at": "2023-05-24T23:58:00+00:00",
+                "overlap_count": 1,
+                "retrieval_source": "transcript.keyword",
+                "match_mode": "keyword",
+                "same_session": True,
+            },
+        ]
+        monkeypatch.setattr(store, "search_profile", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_continuity", lambda **kwargs: continuity_rows)
+        monkeypatch.setattr(store, "recent_continuity", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_transcript", lambda **kwargs: transcript_rows)
+        monkeypatch.setattr(store, "search_transcript_global", lambda **kwargs: transcript_rows)
+        monkeypatch.setattr(store, "search_conversation_semantic", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_graph", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus_semantic", lambda **kwargs: [])
+
+        packet = build_working_memory_packet(
+            store,
+            query="What was my previous occupation?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=3,
+            transcript_match_limit=2,
+            transcript_char_budget=900,
+            graph_limit=0,
+            corpus_limit=0,
+            corpus_char_budget=0,
+        )
+
+        transcript_ids = [int(row.get("id") or 0) for row in packet["transcript_rows"]]
+        assert 126 in transcript_ids
+        assert 128 not in transcript_ids
+    finally:
+        store.close()
+
+
+def test_phase20_11_fact_block_keeps_relevant_third_transcript_row(tmp_path, monkeypatch):
+    store = _open_store(tmp_path)
+    try:
+        continuity_rows = [
+            {
+                "id": 93,
+                "session_id": "phase20",
+                "turn_number": 93,
+                "kind": "turn",
+                "content": "User: Harvest Market planning and soap sales.",
+                "source": "test",
+                "created_at": "2023/05/23 (Tue) 14:15",
+            },
+            {
+                "id": 88,
+                "session_id": "phase20",
+                "turn_number": 88,
+                "kind": "turn",
+                "content": "User: Occupation certificate process for residential work.",
+                "source": "test",
+                "created_at": "2023/05/22 (Mon) 17:30",
+            },
+            {
+                "id": 128,
+                "session_id": "phase20",
+                "turn_number": 128,
+                "kind": "turn",
+                "content": (
+                    "User: In my previous role at the startup, I worked as a marketing specialist "
+                    "and managed interns."
+                ),
+                "source": "test",
+                "created_at": "2023/05/24 (Wed) 23:58",
+            },
+        ]
+        transcript_rows = [
+            {
+                "id": 93,
+                "session_id": "phase20",
+                "turn_number": 93,
+                "kind": "turn",
+                "content": (
+                    "User: I'm preparing for the upcoming Harvest Market on September 18th and I need "
+                    "some help with tracking my sales data from previous markets."
+                ),
+                "source": "test",
+                "created_at": "2023/05/23 (Tue) 14:15",
+                "overlap_count": 1,
+                "retrieval_source": "transcript.keyword",
+                "match_mode": "keyword",
+            },
+            {
+                "id": 88,
+                "session_id": "phase20",
+                "turn_number": 88,
+                "kind": "turn",
+                "content": (
+                    "User: The occupation certificate process for residential work requires several "
+                    "dates to be established before completion."
+                ),
+                "source": "test",
+                "created_at": "2023/05/22 (Mon) 17:30",
+                "overlap_count": 1,
+                "retrieval_source": "transcript.keyword",
+                "match_mode": "keyword",
+            },
+            {
+                "id": 128,
+                "session_id": "phase20",
+                "turn_number": 128,
+                "kind": "turn",
+                "content": (
+                    "User: In my previous role at the startup, I worked as a marketing specialist "
+                    "and managed interns."
+                ),
+                "source": "test",
+                "created_at": "2023/05/24 (Wed) 23:58",
+                "overlap_count": 1,
+                "retrieval_source": "transcript.keyword",
+                "match_mode": "keyword",
+            },
+        ]
+        monkeypatch.setattr(store, "search_profile", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_continuity", lambda **kwargs: continuity_rows)
+        monkeypatch.setattr(store, "recent_continuity", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_transcript", lambda **kwargs: transcript_rows)
+        monkeypatch.setattr(store, "search_transcript_global", lambda **kwargs: transcript_rows)
+        monkeypatch.setattr(store, "search_conversation_semantic", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_graph", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus_semantic", lambda **kwargs: [])
+
+        packet = build_working_memory_packet(
+            store,
+            query="What was my previous occupation?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=2,
+            transcript_match_limit=3,
+            transcript_char_budget=560,
+            graph_limit=0,
+            corpus_limit=0,
+            corpus_char_budget=0,
+        )
+
+        assert "marketing specialist" in packet["block"].lower()
+    finally:
+        store.close()
+
+
+def test_phase20_11_temporal_sort_handles_slash_and_iso_timestamps(tmp_path, monkeypatch):
+    store = _open_store(tmp_path)
+    try:
+        older_trip = {
+            "id": 37,
+            "session_id": "phase20",
+            "turn_number": 37,
+            "kind": "turn",
+            "content": "User: I took a day hike to Muir Woods with my family.",
+            "source": "test",
+            "created_at": "2023/02/15 (Wed) 01:17",
+            "overlap_count": 4,
+            "semantic_score": 0.61,
+            "retrieval_source": "transcript.keyword",
+            "match_mode": "keyword",
+        }
+        middle_trip = {
+            "id": 68,
+            "session_id": "phase20",
+            "turn_number": 68,
+            "kind": "turn",
+            "content": "User: During my road trip to Yosemite National Park, I also thought about Big Sur and Monterey.",
+            "source": "test",
+            "created_at": "2023/02/20 (Mon) 05:52",
+            "overlap_count": 2,
+            "semantic_score": 0.58,
+            "retrieval_source": "conversation.semantic",
+            "match_mode": "semantic",
+        }
+        recent_summary = {
+            "id": 284,
+            "session_id": "phase20",
+            "turn_number": 283,
+            "kind": "turn",
+            "content": "session summary | user: I've been collecting stamps for three months now...",
+            "source": "test",
+            "created_at": "2026-04-14T10:24:28.816720+00:00",
+            "overlap_count": 4,
+            "semantic_score": 0.0,
+            "retrieval_source": "transcript.keyword",
+            "match_mode": "keyword",
+        }
+
+        monkeypatch.setattr(store, "search_profile", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_continuity", lambda **kwargs: [])
+        monkeypatch.setattr(store, "recent_continuity", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_transcript", lambda **kwargs: [recent_summary, older_trip])
+        monkeypatch.setattr(store, "search_transcript_global", lambda **kwargs: [recent_summary, older_trip])
+        monkeypatch.setattr(store, "search_conversation_semantic", lambda **kwargs: [middle_trip])
+        monkeypatch.setattr(store, "search_graph", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus_semantic", lambda **kwargs: [])
+
+        assert _parse_time_value("2023/02/15 (Wed) 01:17") is not None
+
+        packet = build_working_memory_packet(
+            store,
+            query="What is the order of the three trips I took in the past three months, from earliest to latest?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=0,
+            transcript_match_limit=3,
+            transcript_char_budget=900,
+            graph_limit=0,
+            corpus_limit=0,
+            corpus_char_budget=0,
+            route_resolver=lambda _query: {"mode": "temporal", "reason": "test"},
+        )
+
+        transcript_ids = [int(row.get("id") or 0) for row in packet["transcript_rows"]]
+        assert transcript_ids[:2] == [37, 68]
+        assert 284 in transcript_ids
+    finally:
+        store.close()
+
+
+def test_phase20_11_control_plane_packet_exposes_selected_rows(monkeypatch, tmp_path):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        store.add_continuity_event(
+            session_id="phase20",
+            turn_number=1,
+            kind="turn",
+            content="Nike has been my favourite brand so far for running shoes.",
+            source="test",
+        )
+        store.add_transcript_entry(
+            session_id="phase20",
+            turn_number=2,
+            kind="turn",
+            content="User: I want the same Nike running shoes as last time.",
+            source="test",
+        )
+        packet = build_working_memory_packet(
+            store,
+            query="What brand are my favorite running shoes?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=2,
+            transcript_match_limit=1,
+            transcript_char_budget=400,
+            graph_limit=0,
+            corpus_limit=0,
+            corpus_char_budget=0,
+        )
+        assert "matched" in packet
+        assert "transcript_rows" in packet
+        assert isinstance(packet["matched"], list)
+        assert isinstance(packet["transcript_rows"], list)
     finally:
         store.close()

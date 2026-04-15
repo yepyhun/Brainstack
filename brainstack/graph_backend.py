@@ -18,6 +18,17 @@ class GraphBackend(Protocol):
 
     def list_graph_conflicts(self, *, limit: int) -> List[Dict[str, Any]]: ...
 
+    def query_typed_metric_sum(
+        self,
+        *,
+        owner_subject: str | None,
+        entity_type: str | None,
+        entity_type_contains: List[str] | None = None,
+        entity_type_excludes: List[str] | None = None,
+        metric_attribute: str,
+        limit: int,
+    ) -> Dict[str, Any] | None: ...
+
 
 def create_graph_backend(kind: str, *, db_path: str) -> GraphBackend | None:
     normalized = str(kind or "sqlite").strip().lower()

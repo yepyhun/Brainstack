@@ -10,6 +10,50 @@ STRUCTURAL_TOKENS = {
     "tool",
     "user",
 }
+RETRIEVAL_QUERY_STOPWORDS = {
+    "and",
+    "about",
+    "am",
+    "are",
+    "can",
+    "could",
+    "did",
+    "do",
+    "does",
+    "for",
+    "from",
+    "give",
+    "had",
+    "has",
+    "have",
+    "how",
+    "into",
+    "is",
+    "know",
+    "past",
+    "please",
+    "that",
+    "the",
+    "their",
+    "them",
+    "these",
+    "this",
+    "tell",
+    "then",
+    "through",
+    "to",
+    "took",
+    "with",
+    "was",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "would",
+}
 TOKEN_RE = re.compile(r"[^\W_]+(?:[-_][^\W_]+)*", re.UNICODE)
 
 ROLE_PREFIX_RE = re.compile(r"^\s*(user|assistant|system|tool)\s*:\s*", re.IGNORECASE)
@@ -98,12 +142,16 @@ def tokenize_match_text(text: str) -> List[str]:
     return cleaned
 
 
+def tokenize_retrieval_query(text: str) -> List[str]:
+    return [token for token in tokenize_match_text(text) if token not in RETRIEVAL_QUERY_STOPWORDS]
+
+
 def count_overlap(query: str, content: str) -> int:
-    query_tokens = tokenize_match_text(query)
+    query_tokens = tokenize_retrieval_query(query)
     if not query_tokens:
         return 0
-    content_lower = str(content or "").lower()
-    return sum(1 for token in query_tokens if token in content_lower)
+    content_tokens = set(tokenize_match_text(content))
+    return sum(1 for token in query_tokens if token in content_tokens)
 
 
 def has_meaningful_transcript_evidence(query: str, rows: Iterable[Dict[str, Any]]) -> bool:

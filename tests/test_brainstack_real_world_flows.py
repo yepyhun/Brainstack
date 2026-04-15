@@ -327,6 +327,238 @@ class TestBrainstackRealWorldFlows:
         assert extracted["inferred_relations"][0]["predicate"] == "depends_on"
         assert extracted["inferred_relations"][0]["metadata"]["inference_reason"].startswith("BrainStack")
 
+    def test_tier2_extractor_normalizes_temporal_events_against_real_turns(self):
+        def _fake_llm(**kwargs):
+            return {
+                "content": """
+                {
+                  "profile_items": [],
+                  "states": [],
+                  "relations": [],
+                  "inferred_relations": [],
+                  "temporal_events": [
+                    {"turn_number": 11, "content": "Family trip to Muir Woods National Monument", "confidence": 0.88},
+                    {"turn_number": 99, "content": "Invalid event outside the batch", "confidence": 0.9},
+                    {"turn_number": 12, "content": "", "confidence": 0.7}
+                  ],
+                  "continuity_summary": "",
+                  "decisions": []
+                }
+                """
+            }
+
+        rows = [
+            {
+                "id": 1,
+                "turn_number": 11,
+                "kind": "turn",
+                "created_at": "2026-04-11T09:15:00Z",
+                "content": "User: We went to Muir Woods National Monument with family.\nAssistant: Nice.",
+            },
+            {
+                "id": 2,
+                "turn_number": 12,
+                "kind": "turn",
+                "created_at": "2026-04-12T10:30:00Z",
+                "content": "User: I also planned Yosemite later.\nAssistant: Noted.",
+            },
+        ]
+
+        extracted = extract_tier2_candidates(rows, llm_caller=_fake_llm, transcript_limit=4)
+
+        assert extracted["temporal_events"] == [
+            {
+                "turn_number": 11,
+                "content": "Family trip to Muir Woods National Monument",
+                "confidence": 0.88,
+                "metadata": {"event_turn_number": 11},
+                "temporal": {"observed_at": "2026-04-11T09:15:00Z"},
+            }
+        ]
+
+    def test_tier2_extractor_normalizes_typed_entities_against_real_turns(self):
+        def _fake_llm(**kwargs):
+            return {
+                "content": """
+                {
+                  "profile_items": [],
+                  "states": [],
+                  "relations": [],
+                  "inferred_relations": [],
+                  "typed_entities": [
+                    {
+                      "turn_number": 84,
+                      "name": "Yellowstone family road trip",
+                      "entity_type": "road trip",
+                      "subject": "User",
+                      "attributes": {
+                        "distance miles": "1,200 miles",
+                        "destination": "Yellowstone National Park"
+                      },
+                      "confidence": 0.91
+                    },
+                    {
+                      "turn_number": 99,
+                      "name": "Invalid outside batch",
+                      "entity_type": "road trip",
+                      "attributes": {"distance_miles": "300"}
+                    }
+                  ],
+                  "temporal_events": [],
+                  "continuity_summary": "",
+                  "decisions": []
+                }
+                """
+            }
+
+        rows = [
+            {
+                "id": 1,
+                "turn_number": 84,
+                "kind": "turn",
+                "created_at": "2026-04-11T09:15:00Z",
+                "content": "User: I just got back from Yellowstone with my family after a 1,200 mile road trip.\nAssistant: Nice.",
+            }
+        ]
+
+        extracted = extract_tier2_candidates(rows, llm_caller=_fake_llm, transcript_limit=4)
+
+        assert extracted["typed_entities"] == [
+            {
+                "turn_number": 84,
+                "name": "Yellowstone family road trip",
+                "entity_type": "road_trip",
+                "subject": "User",
+                "attributes": {
+                    "distance_miles": "1200",
+                    "destination": "Yellowstone National Park",
+                },
+                "confidence": 0.91,
+                "metadata": {"event_turn_number": 84},
+                "temporal": {"observed_at": "2026-04-11T09:15:00Z"},
+            }
+        ]
+
+    def test_tier2_extractor_empty_batch_keeps_temporal_events_schema(self):
+        extracted = extract_tier2_candidates([], llm_caller=lambda **kwargs: {"content": "{}"})
+
+        assert extracted["temporal_events"] == []
+        assert extracted["inferred_relations"] == []
+        assert extracted["typed_entities"] == []
+
+    def test_tier2_extractor_repairs_truncated_json_tail(self):
+        truncated = (
+            '{"profile_items":[],"states":[],"relations":[],"inferred_relations":[],"temporal_events":'
+            '[{"turn_number":230,"content":"Solo camping trip to Yosemite National Park","confidence":0.95},'
+            '{"turn_number":233,"content":"Bear canister confirmed for John Muir Wilderness","confidence":0.9}],'
+            '"continuity_summary":"Trip planning context","decisions":["Plan Eastern Sierra route"'
+        )
+
+        response = type(
+            "Response",
+            (),
+            {
+                "choices": [
+                    type(
+                        "Choice",
+                        (),
+                        {"message": type("Message", (), {"content": truncated})()},
+                    )()
+                ]
+            },
+        )()
+
+        extracted = extract_tier2_candidates(
+            [
+                {
+                    "turn_number": 230,
+                    "kind": "turn",
+                    "created_at": "2026-04-13T11:00:00Z",
+                    "content": "User: I just got back from Yosemite and I'm planning Eastern Sierra next.\nAssistant: Noted.",
+                },
+                {
+                    "turn_number": 233,
+                    "kind": "turn",
+                    "created_at": "2026-04-13T11:10:00Z",
+                    "content": "User: I already have a bear canister for John Muir Wilderness.\nAssistant: Good.",
+                },
+            ],
+            llm_caller=lambda **kwargs: response,
+        )
+
+        assert extracted["_meta"]["json_parse_status"] == "json_repaired"
+        assert [item["turn_number"] for item in extracted["temporal_events"]] == [230, 233]
+        assert extracted["continuity_summary"] == "Trip planning context"
+
+    def test_tier2_extractor_uses_reasoning_content_when_message_content_empty(self):
+        response = type(
+            "Response",
+            (),
+            {
+                "choices": [
+                    type(
+                        "Choice",
+                        (),
+                        {
+                            "message": type(
+                                "Message",
+                                (),
+                                {
+                                    "content": "",
+                                    "reasoning_content": (
+                                        '{"profile_items":[],"states":[],"relations":[],"inferred_relations":[],'
+                                        '"temporal_events":[{"turn_number":230,"content":"Returned from Yosemite trip","confidence":0.9}],'
+                                        '"continuity_summary":"","decisions":[]}'
+                                    ),
+                                },
+                            )(),
+                        },
+                    )()
+                ]
+            },
+        )()
+
+        extracted = extract_tier2_candidates(
+            [
+                {
+                    "turn_number": 230,
+                    "kind": "turn",
+                    "created_at": "2026-04-13T11:00:00Z",
+                    "content": "User: I got back from Yosemite yesterday.\nAssistant: Noted.",
+                },
+            ],
+            llm_caller=lambda **kwargs: response,
+        )
+
+        assert extracted["_meta"]["json_parse_status"] == "json_object"
+        assert extracted["temporal_events"][0]["turn_number"] == 230
+
+    def test_tier2_extractor_prompt_guides_background_trip_context_into_temporal_events(self):
+        captured = {}
+
+        def _fake_llm(**kwargs):
+            captured["system"] = kwargs["messages"][0]["content"]
+            return {"content": "{}"}
+
+        rows = [
+            {
+                "turn_number": 211,
+                "kind": "turn",
+                "content": (
+                    "User: I recently got back from a solo camping trip to Yosemite and from a road trip to Big Sur and Monterey, "
+                    "and now I need better camping gear recommendations.\nAssistant: Sure."
+                ),
+            }
+        ]
+
+        extract_tier2_candidates(rows, llm_caller=_fake_llm, transcript_limit=4)
+
+        prompt = captured["system"]
+        assert "concrete prior trip" in prompt
+        assert "real-world experiences, visits, trips" in prompt
+        assert '"typed_entities"' in prompt
+        assert "do not replace temporal_events with typed_entities" in prompt
+
     def test_tier2_reconciler_updates_current_state_and_surfaces_conflict(self, tmp_path):
         provider = _make_provider(tmp_path, "session-tier2-reconcile")
         try:
@@ -390,6 +622,327 @@ class TestBrainstackRealWorldFlows:
             )
             assert current_location["metadata"]["temporal"]["supersedes"]
             assert "tier2:test" in current_location["metadata"]["provenance"]["source_ids"]
+        finally:
+            provider.shutdown()
+
+    def test_tier2_reconciler_persists_temporal_events_as_continuity_rows(self, tmp_path):
+        provider = _make_provider(tmp_path, "session-tier2-temporal")
+        try:
+            report = reconcile_tier2_candidates(
+                provider._store,
+                session_id="session-tier2-temporal",
+                turn_number=20,
+                source="tier2:test",
+                extracted={
+                    "profile_items": [],
+                    "states": [],
+                    "relations": [],
+                    "inferred_relations": [],
+                    "temporal_events": [
+                        {
+                            "turn_number": 18,
+                            "content": "Family trip to Muir Woods National Monument",
+                            "confidence": 0.87,
+                            "metadata": {"event_turn_number": 18},
+                            "temporal": {"observed_at": "2026-04-11T09:15:00Z"},
+                        }
+                    ],
+                    "continuity_summary": "",
+                    "decisions": [],
+                },
+            )
+
+            continuity_rows = provider._store.recent_continuity(session_id="session-tier2-temporal", limit=10)
+            temporal_row = next(row for row in continuity_rows if row["kind"] == "temporal_event")
+
+            assert any(
+                action["kind"] == "continuity"
+                and action["action"] == "ADD"
+                and action["type"] == "temporal_event"
+                for action in report["actions"]
+            )
+            assert temporal_row["turn_number"] == 18
+            assert temporal_row["content"] == "Family trip to Muir Woods National Monument"
+            assert temporal_row["metadata"]["event_turn_number"] == 18
+            assert temporal_row["metadata"]["temporal"]["observed_at"].startswith("2026-04-11T09:15:00")
+        finally:
+            provider.shutdown()
+
+    def test_tier2_reconciler_persists_typed_entities_as_graph_states(self, tmp_path):
+        provider = _make_provider(tmp_path, "session-tier2-typed")
+        try:
+            report = reconcile_tier2_candidates(
+                provider._store,
+                session_id="session-tier2-typed",
+                turn_number=84,
+                source="tier2:test",
+                extracted={
+                    "profile_items": [],
+                    "states": [],
+                    "relations": [],
+                    "inferred_relations": [],
+                    "typed_entities": [
+                        {
+                            "turn_number": 84,
+                            "name": "Yellowstone family road trip",
+                            "entity_type": "road_trip",
+                            "subject": "User",
+                            "attributes": {
+                                "distance_miles": "1200",
+                                "destination": "Yellowstone National Park",
+                            },
+                            "confidence": 0.91,
+                            "metadata": {"event_turn_number": 84},
+                            "temporal": {"observed_at": "2026-04-11T09:15:00Z"},
+                        }
+                    ],
+                    "temporal_events": [],
+                    "continuity_summary": "",
+                    "decisions": [],
+                },
+            )
+
+            graph_rows = provider._store.search_graph(
+                query="Yellowstone road trip 1200 miles",
+                limit=20,
+            )
+
+            assert any(action["kind"] == "typed_entity" for action in report["actions"])
+            assert any(
+                row["row_type"] == "state"
+                and row["subject"] == "Yellowstone family road trip"
+                and row["predicate"] == "entity_type"
+                and row["object_value"] == "road_trip"
+                for row in graph_rows
+            )
+            assert any(
+                row["row_type"] == "state"
+                and row["subject"] == "Yellowstone family road trip"
+                and row["predicate"] == "distance_miles"
+                and row["object_value"] == "1200"
+                for row in graph_rows
+            )
+            assert any(
+                row["row_type"] == "state"
+                and row["subject"] == "Yellowstone family road trip"
+                and row["predicate"] == "owner_subject"
+                and row["object_value"] == "User"
+                for row in graph_rows
+            )
+        finally:
+            provider.shutdown()
+
+    def test_store_search_temporal_continuity_surfaces_cross_session_events_without_overlap_filter(self, tmp_path):
+        provider = _make_provider(tmp_path, "session-temporal-search")
+        try:
+            reconcile_tier2_candidates(
+                provider._store,
+                session_id="seed-session-a",
+                turn_number=20,
+                source="tier2:test",
+                extracted={
+                    "profile_items": [],
+                    "states": [],
+                    "relations": [],
+                    "inferred_relations": [],
+                    "temporal_events": [
+                        {
+                            "turn_number": 18,
+                            "content": "Family trip to Muir Woods National Monument",
+                            "confidence": 0.87,
+                            "metadata": {"event_turn_number": 18},
+                            "temporal": {"observed_at": "2026-04-11T09:15:00Z"},
+                        }
+                    ],
+                    "continuity_summary": "",
+                    "decisions": [],
+                },
+            )
+            reconcile_tier2_candidates(
+                provider._store,
+                session_id="seed-session-b",
+                turn_number=230,
+                source="tier2:test",
+                extracted={
+                    "profile_items": [],
+                    "states": [],
+                    "relations": [],
+                    "inferred_relations": [],
+                    "temporal_events": [
+                        {
+                            "turn_number": 230,
+                            "content": "Solo camping trip to Yosemite National Park",
+                            "confidence": 0.93,
+                            "metadata": {"event_turn_number": 230},
+                            "temporal": {"observed_at": "2026-04-13T11:00:00Z"},
+                        }
+                    ],
+                    "continuity_summary": "",
+                    "decisions": [],
+                },
+            )
+
+            rows = provider._store.search_temporal_continuity(
+                query="What is the order of the three trips I took in the past three months?",
+                session_id="prefetch-session",
+                limit=5,
+            )
+
+            assert [row["content"] for row in rows[:2]] == [
+                "Solo camping trip to Yosemite National Park",
+                "Family trip to Muir Woods National Monument",
+            ]
+            assert rows[0]["same_session"] is False
+            assert rows[0]["kind"] == "temporal_event"
+        finally:
+            provider.shutdown()
+
+    def test_store_search_temporal_continuity_can_semantically_rerank_bounded_pool(self, tmp_path):
+        class FakeSemanticBackend:
+            target_name = "test.semantic"
+
+            def score_texts(self, *, query: str, texts: list[str]) -> list[float]:
+                scores = []
+                for text in texts:
+                    normalized = str(text or "").lower()
+                    if "muir woods" in normalized:
+                        scores.append(0.95)
+                    elif "big sur" in normalized or "monterey" in normalized:
+                        scores.append(0.91)
+                    elif "yosemite" in normalized:
+                        scores.append(0.83)
+                    else:
+                        scores.append(0.05)
+                return scores
+
+            def close(self) -> None:
+                pass
+
+        provider = _make_provider(tmp_path, "session-temporal-semantic")
+        try:
+            provider._store._corpus_backend = FakeSemanticBackend()
+
+            reconcile_tier2_candidates(
+                provider._store,
+                session_id="seed-session-a",
+                turn_number=20,
+                source="tier2:test",
+                extracted={
+                    "profile_items": [],
+                    "states": [],
+                    "relations": [],
+                    "inferred_relations": [],
+                    "temporal_events": [
+                        {
+                            "turn_number": 18,
+                            "content": "Family trip to Muir Woods National Monument",
+                            "confidence": 0.87,
+                            "metadata": {"event_turn_number": 18},
+                            "temporal": {"observed_at": "2026-04-11T09:15:00Z"},
+                        }
+                    ],
+                    "continuity_summary": "",
+                    "decisions": [],
+                },
+            )
+            reconcile_tier2_candidates(
+                provider._store,
+                session_id="seed-session-b",
+                turn_number=230,
+                source="tier2:test",
+                extracted={
+                    "profile_items": [],
+                    "states": [],
+                    "relations": [],
+                    "inferred_relations": [],
+                    "temporal_events": [
+                        {
+                            "turn_number": 230,
+                            "content": "Solo camping trip to Yosemite National Park",
+                            "confidence": 0.93,
+                            "metadata": {"event_turn_number": 230},
+                            "temporal": {"observed_at": "2026-04-13T11:00:00Z"},
+                        },
+                        {
+                            "turn_number": 140,
+                            "content": "Road trip to Big Sur and Monterey",
+                            "confidence": 0.89,
+                            "metadata": {"event_turn_number": 140},
+                            "temporal": {"observed_at": "2026-04-12T08:00:00Z"},
+                        },
+                    ],
+                    "continuity_summary": "",
+                    "decisions": [],
+                },
+            )
+
+            rows = provider._store.search_temporal_continuity(
+                query="What is the order of the three trips I took in the past three months?",
+                session_id="prefetch-session",
+                limit=3,
+            )
+
+            assert [row["content"] for row in rows] == [
+                "Family trip to Muir Woods National Monument",
+                "Road trip to Big Sur and Monterey",
+                "Solo camping trip to Yosemite National Park",
+            ]
+            assert rows[0]["semantic_score"] > rows[1]["semantic_score"] > rows[2]["semantic_score"]
+        finally:
+            provider.shutdown()
+
+    def test_provider_tier2_batch_result_exposes_parse_and_write_telemetry(self, tmp_path):
+        provider = _make_provider(tmp_path, "session-tier2-batch-result")
+        try:
+            provider.sync_turn(
+                "I took a family trip to Muir Woods National Monument.",
+                "Noted.",
+                session_id="session-tier2-batch-result",
+                event_time="2026-04-11T09:15:00Z",
+            )
+            provider._config["_tier2_extractor"] = lambda transcript_entries, **kwargs: {
+                "profile_items": [],
+                "states": [],
+                "relations": [],
+                "inferred_relations": [],
+                "temporal_events": [
+                    {
+                        "turn_number": int(transcript_entries[-1]["turn_number"]),
+                        "content": "Family trip to Muir Woods National Monument",
+                        "confidence": 0.87,
+                        "metadata": {"event_turn_number": int(transcript_entries[-1]["turn_number"])},
+                        "temporal": {"observed_at": "2026-04-11T09:15:00Z"},
+                    }
+                ],
+                "continuity_summary": "",
+                "decisions": [],
+                "_meta": {
+                    "json_parse_status": "json_object",
+                    "parse_context": "turns=[1]",
+                    "raw_payload_preview": "{\"temporal_events\": [{\"turn_number\": 1}]}",
+                    "raw_payload_tail": "{\"temporal_events\": [{\"turn_number\": 1}]}",
+                    "raw_payload_length": 41,
+                },
+            }
+
+            result = provider._run_tier2_batch(
+                session_id="session-tier2-batch-result",
+                turn_number=1,
+                trigger_reason="unit-test-flush",
+            )
+
+            assert result["status"] == "ok"
+            assert result["json_parse_status"] == "json_object"
+            assert result["parse_context"] == "turns=[1]"
+            assert result["raw_payload_preview"].startswith("{")
+            assert result["raw_payload_tail"].endswith("}]}")
+            assert result["raw_payload_length"] == 41
+            assert result["transcript_turn_numbers"] == [1]
+            assert result["extracted_counts"]["temporal_events"] == 1
+            assert result["writes_performed"] >= 1
+            assert result["action_counts"]["ADD"] >= 1
+            assert provider._last_tier2_batch_result["trigger_reason"] == "unit-test-flush"
+            assert provider._tier2_batch_history[-1]["json_parse_status"] == "json_object"
         finally:
             provider.shutdown()
 

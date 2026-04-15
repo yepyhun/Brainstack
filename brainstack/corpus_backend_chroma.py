@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 from pathlib import Path
 from typing import Any, Dict, List
+import urllib.request
 
 
 class ChromaCorpusBackend:
@@ -13,6 +16,7 @@ class ChromaCorpusBackend:
         self._db_path = str(db_path)
         self._client = None
         self._collection = None
+        self._embedding_function = None
 
     @property
     def collection(self):
@@ -33,19 +37,21 @@ class ChromaCorpusBackend:
     def open(self) -> None:
         chromadb, Settings = self._import_chromadb()
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._embedding_function = self._build_embedding_function()
         self._client = chromadb.PersistentClient(
             path=self._db_path,
             settings=Settings(anonymized_telemetry=False),
         )
         self._collection = self._client.get_or_create_collection(
             name=self.collection_name,
-            embedding_function=self._build_embedding_function(),
+            embedding_function=self._embedding_function,
             metadata={"hnsw:space": "cosine"},
         )
 
     def close(self) -> None:
         self._collection = None
         self._client = None
+        self._embedding_function = None
 
     def is_empty(self) -> bool:
         return int(self.collection.count() or 0) == 0
@@ -160,6 +166,73 @@ class ChromaCorpusBackend:
             )
         return rows
 
+    def score_texts(
+        self,
+        *,
+        query: str,
+        texts: List[str],
+    ) -> List[float]:
+        items = [str(text or "").strip() for text in texts]
+        if not items:
+            return []
+        external_url = str(os.getenv("BRAINSTACK_TEMPORAL_EMBEDDINGS_URL", "") or "").strip()
+        if external_url:
+            return self._score_texts_via_external_embeddings(
+                url=external_url,
+                model=str(os.getenv("BRAINSTACK_TEMPORAL_EMBEDDINGS_MODEL", "") or "").strip(),
+                query_prefix=str(os.getenv("BRAINSTACK_TEMPORAL_EMBEDDINGS_QUERY_PREFIX", "query: ") or ""),
+                document_prefix=str(os.getenv("BRAINSTACK_TEMPORAL_EMBEDDINGS_DOCUMENT_PREFIX", "document: ") or ""),
+                timeout_seconds=float(os.getenv("BRAINSTACK_TEMPORAL_EMBEDDINGS_TIMEOUT_SECONDS", "15") or 15),
+                query=str(query or ""),
+                texts=items,
+            )
+        if self._embedding_function is None:
+            raise RuntimeError("ChromaCorpusBackend is not open")
+        embeddings = self._embedding_function([str(query or "")] + items)
+        if embeddings is None:
+            return [0.0 for _ in items]
+        embeddings_list = list(embeddings)
+        if len(embeddings_list) != len(items) + 1:
+            return [0.0 for _ in items]
+        query_embedding = embeddings_list[0]
+        return [
+            _cosine_similarity(query_embedding, embedding)
+            for embedding in embeddings_list[1:]
+        ]
+
+    def _score_texts_via_external_embeddings(
+        self,
+        *,
+        url: str,
+        model: str,
+        query_prefix: str,
+        document_prefix: str,
+        timeout_seconds: float,
+        query: str,
+        texts: List[str],
+    ) -> List[float]:
+        payload: Dict[str, Any] = {
+            "input": [f"{query_prefix}{query}"] + [f"{document_prefix}{text}" for text in texts],
+        }
+        if model:
+            payload["model"] = model
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=max(1.0, float(timeout_seconds))) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        data = list(body.get("data") or [])
+        embeddings = [item.get("embedding") for item in data]
+        if len(embeddings) != len(texts) + 1:
+            return [0.0 for _ in texts]
+        query_embedding = embeddings[0]
+        return [
+            _cosine_similarity(query_embedding, embedding)
+            for embedding in embeddings[1:]
+        ]
+
 
 def _decode_json_object(value: Any) -> Dict[str, Any]:
     text = str(value or "").strip()
@@ -170,3 +243,18 @@ def _decode_json_object(value: Any) -> Dict[str, Any]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _cosine_similarity(left: List[float], right: List[float]) -> float:
+    if left is None or right is None:
+        return 0.0
+    left_values = [float(value) for value in list(left)]
+    right_values = [float(value) for value in list(right)]
+    if not left_values or not right_values or len(left_values) != len(right_values):
+        return 0.0
+    dot = sum(float(a) * float(b) for a, b in zip(left_values, right_values))
+    left_norm = math.sqrt(sum(float(value) * float(value) for value in left_values))
+    right_norm = math.sqrt(sum(float(value) * float(value) for value in right_values))
+    if left_norm <= 0.0 or right_norm <= 0.0:
+        return 0.0
+    return dot / (left_norm * right_norm)

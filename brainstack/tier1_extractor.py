@@ -5,6 +5,22 @@ import re
 from typing import Any, Dict, List
 
 
+_PREVIOUS_OCCUPATION_PATTERNS = (
+    re.compile(
+        r"\b(?:in|during)\s+my\s+previous\s+(?:role|occupation)\s+(?:i\s+worked\s+as|i\s+was|as)\s+([^.;!?]+)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bmy\s+previous\s+(?:role|occupation)\s+(?:was|as)\s+([^.;!?]+)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bi\s+used\s+to\s+work\s+as\s+([^.;!?]+)",
+        re.IGNORECASE,
+    ),
+)
+
+
 def build_profile_stable_key(category: str, content: str) -> str:
     normalized = " ".join(content.strip().lower().split())
     digest = hashlib.sha1(f"{category}:{normalized}".encode("utf-8")).hexdigest()
@@ -32,6 +48,17 @@ def _slotted_candidate(
         "confidence": confidence,
         "source": source,
     }
+
+
+def _extract_previous_occupation(sentence: str) -> str:
+    for pattern in _PREVIOUS_OCCUPATION_PATTERNS:
+        match = pattern.search(sentence)
+        if not match:
+            continue
+        value = " ".join(str(match.group(1) or "").split()).strip(" ,.:;")
+        if value:
+            return value
+    return ""
 
 
 def extract_profile_candidates(text: str) -> List[Dict[str, Any]]:
@@ -82,6 +109,18 @@ def extract_profile_candidates(text: str) -> List[Dict[str, Any]]:
                     slot="identity:skill_level",
                     content="Vibecoder (not a professional developer)",
                     confidence=0.88,
+                    source="heuristic_identity",
+                )
+            )
+
+        previous_occupation = _extract_previous_occupation(sentence)
+        if previous_occupation:
+            candidates.append(
+                _slotted_candidate(
+                    category="identity",
+                    slot="identity:previous_occupation",
+                    content=f"Previous occupation: {previous_occupation}",
+                    confidence=0.9,
                     source="heuristic_identity",
                 )
             )

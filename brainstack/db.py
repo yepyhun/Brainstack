@@ -14,8 +14,12 @@ from .corpus_backend import create_corpus_backend
 from .graph_backend import create_graph_backend
 from .provenance import merge_provenance, normalize_provenance
 from .temporal import merge_temporal, normalize_temporal_fields, record_is_effective_at
-from .transcript import count_overlap, tokenize_match_text
-from .usefulness import apply_retrieval_telemetry, graph_priority_adjustment
+from .transcript import count_overlap, tokenize_match_text, tokenize_retrieval_query
+from .usefulness import (
+    apply_retrieval_telemetry,
+    graph_priority_adjustment,
+    profile_priority_adjustment,
+)
 
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -28,17 +32,8 @@ def utc_now_iso() -> str:
 
 
 def _query_tokens(query: str, *, limit: int) -> List[str]:
-    seen: set[str] = set()
-    output: List[str] = []
-    for token in re.findall(r"[^\W_]+", str(query or "").lower(), flags=re.UNICODE):
-        cleaned = token.strip()
-        if len(cleaned) < 2 or cleaned in seen:
-            continue
-        seen.add(cleaned)
-        output.append(cleaned)
-        if len(output) >= limit:
-            break
-    return output
+    tokens = tokenize_retrieval_query(query)
+    return tokens[:limit]
 
 
 def build_fts_query(query: str) -> str:
@@ -1117,6 +1112,90 @@ class BrainstackStore:
         return [_row_to_dict(row) for row in rows]
 
     @_locked
+    def search_temporal_continuity(self, *, query: str, session_id: str, limit: int) -> List[Dict[str, Any]]:
+        if limit <= 0:
+            return []
+        row_limit = max(limit * 6, 24)
+        fts_query = build_fts_query(query)
+        if fts_query:
+            try:
+                rows = self.conn.execute(
+                    """
+                    SELECT ce.id, ce.session_id, ce.turn_number, ce.kind, ce.content, ce.source, ce.metadata_json, ce.created_at
+                    FROM continuity_fts fts
+                    JOIN continuity_events ce ON ce.id = fts.rowid
+                    WHERE ce.kind = 'temporal_event' AND continuity_fts MATCH ?
+                    ORDER BY
+                        CASE WHEN ce.session_id = ? THEN 0 ELSE 1 END,
+                        bm25(continuity_fts),
+                        ce.created_at DESC
+                    LIMIT ?
+                    """,
+                    (fts_query, session_id, row_limit),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+        else:
+            rows = []
+        if not rows:
+            rows = self.conn.execute(
+                """
+                SELECT id, session_id, turn_number, kind, content, source, metadata_json, created_at
+                FROM continuity_events
+                WHERE kind = 'temporal_event'
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (row_limit,),
+            ).fetchall()
+        scored: List[Dict[str, Any]] = []
+        for row in rows:
+            item = _row_to_dict(row)
+            metadata = dict(item.get("metadata") or {})
+            temporal = metadata.get("temporal") if isinstance(metadata.get("temporal"), dict) else {}
+            item["same_session"] = item["session_id"] == session_id
+            item["overlap_count"] = count_overlap(query, item["content"])
+            item["semantic_score"] = 0.0
+            item["_temporal_observed_at"] = str(
+                temporal.get("observed_at")
+                or temporal.get("valid_at")
+                or item.get("created_at")
+                or ""
+            )
+            scored.append(item)
+
+        semantic_scorer = getattr(self._corpus_backend, "score_texts", None)
+        if callable(semantic_scorer) and scored:
+            try:
+                semantic_scores = semantic_scorer(
+                    query=query,
+                    texts=[str(item.get("content") or "") for item in scored],
+                )
+            except Exception as exc:
+                self._corpus_backend_error = str(exc)
+                logger.warning("Brainstack temporal continuity semantic scoring failed: %s", exc)
+            else:
+                self._corpus_backend_error = ""
+                for item, semantic_score in zip(scored, semantic_scores):
+                    item["semantic_score"] = float(semantic_score or 0.0)
+
+        scored.sort(
+            key=lambda item: (
+                1 if float(item.get("semantic_score") or 0.0) > 0.0 else 0,
+                float(item.get("semantic_score") or 0.0),
+                1 if int(item.get("overlap_count") or 0) > 0 else 0,
+                int(item.get("overlap_count") or 0),
+                1 if item.get("same_session") else 0,
+                str(item.get("_temporal_observed_at") or ""),
+                str(item.get("created_at") or ""),
+                int(item.get("turn_number") or 0),
+                int(item.get("id") or 0),
+            ),
+            reverse=True,
+        )
+        return scored[:limit]
+
+    @_locked
     def search_continuity(self, *, query: str, session_id: str, limit: int) -> List[Dict[str, Any]]:
         fts_query = build_fts_query(query)
         if not fts_query:
@@ -1136,7 +1215,6 @@ class BrainstackStore:
                 """,
                 (fts_query, session_id, limit),
             ).fetchall()
-            return [_row_to_dict(row) for row in rows]
         except sqlite3.OperationalError:
             like = f"%{query.strip()}%"
             rows = self.conn.execute(
@@ -1149,7 +1227,28 @@ class BrainstackStore:
                 """,
                 (like, session_id, limit),
             ).fetchall()
-            return [_row_to_dict(row) for row in rows]
+
+        scored: List[Dict[str, Any]] = []
+        for row in rows:
+            item = _row_to_dict(row)
+            overlap_count = count_overlap(query, item["content"])
+            if overlap_count <= 0:
+                continue
+            item["overlap_count"] = overlap_count
+            item["same_session"] = item["session_id"] == session_id
+            scored.append(item)
+
+        scored.sort(
+            key=lambda item: (
+                int(item["overlap_count"]),
+                1 if item["same_session"] else 0,
+                str(item.get("created_at") or ""),
+                int(item.get("turn_number") or 0),
+                int(item.get("id") or 0),
+            ),
+            reverse=True,
+        )
+        return scored[:limit]
 
     @_locked
     def recent_transcript(self, *, session_id: str, limit: int) -> List[Dict[str, Any]]:
@@ -1167,7 +1266,7 @@ class BrainstackStore:
 
     @_locked
     def search_transcript(self, *, query: str, session_id: str, limit: int) -> List[Dict[str, Any]]:
-        tokens = tokenize_match_text(query)
+        tokens = tokenize_retrieval_query(query)
         if not tokens:
             return []
 
@@ -1218,6 +1317,67 @@ class BrainstackStore:
             key=lambda item: (
                 1 if item["same_session"] else 0,
                 int(item["overlap_count"]),
+                int(item["turn_number"]),
+                int(item["id"]),
+            ),
+            reverse=True,
+        )
+        return scored[:limit]
+
+    @_locked
+    def search_transcript_global(self, *, query: str, session_id: str, limit: int) -> List[Dict[str, Any]]:
+        tokens = tokenize_retrieval_query(query)
+        if not tokens:
+            return []
+
+        candidate_limit = max(limit * 6, 12)
+        fts_query = " OR ".join(f'"{token}"' for token in tokens[:8])
+        rows: List[sqlite3.Row]
+
+        try:
+            rows = self.conn.execute(
+                """
+                SELECT te.id, te.session_id, te.turn_number, te.kind, te.content, te.source, te.metadata_json, te.created_at
+                FROM transcript_fts fts
+                JOIN transcript_entries te ON te.id = fts.rowid
+                WHERE transcript_fts MATCH ?
+                ORDER BY
+                    CASE WHEN te.session_id = ? THEN 0 ELSE 1 END,
+                    bm25(transcript_fts),
+                    te.created_at DESC
+                LIMIT ?
+                """,
+                (fts_query, session_id, candidate_limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            patterns = [f"%{token}%" for token in tokens[:8]]
+            where = " OR ".join("lower(content) LIKE ?" for _ in patterns)
+            rows = self.conn.execute(
+                f"""
+                SELECT id, session_id, turn_number, kind, content, source, metadata_json, created_at
+                FROM transcript_entries
+                WHERE {where}
+                ORDER BY CASE WHEN session_id = ? THEN 0 ELSE 1 END, created_at DESC
+                LIMIT ?
+                """,
+                tuple(patterns + [session_id, candidate_limit]),
+            ).fetchall()
+
+        scored: List[Dict[str, Any]] = []
+        for row in rows:
+            item = _row_to_dict(row)
+            overlap_count = count_overlap(query, item["content"])
+            if overlap_count <= 0:
+                continue
+            item["overlap_count"] = overlap_count
+            item["same_session"] = item["session_id"] == session_id
+            scored.append(item)
+
+        scored.sort(
+            key=lambda item: (
+                int(item["overlap_count"]),
+                1 if item["same_session"] else 0,
+                str(item.get("created_at") or ""),
                 int(item["turn_number"]),
                 int(item["id"]),
             ),
@@ -1362,34 +1522,68 @@ class BrainstackStore:
     @_locked
     def search_profile(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
         fts_query = build_fts_query(query)
+        rows: List[sqlite3.Row]
+        candidate_limit = max(limit * 4, 8)
         if not fts_query:
-            return self.list_profile_items(limit=limit)
-        try:
-            rows = self.conn.execute(
-                """
-                SELECT pi.id, pi.stable_key, pi.category, pi.content, pi.source, pi.confidence, pi.metadata_json, pi.updated_at
-                FROM profile_fts fts
-                JOIN profile_items pi ON pi.id = fts.rowid
-                WHERE profile_fts MATCH ? AND pi.active = 1
-                ORDER BY bm25(profile_fts), pi.confidence DESC, pi.updated_at DESC
-                LIMIT ?
-                """,
-                (fts_query, limit),
-            ).fetchall()
-            return [_row_to_dict(row) for row in rows]
-        except sqlite3.OperationalError:
-            like = f"%{query.strip()}%"
             rows = self.conn.execute(
                 """
                 SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at
                 FROM profile_items
-                WHERE active = 1 AND content LIKE ?
+                WHERE active = 1
                 ORDER BY confidence DESC, updated_at DESC
                 LIMIT ?
                 """,
-                (like, limit),
+                (candidate_limit,),
             ).fetchall()
-            return [_row_to_dict(row) for row in rows]
+        else:
+            try:
+                rows = self.conn.execute(
+                    """
+                    SELECT pi.id, pi.stable_key, pi.category, pi.content, pi.source, pi.confidence, pi.metadata_json, pi.updated_at
+                    FROM profile_fts fts
+                    JOIN profile_items pi ON pi.id = fts.rowid
+                    WHERE profile_fts MATCH ? AND pi.active = 1
+                    ORDER BY bm25(profile_fts), pi.confidence DESC, pi.updated_at DESC
+                    LIMIT ?
+                    """,
+                    (fts_query, candidate_limit),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                like = f"%{query.strip()}%"
+                rows = self.conn.execute(
+                    """
+                    SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at
+                    FROM profile_items
+                    WHERE active = 1 AND content LIKE ?
+                    ORDER BY confidence DESC, updated_at DESC
+                    LIMIT ?
+                    """,
+                    (like, candidate_limit),
+                ).fetchall()
+
+        scored: List[Dict[str, Any]] = []
+        for row in rows:
+            item = _row_to_dict(row)
+            match_text = " ".join(
+                (
+                    str(item.get("stable_key") or "").replace("_", " "),
+                    str(item.get("content") or ""),
+                )
+            )
+            item["overlap_count"] = count_overlap(query, match_text)
+            scored.append(item)
+
+        scored.sort(
+            key=lambda item: (
+                int(item.get("overlap_count") or 0),
+                profile_priority_adjustment(item),
+                float(item.get("confidence") or 0.0),
+                str(item.get("updated_at") or ""),
+                int(item.get("id") or 0),
+            ),
+            reverse=True,
+        )
+        return scored[:limit]
 
     @_locked
     def upsert_corpus_document(
@@ -1635,14 +1829,16 @@ class BrainstackStore:
                 "created_at": created_at,
                 "same_session": str(document_meta.get("session_id") or "") == session_id,
                 "semantic_score": float(row.get("semantic_score") or 0.0),
+                "overlap_count": count_overlap(query, str(row.get("content") or "")),
                 "retrieval_source": "conversation.semantic",
                 "match_mode": "semantic",
             }
             output.append(item)
         output.sort(
             key=lambda item: (
-                1 if item["same_session"] else 0,
+                int(item.get("overlap_count") or 0),
                 float(item.get("semantic_score") or 0.0),
+                1 if item["same_session"] else 0,
                 str(item.get("created_at") or ""),
                 int(item.get("turn_number") or 0),
                 int(item.get("id") or 0),
@@ -2514,6 +2710,38 @@ class BrainstackStore:
         rows = [item for item in rows if _graph_sort_key(item, query=query)[0] > 0]
         rows.sort(key=lambda item: _graph_sort_key(item, query=query), reverse=True)
         return rows[:limit]
+
+    @_locked
+    def query_native_typed_metric_sum(
+        self,
+        *,
+        owner_subject: str | None,
+        entity_type: str | None,
+        entity_type_contains: Iterable[str] | None = None,
+        entity_type_excludes: Iterable[str] | None = None,
+        metric_attribute: str,
+        limit: int = 16,
+    ) -> Dict[str, Any] | None:
+        if self._graph_backend is None:
+            return None
+        query_method = getattr(self._graph_backend, "query_typed_metric_sum", None)
+        if not callable(query_method):
+            return None
+        try:
+            result = query_method(
+                owner_subject=owner_subject,
+                entity_type=entity_type,
+                entity_type_contains=list(entity_type_contains or []),
+                entity_type_excludes=list(entity_type_excludes or []),
+                metric_attribute=metric_attribute,
+                limit=max(1, int(limit)),
+            )
+        except Exception as exc:
+            self._graph_backend_error = str(exc)
+            logger.warning("Brainstack native typed metric query failed: %s", exc)
+            return None
+        self._graph_backend_error = ""
+        return dict(result) if isinstance(result, dict) else None
 
     @_locked
     def record_graph_retrievals(self, *, rows: Iterable[Dict[str, Any]]) -> int:

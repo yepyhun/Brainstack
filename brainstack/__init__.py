@@ -57,6 +57,25 @@ def _normalize_path(value: str, hermes_home: str) -> str:
     return str(Path(value).expanduser())
 
 
+def _debug_row_snapshot(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": int(row.get("id") or 0),
+        "session_id": str(row.get("session_id") or ""),
+        "turn_number": int(row.get("turn_number") or 0),
+        "stable_key": str(row.get("stable_key") or ""),
+        "row_type": str(row.get("row_type") or ""),
+        "document_id": int(row.get("document_id") or 0),
+        "section_index": int(row.get("section_index") or 0),
+        "created_at": str(row.get("created_at") or ""),
+        "overlap_count": int(row.get("overlap_count") or 0),
+        "semantic_score": float(row.get("semantic_score") or 0.0),
+        "channels": list(row.get("_brainstack_channels") or []),
+        "channel_ranks": dict(row.get("_brainstack_channel_ranks") or {}),
+        "rrf_score": float(row.get("_brainstack_rrf_score") or 0.0),
+        "content_excerpt": str(row.get("content") or "")[:240],
+    }
+
+
 class BrainstackMemoryProvider(MemoryProvider):
     def __init__(self, config: dict | None = None):
         self._config = config or _load_plugin_config()
@@ -79,8 +98,14 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._tier2_transcript_limit = int(self._config.get("tier2_transcript_limit", 8))
         self._tier2_timeout_seconds = float(self._config.get("tier2_timeout_seconds", 15))
         self._tier2_max_tokens = int(self._config.get("tier2_max_tokens", 900))
+        self._route_resolver_override = None
         self._last_prefetch_policy: Dict[str, Any] | None = None
+        self._last_prefetch_routing: Dict[str, Any] | None = None
+        self._last_prefetch_channels: list[Dict[str, Any]] | None = None
+        self._last_prefetch_debug: Dict[str, Any] | None = None
         self._last_tier2_schedule: Dict[str, Any] | None = None
+        self._last_tier2_batch_result: Dict[str, Any] | None = None
+        self._tier2_batch_history: List[Dict[str, Any]] = []
         self._pending_tier2_turns = 0
         self._last_turn_monotonic: float | None = None
         self._tier2_lock = threading.RLock()
@@ -184,9 +209,29 @@ class BrainstackMemoryProvider(MemoryProvider):
             graph_limit=self._graph_match_limit,
             corpus_limit=self._corpus_match_limit,
             corpus_char_budget=self._corpus_char_budget,
-            route_resolver=self._config.get("_route_resolver"),
+            route_resolver=self._route_resolver_override or self._config.get("_route_resolver"),
         )
         self._last_prefetch_policy = packet["policy"]
+        self._last_prefetch_routing = dict(packet.get("routing") or {})
+        self._last_prefetch_channels = [
+            dict(channel)
+            for channel in list(packet.get("channels") or [])
+            if isinstance(channel, dict)
+        ]
+        if bool(getattr(self, "_capture_candidate_debug", False)) or bool(self._config.get("_capture_candidate_debug")):
+            self._last_prefetch_debug = {
+                "fused_candidates": [dict(item) for item in list(packet.get("fused_candidates") or [])],
+                "selected_rows": {
+                    "profile_items": [_debug_row_snapshot(row) for row in list(packet.get("profile_items") or [])],
+                    "matched": [_debug_row_snapshot(row) for row in list(packet.get("matched") or [])],
+                    "recent": [_debug_row_snapshot(row) for row in list(packet.get("recent") or [])],
+                    "transcript_rows": [_debug_row_snapshot(row) for row in list(packet.get("transcript_rows") or [])],
+                    "graph_rows": [_debug_row_snapshot(row) for row in list(packet.get("graph_rows") or [])],
+                    "corpus_rows": [_debug_row_snapshot(row) for row in list(packet.get("corpus_rows") or [])],
+                },
+            }
+        else:
+            self._last_prefetch_debug = None
         return packet["block"]
 
     def sync_turn(
@@ -379,9 +424,17 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._last_turn_monotonic = None
         self._pending_tier2_turns = 0
         self._last_tier2_schedule = None
+        self._last_tier2_batch_result = None
+        self._tier2_batch_history = []
         self._tier2_followup_requested = False
         self._tier2_running = False
         self._tier2_thread = None
+
+    def _record_tier2_batch_result(self, result: Dict[str, Any]) -> None:
+        self._last_tier2_batch_result = dict(result)
+        self._tier2_batch_history.append(dict(result))
+        if len(self._tier2_batch_history) > 256:
+            self._tier2_batch_history = self._tier2_batch_history[-256:]
 
     def _queue_tier2_background(self, *, session_id: str, turn_number: int, trigger_reason: str) -> None:
         with self._tier2_lock:
@@ -434,16 +487,35 @@ class BrainstackMemoryProvider(MemoryProvider):
                 self._tier2_running = False
                 self._tier2_thread = None
 
-    def _run_tier2_batch(self, *, session_id: str, turn_number: int, trigger_reason: str) -> None:
+    def _run_tier2_batch(self, *, session_id: str, turn_number: int, trigger_reason: str) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "session_id": session_id,
+            "turn_number": int(turn_number or 0),
+            "trigger_reason": trigger_reason,
+            "transcript_turn_numbers": [],
+            "transcript_ids": [],
+            "transcript_count": 0,
+            "json_parse_status": "not_run",
+            "parse_context": "",
+            "extracted_counts": {},
+            "action_counts": {},
+            "writes_performed": 0,
+            "status": "not_run",
+        }
         if not self._store:
-            return
+            return result
         transcript_rows = [
             row
             for row in reversed(self._store.recent_transcript(session_id=session_id, limit=self._tier2_transcript_limit))
             if str(row.get("kind", "")) == "turn"
         ]
+        result["transcript_turn_numbers"] = [int(row.get("turn_number") or 0) for row in transcript_rows]
+        result["transcript_ids"] = [int(row["id"]) for row in transcript_rows if row.get("id") is not None]
+        result["transcript_count"] = len(transcript_rows)
         if not transcript_rows:
-            return
+            result["status"] = "skipped_no_transcript"
+            self._record_tier2_batch_result(result)
+            return result
         extractor = self._config.get("_tier2_extractor")
         if callable(extractor):
             extracted = extractor(
@@ -459,7 +531,48 @@ class BrainstackMemoryProvider(MemoryProvider):
                 timeout_seconds=self._tier2_timeout_seconds,
                 max_tokens=self._tier2_max_tokens,
             )
-        reconcile_tier2_candidates(
+        extracted_meta = extracted.get("_meta") if isinstance(extracted, dict) else {}
+        result["json_parse_status"] = str((extracted_meta or {}).get("json_parse_status") or "unknown")
+        result["parse_context"] = str((extracted_meta or {}).get("parse_context") or "")
+        result["raw_payload_preview"] = str((extracted_meta or {}).get("raw_payload_preview") or "")
+        result["raw_payload_tail"] = str((extracted_meta or {}).get("raw_payload_tail") or "")
+        result["raw_payload_length"] = int((extracted_meta or {}).get("raw_payload_length") or 0)
+        extracted_counts = {
+            "profile_items": len(list(extracted.get("profile_items", []) or [])),
+            "states": len(list(extracted.get("states", []) or [])),
+            "relations": len(list(extracted.get("relations", []) or [])),
+            "inferred_relations": len(list(extracted.get("inferred_relations", []) or [])),
+            "typed_entities": len(list(extracted.get("typed_entities", []) or [])),
+            "temporal_events": len(list(extracted.get("temporal_events", []) or [])),
+            "decisions": len(list(extracted.get("decisions", []) or [])),
+            "continuity_summary_present": 1 if str(extracted.get("continuity_summary") or "").strip() else 0,
+        }
+        result["extracted_counts"] = extracted_counts
+        temporal_event_samples: List[Dict[str, Any]] = []
+        for event in list(extracted.get("temporal_events", []) or [])[:6]:
+            if not isinstance(event, dict):
+                continue
+            temporal_event_samples.append(
+                {
+                    "turn_number": int(event.get("turn_number") or 0),
+                    "content": str(event.get("content") or "").strip(),
+                }
+            )
+        result["temporal_event_samples"] = temporal_event_samples
+        typed_entity_samples: List[Dict[str, Any]] = []
+        for entity in list(extracted.get("typed_entities", []) or [])[:4]:
+            if not isinstance(entity, dict):
+                continue
+            typed_entity_samples.append(
+                {
+                    "turn_number": int(entity.get("turn_number") or 0),
+                    "name": str(entity.get("name") or "").strip(),
+                    "entity_type": str(entity.get("entity_type") or "").strip(),
+                    "attributes": dict(entity.get("attributes") or {}),
+                }
+            )
+        result["typed_entity_samples"] = typed_entity_samples
+        reconcile_report = reconcile_tier2_candidates(
             self._store,
             session_id=session_id,
             turn_number=turn_number,
@@ -470,3 +583,15 @@ class BrainstackMemoryProvider(MemoryProvider):
                 "transcript_ids": [int(row["id"]) for row in transcript_rows if row.get("id") is not None],
             },
         )
+        action_counts: Dict[str, int] = {}
+        writes_performed = 0
+        for action in reconcile_report.get("actions", []):
+            action_name = str(action.get("action") or "UNKNOWN")
+            action_counts[action_name] = action_counts.get(action_name, 0) + 1
+            if action_name != "NONE":
+                writes_performed += 1
+        result["action_counts"] = action_counts
+        result["writes_performed"] = writes_performed
+        result["status"] = "ok"
+        self._record_tier2_batch_result(result)
+        return result

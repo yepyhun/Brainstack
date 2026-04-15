@@ -299,6 +299,7 @@ def build_working_memory_packet(
 
     block = render_working_memory_block(
         policy=asdict(policy),
+        route_mode=str(routing.get("applied_mode") or "fact"),
         profile_items=profile_items,
         matched=matched,
         recent=recent,
@@ -331,6 +332,12 @@ def build_working_memory_packet(
         "analysis": asdict(analysis),
         "policy": asdict(policy),
         "channels": channels,
+        "profile_items": profile_items,
+        "matched": matched,
+        "recent": recent,
+        "transcript_rows": transcript_rows,
+        "graph_rows": graph_rows,
+        "corpus_rows": corpus_rows,
         "fused_candidates": retrieval["fused_candidates"],
         "decomposition": retrieval.get("decomposition", {"used": False, "queries": [query]}),
         "routing": routing,

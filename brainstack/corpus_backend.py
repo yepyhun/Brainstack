@@ -22,6 +22,13 @@ class CorpusBackend(Protocol):
         where: Dict[str, Any] | None = None,
     ) -> List[Dict[str, Any]]: ...
 
+    def score_texts(
+        self,
+        *,
+        query: str,
+        texts: List[str],
+    ) -> List[float]: ...
+
 
 def create_corpus_backend(kind: str, *, db_path: str) -> CorpusBackend | None:
     normalized = str(kind or "sqlite").strip().lower()

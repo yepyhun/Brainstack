@@ -4,6 +4,7 @@ import math
 import re
 import sys
 import types
+import json
 from pathlib import Path
 
 
@@ -272,3 +273,58 @@ def test_conversation_transcript_is_published_to_chroma_and_found_semantically(t
         assert semantic["candidate_count"] > 0
     finally:
         store.close()
+
+
+def test_chroma_score_texts_can_use_external_temporal_embedding_endpoint(monkeypatch, tmp_path):
+    backend = ChromaCorpusBackend(db_path=str(tmp_path / "brainstack.chroma"))
+
+    class _FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def read(self):
+            return json.dumps(self._payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    captured = {}
+
+    def _fake_urlopen(request, timeout=0):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _FakeResponse(
+            {
+                "data": [
+                    {"embedding": [1.0, 0.0, 0.0]},
+                    {"embedding": [0.95, 0.05, 0.0]},
+                    {"embedding": [0.9, 0.1, 0.0]},
+                    {"embedding": [0.0, 1.0, 0.0]},
+                ]
+            }
+        )
+
+    monkeypatch.setenv("BRAINSTACK_TEMPORAL_EMBEDDINGS_URL", "http://127.0.0.1:18081/v1/embeddings")
+    monkeypatch.setenv("BRAINSTACK_TEMPORAL_EMBEDDINGS_MODEL", "jinaai/jina-embeddings-v5-text-small-retrieval")
+    monkeypatch.setenv("BRAINSTACK_TEMPORAL_EMBEDDINGS_QUERY_PREFIX", "query: ")
+    monkeypatch.setenv("BRAINSTACK_TEMPORAL_EMBEDDINGS_DOCUMENT_PREFIX", "document: ")
+    monkeypatch.setattr("brainstack.corpus_backend_chroma.urllib.request.urlopen", _fake_urlopen)
+
+    scores = backend.score_texts(
+        query="What is the order of the three trips I took in the past three months?",
+        texts=[
+            "Family trip to Muir Woods National Monument",
+            "Road trip to Big Sur and Monterey",
+            "User attended Holiday Market at local mall before Black Friday",
+        ],
+    )
+
+    assert captured["url"] == "http://127.0.0.1:18081/v1/embeddings"
+    assert captured["payload"]["model"] == "jinaai/jina-embeddings-v5-text-small-retrieval"
+    assert captured["payload"]["input"][0].startswith("query: ")
+    assert captured["payload"]["input"][1].startswith("document: ")
+    assert scores[0] > scores[1] > scores[2]

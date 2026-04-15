@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List
 
 from .db import BrainstackStore
@@ -26,6 +26,38 @@ AGGREGATE_GRAPH_CAP = 2
 
 logger = logging.getLogger(__name__)
 
+AGGREGATE_ROUTE_CUES = (
+    "in total",
+    "total",
+    "how many",
+    "count",
+    "altogether",
+    "combined",
+    "sum",
+)
+TEMPORAL_STRONG_CUES = (
+    "order",
+    "earliest",
+    "latest",
+    "most recent",
+    "first",
+    "second",
+    "third",
+    "what is the order",
+    "which came first",
+    "which happened first",
+    "how many days",
+    "how many months",
+    "how many years",
+    "when did",
+)
+TEMPORAL_WEAK_CUES = (
+    "before",
+    "after",
+    "previous",
+    "changed",
+    "between",
+)
 
 @dataclass
 class RetrievalChannelStatus:
@@ -80,9 +112,12 @@ def _candidate_priority_bonus(candidate: EvidenceCandidate) -> float:
     row = candidate.row
     text = _candidate_text(candidate)
     bonus = 0.0
+    query_has_digits = bool(row.get("_brainstack_query_has_digits"))
 
     if candidate.shelf == "transcript":
         bonus += 0.08
+        if "keyword" in candidate.channel_ranks:
+            bonus += 0.04
         if _looks_user_led(text):
             bonus += 0.06
     elif candidate.shelf == "continuity_match":
@@ -90,7 +125,7 @@ def _candidate_priority_bonus(candidate: EvidenceCandidate) -> float:
     elif candidate.shelf == "continuity_recent":
         bonus += 0.01
 
-    if any(char.isdigit() for char in text):
+    if query_has_digits and any(char.isdigit() for char in text):
         bonus += 0.08
     if '"' in text or "'" in text:
         bonus += 0.02
@@ -135,7 +170,7 @@ def _should_attempt_route_hint(query: str) -> bool:
     return normalized.endswith("?") and len(tokens) >= 6 and len(normalized) >= 38
 
 
-def _default_route_resolver(query: str) -> Dict[str, Any]:
+def _llm_route_resolver(query: str) -> Dict[str, Any]:
     messages = [
         {
             "role": "system",
@@ -165,6 +200,43 @@ def _default_route_resolver(query: str) -> Dict[str, Any]:
     }
 
 
+def _contains_cue(normalized: str, cue: str) -> bool:
+    return cue in normalized
+
+
+def _default_route_resolver(query: str) -> Dict[str, Any]:
+    normalized = f" {_normalize_text(query).lower()} "
+    temporal_strong_hits = [cue for cue in TEMPORAL_STRONG_CUES if _contains_cue(normalized, cue)]
+    if temporal_strong_hits:
+        return {
+            "mode": ROUTE_TEMPORAL,
+            "reason": f"deterministic temporal cues: {', '.join(temporal_strong_hits)}",
+            "source": "deterministic_route_hint",
+        }
+
+    aggregate_hits = [cue for cue in AGGREGATE_ROUTE_CUES if _contains_cue(normalized, cue)]
+    if aggregate_hits:
+        return {
+            "mode": ROUTE_AGGREGATE,
+            "reason": f"deterministic aggregate cues: {', '.join(aggregate_hits)}",
+            "source": "deterministic_route_hint",
+        }
+
+    temporal_weak_hits = [cue for cue in TEMPORAL_WEAK_CUES if _contains_cue(normalized, cue)]
+    if temporal_weak_hits and any(char.isdigit() for char in normalized):
+        return {
+            "mode": ROUTE_TEMPORAL,
+            "reason": f"deterministic temporal cues: {', '.join(temporal_weak_hits)} + digits",
+            "source": "deterministic_route_hint",
+        }
+
+    return {
+        "mode": ROUTE_FACT,
+        "reason": "deterministic fact default: no strong structural route cues",
+        "source": "deterministic_route_hint",
+    }
+
+
 def _resolve_route(
     query: str,
     *,
@@ -179,7 +251,7 @@ def _resolve_route(
     source = "injected"
     if resolver is None and _should_attempt_route_hint(normalized):
         resolver = _default_route_resolver
-        source = "llm_hint"
+        source = "deterministic_route_hint"
     if resolver is None:
         return route
 
@@ -254,15 +326,27 @@ def _parse_time_value(raw: str) -> datetime | None:
     value = str(raw or "").strip()
     if not value:
         return None
+
+    def _normalize_parsed(dt: datetime) -> datetime:
+        if dt.tzinfo is not None:
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return _normalize_parsed(datetime.fromisoformat(value.replace("Z", "+00:00")))
     except ValueError:
         pass
     candidate = value.split("T", 1)[0] if "T" in value else value[:10]
     try:
-        return datetime.fromisoformat(candidate)
+        return _normalize_parsed(datetime.fromisoformat(candidate))
     except ValueError:
-        return None
+        pass
+    for fmt in ("%Y/%m/%d (%a) %H:%M", "%Y/%m/%d %H:%M", "%Y/%m/%d"):
+        try:
+            return _normalize_parsed(datetime.strptime(value, fmt))
+        except ValueError:
+            continue
+    return None
 
 
 def _temporal_anchor_key(row: Dict[str, Any]) -> str:
@@ -272,6 +356,11 @@ def _temporal_anchor_key(row: Dict[str, Any]) -> str:
 
 
 def _sort_rows_chronologically(rows: Iterable[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+    deduped = _chronologically_sorted_rows(rows)
+    return deduped[:limit]
+
+
+def _chronologically_sorted_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     deduped = _dedupe_rows(rows)
     deduped.sort(
         key=lambda row: (
@@ -282,7 +371,74 @@ def _sort_rows_chronologically(rows: Iterable[Dict[str, Any]], *, limit: int) ->
             int(row.get("id") or row.get("row_id") or 0),
         ),
     )
-    return deduped[:limit]
+    return deduped
+
+
+def _temporal_diversity_key(row: Dict[str, Any]) -> str:
+    parsed = _parse_time_value(_row_time_value(row))
+    session_id = str(row.get("session_id") or "").strip()
+    if parsed is not None:
+        bucket = parsed.date().isoformat()
+        return f"{session_id}:{bucket}" if session_id else bucket
+    return ""
+
+
+def _temporal_diverse_rows(
+    rows: Iterable[Dict[str, Any]],
+    *,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    ranked = _chronologically_sorted_rows(rows)
+    if limit <= 0 or not ranked:
+        return []
+
+    bucket_representatives: Dict[str, Dict[str, Any]] = {}
+    unbucketed: List[Dict[str, Any]] = []
+    for row in ranked:
+        bucket = _temporal_diversity_key(row)
+        if bucket:
+            # Keep the latest row within the same temporal bucket so a concrete
+            # realized event can displace earlier planning/context rows.
+            bucket_representatives[bucket] = dict(row)
+        else:
+            unbucketed.append(dict(row))
+
+    selected = _chronologically_sorted_rows(bucket_representatives.values())
+    seen = {_row_unique_key(row) for row in selected}
+    for row in ranked:
+        key = _row_unique_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(dict(row))
+    for row in unbucketed:
+        key = _row_unique_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(dict(row))
+    return selected[:limit]
+
+
+def _select_temporal_priority_rows(
+    primary_rows: Iterable[Dict[str, Any]],
+    fallback_rows: Iterable[Dict[str, Any]],
+    *,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    selected = _temporal_diverse_rows(primary_rows, limit=limit)
+    if len(selected) >= limit:
+        return selected
+    seen = {_row_unique_key(row) for row in selected}
+    for row in _temporal_diverse_rows(fallback_rows, limit=max(limit * 4, limit)):
+        key = _row_unique_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(dict(row))
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def _aggregate_row_priority(row: Dict[str, Any]) -> tuple[Any, ...]:
@@ -313,6 +469,185 @@ def _aggregate_diverse_rows(
         else:
             secondary.append(row)
     return (primary + secondary)[:limit]
+
+
+def _query_mentions_any(query: str, phrases: Iterable[str]) -> bool:
+    normalized = _normalize_text(query).lower()
+    return any(phrase in normalized for phrase in phrases)
+
+
+def _plan_bounded_native_aggregate_sum(query: str) -> Dict[str, Any] | None:
+    normalized = _normalize_text(query).lower()
+    if not normalized:
+        return None
+    has_total = _query_mentions_any(normalized, ("in total", "total", "combined", "sum"))
+    has_distance = _query_mentions_any(normalized, ("mile", "miles", "distance"))
+    has_road_trip = _query_mentions_any(normalized, ("road trip", "road trips"))
+    if has_total and has_distance and has_road_trip:
+        return {
+            "aggregate_kind": "sum",
+            "entity_type": None,
+            "entity_type_contains": ("road_trip", "mileage_history"),
+            "entity_type_excludes": ("planned_",),
+            "metric_attribute": "distance_miles",
+            "owner_subject": None,
+            "unit": "miles",
+        }
+    return None
+
+
+def _native_aggregate_rows(
+    store: BrainstackStore,
+    *,
+    query: str,
+    session_id: str,
+) -> List[Dict[str, Any]]:
+    plan = _plan_bounded_native_aggregate_sum(query)
+    if not plan:
+        return []
+    result = store.query_native_typed_metric_sum(
+        owner_subject=(str(plan["owner_subject"]) if plan.get("owner_subject") is not None else None),
+        entity_type=(str(plan["entity_type"]) if plan.get("entity_type") is not None else None),
+        entity_type_contains=plan.get("entity_type_contains"),
+        entity_type_excludes=plan.get("entity_type_excludes"),
+        metric_attribute=str(plan["metric_attribute"]),
+        limit=16,
+    )
+    if not result:
+        return []
+    total = float(result.get("total") or 0.0)
+    count = int(result.get("count") or 0)
+    matches = list(result.get("matches") or [])
+    entity_names = [str(item.get("entity_name") or "").strip() for item in matches if str(item.get("entity_name") or "").strip()]
+    unique_names = list(dict.fromkeys(entity_names))[:4]
+    if abs(total - round(total)) < 1e-9:
+        total_text = f"{int(round(total)):,}"
+    else:
+        total_text = f"{total:,.2f}".rstrip("0").rstrip(".")
+    unit = str(plan.get("unit") or "").strip()
+    label = f"{total_text} {unit}".strip()
+    support = ", ".join(unique_names)
+    if plan.get("entity_type_contains"):
+        entity_label = "/".join(str(item) for item in plan["entity_type_contains"])
+    else:
+        entity_label = str(plan.get("entity_type") or "typed")
+    content = f"Native graph sum: {label} across {count} {entity_label} events"
+    if support:
+        content += f" ({support})"
+    return [
+        {
+            "id": 0,
+            "session_id": session_id,
+            "turn_number": 0,
+            "kind": "native_aggregate",
+            "content": content,
+            "source": "graph.kuzu:native_sum",
+            "same_session": False,
+            "overlap_count": 0,
+            "semantic_score": 0.0,
+            "created_at": "",
+            "metadata": {
+                "aggregate_kind": plan["aggregate_kind"],
+                "entity_type": plan["entity_type"],
+                "metric_attribute": plan["metric_attribute"],
+                "owner_subject": plan["owner_subject"],
+                "count": count,
+                "total": total,
+                "unit": unit,
+                "supporting_entities": unique_names,
+            },
+        }
+    ]
+
+
+def _fact_transcript_row_priority(row: Dict[str, Any]) -> tuple[Any, ...]:
+    content = _normalize_text(row.get("content") or row.get("content_excerpt"))
+    token_count = len(tokenize_match_text(content))
+    overlap = int(row.get("overlap_count") or 0)
+    retrieval_source = str(row.get("retrieval_source") or "")
+    match_mode = str(row.get("match_mode") or "")
+    density = float(overlap) / float(token_count or 1)
+    return (
+        1 if overlap > 0 else 0,
+        overlap,
+        1 if match_mode == "keyword" or "keyword" in retrieval_source else 0,
+        density,
+        1 if _looks_user_led(content) else 0,
+        1 if bool(row.get("same_session")) else 0,
+        float(row.get("semantic_score") or 0.0),
+        -token_count,
+        str(row.get("created_at") or ""),
+        int(row.get("turn_number") or 0),
+        int(row.get("id") or 0),
+    )
+
+
+def _transcript_join_key(row: Dict[str, Any]) -> str:
+    session_id = str(row.get("session_id") or "").strip()
+    turn_number = int(row.get("turn_number") or 0)
+    if session_id and turn_number > 0:
+        return f"{session_id}:{turn_number}"
+    row_id = int(row.get("id") or row.get("row_id") or 0)
+    if session_id and row_id > 0:
+        return f"{session_id}:id:{row_id}"
+    if row_id > 0:
+        return f"id:{row_id}"
+    return ""
+
+
+def _fact_transcript_rows(
+    *,
+    fused_transcript_rows: List[Dict[str, Any]],
+    keyword_transcript_rows: List[Dict[str, Any]],
+    semantic_conversation_rows: List[Dict[str, Any]],
+    matched_rows: List[Dict[str, Any]],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    if limit <= 0:
+        return []
+    effective_limit = limit
+    if fused_transcript_rows:
+        effective_limit = max(limit, 3)
+    elif keyword_transcript_rows and semantic_conversation_rows:
+        effective_limit = max(limit, 2)
+    rows = _dedupe_rows(
+        list(fused_transcript_rows)
+        + _round_robin(keyword_transcript_rows, semantic_conversation_rows)
+    )
+    ranked_rows = sorted(rows, key=_fact_transcript_row_priority, reverse=True)
+    top_ranked_keys = {
+        _transcript_join_key(row)
+        for row in ranked_rows[: max(effective_limit * 2, effective_limit + 1)]
+        if _transcript_join_key(row)
+    }
+    matched_keys: List[str] = []
+    seen_matched_keys: set[str] = set()
+    for row in matched_rows:
+        join_key = _transcript_join_key(row)
+        if not join_key or join_key not in top_ranked_keys or join_key in seen_matched_keys:
+            continue
+        seen_matched_keys.add(join_key)
+        matched_keys.append(join_key)
+    transcript_by_key: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        join_key = _transcript_join_key(row)
+        if join_key:
+            transcript_by_key.setdefault(join_key, row)
+    preferred_rows: List[Dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for join_key in matched_keys:
+        preferred = transcript_by_key.get(join_key)
+        if preferred is None or join_key in seen_keys:
+            continue
+        seen_keys.add(join_key)
+        preferred_rows.append(preferred)
+
+    remaining_rows = [
+        row
+        for row in ranked_rows
+        if _transcript_join_key(row) not in seen_keys
+    ]
+    return (preferred_rows + remaining_rows)[:effective_limit]
 
 
 def _fact_sort_key(candidate: EvidenceCandidate) -> tuple[Any, ...]:
@@ -372,6 +707,8 @@ def _route_limits(
 
 def _route_has_support(route: RetrievalRoute, selected: Dict[str, List[Dict[str, Any]]]) -> bool:
     if route.applied_mode == ROUTE_AGGREGATE:
+        if any(str(row.get("kind") or "") == "native_aggregate" for row in selected.get("matched", ())):
+            return True
         total = sum(len(selected.get(name, ())) for name in ("matched", "transcript_rows"))
         return total >= 2
     if route.applied_mode == ROUTE_TEMPORAL:
@@ -389,20 +726,32 @@ def _select_temporal_rows(
     *,
     keyword_continuity_rows: List[Dict[str, Any]],
     recent_rows: List[Dict[str, Any]],
-    keyword_transcript_rows: List[Dict[str, Any]],
-    semantic_conversation_rows: List[Dict[str, Any]],
+    temporal_continuity_rows: List[Dict[str, Any]],
+    temporal_transcript_rows: List[Dict[str, Any]],
     graph_rows: List[Dict[str, Any]],
     limits: Dict[str, int],
 ) -> Dict[str, List[Dict[str, Any]]]:
+    prioritized_recent_rows = _select_temporal_priority_rows(
+        temporal_continuity_rows,
+        recent_rows,
+        limit=limits["continuity_recent_limit"],
+    )
+    recent_keys = {_row_unique_key(row) for row in prioritized_recent_rows}
+    prioritized_matched_rows = _select_temporal_priority_rows(
+        [
+            row
+            for row in temporal_continuity_rows
+            if _row_unique_key(row) not in recent_keys
+        ],
+        _dedupe_rows(_round_robin(keyword_continuity_rows, recent_rows)),
+        limit=limits["continuity_match_limit"],
+    )
     return {
         "profile_items": [],
-        "matched": _sort_rows_chronologically(
-            _round_robin(keyword_continuity_rows, recent_rows),
-            limit=limits["continuity_match_limit"],
-        ),
-        "recent": _sort_rows_chronologically(recent_rows, limit=limits["continuity_recent_limit"]),
+        "matched": prioritized_matched_rows,
+        "recent": prioritized_recent_rows,
         "transcript_rows": _sort_rows_chronologically(
-            _round_robin(semantic_conversation_rows, keyword_transcript_rows),
+            temporal_transcript_rows,
             limit=limits["transcript_limit"],
         ),
         "graph_rows": _temporal_graph_rows(graph_rows, limit=limits["graph_limit"]),
@@ -412,18 +761,24 @@ def _select_temporal_rows(
 
 def _select_aggregate_rows(
     *,
+    native_aggregate_rows: List[Dict[str, Any]],
     keyword_continuity_rows: List[Dict[str, Any]],
     keyword_transcript_rows: List[Dict[str, Any]],
     semantic_conversation_rows: List[Dict[str, Any]],
     graph_rows: List[Dict[str, Any]],
     limits: Dict[str, int],
 ) -> Dict[str, List[Dict[str, Any]]]:
+    aggregate_matched = _aggregate_diverse_rows(
+        keyword_continuity_rows,
+        limit=limits["continuity_match_limit"],
+    )
+    if native_aggregate_rows:
+        aggregate_matched = _dedupe_rows([*native_aggregate_rows, *aggregate_matched])[
+            : limits["continuity_match_limit"]
+        ]
     return {
         "profile_items": [],
-        "matched": _aggregate_diverse_rows(
-            keyword_continuity_rows,
-            limit=limits["continuity_match_limit"],
-        ),
+        "matched": aggregate_matched,
         "recent": [],
         "transcript_rows": _aggregate_diverse_rows(
             _round_robin(semantic_conversation_rows, keyword_transcript_rows),
@@ -460,6 +815,16 @@ def _collect_query_rows(
     return merged
 
 
+def _annotate_query_flags(rows: Iterable[Dict[str, Any]], *, query: str) -> List[Dict[str, Any]]:
+    query_has_digits = any(char.isdigit() for char in str(query or ""))
+    annotated: List[Dict[str, Any]] = []
+    for row in rows:
+        payload = dict(row)
+        payload["_brainstack_query_has_digits"] = query_has_digits
+        annotated.append(payload)
+    return annotated
+
+
 def _profile_keyword_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
     ranked = list(enumerate(rows))
     ranked.sort(
@@ -477,6 +842,8 @@ def _profile_keyword_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dic
 def _graph_match_text(row: Dict[str, Any]) -> str:
     parts = [
         str(row.get("subject") or "").strip(),
+        str(row.get("attribute") or "").strip(),
+        str(row.get("value") or "").strip(),
         str(row.get("predicate") or "").strip(),
         str(row.get("object_value") or "").strip(),
         str(row.get("conflict_value") or "").strip(),
@@ -710,6 +1077,7 @@ def retrieve_executive_context(
         if profile_limit > 0
         else []
     )
+    keyword_profile_rows = _annotate_query_flags(keyword_profile_rows, query=query)
     keyword_continuity_rows = (
         _collect_query_rows(
             shelf="continuity_match",
@@ -723,7 +1091,8 @@ def retrieve_executive_context(
         if continuity_match_limit > 0
         else []
     )
-    keyword_transcript_rows = (
+    keyword_continuity_rows = _annotate_query_flags(keyword_continuity_rows, query=query)
+    keyword_transcript_session_rows = (
         _collect_query_rows(
             shelf="transcript",
             queries=search_queries,
@@ -735,6 +1104,25 @@ def retrieve_executive_context(
         )
         if transcript_limit > 0
         else []
+    )
+    keyword_transcript_session_rows = _annotate_query_flags(keyword_transcript_session_rows, query=query)
+    keyword_transcript_global_rows = (
+        _collect_query_rows(
+            shelf="transcript",
+            queries=search_queries,
+            searcher=lambda variant: store.search_transcript_global(
+                query=variant,
+                session_id=session_id,
+                limit=max(transcript_limit * 6, 12),
+            ),
+        )
+        if transcript_limit > 0
+        else []
+    )
+    keyword_transcript_global_rows = _annotate_query_flags(keyword_transcript_global_rows, query=query)
+    keyword_transcript_rows = _round_robin(
+        keyword_transcript_session_rows,
+        keyword_transcript_global_rows,
     )
     keyword_corpus_rows = (
         _collect_query_rows(
@@ -748,6 +1136,7 @@ def retrieve_executive_context(
         if corpus_limit > 0
         else []
     )
+    keyword_corpus_rows = _annotate_query_flags(keyword_corpus_rows, query=query)
     semantic_conversation_rows = (
         _collect_query_rows(
             shelf="transcript",
@@ -761,6 +1150,7 @@ def retrieve_executive_context(
         if transcript_limit > 0
         else []
     )
+    semantic_conversation_rows = _annotate_query_flags(semantic_conversation_rows, query=query)
     semantic_corpus_rows = (
         _collect_query_rows(
             shelf="corpus",
@@ -773,6 +1163,7 @@ def retrieve_executive_context(
         if corpus_limit > 0
         else []
     )
+    semantic_corpus_rows = _annotate_query_flags(semantic_corpus_rows, query=query)
     keyword_rows = _round_robin(
         keyword_profile_rows,
         keyword_continuity_rows,
@@ -795,12 +1186,27 @@ def retrieve_executive_context(
         if graph_limit > 0
         else []
     )
+    graph_rows = _annotate_query_flags(graph_rows, query=query)
 
     recent_rows = (
         store.recent_continuity(session_id=session_id, limit=max(continuity_recent_limit * 4, 6))
         if continuity_recent_limit > 0
         else []
     )
+    temporal_continuity_search = getattr(store, "search_temporal_continuity", None)
+    temporal_continuity_rows = (
+        temporal_continuity_search(
+            query=query,
+            session_id=session_id,
+            limit=max(continuity_recent_limit * 4, TEMPORAL_RECENT_CAP),
+        )
+        if continuity_recent_limit > 0
+        and route.applied_mode == ROUTE_TEMPORAL
+        and callable(temporal_continuity_search)
+        else []
+    )
+    temporal_continuity_rows = _annotate_query_flags(temporal_continuity_rows, query=query)
+    recent_rows = _annotate_query_flags(recent_rows, query=query)
     temporal_graph_rows = []
     if graph_limit > 0 and (
         route.applied_mode == ROUTE_TEMPORAL
@@ -819,7 +1225,30 @@ def retrieve_executive_context(
             limit=max(graph_limit * 2, 6),
         )
 
-    temporal_rows = _round_robin(recent_rows, temporal_graph_rows)
+    temporal_transcript_rows = []
+    if transcript_limit > 0 and (
+        route.applied_mode == ROUTE_TEMPORAL or bool(analysis.get("temporal"))
+    ):
+        temporal_transcript_rows = _sort_rows_chronologically(
+            _round_robin(keyword_transcript_rows, semantic_conversation_rows),
+            limit=max(TEMPORAL_TRANSCRIPT_CAP * 2, transcript_limit * 2),
+        )
+
+    temporal_rows = _round_robin(
+        temporal_continuity_rows,
+        recent_rows,
+        temporal_transcript_rows,
+        temporal_graph_rows,
+    )
+    native_aggregate_rows = (
+        _native_aggregate_rows(
+            store,
+            query=query,
+            session_id=session_id,
+        )
+        if route.applied_mode == ROUTE_AGGREGATE
+        else []
+    )
     graph_status = store.graph_backend_channel_status()
 
     merged: Dict[str, EvidenceCandidate] = {}
@@ -830,7 +1259,9 @@ def retrieve_executive_context(
     _merge_channel(merged, channel_name="semantic", rows=semantic_conversation_rows, shelf="transcript")
     _merge_channel(merged, channel_name="semantic", rows=semantic_corpus_rows, shelf="corpus")
     _merge_channel(merged, channel_name="graph", rows=graph_rows, shelf="graph")
+    _merge_channel(merged, channel_name="temporal", rows=temporal_continuity_rows, shelf="continuity_recent")
     _merge_channel(merged, channel_name="temporal", rows=recent_rows, shelf="continuity_recent")
+    _merge_channel(merged, channel_name="temporal", rows=temporal_transcript_rows, shelf="transcript")
     _merge_channel(merged, channel_name="temporal", rows=temporal_graph_rows, shelf="graph")
 
     fused = sorted(merged.values(), key=_fact_sort_key, reverse=True)
@@ -844,18 +1275,27 @@ def retrieve_executive_context(
         graph_limit=graph_limit,
         corpus_limit=corpus_limit,
     )
+    fused_transcript_rows = [candidate.row for candidate in fused if candidate.shelf == "transcript"]
+    fact_selected["transcript_rows"] = _fact_transcript_rows(
+        fused_transcript_rows=fused_transcript_rows,
+        keyword_transcript_rows=keyword_transcript_rows,
+        semantic_conversation_rows=semantic_conversation_rows,
+        matched_rows=fact_selected["matched"],
+        limit=limits["transcript_limit"],
+    )
     selected = fact_selected
     if route.applied_mode == ROUTE_TEMPORAL:
         selected = _select_temporal_rows(
             keyword_continuity_rows=keyword_continuity_rows,
             recent_rows=recent_rows,
-            keyword_transcript_rows=keyword_transcript_rows,
-            semantic_conversation_rows=semantic_conversation_rows,
-            graph_rows=graph_rows,
+            temporal_continuity_rows=temporal_continuity_rows,
+            temporal_transcript_rows=temporal_transcript_rows,
+            graph_rows=temporal_graph_rows,
             limits=limits,
         )
     elif route.applied_mode == ROUTE_AGGREGATE:
         selected = _select_aggregate_rows(
+            native_aggregate_rows=native_aggregate_rows,
             keyword_continuity_rows=keyword_continuity_rows,
             keyword_transcript_rows=keyword_transcript_rows,
             semantic_conversation_rows=semantic_conversation_rows,
@@ -899,6 +1339,16 @@ def retrieve_executive_context(
                 "rrf_score": candidate.rrf_score,
                 "priority_bonus": _candidate_priority_bonus(candidate),
                 "channel_ranks": dict(candidate.channel_ranks),
+                "id": int(candidate.row.get("id") or 0),
+                "row_id": int(candidate.row.get("row_id") or 0),
+                "turn_number": int(candidate.row.get("turn_number") or 0),
+                "document_id": int(candidate.row.get("document_id") or 0),
+                "section_index": int(candidate.row.get("section_index") or 0),
+                "created_at": str(candidate.row.get("created_at") or ""),
+                "overlap_count": int(candidate.row.get("overlap_count") or 0),
+                "semantic_score": float(candidate.row.get("semantic_score") or 0.0),
+                "same_session": bool(candidate.row.get("same_session")),
+                "content_excerpt": _candidate_text(candidate)[:220],
             }
             for candidate in fused
         ],

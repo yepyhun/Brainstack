@@ -38,6 +38,11 @@ def _render_items(items: Iterable[str]) -> str:
     return "\n".join(f"- {item}" for item in rows)
 
 
+def _render_numbered_items(items: Iterable[str]) -> str:
+    rows = [item for item in items if item]
+    return "\n".join(f"{index}. {item}" for index, item in enumerate(rows, start=1))
+
+
 COMMUNICATION_PROFILE_SLOTS = {
     "preference:communication_style",
     "preference:emoji_usage",
@@ -313,12 +318,15 @@ def _pack_continuity_rows(rows: Iterable[dict], *, char_budget: int, provenance_
     budget = max(220, int(char_budget))
     packed: List[str] = []
     seen = set()
+    unique_rows: List[dict] = []
     for row in rows:
         row_key = (str(row.get("session_id") or ""), int(row.get("id") or 0))
         if row_key in seen:
             continue
         seen.add(row_key)
+        unique_rows.append(row)
 
+    for index, row in enumerate(unique_rows):
         remaining = budget - sum(len(item) for item in packed)
         if packed and remaining < 120:
             break
@@ -326,7 +334,9 @@ def _pack_continuity_rows(rows: Iterable[dict], *, char_budget: int, provenance_
         temporal_label = _row_temporal_label(row)
         evidence_label = str(row.get("kind") or "turn")
         prefix = f"[{temporal_label} | {evidence_label}]" if temporal_label else f"[{evidence_label}]"
-        snippet_cap = max(180, min(420, remaining - len(prefix) - 24))
+        remaining_items = max(1, len(unique_rows) - index)
+        per_row_budget = max(140, remaining // remaining_items)
+        snippet_cap = max(140, min(280, per_row_budget - len(prefix) - 24))
         line = f"{prefix} {_trim(str(row.get('content') or ''), snippet_cap)}"
         line = _with_provenance(
             line,
@@ -344,8 +354,53 @@ def _pack_transcript_rows(rows: Iterable[dict], *, char_budget: int, provenance_
     budget = max(240, int(char_budget))
     packed: List[str] = []
     seen = set()
+    unique_rows: List[dict] = []
     for row in rows:
         row_key = (row["session_id"], row["id"])
+        if row_key in seen:
+            continue
+        seen.add(row_key)
+        unique_rows.append(row)
+
+    for index, row in enumerate(unique_rows):
+        remaining = budget - sum(len(item) for item in packed)
+        if packed and remaining < 120:
+            break
+
+        temporal_label = _row_temporal_label(row)
+        evidence_label = str(row.get("kind") or "turn")
+        prefix = f"[{temporal_label} | {evidence_label}]" if temporal_label else f"[{evidence_label}]"
+        remaining_items = max(1, len(unique_rows) - index)
+        per_row_budget = max(160, remaining // remaining_items)
+        snippet_cap = max(160, min(320, per_row_budget - len(prefix) - 24))
+        label = f"{prefix} {_render_user_first_exchange(row.get('content') or '', max_len=snippet_cap)}"
+        extra = ""
+        if row.get("same_session"):
+            extra = "same_session"
+        line = _with_provenance(
+            label,
+            source=str(row.get("source", "")),
+            extra=extra,
+            provenance_mode=provenance_mode,
+            metadata=row.get("metadata"),
+        )
+        packed.append(line if len(line) <= remaining else _trim(line, remaining))
+        if sum(len(item) for item in packed) >= budget:
+            break
+    return packed
+
+
+def _pack_aggregate_rows(rows: Iterable[dict], *, char_budget: int, provenance_mode: str) -> List[str]:
+    budget = max(420, int(char_budget))
+    packed: List[str] = []
+    seen = set()
+    for row in rows:
+        row_key = (
+            str(row.get("session_id") or ""),
+            int(row.get("id") or 0),
+            str(row.get("kind") or row.get("row_type") or ""),
+            _normalize_compare_text(row.get("content") or ""),
+        )
         if row_key in seen:
             continue
         seen.add(row_key)
@@ -355,15 +410,19 @@ def _pack_transcript_rows(rows: Iterable[dict], *, char_budget: int, provenance_
             break
 
         temporal_label = _row_temporal_label(row)
-        evidence_label = str(row.get("kind") or "turn")
+        evidence_label = str(row.get("kind") or row.get("row_type") or "item")
         prefix = f"[{temporal_label} | {evidence_label}]" if temporal_label else f"[{evidence_label}]"
-        snippet_cap = max(220, min(520, remaining - len(prefix) - 24))
-        label = f"{prefix} {_render_user_first_exchange(row.get('content') or '', max_len=snippet_cap)}"
-        extra = ""
-        if row.get("same_session"):
-            extra = "same_session"
+        content = str(row.get("content") or "")
+        snippet_cap = max(180, min(360, remaining - len(prefix) - 24))
+        lowered = content.lower()
+        if "user:" in lowered and "assistant:" in lowered:
+            body = _render_user_first_exchange(content, max_len=snippet_cap)
+        else:
+            body = _trim(content, max_len=snippet_cap)
+        line = f"{prefix} {body}"
+        extra = "same_session" if row.get("same_session") else ""
         line = _with_provenance(
-            label,
+            line,
             source=str(row.get("source", "")),
             extra=extra,
             provenance_mode=provenance_mode,
@@ -410,6 +469,7 @@ def build_system_prompt_block(store: BrainstackStore, *, profile_limit: int) -> 
 def render_working_memory_block(
     *,
     policy: Dict[str, Any],
+    route_mode: str = "fact",
     profile_items: List[Dict[str, Any]],
     matched: List[Dict[str, Any]],
     recent: List[Dict[str, Any]],
@@ -460,29 +520,43 @@ def render_working_memory_block(
         ]
         sections.append("## Brainstack Profile Match\n" + _render_items(lines))
 
-    if matched:
-        lines = _pack_continuity_rows(
-            matched,
-            char_budget=max(320, min(900, 260 * max(1, len(matched)))),
+    if route_mode == "aggregate":
+        aggregate_rows = [*matched, *recent, *transcript_rows]
+        packed_aggregate = _pack_aggregate_rows(
+            aggregate_rows,
+            char_budget=max(960, int(policy.get("transcript_char_budget", 320))),
             provenance_mode=provenance_mode,
         )
-        sections.append("## Brainstack Continuity Match\n" + _render_items(lines))
+        if packed_aggregate:
+            sections.append(
+                "## Brainstack Aggregate Evidence\n"
+                "Each numbered line below is a separate recalled item. Combine only the items that actually match the user question.\n"
+                + _render_numbered_items(packed_aggregate)
+            )
+    else:
+        if matched:
+            lines = _pack_continuity_rows(
+                matched,
+                char_budget=max(320, min(900, 260 * max(1, len(matched)))),
+                provenance_mode=provenance_mode,
+            )
+            sections.append("## Brainstack Continuity Match\n" + _render_items(lines))
 
-    if recent:
-        lines = _pack_continuity_rows(
-            recent,
-            char_budget=max(240, min(640, 220 * max(1, len(recent)))),
+        if recent:
+            lines = _pack_continuity_rows(
+                recent,
+                char_budget=max(240, min(640, 220 * max(1, len(recent)))),
+                provenance_mode=provenance_mode,
+            )
+            sections.append("## Brainstack Recent Continuity\n" + _render_items(lines))
+
+        packed_transcript = _pack_transcript_rows(
+            transcript_rows,
+            char_budget=int(policy.get("transcript_char_budget", 320)),
             provenance_mode=provenance_mode,
         )
-        sections.append("## Brainstack Recent Continuity\n" + _render_items(lines))
-
-    packed_transcript = _pack_transcript_rows(
-        transcript_rows,
-        char_budget=int(policy.get("transcript_char_budget", 320)),
-        provenance_mode=provenance_mode,
-    )
-    if packed_transcript:
-        sections.append("## Brainstack Transcript Evidence\n" + _render_items(packed_transcript))
+        if packed_transcript:
+            sections.append("## Brainstack Transcript Evidence\n" + _render_items(packed_transcript))
 
     if graph_rows:
         show_graph_history = bool(policy.get("show_graph_history", False))

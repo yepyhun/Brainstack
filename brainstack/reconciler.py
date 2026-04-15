@@ -203,17 +203,125 @@ def _reconcile_inferred_relations(
     return actions
 
 
+def _typed_entity_name(candidate: Mapping[str, Any]) -> str:
+    name = _normalize_text(candidate.get("name"))
+    if name:
+        return name
+    entity_type = _normalize_text(candidate.get("entity_type")).lower() or "event"
+    turn_number = int(candidate.get("turn_number") or 0)
+    return f"{entity_type} turn {turn_number}".strip()
+
+
+def _reconcile_typed_entities(
+    store: BrainstackStore,
+    *,
+    candidates: Iterable[Mapping[str, Any]],
+    metadata: Dict[str, Any],
+    source: str,
+    user_name: str,
+) -> List[Dict[str, Any]]:
+    actions: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        entity_name = _typed_entity_name(candidate)
+        entity_type = _normalize_text(candidate.get("entity_type")).lower()
+        if not entity_name or not entity_type:
+            continue
+        subject_name = _canonicalize_person_subject(candidate.get("subject"), user_name=user_name) or user_name or "User"
+        entity_metadata = _candidate_metadata(
+            candidate,
+            base_metadata=metadata,
+            confidence=float(candidate.get("confidence", 0.78)),
+        )
+
+        state_candidates: List[Dict[str, Any]] = [
+            {
+                "subject": entity_name,
+                "attribute": "entity_type",
+                "value": entity_type,
+                "supersede": False,
+                "confidence": float(candidate.get("confidence", 0.78)),
+                "metadata": entity_metadata,
+            },
+            {
+                "subject": entity_name,
+                "attribute": "owner_subject",
+                "value": subject_name,
+                "supersede": False,
+                "confidence": float(candidate.get("confidence", 0.78)),
+                "metadata": entity_metadata,
+            },
+        ]
+        raw_attributes = candidate.get("attributes") if isinstance(candidate.get("attributes"), Mapping) else {}
+        for attribute, value in raw_attributes.items():
+            normalized_attribute = _normalize_text(attribute).lower()
+            normalized_value = _normalize_text(value)
+            if not normalized_attribute or not normalized_value:
+                continue
+            state_candidates.append(
+                {
+                    "subject": entity_name,
+                    "attribute": normalized_attribute,
+                    "value": normalized_value,
+                    "supersede": False,
+                    "confidence": float(candidate.get("confidence", 0.78)),
+                    "metadata": entity_metadata,
+                }
+            )
+
+        for outcome in _reconcile_states(
+            store,
+            candidates=state_candidates,
+            metadata=metadata,
+            source=source,
+            user_name=user_name,
+        ):
+            actions.append({**outcome, "kind": "typed_entity", "entity_name": entity_name})
+    return actions
+
+
 def _reconcile_continuity(
     store: BrainstackStore,
     *,
     session_id: str,
     turn_number: int,
+    temporal_events: Iterable[Mapping[str, Any]],
     continuity_summary: str,
     decisions: Iterable[str],
     source: str,
     metadata: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
+    for event in temporal_events:
+        content = _normalize_text(event.get("content"))
+        if not content:
+            continue
+        event_turn_number = int(event.get("turn_number") or turn_number or 0)
+        event_metadata = _candidate_metadata(
+            event,
+            base_metadata=metadata,
+            confidence=float(event.get("confidence", 0.76)),
+        )
+        if store.find_continuity_event(session_id=session_id, kind="temporal_event", content=content) is not None:
+            actions.append({"kind": "continuity", "action": "NONE", "type": "temporal_event", "content": content})
+            continue
+        row_id = store.add_continuity_event(
+            session_id=session_id,
+            turn_number=event_turn_number,
+            kind="temporal_event",
+            content=content,
+            source=source,
+            metadata=event_metadata,
+        )
+        actions.append(
+            {
+                "kind": "continuity",
+                "action": "ADD",
+                "type": "temporal_event",
+                "row_id": row_id,
+                "content": content,
+            }
+        )
+
     if continuity_summary:
         if store.find_continuity_event(session_id=session_id, kind="tier2_summary", content=continuity_summary) is None:
             row_id = store.add_continuity_event(
@@ -298,10 +406,20 @@ def reconcile_tier2_candidates(
         )
     )
     actions.extend(
+        _reconcile_typed_entities(
+            store,
+            candidates=extracted.get("typed_entities", []),
+            metadata=payload,
+            source=source,
+            user_name=user_name,
+        )
+    )
+    actions.extend(
         _reconcile_continuity(
             store,
             session_id=session_id,
             turn_number=turn_number,
+            temporal_events=extracted.get("temporal_events", []),
             continuity_summary=_normalize_text(extracted.get("continuity_summary")),
             decisions=extracted.get("decisions", []),
             source=source,

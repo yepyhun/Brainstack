@@ -112,6 +112,41 @@ def test_kuzu_publish_entity_subgraph_rolls_back_on_mid_publish_failure(tmp_path
         backend.close()
 
 
+def test_kuzu_publish_entity_subgraph_can_republish_same_state_ids(tmp_path):
+    backend = KuzuGraphBackend(db_path=str(tmp_path / "brainstack.kuzu"))
+    backend.open()
+    try:
+        snapshot = {
+            "entity": {"id": 1, "canonical_name": "Tomi", "normalized_name": "tomi", "updated_at": "2026-04-12T00:00:00+00:00"},
+            "states": [
+                {
+                    "row_id": 11,
+                    "predicate": "role",
+                    "object_value": "planner",
+                    "source": "test",
+                    "metadata": {},
+                    "happened_at": "2026-04-12T00:00:00+00:00",
+                    "valid_to": "",
+                    "is_current": True,
+                }
+            ],
+            "conflicts": [],
+            "relations": [],
+            "inferred_relations": [],
+        }
+
+        backend.publish_entity_subgraph(snapshot)
+        backend.publish_entity_subgraph(snapshot)
+
+        rows = backend.conn.execute("MATCH (s:State) WHERE s.entity_id = 1 RETURN s.id, s.value_text")
+        collected = []
+        while rows.has_next():
+            collected.append(rows.get_next())
+        assert collected == [[11, "planner"]]
+    finally:
+        backend.close()
+
+
 def test_kuzu_bootstrap_replays_sqlite_graph_and_handles_inflected_query(tmp_path):
     sqlite_store = BrainstackStore(str(tmp_path / "brainstack.db"))
     sqlite_store.open()
