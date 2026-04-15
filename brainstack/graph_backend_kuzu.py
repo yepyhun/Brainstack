@@ -36,6 +36,10 @@ def _decode_json_object(value: Any) -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _encode_json_object(value: Any) -> str:
+    return json.dumps(value or {}, ensure_ascii=True, sort_keys=True)
+
+
 def _tokens(query: str) -> List[str]:
     seen: Set[str] = set()
     items: List[str] = []
@@ -167,6 +171,12 @@ class KuzuGraphBackend:
             },
         )
 
+    def _rollback_transaction(self) -> None:
+        try:
+            self._execute("ROLLBACK")
+        except Exception:
+            pass
+
     def publish_entity_subgraph(self, snapshot: Dict[str, Any]) -> None:
         entity = snapshot["entity"]
         entity_id = int(entity["id"])
@@ -197,121 +207,118 @@ class KuzuGraphBackend:
 
             for state in snapshot.get("states", []):
                 self._execute(
-                """
-                MERGE (s:State {id: $id})
-                SET s.entity_id = $entity_id,
-                    s.attribute = $attribute,
-                    s.value_text = $value_text,
-                    s.source = $source,
-                    s.metadata_json = $metadata_json,
-                    s.valid_from = $valid_from,
-                    s.valid_to = $valid_to,
-                    s.is_current = $is_current
-                """,
-                {
-                    "id": int(state["row_id"]),
-                    "entity_id": entity_id,
-                    "attribute": str(state["predicate"]),
-                    "value_text": str(state["object_value"]),
-                    "source": str(state.get("source") or ""),
-                    "metadata_json": json.dumps(state.get("metadata") or {}, ensure_ascii=True, sort_keys=True),
-                    "valid_from": str(state.get("happened_at") or ""),
-                    "valid_to": str(state.get("valid_to") or ""),
-                    "is_current": bool(state.get("is_current")),
-                },
-            )
+                    """
+                    MERGE (s:State {id: $id})
+                    SET s.entity_id = $entity_id,
+                        s.attribute = $attribute,
+                        s.value_text = $value_text,
+                        s.source = $source,
+                        s.metadata_json = $metadata_json,
+                        s.valid_from = $valid_from,
+                        s.valid_to = $valid_to,
+                        s.is_current = $is_current
+                    """,
+                    {
+                        "id": int(state["row_id"]),
+                        "entity_id": entity_id,
+                        "attribute": str(state["predicate"]),
+                        "value_text": str(state["object_value"]),
+                        "source": str(state.get("source") or ""),
+                        "metadata_json": _encode_json_object(state.get("metadata")),
+                        "valid_from": str(state.get("happened_at") or ""),
+                        "valid_to": str(state.get("valid_to") or ""),
+                        "is_current": bool(state.get("is_current")),
+                    },
+                )
 
             for conflict in snapshot.get("conflicts", []):
                 self._execute(
-                """
-                MERGE (c:Conflict {id: $id})
-                SET c.entity_id = $entity_id,
-                    c.attribute = $attribute,
-                    c.current_state_id = $current_state_id,
-                    c.current_value = $current_value,
-                    c.candidate_value = $candidate_value,
-                    c.candidate_source = $candidate_source,
-                    c.metadata_json = $metadata_json,
-                    c.status = $status,
-                    c.created_at = $created_at,
-                    c.updated_at = $updated_at
-                """,
-                {
-                    "id": int(conflict["row_id"]),
-                    "entity_id": entity_id,
-                    "attribute": str(conflict["predicate"]),
-                    "current_state_id": int(conflict.get("current_state_id") or 0),
-                    "current_value": str(conflict.get("object_value") or ""),
-                    "candidate_value": str(conflict.get("conflict_value") or ""),
-                    "candidate_source": str(conflict.get("conflict_source") or ""),
-                    "metadata_json": json.dumps(conflict.get("conflict_metadata") or {}, ensure_ascii=True, sort_keys=True),
-                    "status": "open",
-                    "created_at": str(conflict.get("happened_at") or ""),
-                    "updated_at": str(conflict.get("happened_at") or ""),
-                },
-            )
+                    """
+                    MERGE (c:Conflict {id: $id})
+                    SET c.entity_id = $entity_id,
+                        c.attribute = $attribute,
+                        c.current_state_id = $current_state_id,
+                        c.current_value = $current_value,
+                        c.candidate_value = $candidate_value,
+                        c.candidate_source = $candidate_source,
+                        c.metadata_json = $metadata_json,
+                        c.status = $status,
+                        c.created_at = $created_at,
+                        c.updated_at = $updated_at
+                    """,
+                    {
+                        "id": int(conflict["row_id"]),
+                        "entity_id": entity_id,
+                        "attribute": str(conflict["predicate"]),
+                        "current_state_id": int(conflict.get("current_state_id") or 0),
+                        "current_value": str(conflict.get("object_value") or ""),
+                        "candidate_value": str(conflict.get("conflict_value") or ""),
+                        "candidate_source": str(conflict.get("conflict_source") or ""),
+                        "metadata_json": _encode_json_object(conflict.get("conflict_metadata")),
+                        "status": "open",
+                        "created_at": str(conflict.get("happened_at") or ""),
+                        "updated_at": str(conflict.get("happened_at") or ""),
+                    },
+                )
 
             for relation in snapshot.get("relations", []):
                 target = relation["object_entity"]
                 self._ensure_entity(target)
                 self._execute(
-                """
-                MATCH (a:Entity {id: $source_id}), (b:Entity {id: $target_id})
-                CREATE (a)-[:RELATES_TO {
-                    id: $id,
-                    predicate: $predicate,
-                    source: $source,
-                    metadata_json: $metadata_json,
-                    created_at: $created_at,
-                    active: $active
-                }]->(b)
-                """,
-                {
-                    "source_id": entity_id,
-                    "target_id": int(target["id"]),
-                    "id": int(relation["row_id"]),
-                    "predicate": str(relation["predicate"]),
-                    "source": str(relation.get("source") or ""),
-                    "metadata_json": json.dumps(relation.get("metadata") or {}, ensure_ascii=True, sort_keys=True),
-                    "created_at": str(relation.get("happened_at") or ""),
-                    "active": bool(relation.get("active", True)),
-                },
-            )
+                    """
+                    MATCH (a:Entity {id: $source_id}), (b:Entity {id: $target_id})
+                    CREATE (a)-[:RELATES_TO {
+                        id: $id,
+                        predicate: $predicate,
+                        source: $source,
+                        metadata_json: $metadata_json,
+                        created_at: $created_at,
+                        active: $active
+                    }]->(b)
+                    """,
+                    {
+                        "source_id": entity_id,
+                        "target_id": int(target["id"]),
+                        "id": int(relation["row_id"]),
+                        "predicate": str(relation["predicate"]),
+                        "source": str(relation.get("source") or ""),
+                        "metadata_json": _encode_json_object(relation.get("metadata")),
+                        "created_at": str(relation.get("happened_at") or ""),
+                        "active": bool(relation.get("active", True)),
+                    },
+                )
 
             for relation in snapshot.get("inferred_relations", []):
                 target = relation["object_entity"]
                 self._ensure_entity(target)
                 self._execute(
-                """
-                MATCH (a:Entity {id: $source_id}), (b:Entity {id: $target_id})
-                CREATE (a)-[:INFERRED_RELATES_TO {
-                    id: $id,
-                    predicate: $predicate,
-                    source: $source,
-                    metadata_json: $metadata_json,
-                    created_at: $created_at,
-                    updated_at: $updated_at,
-                    active: $active
-                }]->(b)
-                """,
-                {
-                    "source_id": entity_id,
-                    "target_id": int(target["id"]),
-                    "id": int(relation["row_id"]),
-                    "predicate": str(relation["predicate"]),
-                    "source": str(relation.get("source") or ""),
-                    "metadata_json": json.dumps(relation.get("metadata") or {}, ensure_ascii=True, sort_keys=True),
-                    "created_at": str(relation.get("happened_at") or ""),
-                    "updated_at": str(relation.get("happened_at") or ""),
-                    "active": bool(relation.get("active", True)),
-                },
-            )
+                    """
+                    MATCH (a:Entity {id: $source_id}), (b:Entity {id: $target_id})
+                    CREATE (a)-[:INFERRED_RELATES_TO {
+                        id: $id,
+                        predicate: $predicate,
+                        source: $source,
+                        metadata_json: $metadata_json,
+                        created_at: $created_at,
+                        updated_at: $updated_at,
+                        active: $active
+                    }]->(b)
+                    """,
+                    {
+                        "source_id": entity_id,
+                        "target_id": int(target["id"]),
+                        "id": int(relation["row_id"]),
+                        "predicate": str(relation["predicate"]),
+                        "source": str(relation.get("source") or ""),
+                        "metadata_json": _encode_json_object(relation.get("metadata")),
+                        "created_at": str(relation.get("happened_at") or ""),
+                        "updated_at": str(relation.get("happened_at") or ""),
+                        "active": bool(relation.get("active", True)),
+                    },
+                )
             self._execute("COMMIT")
         except Exception:
-            try:
-                self._execute("ROLLBACK")
-            except Exception:
-                pass
+            self._rollback_transaction()
             raise
 
     def _seed_entity_ids(self, query: str, *, limit: int) -> List[int]:

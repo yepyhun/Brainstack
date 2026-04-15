@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 import json
 import logging
 import re
@@ -57,6 +58,19 @@ def _normalize_slot(value: Any) -> str:
     return _SLOT_ALIASES.get(normalized, normalized)
 
 
+def _extract_reasoning_details_text(details: Any) -> str:
+    if not isinstance(details, list):
+        return ""
+    parts: List[str] = []
+    for detail in details:
+        if not isinstance(detail, Mapping):
+            continue
+        summary = detail.get("summary") or detail.get("content") or detail.get("text")
+        if isinstance(summary, str) and summary.strip():
+            parts.append(summary.strip())
+    return "\n\n".join(parts)
+
+
 def _extract_text_content(response: Any) -> str:
     if response is None:
         return ""
@@ -76,17 +90,9 @@ def _extract_text_content(response: Any) -> str:
                 reasoning_text = str(response[field]).strip()
                 if reasoning_text:
                     return reasoning_text
-        details = response.get("reasoning_details")
-        if isinstance(details, list):
-            parts: List[str] = []
-            for detail in details:
-                if not isinstance(detail, Mapping):
-                    continue
-                summary = detail.get("summary") or detail.get("content") or detail.get("text")
-                if isinstance(summary, str) and summary.strip():
-                    parts.append(summary.strip())
-            if parts:
-                return "\n\n".join(parts)
+        details_text = _extract_reasoning_details_text(response.get("reasoning_details"))
+        if details_text:
+            return details_text
     choices = getattr(response, "choices", None)
     if choices:
         message = getattr(choices[0], "message", None)
@@ -103,17 +109,9 @@ def _extract_text_content(response: Any) -> str:
                 value = getattr(message, field, None)
                 if isinstance(value, str) and value.strip():
                     return value
-            details = getattr(message, "reasoning_details", None)
-            if isinstance(details, list):
-                parts = []
-                for detail in details:
-                    if not isinstance(detail, Mapping):
-                        continue
-                    summary = detail.get("summary") or detail.get("content") or detail.get("text")
-                    if isinstance(summary, str) and summary.strip():
-                        parts.append(summary.strip())
-                if parts:
-                    return "\n\n".join(parts)
+            details_text = _extract_reasoning_details_text(getattr(message, "reasoning_details", None))
+            if details_text:
+                return details_text
     return ""
 
 
@@ -184,10 +182,7 @@ def _extract_json_object_with_status(raw_text: str, *, context: str = "") -> tup
         repaired = _repair_truncated_json_object(text)
         if repaired:
             return repaired, "json_repaired"
-        if context:
-            logger.warning("Tier2 extractor returned non-JSON payload (%s): %s", context, text[:240])
-        else:
-            logger.warning("Tier2 extractor returned non-JSON payload: %s", text[:240])
+        _log_non_json_payload(text, context=context)
         return {}, "non_json"
     snippet = text[start : end + 1]
     try:
@@ -196,10 +191,7 @@ def _extract_json_object_with_status(raw_text: str, *, context: str = "") -> tup
         repaired = _repair_truncated_json_object(text)
         if repaired:
             return repaired, "json_repaired"
-        if context:
-            logger.warning("Tier2 extractor returned non-JSON payload (%s): %s", context, text[:240])
-        else:
-            logger.warning("Tier2 extractor returned non-JSON payload: %s", text[:240])
+        _log_non_json_payload(text, context=context)
         return {}, "non_json"
     return (payload if isinstance(payload, dict) else {}), "json_snippet"
 
@@ -209,11 +201,22 @@ def _extract_json_object(raw_text: str, *, context: str = "") -> Dict[str, Any]:
     return payload
 
 
+def _log_non_json_payload(text: str, *, context: str = "") -> None:
+    if context:
+        logger.warning("Tier2 extractor returned non-JSON payload (%s): %s", context, text[:240])
+    else:
+        logger.warning("Tier2 extractor returned non-JSON payload: %s", text[:240])
+
+
 def _format_transcript_batch(entries: Iterable[Mapping[str, Any]], *, limit: int) -> str:
-    selected = [row for row in entries if _normalize_text(row.get("content"))]
+    if limit <= 0:
+        return ""
+    selected: deque[Mapping[str, Any]] = deque(maxlen=limit)
+    for row in entries:
+        if _normalize_text(row.get("content")):
+            selected.append(row)
     if not selected:
         return ""
-    selected = selected[-limit:]
     blocks: List[str] = []
     for row in selected:
         turn_number = row.get("turn_number", "?")

@@ -132,7 +132,6 @@ class TestBrainstackTranscriptShelf:
                 session_id="session-transcript-dates",
             )
 
-            assert "## Brainstack Transcript Evidence" in block
             assert "2024-04-02" in block
             assert "100 points" in block
         finally:

@@ -38,6 +38,26 @@ from brainstack.db import BrainstackStore
 
 
 class DeterministicEmbeddingFunction:
+    @staticmethod
+    def name() -> str:
+        return "default"
+
+    @staticmethod
+    def is_legacy() -> bool:
+        return False
+
+    @staticmethod
+    def supported_spaces() -> list[str]:
+        return ["cosine"]
+
+    @staticmethod
+    def get_config() -> dict:
+        return {}
+
+    @classmethod
+    def build_from_config(cls, _config: dict):
+        return cls()
+
     def __call__(self, input):
         rows = []
         for text in list(input):
@@ -49,6 +69,9 @@ class DeterministicEmbeddingFunction:
             norm = math.sqrt(sum(value * value for value in vector)) or 1.0
             rows.append([value / norm for value in vector])
         return rows
+
+    def embed_query(self, input):
+        return self([input])
 
 
 def _patch_embeddings(monkeypatch):

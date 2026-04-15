@@ -403,9 +403,13 @@ def _parse_time_value(raw: str) -> datetime | None:
     return None
 
 
-def _temporal_anchor_key(row: Dict[str, Any]) -> str:
+def _row_time_fields(row: Dict[str, Any]) -> tuple[str, datetime | None]:
     raw = _row_time_value(row)
-    parsed = _parse_time_value(raw)
+    return raw, _parse_time_value(raw)
+
+
+def _temporal_anchor_key(row: Dict[str, Any]) -> str:
+    raw, parsed = _row_time_fields(row)
     return parsed.isoformat() if parsed is not None else raw
 
 
@@ -415,21 +419,25 @@ def _sort_rows_chronologically(rows: Iterable[Dict[str, Any]], *, limit: int) ->
 
 
 def _chronologically_sorted_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    deduped = _dedupe_rows(rows)
-    deduped.sort(
-        key=lambda row: (
-            0 if _parse_time_value(_row_time_value(row)) is not None else 1,
-            _parse_time_value(_row_time_value(row)) or datetime.max,
-            _row_time_value(row),
-            int(row.get("turn_number") or 0),
-            int(row.get("id") or row.get("row_id") or 0),
-        ),
-    )
-    return deduped
+    decorated = []
+    for row in _dedupe_rows(rows):
+        raw_time, parsed_time = _row_time_fields(row)
+        decorated.append(
+            (
+                0 if parsed_time is not None else 1,
+                parsed_time or datetime.max,
+                raw_time,
+                int(row.get("turn_number") or 0),
+                int(row.get("id") or row.get("row_id") or 0),
+                row,
+            )
+        )
+    decorated.sort()
+    return [row for *_, row in decorated]
 
 
 def _temporal_diversity_key(row: Dict[str, Any]) -> str:
-    parsed = _parse_time_value(_row_time_value(row))
+    _, parsed = _row_time_fields(row)
     session_id = str(row.get("session_id") or "").strip()
     if parsed is not None:
         bucket = parsed.date().isoformat()
@@ -447,25 +455,16 @@ def _temporal_diverse_rows(
         return []
 
     bucket_representatives: Dict[str, Dict[str, Any]] = {}
-    unbucketed: List[Dict[str, Any]] = []
     for row in ranked:
         bucket = _temporal_diversity_key(row)
         if bucket:
             # Keep the latest row within the same temporal bucket so a concrete
             # realized event can displace earlier planning/context rows.
             bucket_representatives[bucket] = dict(row)
-        else:
-            unbucketed.append(dict(row))
 
     selected = _chronologically_sorted_rows(bucket_representatives.values())
     seen = {_row_unique_key(row) for row in selected}
     for row in ranked:
-        key = _row_unique_key(row)
-        if key in seen:
-            continue
-        seen.add(key)
-        selected.append(dict(row))
-    for row in unbucketed:
         key = _row_unique_key(row)
         if key in seen:
             continue

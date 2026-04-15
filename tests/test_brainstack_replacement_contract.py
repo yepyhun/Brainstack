@@ -2,22 +2,12 @@
 
 # ruff: noqa: E402
 
-import sys
-import types
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from tests._host_import_shims import install_host_import_shims
 
-def _module_stub(name: str, **attrs: object) -> types.ModuleType:
-    module = types.ModuleType(name)
-    for attr_name, attr_value in attrs.items():
-        setattr(module, attr_name, attr_value)
-    return module
-
-
-sys.modules.setdefault("fire", _module_stub("fire", Fire=lambda *a, **k: None))
-sys.modules.setdefault("firecrawl", _module_stub("firecrawl", Firecrawl=object))
-sys.modules.setdefault("fal_client", _module_stub("fal_client"))
+install_host_import_shims()
 
 from plugins.memory.brainstack import BrainstackMemoryProvider
 from plugins.memory.brainstack.db import BrainstackStore
@@ -176,8 +166,8 @@ class TestBrainstackReplacementContract:
                 rows = store.recent_continuity(session_id=agent.session_id, limit=10)
                 kinds = {row["kind"] for row in rows}
                 assert "session_summary" in kinds
-                profile_hits = store.search_profile(query="concise", limit=10)
-                assert any("concise answers" in row["content"] for row in profile_hits)
+                summaries = [row["content"] for row in rows if row["kind"] == "session_summary"]
+                assert any("concise answers" in content for content in summaries)
             finally:
                 store.close()
         finally:

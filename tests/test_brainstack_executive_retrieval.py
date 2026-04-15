@@ -91,25 +91,25 @@ def test_temporal_route_uses_temporal_graph_rows_for_selection():
         def search_profile(self, query, limit):
             return []
 
-        def search_continuity(self, query, session_id, limit):
+        def search_continuity(self, query, session_id, limit, principal_scope_key=None):
             return []
 
-        def search_transcript(self, query, session_id, limit):
+        def search_transcript(self, query, session_id, limit, principal_scope_key=None):
             return []
 
-        def search_transcript_global(self, query, session_id, limit):
+        def search_transcript_global(self, query, session_id, limit, principal_scope_key=None):
             return []
 
-        def search_corpus(self, query, limit):
+        def search_corpus(self, query, limit, principal_scope_key=None):
             return []
 
-        def search_conversation_semantic(self, query, session_id, limit):
+        def search_conversation_semantic(self, query, session_id, limit, principal_scope_key=None):
             return []
 
-        def search_corpus_semantic(self, query, limit):
+        def search_corpus_semantic(self, query, limit, principal_scope_key=None):
             return []
 
-        def search_graph(self, query, limit):
+        def search_graph(self, query, limit, principal_scope_key=None):
             return [
                 {
                     "row_type": "relation",
@@ -147,7 +147,7 @@ def test_temporal_route_uses_temporal_graph_rows_for_selection():
                 },
             ]
 
-        def search_temporal_continuity(self, query, session_id, limit):
+        def search_temporal_continuity(self, query, session_id, limit, principal_scope_key=None):
             return []
 
         def graph_backend_channel_status(self):
@@ -183,7 +183,7 @@ def test_temporal_route_prioritizes_temporal_continuity_before_generic_recent_ro
         def search_profile(self, query, limit):
             return []
 
-        def search_continuity(self, query, session_id, limit):
+        def search_continuity(self, query, session_id, limit, principal_scope_key=None):
             return [
                 {
                     "id": 1,
@@ -205,22 +205,22 @@ def test_temporal_route_prioritizes_temporal_continuity_before_generic_recent_ro
                 },
             ]
 
-        def search_transcript(self, query, session_id, limit):
+        def search_transcript(self, query, session_id, limit, principal_scope_key=None):
             return []
 
-        def search_transcript_global(self, query, session_id, limit):
+        def search_transcript_global(self, query, session_id, limit, principal_scope_key=None):
             return []
 
-        def search_corpus(self, query, limit):
+        def search_corpus(self, query, limit, principal_scope_key=None):
             return []
 
-        def search_conversation_semantic(self, query, session_id, limit):
+        def search_conversation_semantic(self, query, session_id, limit, principal_scope_key=None):
             return []
 
-        def search_corpus_semantic(self, query, limit):
+        def search_corpus_semantic(self, query, limit, principal_scope_key=None):
             return []
 
-        def search_graph(self, query, limit):
+        def search_graph(self, query, limit, principal_scope_key=None):
             return []
 
         def recent_continuity(self, session_id, limit):
@@ -245,7 +245,7 @@ def test_temporal_route_prioritizes_temporal_continuity_before_generic_recent_ro
                 },
             ]
 
-        def search_temporal_continuity(self, query, session_id, limit):
+        def search_temporal_continuity(self, query, session_id, limit, principal_scope_key=None):
             return [
                 {
                     "id": 10,

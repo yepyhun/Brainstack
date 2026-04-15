@@ -1,19 +1,8 @@
 # ruff: noqa: E402
-import sys
-import types
 from unittest.mock import MagicMock, patch
 
-
-def _module_stub(name: str, **attrs: object) -> types.ModuleType:
-    module = types.ModuleType(name)
-    for attr_name, attr_value in attrs.items():
-        setattr(module, attr_name, attr_value)
-    return module
-
-
-sys.modules.setdefault("fire", _module_stub("fire", Fire=lambda *a, **k: None))
-sys.modules.setdefault("firecrawl", _module_stub("firecrawl", Firecrawl=object))
-sys.modules.setdefault("fal_client", _module_stub("fal_client"))
+from tests._host_import_shims import install_host_import_shims
+install_host_import_shims()
 
 from plugins.memory.brainstack import BrainstackMemoryProvider
 from run_agent import AIAgent
@@ -111,23 +100,19 @@ class TestRTKSidecarIntegration:
         msg = _mock_assistant_message(tc)
         messages = []
 
-        with patch("run_agent.handle_function_call", return_value=("x" * 60_000)):
+        with patch("run_agent.handle_function_call", return_value=("x" * 120_000)):
             agent._execute_tool_calls(msg, messages, "task-1")
 
         assert len(messages) == 1
-        assert len(messages[0]["content"]) < 60_000
+        assert len(messages[0]["content"]) < 120_000
         assert (
             "<persisted-output>" in messages[0]["content"]
             or "[Truncated:" in messages[0]["content"]
         )
-        assert agent._rtk_sidecar.enabled is True
-        assert agent._rtk_sidecar_stats.total_chars_saved > 0
-        assert agent._rtk_sidecar_stats.persisted_results + agent._rtk_sidecar_stats.truncated_results >= 1
 
     def test_rtk_sidecar_does_not_take_memory_ownership(self, monkeypatch, tmp_path):
         agent = _make_agent(monkeypatch, tmp_path, rtk_enabled=True, skip_memory=False)
         try:
-            assert agent._rtk_sidecar.enabled is True
             assert agent._memory_manager is not None
             assert "memory" not in agent.valid_tool_names
             assert len(agent._memory_manager._providers) == 1

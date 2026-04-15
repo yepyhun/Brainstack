@@ -760,7 +760,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        import yaml
+        import yaml  # type: ignore[import-untyped]
 
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         return data if isinstance(data, dict) else {}
@@ -770,7 +770,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 def _write_yaml(path: Path, data: dict[str, Any]) -> None:
     try:
-        import yaml
+        import yaml  # type: ignore[import-untyped]
     except Exception as exc:
         raise RuntimeError("PyYAML is required to patch Hermes config.yaml") from exc
     path.parent.mkdir(parents=True, exist_ok=True)

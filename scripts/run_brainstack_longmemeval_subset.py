@@ -10,7 +10,7 @@ import random
 import re
 import sys
 import time
-from contextlib import ExitStack
+from contextlib import AbstractContextManager, ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, Iterable, List, Tuple
 from unittest.mock import patch
 
 import openai
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1313,6 +1313,7 @@ def _run_brainstack_generation(
                 )
             started = time.perf_counter()
             try:
+                assert original_streaming is not None
                 return original_streaming(agent_self, api_kwargs, on_first_delta=on_first_delta)
             finally:
                 api_seconds += time.perf_counter() - started
@@ -1335,7 +1336,7 @@ def _run_brainstack_generation(
             tool_events.append(event)
             return result
 
-        patchers = [
+        patchers: List[AbstractContextManager[Any]] = [
             patch.dict(os.environ, {"HERMES_HOME": str(home)}),
             patch("run_agent._hermes_home", home),
             patch("run_agent.get_tool_definitions", return_value=[]),
@@ -1370,10 +1371,10 @@ def _run_brainstack_generation(
                 if direct_route_resolver is not None
                 else False
             )
-            agent._cleanup_task_resources = lambda task_id: None
-            agent._persist_session = lambda messages, history=None: None
-            agent._save_trajectory = lambda messages, user_message, completed: None
-            agent._save_session_log = lambda messages: None
+            setattr(agent, "_cleanup_task_resources", lambda task_id: None)
+            setattr(agent, "_persist_session", lambda messages, history=None: None)
+            setattr(agent, "_save_trajectory", lambda messages, user_message, completed: None)
+            setattr(agent, "_save_session_log", lambda messages: None)
             conversation_started = time.perf_counter()
             raw_result = agent.run_conversation(str(entry["question"]))
             conversation_seconds = time.perf_counter() - conversation_started
@@ -1381,10 +1382,12 @@ def _run_brainstack_generation(
             manager_route = _memory_manager_route_snapshot(agent._memory_manager)
             if manager_route:
                 captured.setdefault("route_events", []).append(manager_route)
-            try:
-                agent._memory_manager.shutdown_all()
-            except Exception:
-                pass
+            memory_manager = agent._memory_manager
+            if memory_manager is not None:
+                try:
+                    memory_manager.shutdown_all()
+                except Exception:
+                    pass
         if direct_route_client is not None:
             try:
                 direct_route_client.close()

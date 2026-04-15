@@ -122,6 +122,8 @@ class ChromaCorpusBackend:
         limit: int,
         where: Dict[str, Any] | None = None,
     ) -> List[Dict[str, Any]]:
+        if limit <= 0 or not str(query or "").strip():
+            return []
         query_kwargs = {
             "query_texts": [str(query or "")],
             "n_results": max(1, int(limit)),

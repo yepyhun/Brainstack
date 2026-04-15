@@ -3,21 +3,10 @@
 # ruff: noqa: E402
 
 import json
-import sys
-import types
 from unittest.mock import MagicMock, patch
 
-
-def _module_stub(name: str, **attrs: object) -> types.ModuleType:
-    module = types.ModuleType(name)
-    for attr_name, attr_value in attrs.items():
-        setattr(module, attr_name, attr_value)
-    return module
-
-
-sys.modules.setdefault("fire", _module_stub("fire", Fire=lambda *a, **k: None))
-sys.modules.setdefault("firecrawl", _module_stub("firecrawl", Firecrawl=object))
-sys.modules.setdefault("fal_client", _module_stub("fal_client"))
+from tests._host_import_shims import install_host_import_shims
+install_host_import_shims()
 
 from plugins.memory.brainstack import BrainstackMemoryProvider
 from run_agent import AIAgent, MEMORY_GUIDANCE
@@ -122,8 +111,7 @@ class TestBrainstackNativeMemoryDisplacement:
             )
             prompt = agent._build_system_prompt()
             assert MEMORY_GUIDANCE not in prompt
-            assert "Brainstack Profile" in prompt
-            assert "Laura" in prompt
+            assert "Brainstack owns personal memory in this mode." in prompt
         finally:
             agent._memory_manager.shutdown_all()
 

@@ -8,7 +8,7 @@ import pytest
 from plugins.memory.brainstack.donors.registry import DonorSpec
 
 
-SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "brainstack_refresh_donors.py"
+SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "brainstack_refresh_donors.py"
 
 
 def _load_module():

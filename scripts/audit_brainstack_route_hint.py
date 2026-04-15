@@ -8,7 +8,7 @@ import random
 import sys
 import types
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, cast
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +25,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised by script san
     if exc.name != "agent.memory_provider":
         raise
     sys.modules.setdefault("agent", types.ModuleType("agent"))
-    fake_memory_provider = types.ModuleType("agent.memory_provider")
+    fake_memory_provider = cast(Any, types.ModuleType("agent.memory_provider"))
     fake_memory_provider.MemoryProvider = object
     sys.modules["agent.memory_provider"] = fake_memory_provider
     from brainstack.executive_retrieval import (  # noqa: E402
