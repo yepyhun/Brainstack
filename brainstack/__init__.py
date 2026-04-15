@@ -42,7 +42,7 @@ def _load_plugin_config() -> dict:
     if not config_path.exists():
         return {}
     try:
-        import yaml
+        import yaml  # type: ignore[import-untyped]
 
         with open(config_path, encoding="utf-8") as handle:
             config = yaml.safe_load(handle) or {}
@@ -222,7 +222,9 @@ class BrainstackMemoryProvider(MemoryProvider):
         graph_backend = str(self._config.get("graph_backend", "kuzu") or "kuzu")
         corpus_backend = str(self._config.get("corpus_backend", "chroma") or "chroma")
         corpus_db_path = _normalize_path(str(self._config.get("corpus_db_path", default_corpus_db)), hermes_home)
-        self._wait_for_tier2_worker(timeout=self._tier2_timeout_seconds + 2.0)
+        worker_finished = self._wait_for_tier2_worker(timeout=self._tier2_timeout_seconds + 2.0)
+        if not worker_finished:
+            raise RuntimeError("Cannot reinitialize Brainstack while the Tier-2 worker is still running.")
         if self._store:
             self._store.close()
             self._store = None
@@ -485,7 +487,10 @@ class BrainstackMemoryProvider(MemoryProvider):
         )
 
     def shutdown(self) -> None:
-        self._wait_for_tier2_worker(timeout=self._tier2_timeout_seconds + 2.0)
+        worker_finished = self._wait_for_tier2_worker(timeout=self._tier2_timeout_seconds + 2.0)
+        if not worker_finished:
+            logger.error("Refusing to reset Brainstack runtime state while the Tier-2 worker is still running.")
+            return
         if self._store:
             self._store.close()
             self._store = None

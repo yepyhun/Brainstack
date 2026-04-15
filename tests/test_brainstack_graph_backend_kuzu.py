@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 import sys
 import types
 from pathlib import Path
@@ -18,12 +19,12 @@ if "agent.memory_provider" not in sys.modules:
     class MemoryProvider:  # pragma: no cover - simple import shim for source-repo tests
         pass
 
-    memory_provider_module.MemoryProvider = MemoryProvider
+    setattr(memory_provider_module, "MemoryProvider", MemoryProvider)
     sys.modules["agent.memory_provider"] = memory_provider_module
 
 if "hermes_constants" not in sys.modules:
     hermes_constants = types.ModuleType("hermes_constants")
-    hermes_constants.get_hermes_home = lambda: REPO_ROOT
+    setattr(hermes_constants, "get_hermes_home", lambda: REPO_ROOT)
     sys.modules["hermes_constants"] = hermes_constants
 
 from brainstack.db import BrainstackStore
@@ -68,7 +69,7 @@ def test_kuzu_publish_entity_subgraph_rolls_back_on_mid_publish_failure(tmp_path
         failed_once = {"value": False}
 
         def _failing_execute(query, params=None):
-            if not failed_once["value"] and "CREATE (s:State" in query:
+            if not failed_once["value"] and "MERGE (s:State" in query:
                 failed_once["value"] = True
                 raise RuntimeError("state create boom")
             return original_execute(query, params)

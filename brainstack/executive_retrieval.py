@@ -367,7 +367,8 @@ def _same_principal_session_support_rows(
 
 def _row_time_value(row: Dict[str, Any]) -> str:
     metadata = row.get("metadata")
-    temporal = metadata.get("temporal") if isinstance(metadata, dict) and isinstance(metadata.get("temporal"), dict) else {}
+    temporal_payload = metadata.get("temporal") if isinstance(metadata, dict) else None
+    temporal = temporal_payload if isinstance(temporal_payload, dict) else {}
     return (
         str(temporal.get("observed_at") or "").strip()
         or str(row.get("created_at") or "").strip()
@@ -1140,9 +1141,9 @@ def _select_rows(
             continue
 
         if candidate.shelf == "corpus" and len(corpus_rows) < corpus_limit:
-            row_key = (int(row.get("document_id") or 0), int(row.get("section_index") or 0))
-            if row_key[0] > 0 and row_key not in seen_corpus_keys:
-                seen_corpus_keys.add(row_key)
+            corpus_row_key = (int(row.get("document_id") or 0), int(row.get("section_index") or 0))
+            if corpus_row_key[0] > 0 and corpus_row_key not in seen_corpus_keys:
+                seen_corpus_keys.add(corpus_row_key)
                 corpus_rows.append(row)
             continue
 

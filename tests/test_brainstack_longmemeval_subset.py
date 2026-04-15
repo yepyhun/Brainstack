@@ -383,7 +383,9 @@ def test_install_brainstack_route_resolver_updates_matching_provider_only():
     class DummyManager:
         _providers = [OtherProvider(), BrainstackProvider()]
 
-    resolver = lambda query: {"mode": "fact", "reason": query}
+    def resolver(query):
+        return {"mode": "fact", "reason": query}
+
     installed = module._install_brainstack_route_resolver(DummyManager(), resolver)
 
     assert installed is True

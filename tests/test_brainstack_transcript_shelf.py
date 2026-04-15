@@ -1,5 +1,7 @@
 """Focused tests for the Brainstack transcript shelf."""
 
+# ruff: noqa: E402
+
 from pathlib import Path
 import sys
 import types
@@ -20,12 +22,12 @@ if "agent.memory_provider" not in sys.modules:
     class MemoryProvider:  # pragma: no cover - import shim for source tests
         pass
 
-    memory_provider_module.MemoryProvider = MemoryProvider
+    setattr(memory_provider_module, "MemoryProvider", MemoryProvider)
     sys.modules["agent.memory_provider"] = memory_provider_module
 
 if "hermes_constants" not in sys.modules:
     hermes_constants = types.ModuleType("hermes_constants")
-    hermes_constants.get_hermes_home = lambda: REPO_ROOT
+    setattr(hermes_constants, "get_hermes_home", lambda: REPO_ROOT)
     sys.modules["hermes_constants"] = hermes_constants
 
 from brainstack import BrainstackMemoryProvider

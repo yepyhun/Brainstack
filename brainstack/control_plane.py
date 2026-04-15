@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict
 
 from .db import BrainstackStore
 from .executive_retrieval import retrieve_executive_context

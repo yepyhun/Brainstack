@@ -72,7 +72,8 @@ def _row_metadata(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def _row_temporal_label(row: Dict[str, Any]) -> str:
     metadata = _row_metadata(row)
-    temporal = metadata.get("temporal") if isinstance(metadata.get("temporal"), dict) else {}
+    temporal_payload = metadata.get("temporal")
+    temporal = temporal_payload if isinstance(temporal_payload, dict) else {}
     raw = (
         str(temporal.get("observed_at") or "").strip()
         or str(row.get("created_at") or "").strip()
@@ -442,7 +443,11 @@ def build_system_prompt_block(
 ) -> str:
     fetch_limit = max(profile_limit * 3, 10)
     items = store.list_profile_items(limit=fetch_limit, principal_scope_key=principal_scope_key)
-    graph_rows = store.search_graph(query="Assistant", limit=8, principal_scope_key=principal_scope_key)
+    graph_rows = store.search_graph(
+        query="writing style communication style",
+        limit=8,
+        principal_scope_key=principal_scope_key,
+    )
     contract_lines, hidden_profile_keys = _build_active_communication_contract(
         profile_items=items,
         graph_rows=graph_rows,
@@ -608,63 +613,6 @@ def render_working_memory_block(
         sections.append("## Brainstack Corpus Recall\n" + _render_items(packed_corpus))
 
     return "\n\n".join(section for section in sections if section.strip())
-
-
-def build_prefetch_block(
-    store: BrainstackStore,
-    *,
-    query: str,
-    session_id: str,
-    principal_scope_key: str = "",
-    continuity_recent_limit: int,
-    continuity_match_limit: int,
-    profile_match_limit: int,
-    transcript_match_limit: int,
-    transcript_char_budget: int,
-    graph_limit: int,
-    corpus_limit: int,
-    corpus_char_budget: int,
-) -> str:
-    profile_items = store.search_profile(
-        query=query,
-        limit=profile_match_limit,
-        principal_scope_key=principal_scope_key,
-    )
-    matched = store.search_continuity(
-        query=query,
-        session_id=session_id,
-        limit=continuity_match_limit,
-        principal_scope_key=principal_scope_key,
-    )
-    matched_ids = {item["id"] for item in matched}
-    recent = store.recent_continuity(session_id=session_id, limit=continuity_recent_limit)
-    recent = [item for item in recent if item["id"] not in matched_ids]
-    transcript_rows = store.search_transcript(query=query, session_id=session_id, limit=transcript_match_limit)
-    graph_rows = store.search_graph(query=query, limit=graph_limit, principal_scope_key=principal_scope_key)
-    corpus_rows = store.search_corpus(query=query, limit=max(corpus_limit * 3, corpus_limit))
-    return render_working_memory_block(
-        policy={
-            "mode": "balanced",
-            "collapse_mode": "balanced",
-            "provenance_mode": "compact",
-            "confidence_band": "medium",
-            "conflict_escalation": False,
-            "tool_avoidance_allowed": True,
-            "tool_avoidance_reason": "legacy prefetch path",
-            "show_policy": False,
-            "show_graph_history": False,
-            "graph_inferred_limit": 2,
-            "transcript_char_budget": transcript_char_budget,
-            "corpus_char_budget": corpus_char_budget,
-        },
-        profile_items=profile_items,
-        matched=matched,
-        recent=recent[:continuity_recent_limit],
-        transcript_rows=transcript_rows[:transcript_match_limit],
-        graph_rows=graph_rows,
-        corpus_rows=corpus_rows,
-    )
-
 
 def build_compression_hint(snapshot: str) -> str:
     snapshot = _trim(snapshot, 500)

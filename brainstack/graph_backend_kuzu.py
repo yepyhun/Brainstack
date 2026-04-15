@@ -8,6 +8,23 @@ from typing import Any, Dict, Iterable, List, Set
 import kuzu
 
 
+def _row_to_list(row: Any) -> List[Any]:
+    if isinstance(row, list):
+        return row
+    if isinstance(row, tuple):
+        return list(row)
+    if isinstance(row, dict):
+        return list(row.values())
+    return [row]
+
+
+def _iter_result_rows(result: kuzu.QueryResult | list[kuzu.QueryResult]) -> Iterable[List[Any]]:
+    query_results = result if isinstance(result, list) else [result]
+    for query_result in query_results:
+        while query_result.has_next():
+            yield _row_to_list(query_result.get_next())
+
+
 def _decode_json_object(value: Any) -> Dict[str, Any]:
     text = str(value or "").strip()
     if not text:
@@ -115,7 +132,7 @@ class KuzuGraphBackend:
             raise RuntimeError("KuzuGraphBackend is not open")
         return self._conn
 
-    def _execute(self, query: str, params: Dict[str, Any] | None = None):
+    def _execute(self, query: str, params: Dict[str, Any] | None = None) -> kuzu.QueryResult | list[kuzu.QueryResult]:
         if params is None:
             return self.conn.execute(query)
         return self.conn.execute(query, params)
@@ -131,8 +148,8 @@ class KuzuGraphBackend:
         self._db = None
 
     def is_empty(self) -> bool:
-        rows = self._execute("MATCH (e:Entity) RETURN count(e) AS count").get_next()
-        return int(rows[0] or 0) == 0
+        rows = list(_iter_result_rows(self._execute("MATCH (e:Entity) RETURN count(e) AS count")))
+        return int(rows[0][0] if rows else 0) == 0
 
     def _ensure_entity(self, entity: Dict[str, Any]) -> None:
         self._execute(
@@ -329,10 +346,8 @@ class KuzuGraphBackend:
                 """,
                 {"term": token, "limit": limit},
             )
-            collected: List[List[Any]] = []
-            while rows.has_next():
-                collected.append(rows.get_next())
-            add_rows(collected)
+            entity_rows = list(_iter_result_rows(rows))
+            add_rows(entity_rows)
 
         for token in tokens:
             if len(ids) >= limit:
@@ -347,10 +362,8 @@ class KuzuGraphBackend:
                 """,
                 {"term": token, "limit": limit},
             )
-            collected = []
-            while rows.has_next():
-                collected.append(rows.get_next())
-            add_rows(collected)
+            state_match_rows = list(_iter_result_rows(rows))
+            add_rows(state_match_rows)
 
         for token in tokens:
             if len(ids) >= limit:
@@ -369,10 +382,8 @@ class KuzuGraphBackend:
                 """,
                 {"term": token, "limit": limit},
             )
-            collected = []
-            while rows.has_next():
-                collected.append(rows.get_next())
-            add_rows(collected)
+            conflict_match_rows = list(_iter_result_rows(rows))
+            add_rows(conflict_match_rows)
 
         for token in tokens:
             if len(ids) >= limit:
@@ -390,12 +401,11 @@ class KuzuGraphBackend:
                 """,
                 {"term": token, "limit": limit},
             )
-            collected = []
-            while rows.has_next():
-                row = rows.get_next()
-                collected.append([row[0]])
-                collected.append([row[1]])
-            add_rows(collected)
+            relation_match_rows: List[List[Any]] = []
+            for row in _iter_result_rows(rows):
+                relation_match_rows.append([row[0]])
+                relation_match_rows.append([row[1]])
+            add_rows(relation_match_rows)
 
         return ids[:limit]
 
@@ -414,8 +424,8 @@ class KuzuGraphBackend:
             if len(output) >= limit:
                 break
             rows = self.conn.execute(query, {"ids": seed_ids, "limit": limit})
-            while rows.has_next():
-                entity_id = int(rows.get_next()[0])
+            for row in _iter_result_rows(rows):
+                entity_id = int(row[0])
                 if entity_id in seen:
                     continue
                 seen.add(entity_id)
@@ -432,8 +442,7 @@ class KuzuGraphBackend:
             {"ids": entity_ids},
         )
         names: Dict[int, str] = {}
-        while rows.has_next():
-            row = rows.get_next()
+        for row in _iter_result_rows(rows):
             names[int(row[0])] = str(row[1] or "")
         return names
 
@@ -455,8 +464,7 @@ class KuzuGraphBackend:
             """,
             {"ids": all_ids, "limit": max(limit * 10, 40)},
         )
-        while state_rows.has_next():
-            row = state_rows.get_next()
+        for row in _iter_result_rows(state_rows):
             entity_id = int(row[1])
             rows.append(
                 {
@@ -486,8 +494,7 @@ class KuzuGraphBackend:
             """,
             {"ids": all_ids, "limit": max(limit * 6, 24)},
         )
-        while conflict_rows.has_next():
-            row = conflict_rows.get_next()
+        for row in _iter_result_rows(conflict_rows):
             entity_id = int(row[1])
             rows.append(
                 {
@@ -518,8 +525,7 @@ class KuzuGraphBackend:
             """,
             {"ids": all_ids, "limit": max(limit * 8, 32)},
         )
-        while relation_rows.has_next():
-            relation_buffer.append(relation_rows.get_next())
+        relation_buffer.extend(_iter_result_rows(relation_rows))
 
         inferred_buffer: List[List[Any]] = []
         inferred_rows = self.conn.execute(
@@ -531,8 +537,7 @@ class KuzuGraphBackend:
             """,
             {"ids": all_ids, "limit": max(limit * 8, 32)},
         )
-        while inferred_rows.has_next():
-            inferred_buffer.append(inferred_rows.get_next())
+        inferred_buffer.extend(_iter_result_rows(inferred_rows))
 
         relation_entity_ids = all_ids[:]
         for row in relation_buffer + inferred_buffer:
@@ -595,8 +600,7 @@ class KuzuGraphBackend:
         )
         entity_ids: List[int] = []
         buffer: List[List[Any]] = []
-        while rows.has_next():
-            row = rows.get_next()
+        for row in _iter_result_rows(rows):
             buffer.append(row)
             entity_ids.append(int(row[1]))
         names = self._entity_names(entity_ids)
@@ -651,8 +655,7 @@ class KuzuGraphBackend:
         matches: List[Dict[str, Any]] = []
         total = 0.0
         seen_entity_ids: Set[int] = set()
-        while rows.has_next():
-            row = rows.get_next()
+        for row in _iter_result_rows(rows):
             entity_id = int(row[0])
             if entity_id in seen_entity_ids:
                 continue

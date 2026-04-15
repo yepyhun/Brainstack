@@ -1,13 +1,23 @@
 """Replacement-contract tests for Brainstack host ownership."""
 
+# ruff: noqa: E402
+
 import sys
 import types
 from pathlib import Path
 from unittest.mock import MagicMock
 
-sys.modules.setdefault("fire", types.SimpleNamespace(Fire=lambda *a, **k: None))
-sys.modules.setdefault("firecrawl", types.SimpleNamespace(Firecrawl=object))
-sys.modules.setdefault("fal_client", types.SimpleNamespace())
+
+def _module_stub(name: str, **attrs: object) -> types.ModuleType:
+    module = types.ModuleType(name)
+    for attr_name, attr_value in attrs.items():
+        setattr(module, attr_name, attr_value)
+    return module
+
+
+sys.modules.setdefault("fire", _module_stub("fire", Fire=lambda *a, **k: None))
+sys.modules.setdefault("firecrawl", _module_stub("firecrawl", Firecrawl=object))
+sys.modules.setdefault("fal_client", _module_stub("fal_client"))
 
 from plugins.memory.brainstack import BrainstackMemoryProvider
 from plugins.memory.brainstack.db import BrainstackStore

@@ -251,7 +251,8 @@ def _reconcile_typed_entities(
                 "metadata": entity_metadata,
             },
         ]
-        raw_attributes = candidate.get("attributes") if isinstance(candidate.get("attributes"), Mapping) else {}
+        raw_attributes_value = candidate.get("attributes")
+        raw_attributes: Mapping[Any, Any] = raw_attributes_value if isinstance(raw_attributes_value, Mapping) else {}
         for attribute, value in raw_attributes.items():
             normalized_attribute = _normalize_text(attribute).lower()
             normalized_value = _normalize_text(value)

@@ -14,23 +14,23 @@ class ChromaCorpusBackend:
 
     def __init__(self, *, db_path: str) -> None:
         self._db_path = str(db_path)
-        self._client = None
-        self._collection = None
-        self._embedding_function = None
+        self._client: Any | None = None
+        self._collection: Any | None = None
+        self._embedding_function: Any | None = None
 
     @property
-    def collection(self):
+    def collection(self) -> Any:
         if self._collection is None:
             raise RuntimeError("ChromaCorpusBackend is not open")
         return self._collection
 
-    def _import_chromadb(self):
+    def _import_chromadb(self) -> tuple[Any, Any]:
         import chromadb
         from chromadb.config import Settings
 
         return chromadb, Settings
 
-    def _build_embedding_function(self):
+    def _build_embedding_function(self) -> Any:
         chromadb, _ = self._import_chromadb()
         return chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
 

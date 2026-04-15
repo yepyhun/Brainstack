@@ -231,6 +231,52 @@ class TestBrainstackRealWorldFlows:
         finally:
             provider.shutdown()
 
+    def test_initialize_refuses_to_reset_runtime_state_while_tier2_worker_is_still_running(self, tmp_path, monkeypatch):
+        provider = _make_provider(tmp_path, "session-a", user_id="user-a", platform="discord")
+        original_store = provider._store
+        try:
+            provider._turn_counter = 4
+            provider._pending_tier2_turns = 2
+            provider._tier2_running = True
+            monkeypatch.setattr(provider, "_wait_for_tier2_worker", lambda **kwargs: False)
+
+            try:
+                provider.initialize("session-b", hermes_home=str(tmp_path), user_id="user-b", platform="discord")
+            except RuntimeError as exc:
+                assert "Tier-2 worker is still running" in str(exc)
+            else:
+                raise AssertionError("initialize should fail closed while the Tier-2 worker is still running")
+
+            assert provider._store is original_store
+            assert provider._session_id == "session-a"
+            assert provider._turn_counter == 4
+            assert provider._pending_tier2_turns == 2
+            assert provider._tier2_running is True
+            assert provider._principal_scope_key == "platform:discord|user_id:user-a"
+        finally:
+            monkeypatch.setattr(provider, "_wait_for_tier2_worker", lambda **kwargs: True)
+            provider.shutdown()
+
+    def test_shutdown_refuses_to_reset_runtime_state_while_tier2_worker_is_still_running(self, tmp_path, monkeypatch):
+        provider = _make_provider(tmp_path, "session-a", user_id="user-a", platform="discord")
+        original_store = provider._store
+        try:
+            provider._turn_counter = 4
+            provider._pending_tier2_turns = 2
+            provider._tier2_running = True
+            monkeypatch.setattr(provider, "_wait_for_tier2_worker", lambda **kwargs: False)
+
+            provider.shutdown()
+
+            assert provider._store is original_store
+            assert provider._session_id == "session-a"
+            assert provider._turn_counter == 4
+            assert provider._pending_tier2_turns == 2
+            assert provider._tier2_running is True
+        finally:
+            monkeypatch.setattr(provider, "_wait_for_tier2_worker", lambda **kwargs: True)
+            provider.shutdown()
+
     def test_cross_session_prefetch_stays_within_same_principal_scope(self, tmp_path):
         writer_a = _make_provider(tmp_path, "session-a", user_id="user-a", platform="discord")
         try:
@@ -1294,7 +1340,10 @@ class TestBrainstackRealWorldFlows:
             provider.sync_turn("Kérlek, magyarul válaszolj.", "Rendben.", session_id="session-tier2-bg")
             elapsed = time.monotonic() - start
 
-            assert elapsed < 0.15
+            # The extractor sleeps for 0.25s. The sync path should return well
+            # before that even on a loaded CI/dev box, without requiring an
+            # unrealistically tight sub-150ms ceiling.
+            assert elapsed < 0.22
             assert provider._wait_for_tier2_worker(timeout=1.0) is True
 
             profile_rows = provider._store.list_profile_items(limit=10)

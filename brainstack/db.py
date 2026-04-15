@@ -10,11 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, TypeVar
 
-from .corpus_backend import create_corpus_backend
-from .graph_backend import create_graph_backend
-from .provenance import merge_provenance, normalize_provenance
+from .corpus_backend import CorpusBackend, create_corpus_backend
+from .graph_backend import GraphBackend, create_graph_backend
+from .provenance import merge_provenance
 from .temporal import merge_temporal, normalize_temporal_fields, record_is_effective_at
-from .transcript import count_overlap, tokenize_match_text, tokenize_retrieval_query
+from .transcript import count_overlap, tokenize_retrieval_query
 from .usefulness import (
     apply_retrieval_telemetry,
     graph_priority_adjustment,
@@ -44,7 +44,7 @@ def build_fts_query(query: str) -> str:
 
 
 def build_like_tokens(query: str, *, limit: int = 8) -> List[str]:
-    return [f"%{token}%" for token in _query_tokens(query, limit=limit)]
+    return [f"%{token.lower()}%" for token in _query_tokens(query, limit=limit)]
 
 
 def _decode_json_object(value: Any) -> Dict[str, Any]:
@@ -115,6 +115,13 @@ def _normalize_record_metadata(metadata: Dict[str, Any] | None, *, source: str =
     if provenance:
         normalized["provenance"] = provenance
     return normalized
+
+
+def _cursor_lastrowid(cur: sqlite3.Cursor) -> int:
+    row_id = cur.lastrowid
+    if row_id is None:
+        raise RuntimeError("sqlite cursor did not expose lastrowid")
+    return int(row_id)
 
 
 def _merge_record_metadata(
@@ -242,6 +249,9 @@ def _graph_sort_key(row: Dict[str, Any], *, query: str) -> tuple[int, int, int, 
     if str(row.get("row_type") or "") == "conflict" and isinstance(row.get("conflict_metadata"), dict):
         metadata = row.get("conflict_metadata") or metadata
     overlap_count = count_overlap(query, _graph_match_text(row))
+    raw_query = str(query or "").strip().lower()
+    if overlap_count <= 0 and raw_query and raw_query in _graph_match_text(row).lower():
+        overlap_count = 1
     row["overlap_count"] = overlap_count
     row["fact_class"] = _graph_fact_class(row)
     confidence_score = int(round(_graph_metadata_confidence(metadata) * 100))
@@ -282,9 +292,9 @@ class BrainstackStore:
         default_corpus_db = str(Path(self._db_path).with_suffix(".chroma"))
         self._corpus_db_path = str(corpus_db_path or default_corpus_db)
         self._conn: sqlite3.Connection | None = None
-        self._graph_backend = None
+        self._graph_backend: GraphBackend | None = None
         self._graph_backend_error = ""
-        self._corpus_backend = None
+        self._corpus_backend: CorpusBackend | None = None
         self._corpus_backend_error = ""
         self._lock = threading.RLock()
 
@@ -1098,7 +1108,7 @@ class BrainstackStore:
                 now,
             ),
         )
-        row_id = int(cur.lastrowid)
+        row_id = _cursor_lastrowid(cur)
         self.conn.execute(
             "INSERT INTO continuity_fts(rowid, content, session_id, kind) VALUES (?, ?, ?, ?)",
             (row_id, content, session_id, kind),
@@ -1141,7 +1151,7 @@ class BrainstackStore:
                 now,
             ),
         )
-        row_id = int(cur.lastrowid)
+        row_id = _cursor_lastrowid(cur)
         self.conn.execute(
             "INSERT INTO transcript_fts(rowid, content, session_id, kind) VALUES (?, ?, ?, ?)",
             (row_id, content, session_id, kind),
@@ -1220,7 +1230,8 @@ class BrainstackStore:
             ):
                 continue
             metadata = dict(item.get("metadata") or {})
-            temporal = metadata.get("temporal") if isinstance(metadata.get("temporal"), dict) else {}
+            temporal_payload = metadata.get("temporal")
+            temporal = temporal_payload if isinstance(temporal_payload, dict) else {}
             item["same_session"] = item["session_id"] == session_id
             item["overlap_count"] = count_overlap(query, item["content"])
             item["semantic_score"] = 0.0
@@ -1549,7 +1560,7 @@ class BrainstackStore:
                     1 if active else 0,
                 ),
             )
-            row_id = int(cur.lastrowid)
+            row_id = _cursor_lastrowid(cur)
 
         self.conn.execute(
             "INSERT INTO profile_fts(rowid, content, category, stable_key) VALUES (?, ?, ?, ?)",
@@ -1738,7 +1749,7 @@ class BrainstackStore:
             (stable_key, title, doc_kind, source, meta_json, now, now, 1 if active else 0),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _cursor_lastrowid(cur)
 
     @_locked
     def replace_corpus_sections(
@@ -1773,7 +1784,7 @@ class BrainstackStore:
                 """,
                 (document_id, index, heading, content, token_estimate, metadata_json, now),
             )
-            row_id = int(cur.lastrowid)
+            row_id = _cursor_lastrowid(cur)
             self.conn.execute(
                 """
                 INSERT INTO corpus_section_fts(rowid, title, heading, content, document_id, section_index)
@@ -2030,7 +2041,7 @@ class BrainstackStore:
         )
         self.conn.commit()
         return {
-            "id": int(cur.lastrowid),
+            "id": _cursor_lastrowid(cur),
             "canonical_name": name.strip(),
             "normalized_name": normalized,
         }
@@ -2198,7 +2209,7 @@ class BrainstackStore:
             (now, subject["id"], predicate, obj["id"]),
         )
         self.conn.commit()
-        return int(cur.lastrowid)
+        return _cursor_lastrowid(cur)
 
     @_locked
     def _sqlite_upsert_graph_relation(
@@ -2262,7 +2273,7 @@ class BrainstackStore:
             (now, subject["id"], predicate, obj["id"]),
         )
         self.conn.commit()
-        return {"status": "inserted", "relation_id": int(cur.lastrowid)}
+        return {"status": "inserted", "relation_id": _cursor_lastrowid(cur)}
 
     @_locked
     def _sqlite_upsert_graph_inferred_relation(
@@ -2340,7 +2351,7 @@ class BrainstackStore:
             ),
         )
         self.conn.commit()
-        return {"status": "inserted", "relation_id": int(cur.lastrowid)}
+        return {"status": "inserted", "relation_id": _cursor_lastrowid(cur)}
 
     @_locked
     def _sqlite_upsert_graph_state(
@@ -2448,7 +2459,7 @@ class BrainstackStore:
                 ),
             )
             self.conn.commit()
-            return {"status": "conflict", "entity_id": entity["id"], "conflict_id": int(cur.lastrowid)}
+            return {"status": "conflict", "entity_id": entity["id"], "conflict_id": _cursor_lastrowid(cur)}
 
         if current and supersede:
             prior_temporal = merge_temporal(
@@ -2495,7 +2506,7 @@ class BrainstackStore:
                 valid_from,
             ),
         )
-        new_state_id = int(cur.lastrowid)
+        new_state_id = _cursor_lastrowid(cur)
 
         if current and supersede:
             updated_prior_metadata = _decode_json_object(current["metadata_json"])
@@ -2590,7 +2601,10 @@ class BrainstackStore:
     def _sqlite_search_graph(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
         patterns = build_like_tokens(query)
         if not patterns:
-            return []
+            raw_query = " ".join(str(query or "").split()).strip().lower()
+            if not raw_query:
+                return []
+            patterns = [f"%{raw_query}%"]
         candidate_limit = max(limit * 8, 24)
         state_where = " OR ".join(
             "lower(ge.canonical_name) LIKE ? OR lower(gs.value_text) LIKE ? OR lower(gs.attribute) LIKE ?"
