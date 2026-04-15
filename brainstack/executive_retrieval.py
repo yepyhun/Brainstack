@@ -36,7 +36,7 @@ AGGREGATE_ROUTE_CUES = (
     "sum",
 )
 TEMPORAL_STRONG_CUES = (
-    "order",
+    "order of",
     "earliest",
     "latest",
     "most recent",
@@ -310,6 +310,59 @@ def _dedupe_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         seen.add(key)
         output.append(dict(row))
     return output
+
+
+def _same_principal_session_support_rows(
+    store: BrainstackStore,
+    anchor_rows: Iterable[Dict[str, Any]],
+    *,
+    current_session_id: str,
+    per_session_limit: int = 2,
+) -> List[Dict[str, Any]]:
+    support_rows: List[Dict[str, Any]] = []
+    seen_support_keys: set[str] = set()
+    seen_anchor_sessions: set[str] = set()
+    for anchor in _dedupe_rows(anchor_rows):
+        if str(anchor.get("kind") or "") != "session_summary":
+            continue
+        if not bool(anchor.get("same_principal")):
+            continue
+        session_id = str(anchor.get("session_id") or "").strip()
+        if not session_id or session_id == current_session_id or session_id in seen_anchor_sessions:
+            continue
+        seen_anchor_sessions.add(session_id)
+        session_rows = store.recent_transcript(
+            session_id=session_id,
+            limit=max(per_session_limit * 3, 6),
+        )
+        ranked_session_rows = sorted(
+            [
+                dict(row)
+                for row in session_rows
+                if str(row.get("kind") or "") != "session_summary"
+            ],
+            key=lambda row: (
+                int(row.get("turn_number") or 0),
+                int(row.get("id") or 0),
+            ),
+            reverse=True,
+        )
+        added = 0
+        for row in ranked_session_rows:
+            row.setdefault("same_principal", True)
+            row.setdefault("same_session", False)
+            row.setdefault("overlap_count", 0)
+            row.setdefault("retrieval_source", "transcript.session_support")
+            row.setdefault("match_mode", "support")
+            key = _row_unique_key(row)
+            if key in seen_support_keys:
+                continue
+            seen_support_keys.add(key)
+            support_rows.append(row)
+            added += 1
+            if added >= per_session_limit:
+                break
+    return support_rows
 
 
 def _row_time_value(row: Dict[str, Any]) -> str:
@@ -597,6 +650,8 @@ def _transcript_join_key(row: Dict[str, Any]) -> str:
 
 def _fact_transcript_rows(
     *,
+    store: BrainstackStore,
+    current_session_id: str,
     fused_transcript_rows: List[Dict[str, Any]],
     keyword_transcript_rows: List[Dict[str, Any]],
     semantic_conversation_rows: List[Dict[str, Any]],
@@ -613,6 +668,11 @@ def _fact_transcript_rows(
     rows = _dedupe_rows(
         list(fused_transcript_rows)
         + _round_robin(keyword_transcript_rows, semantic_conversation_rows)
+    )
+    support_rows = _same_principal_session_support_rows(
+        store,
+        matched_rows,
+        current_session_id=current_session_id,
     )
     ranked_rows = sorted(rows, key=_fact_transcript_row_priority, reverse=True)
     top_ranked_keys = {
@@ -647,7 +707,17 @@ def _fact_transcript_rows(
         for row in ranked_rows
         if _transcript_join_key(row) not in seen_keys
     ]
-    return (preferred_rows + remaining_rows)[:effective_limit]
+    support_preferred: List[Dict[str, Any]] = []
+    for row in support_rows:
+        join_key = _transcript_join_key(row)
+        unique_key = _row_unique_key(row)
+        if unique_key in seen_keys or (join_key and join_key in seen_keys):
+            continue
+        if join_key:
+            seen_keys.add(join_key)
+        seen_keys.add(unique_key)
+        support_preferred.append(row)
+    return (preferred_rows + support_preferred + remaining_rows)[:effective_limit]
 
 
 def _fact_sort_key(candidate: EvidenceCandidate) -> tuple[Any, ...]:
@@ -709,7 +779,10 @@ def _route_has_support(route: RetrievalRoute, selected: Dict[str, List[Dict[str,
     if route.applied_mode == ROUTE_AGGREGATE:
         if any(str(row.get("kind") or "") == "native_aggregate" for row in selected.get("matched", ())):
             return True
-        total = sum(len(selected.get(name, ())) for name in ("matched", "transcript_rows"))
+        total = sum(
+            len(selected.get(name, ()))
+            for name in ("matched", "transcript_rows", "graph_rows", "corpus_rows")
+        )
         return total >= 2
     if route.applied_mode == ROUTE_TEMPORAL:
         anchors = {
@@ -720,6 +793,33 @@ def _route_has_support(route: RetrievalRoute, selected: Dict[str, List[Dict[str,
         }
         return len(anchors) >= 2
     return True
+
+
+def _keep_low_overlap_temporal_transcript_rows(selected: Dict[str, List[Dict[str, Any]]]) -> bool:
+    transcript_rows = list(selected.get("transcript_rows", ()))
+    if not transcript_rows:
+        return False
+    transcript_anchors = {
+        _temporal_anchor_key(row)
+        for row in transcript_rows
+        if _temporal_anchor_key(row)
+    }
+    if len(transcript_anchors) >= 2:
+        return True
+    overall_anchors = {
+        _temporal_anchor_key(row)
+        for name in ("matched", "recent", "transcript_rows", "graph_rows")
+        for row in selected.get(name, ())
+        if _temporal_anchor_key(row)
+    }
+    if len(overall_anchors) < 2:
+        return False
+    return any(
+        str(row.get("match_mode") or "").strip() == "support"
+        and str(row.get("retrieval_source") or "").strip() == "transcript.session_support"
+        and bool(row.get("same_principal"))
+        for row in transcript_rows
+    )
 
 
 def _select_temporal_rows(
@@ -765,6 +865,8 @@ def _select_aggregate_rows(
     keyword_continuity_rows: List[Dict[str, Any]],
     keyword_transcript_rows: List[Dict[str, Any]],
     semantic_conversation_rows: List[Dict[str, Any]],
+    keyword_corpus_rows: List[Dict[str, Any]],
+    semantic_corpus_rows: List[Dict[str, Any]],
     graph_rows: List[Dict[str, Any]],
     limits: Dict[str, int],
 ) -> Dict[str, List[Dict[str, Any]]]:
@@ -785,7 +887,10 @@ def _select_aggregate_rows(
             limit=limits["transcript_limit"],
         ),
         "graph_rows": _graph_channel_rows(graph_rows, limit=limits["graph_limit"]),
-        "corpus_rows": [],
+        "corpus_rows": _corpus_channel_rows(
+            _round_robin(semantic_corpus_rows, keyword_corpus_rows),
+            limit=limits["corpus_limit"],
+        ),
     }
 
 
@@ -873,6 +978,21 @@ def _graph_channel_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[
             graph_priority_adjustment(item[1]),
             item[1].get("overlap_count") or 0,
             str(item[1].get("happened_at") or ""),
+            -0.05 * item[0],
+        ),
+        reverse=True,
+    )
+    return [row for _, row in ranked[:limit]]
+
+
+def _corpus_channel_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+    ranked = list(enumerate(_dedupe_rows(rows)))
+    ranked.sort(
+        key=lambda item: (
+            float(item[1].get("semantic_score") or 0.0),
+            int(item[1].get("overlap_count") or 0),
+            1 if "semantic" in str(item[1].get("retrieval_source") or "") else 0,
+            1 if bool(item[1].get("same_session")) else 0,
             -0.05 * item[0],
         ),
         reverse=True,
@@ -1041,6 +1161,7 @@ def retrieve_executive_context(
     *,
     query: str,
     session_id: str,
+    principal_scope_key: str = "",
     analysis: Dict[str, Any],
     policy: Dict[str, Any],
     route_resolver: Callable[[str], Dict[str, Any] | str] | None = None,
@@ -1085,6 +1206,7 @@ def retrieve_executive_context(
             searcher=lambda variant: store.search_continuity(
                 query=variant,
                 session_id=session_id,
+                principal_scope_key=principal_scope_key,
                 limit=max(continuity_match_limit * 4, 8),
             ),
         )
@@ -1113,6 +1235,7 @@ def retrieve_executive_context(
             searcher=lambda variant: store.search_transcript_global(
                 query=variant,
                 session_id=session_id,
+                principal_scope_key=principal_scope_key,
                 limit=max(transcript_limit * 6, 12),
             ),
         )
@@ -1198,6 +1321,7 @@ def retrieve_executive_context(
         temporal_continuity_search(
             query=query,
             session_id=session_id,
+            principal_scope_key=principal_scope_key,
             limit=max(continuity_recent_limit * 4, TEMPORAL_RECENT_CAP),
         )
         if continuity_recent_limit > 0
@@ -1229,8 +1353,13 @@ def retrieve_executive_context(
     if transcript_limit > 0 and (
         route.applied_mode == ROUTE_TEMPORAL or bool(analysis.get("temporal"))
     ):
+        temporal_support_rows = _same_principal_session_support_rows(
+            store,
+            _dedupe_rows(_round_robin(temporal_continuity_rows, recent_rows)),
+            current_session_id=session_id,
+        )
         temporal_transcript_rows = _sort_rows_chronologically(
-            _round_robin(keyword_transcript_rows, semantic_conversation_rows),
+            _round_robin(keyword_transcript_rows, semantic_conversation_rows, temporal_support_rows),
             limit=max(TEMPORAL_TRANSCRIPT_CAP * 2, transcript_limit * 2),
         )
 
@@ -1277,6 +1406,8 @@ def retrieve_executive_context(
     )
     fused_transcript_rows = [candidate.row for candidate in fused if candidate.shelf == "transcript"]
     fact_selected["transcript_rows"] = _fact_transcript_rows(
+        store=store,
+        current_session_id=session_id,
         fused_transcript_rows=fused_transcript_rows,
         keyword_transcript_rows=keyword_transcript_rows,
         semantic_conversation_rows=semantic_conversation_rows,
@@ -1299,13 +1430,18 @@ def retrieve_executive_context(
             keyword_continuity_rows=keyword_continuity_rows,
             keyword_transcript_rows=keyword_transcript_rows,
             semantic_conversation_rows=semantic_conversation_rows,
+            keyword_corpus_rows=keyword_corpus_rows,
+            semantic_corpus_rows=semantic_corpus_rows,
             graph_rows=graph_rows,
             limits=limits,
         )
 
     transcript_rows = selected["transcript_rows"]
     if transcript_rows and not has_meaningful_transcript_evidence(query, transcript_rows):
-        selected["transcript_rows"] = []
+        if route.applied_mode == ROUTE_TEMPORAL and _keep_low_overlap_temporal_transcript_rows(selected):
+            pass
+        else:
+            selected["transcript_rows"] = []
     if route.applied_mode != ROUTE_FACT and not _route_has_support(route, selected):
         route.fallback_used = True
         route.applied_mode = ROUTE_FACT

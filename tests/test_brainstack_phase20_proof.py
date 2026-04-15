@@ -40,6 +40,26 @@ from brainstack.executive_retrieval import (
 
 
 class DeterministicEmbeddingFunction:
+    @staticmethod
+    def name() -> str:
+        return "default"
+
+    @staticmethod
+    def is_legacy() -> bool:
+        return False
+
+    @staticmethod
+    def supported_spaces() -> list[str]:
+        return ["cosine"]
+
+    @staticmethod
+    def get_config() -> dict:
+        return {}
+
+    @classmethod
+    def build_from_config(cls, _config: dict):
+        return cls()
+
     def __call__(self, input):
         rows = []
         for text in list(input):
@@ -50,6 +70,9 @@ class DeterministicEmbeddingFunction:
             magnitude = sum(value * value for value in vector) ** 0.5 or 1.0
             rows.append([value / magnitude for value in vector])
         return rows
+
+    def embed_query(self, input):
+        return self([input])
 
 
 def _patch_embeddings(monkeypatch):
@@ -217,6 +240,106 @@ def test_stream_c_proves_corpus_delta_above_non_corpus_baseline(monkeypatch, tmp
         store.close()
 
 
+def test_phase20_20_aggregate_route_preserves_corpus_rows(monkeypatch, tmp_path):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        store.add_continuity_event(
+            session_id="phase20",
+            turn_number=1,
+            kind="turn",
+            content="I bought three books this week for 4200 HUF, 3100 HUF, and 2600 HUF.",
+            source="test",
+        )
+        store.add_continuity_event(
+            session_id="phase20",
+            turn_number=2,
+            kind="turn",
+            content="I want to remember the total without reopening my banking app.",
+            source="test",
+        )
+        store.ingest_corpus_document(
+            stable_key="books:total",
+            title="Book spending note",
+            doc_kind="note",
+            source="test",
+            sections=[
+                {
+                    "heading": "Total",
+                    "content": "The three book purchases totaled 9,900 HUF.",
+                }
+            ],
+        )
+
+        packet = build_working_memory_packet(
+            store,
+            query="What was the total I spent on those three books?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=2,
+            transcript_match_limit=0,
+            transcript_char_budget=0,
+            graph_limit=0,
+            corpus_limit=2,
+            corpus_char_budget=480,
+            route_resolver=lambda _query: {"mode": "aggregate", "reason": "aggregate corpus bridge test"},
+        )
+
+        assert packet["routing"]["requested_mode"] == "aggregate"
+        assert packet["routing"]["applied_mode"] == "aggregate"
+        assert packet["corpus_rows"]
+        assert "## Brainstack Corpus Recall" in packet["block"]
+        assert "9,900 HUF" in packet["block"]
+    finally:
+        store.close()
+
+
+def test_phase20_20_aggregate_route_accepts_corpus_only_support(monkeypatch, tmp_path):
+    _patch_embeddings(monkeypatch)
+    store = _open_store(tmp_path)
+    try:
+        store.ingest_corpus_document(
+            stable_key="books:aggregate-support",
+            title="Book spending note",
+            doc_kind="note",
+            source="test",
+            sections=[
+                {
+                    "heading": "Prices",
+                    "content": "The three books cost 4200 HUF, 3100 HUF, and 2600 HUF.",
+                },
+                {
+                    "heading": "Total",
+                    "content": "The combined total for the three books was 9,900 HUF.",
+                },
+            ],
+        )
+
+        packet = build_working_memory_packet(
+            store,
+            query="What was the total I spent on those three books?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=0,
+            transcript_match_limit=0,
+            transcript_char_budget=0,
+            graph_limit=0,
+            corpus_limit=2,
+            corpus_char_budget=480,
+            route_resolver=lambda _query: {"mode": "aggregate", "reason": "aggregate corpus-only support"},
+        )
+
+        assert packet["routing"]["requested_mode"] == "aggregate"
+        assert packet["routing"]["applied_mode"] == "aggregate"
+        assert not packet["routing"]["fallback_used"]
+        assert len(packet["corpus_rows"]) >= 2
+        assert "## Brainstack Corpus Recall" in packet["block"]
+    finally:
+        store.close()
+
+
 def test_phase20_3_fact_route_does_not_inherit_legacy_decomposition_gate(monkeypatch, tmp_path):
     _patch_embeddings(monkeypatch)
     store = _open_store(tmp_path)
@@ -329,6 +452,11 @@ def test_phase20_3_temporal_route_orders_timestamped_transcript_evidence(monkeyp
         assert packet["block"].index("The Hate U Give") < packet["block"].index("The Nightingale")
     finally:
         store.close()
+
+
+def test_phase20_17_noun_order_query_stays_fact_routed():
+    route = _default_route_resolver("Write my cafe order in one line with size and extras.")
+    assert route["mode"] == "fact"
 
 
 def test_phase20_3_aggregate_route_widens_cross_session_recall_with_explicit_bound(monkeypatch, tmp_path):
@@ -766,6 +894,84 @@ def test_phase20_11_transcript_query_normalization_demotes_question_word_junk(tm
         assert hits
         assert hits[0]["id"] == 2
         assert "marketing specialist" in str(hits[0].get("content") or "")
+    finally:
+        store.close()
+
+
+def test_phase20_17_search_transcript_global_filters_other_principal_rows(tmp_path):
+    store = _open_store(tmp_path)
+    try:
+        store.add_transcript_entry(
+            session_id="session-alice",
+            turn_number=1,
+            kind="turn",
+            content="User: My usual coffee order is an oat flat white, extra hot, no vanilla syrup.",
+            source="test",
+            metadata={"principal_scope_key": "platform:discord|user_id:alice"},
+            created_at="2026-04-15T10:00:00Z",
+        )
+        store.add_transcript_entry(
+            session_id="session-bob",
+            turn_number=1,
+            kind="turn",
+            content="User: My usual coffee order is a vanilla cold brew with caramel foam.",
+            source="test",
+            metadata={"principal_scope_key": "platform:discord|user_id:bob"},
+            created_at="2026-04-15T10:01:00Z",
+        )
+
+        hits = store.search_transcript_global(
+            query="What is my usual coffee order?",
+            session_id="prefetch-session",
+            principal_scope_key="platform:discord|user_id:alice",
+            limit=5,
+        )
+
+        assert hits
+        assert all(str(row.get("principal_scope_key") or "") != "platform:discord|user_id:bob" for row in hits)
+        assert any("oat flat white" in str(row.get("content") or "") for row in hits)
+    finally:
+        store.close()
+
+
+def test_phase20_17_search_temporal_continuity_filters_other_principal_rows(tmp_path):
+    store = _open_store(tmp_path)
+    try:
+        store.add_continuity_event(
+            session_id="session-alice",
+            turn_number=5,
+            kind="temporal_event",
+            content="Road trip to Big Sur and Monterey",
+            source="test",
+            metadata={
+                "principal_scope_key": "platform:discord|user_id:alice",
+                "temporal": {"observed_at": "2026-04-10T09:00:00Z"},
+            },
+            created_at="2026-04-10T09:00:00Z",
+        )
+        store.add_continuity_event(
+            session_id="session-bob",
+            turn_number=6,
+            kind="temporal_event",
+            content="Solo camping trip to Yosemite",
+            source="test",
+            metadata={
+                "principal_scope_key": "platform:discord|user_id:bob",
+                "temporal": {"observed_at": "2026-04-12T09:00:00Z"},
+            },
+            created_at="2026-04-12T09:00:00Z",
+        )
+
+        hits = store.search_temporal_continuity(
+            query="What is the order of my trips?",
+            session_id="prefetch-session",
+            principal_scope_key="platform:discord|user_id:alice",
+            limit=5,
+        )
+
+        assert hits
+        assert all(str(row.get("principal_scope_key") or "") != "platform:discord|user_id:bob" for row in hits)
+        assert any("Big Sur" in str(row.get("content") or "") for row in hits)
     finally:
         store.close()
 
@@ -1578,5 +1784,194 @@ def test_phase20_11_control_plane_packet_exposes_selected_rows(monkeypatch, tmp_
         assert "transcript_rows" in packet
         assert isinstance(packet["matched"], list)
         assert isinstance(packet["transcript_rows"], list)
+    finally:
+        store.close()
+
+
+def test_phase20_18_fact_packet_carries_same_principal_session_support_rows(tmp_path, monkeypatch):
+    store = _open_store(tmp_path)
+    try:
+        continuity_rows = [
+            {
+                "id": 810,
+                "session_id": "coffee-memory",
+                "turn_number": 9,
+                "kind": "session_summary",
+                "content": "Cafe preference summary for the same principal.",
+                "source": "test",
+                "created_at": "2026-04-15T09:00:00Z",
+                "same_session": False,
+                "same_principal": True,
+            }
+        ]
+        transcript_rows = [
+            {
+                "id": 811,
+                "session_id": "phase20",
+                "turn_number": 11,
+                "kind": "turn",
+                "content": "My usual cafe order is an oat flat white.",
+                "source": "test",
+                "created_at": "2026-04-15T09:02:00Z",
+                "overlap_count": 2,
+                "retrieval_source": "transcript.keyword",
+                "match_mode": "keyword",
+                "same_session": True,
+            }
+        ]
+
+        def _recent_transcript(**kwargs):
+            if kwargs.get("session_id") != "coffee-memory":
+                return []
+            return [
+                {
+                    "id": 812,
+                    "session_id": "coffee-memory",
+                    "turn_number": 10,
+                    "kind": "session_summary",
+                    "content": "Coffee memory session summary.",
+                    "source": "test",
+                    "created_at": "2026-04-15T09:03:00Z",
+                },
+                {
+                    "id": 813,
+                    "session_id": "coffee-memory",
+                    "turn_number": 12,
+                    "kind": "turn",
+                    "content": "Make it extra hot and skip the vanilla syrup.",
+                    "source": "test",
+                    "created_at": "2026-04-15T09:04:00Z",
+                },
+            ]
+
+        monkeypatch.setattr(store, "search_profile", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_continuity", lambda **kwargs: list(continuity_rows))
+        monkeypatch.setattr(store, "recent_continuity", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_transcript", lambda **kwargs: list(transcript_rows))
+        monkeypatch.setattr(store, "search_transcript_global", lambda **kwargs: list(transcript_rows))
+        monkeypatch.setattr(store, "recent_transcript", _recent_transcript)
+        monkeypatch.setattr(store, "search_conversation_semantic", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_graph", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus_semantic", lambda **kwargs: [])
+
+        packet = build_working_memory_packet(
+            store,
+            query="Write my cafe order in one line.",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=0,
+            continuity_match_limit=1,
+            transcript_match_limit=3,
+            transcript_char_budget=800,
+            graph_limit=0,
+            corpus_limit=0,
+            corpus_char_budget=0,
+            route_resolver=lambda _query: {"mode": "fact", "reason": "test"},
+        )
+
+        transcript_contents = [str(row.get("content") or "") for row in packet["transcript_rows"]]
+        assert any("oat flat white" in content.lower() for content in transcript_contents)
+        assert any("extra hot" in content.lower() and "vanilla" in content.lower() for content in transcript_contents)
+    finally:
+        store.close()
+
+
+def test_phase20_18_temporal_packet_carries_same_principal_support_turns(tmp_path, monkeypatch):
+    store = _open_store(tmp_path)
+    try:
+        temporal_rows = [
+            {
+                "id": 901,
+                "session_id": "dentist-session",
+                "turn_number": 3,
+                "kind": "temporal_event",
+                "content": "Dentist visit on Monday morning.",
+                "source": "test",
+                "created_at": "2026-04-11T09:00:00Z",
+                "metadata": {"temporal": {"observed_at": "2026-04-11T09:00:00Z"}},
+                "same_session": False,
+                "same_principal": True,
+            },
+            {
+                "id": 902,
+                "session_id": "bike-session",
+                "turn_number": 5,
+                "kind": "temporal_event",
+                "content": "Brake pads replaced on Tuesday afternoon.",
+                "source": "test",
+                "created_at": "2026-04-12T14:00:00Z",
+                "metadata": {"temporal": {"observed_at": "2026-04-12T14:00:00Z"}},
+                "same_session": False,
+                "same_principal": True,
+            },
+        ]
+        recent_rows = [
+            {
+                "id": 903,
+                "session_id": "accountant-session",
+                "turn_number": 7,
+                "kind": "session_summary",
+                "content": "Errands summary for the same principal.",
+                "source": "test",
+                "created_at": "2026-04-13T18:00:00Z",
+                "same_session": False,
+                "same_principal": True,
+            }
+        ]
+
+        def _recent_transcript(**kwargs):
+            if kwargs.get("session_id") != "accountant-session":
+                return []
+            return [
+                {
+                    "id": 904,
+                    "session_id": "accountant-session",
+                    "turn_number": 8,
+                    "kind": "session_summary",
+                    "content": "Accountant summary row.",
+                    "source": "test",
+                    "created_at": "2026-04-13T18:05:00Z",
+                },
+                {
+                    "id": 905,
+                    "session_id": "accountant-session",
+                    "turn_number": 9,
+                    "kind": "turn",
+                    "content": "I stopped by the tax accountant after lunch.",
+                    "source": "test",
+                    "created_at": "2026-04-13T18:06:00Z",
+                },
+            ]
+
+        monkeypatch.setattr(store, "search_profile", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_continuity", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_temporal_continuity", lambda **kwargs: list(temporal_rows))
+        monkeypatch.setattr(store, "recent_continuity", lambda **kwargs: list(recent_rows))
+        monkeypatch.setattr(store, "search_transcript", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_transcript_global", lambda **kwargs: [])
+        monkeypatch.setattr(store, "recent_transcript", _recent_transcript)
+        monkeypatch.setattr(store, "search_conversation_semantic", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_graph", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus", lambda **kwargs: [])
+        monkeypatch.setattr(store, "search_corpus_semantic", lambda **kwargs: [])
+
+        packet = build_working_memory_packet(
+            store,
+            query="What was the order of the dentist, brake pad, and accountant errands?",
+            session_id="phase20",
+            profile_match_limit=0,
+            continuity_recent_limit=1,
+            continuity_match_limit=2,
+            transcript_match_limit=3,
+            transcript_char_budget=900,
+            graph_limit=0,
+            corpus_limit=0,
+            corpus_char_budget=0,
+            route_resolver=lambda _query: {"mode": "temporal", "reason": "test"},
+        )
+
+        transcript_contents = [str(row.get("content") or "") for row in packet["transcript_rows"]]
+        assert any("tax accountant" in content.lower() for content in transcript_contents)
     finally:
         store.close()

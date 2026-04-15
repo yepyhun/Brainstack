@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Protocol
+
+
+logger = logging.getLogger(__name__)
 
 
 class GraphBackend(Protocol):
@@ -35,7 +39,13 @@ def create_graph_backend(kind: str, *, db_path: str) -> GraphBackend | None:
     if normalized in {"", "sqlite", "none"}:
         return None
     if normalized == "kuzu":
-        from .graph_backend_kuzu import KuzuGraphBackend
+        try:
+            from .graph_backend_kuzu import KuzuGraphBackend
+        except (ImportError, ModuleNotFoundError) as exc:
+            if getattr(exc, "name", "") not in {"", "kuzu"} and "kuzu" not in str(exc).lower():
+                raise
+            logger.warning("Brainstack Kuzu backend unavailable; continuing without graph backend")
+            return None
 
         return KuzuGraphBackend(db_path=db_path)
     raise ValueError(f"Unsupported graph backend: {kind}")

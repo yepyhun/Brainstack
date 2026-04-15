@@ -143,7 +143,19 @@ def tokenize_match_text(text: str) -> List[str]:
 
 
 def tokenize_retrieval_query(text: str) -> List[str]:
-    return [token for token in tokenize_match_text(text) if token not in RETRIEVAL_QUERY_STOPWORDS]
+    cleaned = [token for token in tokenize_match_text(text) if token not in RETRIEVAL_QUERY_STOPWORDS]
+    expanded: List[str] = []
+    seen: Set[str] = set()
+    for token in cleaned:
+        variants = [token]
+        if len(token) > 4 and token.endswith("s") and not token.endswith("ss"):
+            variants.append(token[:-1])
+        for variant in variants:
+            if variant in seen:
+                continue
+            seen.add(variant)
+            expanded.append(variant)
+    return expanded
 
 
 def count_overlap(query: str, content: str) -> int:
@@ -159,5 +171,11 @@ def has_meaningful_transcript_evidence(query: str, rows: Iterable[Dict[str, Any]
         if int(row.get("overlap_count", 0)) > 0:
             return True
         if str(row.get("match_mode") or "").strip() == "semantic" and float(row.get("semantic_score") or 0.0) > 0.0:
+            return True
+        if (
+            str(row.get("match_mode") or "").strip() == "support"
+            and str(row.get("retrieval_source") or "").strip() == "transcript.session_support"
+            and bool(row.get("same_principal"))
+        ):
             return True
     return False

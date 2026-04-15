@@ -13,10 +13,10 @@ from plugins.memory.brainstack.temporal import normalize_temporal_fields, record
 from plugins.memory.brainstack.tier2_extractor import extract_tier2_candidates
 
 
-def _make_provider(tmp_path, session_id):
+def _make_provider(tmp_path, session_id, **init_kwargs):
     base = Path(tmp_path)
     provider = BrainstackMemoryProvider(config={"db_path": str(base / "brainstack.db")})
-    provider.initialize(session_id, hermes_home=str(base))
+    provider.initialize(session_id, hermes_home=str(base), **init_kwargs)
     return provider
 
 
@@ -196,6 +196,38 @@ class TestBrainstackRealWorldFlows:
             assert "## Brainstack Profile Match" not in block
         finally:
             provider.shutdown()
+
+    def test_cross_session_prefetch_stays_within_same_principal_scope(self, tmp_path):
+        writer_a = _make_provider(tmp_path, "session-a", user_id="user-a", platform="discord")
+        try:
+            writer_a.sync_turn(
+                "My usual coffee order is an oat flat white, extra hot, with no vanilla syrup.",
+                "Understood.",
+                session_id="session-a",
+            )
+        finally:
+            writer_a.shutdown()
+
+        writer_b = _make_provider(tmp_path, "session-b", user_id="user-b", platform="discord")
+        try:
+            writer_b.sync_turn(
+                "My usual coffee order is a vanilla cold brew with caramel foam.",
+                "Understood.",
+                session_id="session-b",
+            )
+        finally:
+            writer_b.shutdown()
+
+        reader = _make_provider(tmp_path, "session-c", user_id="user-a", platform="discord")
+        try:
+            block = reader.prefetch(
+                "What is my usual coffee order?",
+                session_id="session-c",
+            )
+            assert "oat flat white" in block
+            assert "vanilla cold brew" not in block
+        finally:
+            reader.shutdown()
 
     def test_temporal_graph_truth_shows_current_and_prior_state(self, tmp_path):
         provider = _make_provider(tmp_path, "session-graph")

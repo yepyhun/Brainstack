@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Protocol
+
+
+logger = logging.getLogger(__name__)
 
 
 class CorpusBackend(Protocol):
@@ -35,7 +39,13 @@ def create_corpus_backend(kind: str, *, db_path: str) -> CorpusBackend | None:
     if normalized in {"", "sqlite", "none"}:
         return None
     if normalized == "chroma":
-        from .corpus_backend_chroma import ChromaCorpusBackend
+        try:
+            from .corpus_backend_chroma import ChromaCorpusBackend
+        except (ImportError, ModuleNotFoundError) as exc:
+            if getattr(exc, "name", "") not in {"", "chromadb"} and "chromadb" not in str(exc).lower():
+                raise
+            logger.warning("Brainstack Chroma backend unavailable; continuing without corpus backend")
+            return None
 
         return ChromaCorpusBackend(db_path=db_path)
     raise ValueError(f"Unsupported corpus backend: {kind}")

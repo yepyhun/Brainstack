@@ -76,6 +76,30 @@ def _debug_row_snapshot(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _build_principal_scope(**kwargs: Any) -> Dict[str, str]:
+    user_id = str(kwargs.get("user_id") or "").strip()
+    if not user_id:
+        return {}
+    platform = str(kwargs.get("platform") or "").strip()
+    agent_identity = str(kwargs.get("agent_identity") or "").strip()
+    agent_workspace = str(kwargs.get("agent_workspace") or "").strip()
+    scope: Dict[str, str] = {"user_id": user_id}
+    if platform:
+        scope["platform"] = platform
+    if agent_identity:
+        scope["agent_identity"] = agent_identity
+    if agent_workspace:
+        scope["agent_workspace"] = agent_workspace
+    key_parts: List[str] = []
+    for key in ("platform", "user_id", "agent_identity", "agent_workspace"):
+        value = str(scope.get(key) or "").strip()
+        if value:
+            key_parts.append(f"{key}:{value}")
+    if key_parts:
+        scope["principal_scope_key"] = "|".join(key_parts)
+    return scope
+
+
 class BrainstackMemoryProvider(MemoryProvider):
     def __init__(self, config: dict | None = None):
         self._config = config or _load_plugin_config()
@@ -112,6 +136,8 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._tier2_thread: threading.Thread | None = None
         self._tier2_running = False
         self._tier2_followup_requested = False
+        self._principal_scope: Dict[str, str] = {}
+        self._principal_scope_key = ""
 
     @property
     def name(self) -> str:
@@ -179,6 +205,8 @@ class BrainstackMemoryProvider(MemoryProvider):
         corpus_backend = str(self._config.get("corpus_backend", "chroma") or "chroma")
         corpus_db_path = _normalize_path(str(self._config.get("corpus_db_path", default_corpus_db)), hermes_home)
         self._session_id = session_id
+        self._principal_scope = _build_principal_scope(**kwargs)
+        self._principal_scope_key = str(self._principal_scope.get("principal_scope_key") or "").strip()
         self._store = BrainstackStore(
             db_path,
             graph_backend=graph_backend,
@@ -187,6 +215,13 @@ class BrainstackMemoryProvider(MemoryProvider):
             corpus_db_path=corpus_db_path,
         )
         self._store.open()
+
+    def _scoped_metadata(self, metadata: Dict[str, Any] | None = None) -> Dict[str, Any] | None:
+        payload = dict(metadata or {})
+        if self._principal_scope_key:
+            payload.setdefault("principal_scope_key", self._principal_scope_key)
+            payload.setdefault("principal_scope", dict(self._principal_scope))
+        return payload or None
 
     def system_prompt_block(self) -> str:
         if not self._store:
@@ -201,6 +236,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             self._store,
             query=query,
             session_id=sid,
+            principal_scope_key=self._principal_scope_key,
             profile_match_limit=self._profile_match_limit,
             continuity_recent_limit=self._continuity_recent_limit,
             continuity_match_limit=self._continuity_match_limit,
@@ -257,6 +293,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             user_content=user_content,
             assistant_content=assistant_content,
             created_at=event_time,
+            metadata=self._scoped_metadata(),
         )
         plan = build_turn_ingest_plan(
             user_content=user_content,
@@ -343,6 +380,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             kind="compression_snapshot",
             source="on_pre_compress",
             max_items=self._compression_snapshot_limit,
+            metadata=self._scoped_metadata(),
         )
         if not summary:
             return ""
@@ -370,6 +408,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             kind="session_summary",
             source="on_session_end",
             max_items=8,
+            metadata=self._scoped_metadata(),
         )
         for message in messages:
             message_content = str(message.get("content", ""))
@@ -403,7 +442,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                 content=content,
                 source=f"builtin_{action}",
                 confidence=0.88,
-                metadata={"target": target},
+                metadata=self._scoped_metadata({"target": target}),
             )
             return
 
@@ -413,7 +452,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             kind="builtin_memory",
             content=content,
             source=f"on_memory_write:{action}:{target}",
-            metadata={"target": target},
+            metadata=self._scoped_metadata({"target": target}),
         )
 
     def shutdown(self) -> None:
@@ -578,10 +617,10 @@ class BrainstackMemoryProvider(MemoryProvider):
             turn_number=turn_number,
             source=f"tier2:{trigger_reason}",
             extracted=extracted,
-            metadata={
+            metadata=self._scoped_metadata({
                 "batch_reason": trigger_reason,
                 "transcript_ids": [int(row["id"]) for row in transcript_rows if row.get("id") is not None],
-            },
+            }),
         )
         action_counts: Dict[str, int] = {}
         writes_performed = 0

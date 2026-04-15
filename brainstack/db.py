@@ -149,6 +149,23 @@ def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     return item
 
 
+def _principal_scope_key_from_metadata(metadata: Dict[str, Any] | None) -> str:
+    if not isinstance(metadata, dict):
+        return ""
+    direct = str(metadata.get("principal_scope_key") or "").strip()
+    if direct:
+        return direct
+    nested = metadata.get("principal_scope")
+    if not isinstance(nested, dict):
+        return ""
+    parts: list[str] = []
+    for key in ("platform", "user_id", "agent_identity", "agent_workspace"):
+        value = str(nested.get(key) or "").strip()
+        if value:
+            parts.append(f"{key}:{value}")
+    return "|".join(parts)
+
+
 def _graph_metadata_confidence(metadata: Dict[str, Any] | None) -> float:
     try:
         return max(0.0, min(1.0, float((metadata or {}).get("confidence", 0.0) or 0.0)))
@@ -260,15 +277,25 @@ class BrainstackStore:
         self._init_schema()
         self._graph_backend = create_graph_backend(self._graph_backend_name, db_path=self._graph_db_path)
         if self._graph_backend is not None:
-            self._graph_backend.open()
-            self._graph_backend_error = ""
-            self._bootstrap_graph_backend_if_needed()
+            try:
+                self._graph_backend.open()
+            except ModuleNotFoundError as exc:
+                self._graph_backend_error = str(exc)
+                self._graph_backend = None
+            else:
+                self._graph_backend_error = ""
+                self._bootstrap_graph_backend_if_needed()
         self._corpus_backend = create_corpus_backend(self._corpus_backend_name, db_path=self._corpus_db_path)
         if self._corpus_backend is not None:
-            self._corpus_backend.open()
-            self._corpus_backend_error = ""
-            self._bootstrap_corpus_backend_if_needed()
-            self._replay_corpus_publications_if_needed()
+            try:
+                self._corpus_backend.open()
+            except ModuleNotFoundError as exc:
+                self._corpus_backend_error = str(exc)
+                self._corpus_backend = None
+            else:
+                self._corpus_backend_error = ""
+                self._bootstrap_corpus_backend_if_needed()
+                self._replay_corpus_publications_if_needed()
 
     @_locked
     def close(self) -> None:
@@ -1112,10 +1139,18 @@ class BrainstackStore:
         return [_row_to_dict(row) for row in rows]
 
     @_locked
-    def search_temporal_continuity(self, *, query: str, session_id: str, limit: int) -> List[Dict[str, Any]]:
+    def search_temporal_continuity(
+        self,
+        *,
+        query: str,
+        session_id: str,
+        limit: int,
+        principal_scope_key: str = "",
+    ) -> List[Dict[str, Any]]:
         if limit <= 0:
             return []
         row_limit = max(limit * 6, 24)
+        current_principal_scope_key = str(principal_scope_key or "").strip()
         fts_query = build_fts_query(query)
         if fts_query:
             try:
@@ -1151,6 +1186,16 @@ class BrainstackStore:
         scored: List[Dict[str, Any]] = []
         for row in rows:
             item = _row_to_dict(row)
+            item_scope_key = _principal_scope_key_from_metadata(item.get("metadata"))
+            item["principal_scope_key"] = item_scope_key
+            item["same_principal"] = bool(current_principal_scope_key) and item_scope_key == current_principal_scope_key
+            if (
+                current_principal_scope_key
+                and item["session_id"] != session_id
+                and item_scope_key
+                and item_scope_key != current_principal_scope_key
+            ):
+                continue
             metadata = dict(item.get("metadata") or {})
             temporal = metadata.get("temporal") if isinstance(metadata.get("temporal"), dict) else {}
             item["same_session"] = item["session_id"] == session_id
@@ -1186,6 +1231,7 @@ class BrainstackStore:
                 1 if int(item.get("overlap_count") or 0) > 0 else 0,
                 int(item.get("overlap_count") or 0),
                 1 if item.get("same_session") else 0,
+                1 if item.get("same_principal") else 0,
                 str(item.get("_temporal_observed_at") or ""),
                 str(item.get("created_at") or ""),
                 int(item.get("turn_number") or 0),
@@ -1196,10 +1242,18 @@ class BrainstackStore:
         return scored[:limit]
 
     @_locked
-    def search_continuity(self, *, query: str, session_id: str, limit: int) -> List[Dict[str, Any]]:
+    def search_continuity(
+        self,
+        *,
+        query: str,
+        session_id: str,
+        limit: int,
+        principal_scope_key: str = "",
+    ) -> List[Dict[str, Any]]:
         fts_query = build_fts_query(query)
         if not fts_query:
             return []
+        current_principal_scope_key = str(principal_scope_key or "").strip()
         try:
             rows = self.conn.execute(
                 """
@@ -1231,6 +1285,16 @@ class BrainstackStore:
         scored: List[Dict[str, Any]] = []
         for row in rows:
             item = _row_to_dict(row)
+            item_scope_key = _principal_scope_key_from_metadata(item.get("metadata"))
+            item["principal_scope_key"] = item_scope_key
+            item["same_principal"] = bool(current_principal_scope_key) and item_scope_key == current_principal_scope_key
+            if (
+                current_principal_scope_key
+                and item["session_id"] != session_id
+                and item_scope_key
+                and item_scope_key != current_principal_scope_key
+            ):
+                continue
             overlap_count = count_overlap(query, item["content"])
             if overlap_count <= 0:
                 continue
@@ -1242,6 +1306,7 @@ class BrainstackStore:
             key=lambda item: (
                 int(item["overlap_count"]),
                 1 if item["same_session"] else 0,
+                1 if item.get("same_principal") else 0,
                 str(item.get("created_at") or ""),
                 int(item.get("turn_number") or 0),
                 int(item.get("id") or 0),
@@ -1325,7 +1390,14 @@ class BrainstackStore:
         return scored[:limit]
 
     @_locked
-    def search_transcript_global(self, *, query: str, session_id: str, limit: int) -> List[Dict[str, Any]]:
+    def search_transcript_global(
+        self,
+        *,
+        query: str,
+        session_id: str,
+        limit: int,
+        principal_scope_key: str = "",
+    ) -> List[Dict[str, Any]]:
         tokens = tokenize_retrieval_query(query)
         if not tokens:
             return []
@@ -1333,6 +1405,7 @@ class BrainstackStore:
         candidate_limit = max(limit * 6, 12)
         fts_query = " OR ".join(f'"{token}"' for token in tokens[:8])
         rows: List[sqlite3.Row]
+        current_principal_scope_key = str(principal_scope_key or "").strip()
 
         try:
             rows = self.conn.execute(
@@ -1366,6 +1439,16 @@ class BrainstackStore:
         scored: List[Dict[str, Any]] = []
         for row in rows:
             item = _row_to_dict(row)
+            item_scope_key = _principal_scope_key_from_metadata(item.get("metadata"))
+            item["principal_scope_key"] = item_scope_key
+            item["same_principal"] = bool(current_principal_scope_key) and item_scope_key == current_principal_scope_key
+            if (
+                current_principal_scope_key
+                and item["session_id"] != session_id
+                and item_scope_key
+                and item_scope_key != current_principal_scope_key
+            ):
+                continue
             overlap_count = count_overlap(query, item["content"])
             if overlap_count <= 0:
                 continue
@@ -1377,6 +1460,7 @@ class BrainstackStore:
             key=lambda item: (
                 int(item["overlap_count"]),
                 1 if item["same_session"] else 0,
+                1 if item.get("same_principal") else 0,
                 str(item.get("created_at") or ""),
                 int(item["turn_number"]),
                 int(item["id"]),
