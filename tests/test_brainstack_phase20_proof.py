@@ -976,6 +976,41 @@ def test_phase20_17_search_temporal_continuity_filters_other_principal_rows(tmp_
         store.close()
 
 
+def test_pre20_22_search_graph_filters_other_principal_rows(tmp_path):
+    store = _open_store(tmp_path)
+    try:
+        store.upsert_graph_state(
+            subject_name="Project Atlas",
+            attribute="status",
+            value_text="active",
+            source="test",
+            metadata={"principal_scope_key": "platform:discord|user_id:alice"},
+        )
+        store.upsert_graph_state(
+            subject_name="Project Atlas",
+            attribute="status",
+            value_text="archived",
+            source="test",
+            metadata={"principal_scope_key": "platform:discord|user_id:bob"},
+        )
+
+        hits = store.search_graph(
+            query="Project Atlas status",
+            principal_scope_key="platform:discord|user_id:alice",
+            limit=10,
+        )
+
+        assert hits
+        assert all(str(row.get("principal_scope_key") or "") != "platform:discord|user_id:bob" for row in hits)
+        assert any(
+            row.get("predicate") == "status" and str(row.get("object_value") or "") == "active"
+            for row in hits
+        )
+        assert not any(str(row.get("object_value") or "") == "archived" for row in hits)
+    finally:
+        store.close()
+
+
 def test_phase20_11_fact_route_keeps_semantic_transcript_evidence(tmp_path, monkeypatch):
     store = _open_store(tmp_path)
     try:

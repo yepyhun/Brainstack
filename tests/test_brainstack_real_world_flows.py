@@ -197,6 +197,40 @@ class TestBrainstackRealWorldFlows:
         finally:
             provider.shutdown()
 
+    def test_initialize_resets_stale_session_runtime_state(self, tmp_path):
+        provider = _make_provider(tmp_path, "session-a", user_id="user-a", platform="discord")
+        try:
+            provider._turn_counter = 9
+            provider._last_prefetch_policy = {"route": "fact"}
+            provider._last_prefetch_routing = {"mode": "temporal"}
+            provider._last_prefetch_channels = [{"name": "graph"}]
+            provider._last_prefetch_debug = {"selected_rows": {"matched": []}}
+            provider._last_tier2_schedule = {"reason": "waiting_for_batch"}
+            provider._last_tier2_batch_result = {"status": "ok"}
+            provider._tier2_batch_history = [{"status": "ok"}]
+            provider._pending_tier2_turns = 3
+            provider._last_turn_monotonic = 123.0
+            provider._tier2_followup_requested = True
+            provider._tier2_running = True
+            provider.initialize("session-b", hermes_home=str(tmp_path), user_id="user-b", platform="discord")
+
+            assert provider._session_id == "session-b"
+            assert provider._turn_counter == 0
+            assert provider._last_prefetch_policy is None
+            assert provider._last_prefetch_routing is None
+            assert provider._last_prefetch_channels == []
+            assert provider._last_prefetch_debug is None
+            assert provider._last_tier2_schedule is None
+            assert provider._last_tier2_batch_result is None
+            assert provider._tier2_batch_history == []
+            assert provider._pending_tier2_turns == 0
+            assert provider._last_turn_monotonic is None
+            assert provider._tier2_followup_requested is False
+            assert provider._tier2_running is False
+            assert provider._principal_scope_key == "platform:discord|user_id:user-b"
+        finally:
+            provider.shutdown()
+
     def test_cross_session_prefetch_stays_within_same_principal_scope(self, tmp_path):
         writer_a = _make_provider(tmp_path, "session-a", user_id="user-a", platform="discord")
         try:
@@ -226,6 +260,56 @@ class TestBrainstackRealWorldFlows:
             )
             assert "oat flat white" in block
             assert "vanilla cold brew" not in block
+        finally:
+            reader.shutdown()
+
+    def test_cross_session_graph_truth_stays_within_same_principal_scope(self, tmp_path):
+        writer_a = _make_provider(tmp_path, "session-graph-a", user_id="user-a", platform="discord")
+        try:
+            writer_a.sync_turn("Project Atlas is active now.", "Understood.", session_id="session-graph-a")
+        finally:
+            writer_a.shutdown()
+
+        writer_b = _make_provider(tmp_path, "session-graph-b", user_id="user-b", platform="discord")
+        try:
+            writer_b.sync_turn("Project Atlas is archived now.", "Understood.", session_id="session-graph-b")
+        finally:
+            writer_b.shutdown()
+
+        reader = _make_provider(tmp_path, "session-graph-c", user_id="user-a", platform="discord")
+        try:
+            graph_rows = reader._store.search_graph(
+                query="Project Atlas status",
+                principal_scope_key=reader._principal_scope_key,
+                limit=10,
+            )
+            assert graph_rows
+            assert any(
+                row.get("predicate") == "status" and str(row.get("object_value") or "") == "active"
+                for row in graph_rows
+            )
+            assert not any(str(row.get("object_value") or "") == "archived" for row in graph_rows)
+        finally:
+            reader.shutdown()
+
+    def test_system_prompt_block_stays_within_same_principal_scope(self, tmp_path):
+        writer_a = _make_provider(tmp_path, "session-prompt-a", user_id="user-a", platform="discord")
+        try:
+            writer_a.on_memory_write("add", "user", "I prefer concise answers.")
+        finally:
+            writer_a.shutdown()
+
+        writer_b = _make_provider(tmp_path, "session-prompt-b", user_id="user-b", platform="discord")
+        try:
+            writer_b.on_memory_write("add", "user", "I prefer extremely detailed answers with lots of examples.")
+        finally:
+            writer_b.shutdown()
+
+        reader = _make_provider(tmp_path, "session-prompt-c", user_id="user-a", platform="discord")
+        try:
+            block = reader.system_prompt_block()
+            assert "I prefer concise answers." in block
+            assert "extremely detailed answers" not in block
         finally:
             reader.shutdown()
 

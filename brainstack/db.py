@@ -48,6 +48,8 @@ def build_like_tokens(query: str, *, limit: int = 8) -> List[str]:
 
 
 def _decode_json_object(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
     text = str(value or "").strip()
     if not text:
         return {}
@@ -157,6 +159,12 @@ def _principal_scope_key_from_metadata(metadata: Dict[str, Any] | None) -> str:
         return direct
     nested = metadata.get("principal_scope")
     if not isinstance(nested, dict):
+        for container_key in ("document", "section"):
+            container = metadata.get(container_key)
+            if isinstance(container, dict):
+                scoped = _principal_scope_key_from_metadata(container)
+                if scoped:
+                    return scoped
         return ""
     parts: list[str] = []
     for key in ("platform", "user_id", "agent_identity", "agent_workspace"):
@@ -164,6 +172,25 @@ def _principal_scope_key_from_metadata(metadata: Dict[str, Any] | None) -> str:
         if value:
             parts.append(f"{key}:{value}")
     return "|".join(parts)
+
+
+def _annotate_principal_scope(
+    item: Dict[str, Any],
+    *,
+    principal_scope_key: str,
+    session_id: str | None = None,
+) -> bool:
+    current_principal_scope_key = str(principal_scope_key or "").strip()
+    item_scope_key = _principal_scope_key_from_metadata(item.get("metadata"))
+    item["principal_scope_key"] = item_scope_key
+    item["same_principal"] = bool(current_principal_scope_key) and item_scope_key == current_principal_scope_key
+    if not current_principal_scope_key or not item_scope_key:
+        return True
+    if item_scope_key == current_principal_scope_key:
+        return True
+    if session_id is not None and str(item.get("session_id") or "") == session_id:
+        return True
+    return False
 
 
 def _graph_metadata_confidence(metadata: Dict[str, Any] | None) -> float:
@@ -1186,14 +1213,10 @@ class BrainstackStore:
         scored: List[Dict[str, Any]] = []
         for row in rows:
             item = _row_to_dict(row)
-            item_scope_key = _principal_scope_key_from_metadata(item.get("metadata"))
-            item["principal_scope_key"] = item_scope_key
-            item["same_principal"] = bool(current_principal_scope_key) and item_scope_key == current_principal_scope_key
-            if (
-                current_principal_scope_key
-                and item["session_id"] != session_id
-                and item_scope_key
-                and item_scope_key != current_principal_scope_key
+            if not _annotate_principal_scope(
+                item,
+                principal_scope_key=current_principal_scope_key,
+                session_id=session_id,
             ):
                 continue
             metadata = dict(item.get("metadata") or {})
@@ -1285,14 +1308,10 @@ class BrainstackStore:
         scored: List[Dict[str, Any]] = []
         for row in rows:
             item = _row_to_dict(row)
-            item_scope_key = _principal_scope_key_from_metadata(item.get("metadata"))
-            item["principal_scope_key"] = item_scope_key
-            item["same_principal"] = bool(current_principal_scope_key) and item_scope_key == current_principal_scope_key
-            if (
-                current_principal_scope_key
-                and item["session_id"] != session_id
-                and item_scope_key
-                and item_scope_key != current_principal_scope_key
+            if not _annotate_principal_scope(
+                item,
+                principal_scope_key=current_principal_scope_key,
+                session_id=session_id,
             ):
                 continue
             overlap_count = count_overlap(query, item["content"])
@@ -1439,14 +1458,10 @@ class BrainstackStore:
         scored: List[Dict[str, Any]] = []
         for row in rows:
             item = _row_to_dict(row)
-            item_scope_key = _principal_scope_key_from_metadata(item.get("metadata"))
-            item["principal_scope_key"] = item_scope_key
-            item["same_principal"] = bool(current_principal_scope_key) and item_scope_key == current_principal_scope_key
-            if (
-                current_principal_scope_key
-                and item["session_id"] != session_id
-                and item_scope_key
-                and item_scope_key != current_principal_scope_key
+            if not _annotate_principal_scope(
+                item,
+                principal_scope_key=current_principal_scope_key,
+                session_id=session_id,
             ):
                 continue
             overlap_count = count_overlap(query, item["content"])
@@ -1544,8 +1559,15 @@ class BrainstackStore:
         return row_id
 
     @_locked
-    def list_profile_items(self, *, limit: int, categories: Iterable[str] | None = None) -> List[Dict[str, Any]]:
+    def list_profile_items(
+        self,
+        *,
+        limit: int,
+        categories: Iterable[str] | None = None,
+        principal_scope_key: str = "",
+    ) -> List[Dict[str, Any]]:
         params: list[Any] = []
+        fetch_limit = max(limit * 4, 16) if principal_scope_key else limit
         sql = """
             SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at
             FROM profile_items
@@ -1556,9 +1578,15 @@ class BrainstackStore:
             sql += f" AND category IN ({','.join('?' for _ in cats)})"
             params.extend(cats)
         sql += " ORDER BY confidence DESC, updated_at DESC, id DESC LIMIT ?"
-        params.append(limit)
+        params.append(fetch_limit)
         rows = self.conn.execute(sql, tuple(params)).fetchall()
-        return [_row_to_dict(row) for row in rows]
+        parsed: List[Dict[str, Any]] = []
+        for row in rows:
+            item = _row_to_dict(row)
+            if not _annotate_principal_scope(item, principal_scope_key=principal_scope_key):
+                continue
+            parsed.append(item)
+        return parsed[:limit]
 
     @_locked
     def get_profile_item(self, *, stable_key: str) -> Dict[str, Any] | None:
@@ -1604,10 +1632,10 @@ class BrainstackStore:
         return updated
 
     @_locked
-    def search_profile(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
+    def search_profile(self, *, query: str, limit: int, principal_scope_key: str = "") -> List[Dict[str, Any]]:
         fts_query = build_fts_query(query)
         rows: List[sqlite3.Row]
-        candidate_limit = max(limit * 4, 8)
+        candidate_limit = max(limit * 8, 16)
         if not fts_query:
             rows = self.conn.execute(
                 """
@@ -1648,6 +1676,8 @@ class BrainstackStore:
         scored: List[Dict[str, Any]] = []
         for row in rows:
             item = _row_to_dict(row)
+            if not _annotate_principal_scope(item, principal_scope_key=principal_scope_key):
+                continue
             match_text = " ".join(
                 (
                     str(item.get("stable_key") or "").replace("_", " "),
@@ -1884,7 +1914,14 @@ class BrainstackStore:
         return rows
 
     @_locked
-    def search_conversation_semantic(self, *, query: str, session_id: str, limit: int) -> List[Dict[str, Any]]:
+    def search_conversation_semantic(
+        self,
+        *,
+        query: str,
+        session_id: str,
+        limit: int,
+        principal_scope_key: str = "",
+    ) -> List[Dict[str, Any]]:
         rows = self._search_semantic_backend(
             query=query,
             limit=max(limit * 4, 8),
@@ -1917,6 +1954,12 @@ class BrainstackStore:
                 "retrieval_source": "conversation.semantic",
                 "match_mode": "semantic",
             }
+            if not _annotate_principal_scope(
+                item,
+                principal_scope_key=principal_scope_key,
+                session_id=session_id,
+            ):
+                continue
             output.append(item)
         output.sort(
             key=lambda item: (
@@ -2781,19 +2824,28 @@ class BrainstackStore:
         return rows
 
     @_locked
-    def search_graph(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
+    def search_graph(self, *, query: str, limit: int, principal_scope_key: str = "") -> List[Dict[str, Any]]:
         if self._graph_backend is None:
-            return self._sqlite_search_graph(query=query, limit=limit)
-        try:
-            rows = self._graph_backend.search_graph(query=query, limit=max(limit * 8, 24))
-        except Exception as exc:
-            self._graph_backend_error = str(exc)
-            logger.warning("Brainstack graph search failed; falling back to SQLite: %s", exc)
-            return self._sqlite_search_graph(query=query, limit=limit)
-        self._graph_backend_error = ""
-        rows = [item for item in rows if _graph_sort_key(item, query=query)[0] > 0]
-        rows.sort(key=lambda item: _graph_sort_key(item, query=query), reverse=True)
-        return rows[:limit]
+            rows = self._sqlite_search_graph(query=query, limit=limit)
+        else:
+            try:
+                rows = self._graph_backend.search_graph(query=query, limit=max(limit * 8, 24))
+            except Exception as exc:
+                self._graph_backend_error = str(exc)
+                logger.warning("Brainstack graph search failed; falling back to SQLite: %s", exc)
+                rows = self._sqlite_search_graph(query=query, limit=limit)
+            else:
+                self._graph_backend_error = ""
+        scored: List[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            if not _annotate_principal_scope(item, principal_scope_key=principal_scope_key):
+                continue
+            if _graph_sort_key(item, query=query)[0] <= 0:
+                continue
+            scored.append(item)
+        scored.sort(key=lambda item: _graph_sort_key(item, query=query), reverse=True)
+        return scored[:limit]
 
     @_locked
     def query_native_typed_metric_sum(

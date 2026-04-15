@@ -12,12 +12,13 @@ def ingest_turn_graph_candidates(
     session_id: str,
     turn_number: int,
     source: str,
+    metadata: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     return ingest_graph_candidates(
         store,
         text=text,
         source=source,
-        metadata={"session_id": session_id, "turn_number": turn_number},
+        metadata={**dict(metadata or {}), "session_id": session_id, "turn_number": turn_number},
     )
 
 
@@ -27,10 +28,11 @@ def ingest_session_graph_candidates(
     text: str,
     session_id: str,
     source: str,
+    metadata: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     return ingest_graph_candidates(
         store,
         text=text,
         source=source,
-        metadata={"session_id": session_id},
+        metadata={**dict(metadata or {}), "session_id": session_id},
     )

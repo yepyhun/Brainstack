@@ -434,10 +434,15 @@ def _pack_aggregate_rows(rows: Iterable[dict], *, char_budget: int, provenance_m
     return packed
 
 
-def build_system_prompt_block(store: BrainstackStore, *, profile_limit: int) -> str:
+def build_system_prompt_block(
+    store: BrainstackStore,
+    *,
+    profile_limit: int,
+    principal_scope_key: str = "",
+) -> str:
     fetch_limit = max(profile_limit * 3, 10)
-    items = store.list_profile_items(limit=fetch_limit)
-    graph_rows = store.search_graph(query="Assistant", limit=8)
+    items = store.list_profile_items(limit=fetch_limit, principal_scope_key=principal_scope_key)
+    graph_rows = store.search_graph(query="Assistant", limit=8, principal_scope_key=principal_scope_key)
     contract_lines, hidden_profile_keys = _build_active_communication_contract(
         profile_items=items,
         graph_rows=graph_rows,
@@ -610,6 +615,7 @@ def build_prefetch_block(
     *,
     query: str,
     session_id: str,
+    principal_scope_key: str = "",
     continuity_recent_limit: int,
     continuity_match_limit: int,
     profile_match_limit: int,
@@ -619,13 +625,22 @@ def build_prefetch_block(
     corpus_limit: int,
     corpus_char_budget: int,
 ) -> str:
-    profile_items = store.search_profile(query=query, limit=profile_match_limit)
-    matched = store.search_continuity(query=query, session_id=session_id, limit=continuity_match_limit)
+    profile_items = store.search_profile(
+        query=query,
+        limit=profile_match_limit,
+        principal_scope_key=principal_scope_key,
+    )
+    matched = store.search_continuity(
+        query=query,
+        session_id=session_id,
+        limit=continuity_match_limit,
+        principal_scope_key=principal_scope_key,
+    )
     matched_ids = {item["id"] for item in matched}
     recent = store.recent_continuity(session_id=session_id, limit=continuity_recent_limit)
     recent = [item for item in recent if item["id"] not in matched_ids]
     transcript_rows = store.search_transcript(query=query, session_id=session_id, limit=transcript_match_limit)
-    graph_rows = store.search_graph(query=query, limit=graph_limit)
+    graph_rows = store.search_graph(query=query, limit=graph_limit, principal_scope_key=principal_scope_key)
     corpus_rows = store.search_corpus(query=query, limit=max(corpus_limit * 3, corpus_limit))
     return render_working_memory_block(
         policy={

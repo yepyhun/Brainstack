@@ -194,6 +194,24 @@ class BrainstackMemoryProvider(MemoryProvider):
         except Exception:
             logger.debug("Failed to save Brainstack config", exc_info=True)
 
+    def _reset_session_runtime_state(self) -> None:
+        self._session_id = ""
+        self._turn_counter = 0
+        self._last_prefetch_policy = None
+        self._last_prefetch_routing = None
+        self._last_prefetch_channels = []
+        self._last_prefetch_debug = None
+        self._last_tier2_schedule = None
+        self._last_tier2_batch_result = None
+        self._tier2_batch_history = []
+        self._pending_tier2_turns = 0
+        self._last_turn_monotonic = None
+        self._tier2_followup_requested = False
+        self._tier2_running = False
+        self._tier2_thread = None
+        self._principal_scope = {}
+        self._principal_scope_key = ""
+
     def initialize(self, session_id: str, **kwargs) -> None:
         hermes_home = str(kwargs.get("hermes_home") or "")
         default_db = f"{hermes_home}/brainstack/brainstack.db" if hermes_home else "brainstack.db"
@@ -204,6 +222,11 @@ class BrainstackMemoryProvider(MemoryProvider):
         graph_backend = str(self._config.get("graph_backend", "kuzu") or "kuzu")
         corpus_backend = str(self._config.get("corpus_backend", "chroma") or "chroma")
         corpus_db_path = _normalize_path(str(self._config.get("corpus_db_path", default_corpus_db)), hermes_home)
+        self._wait_for_tier2_worker(timeout=self._tier2_timeout_seconds + 2.0)
+        if self._store:
+            self._store.close()
+            self._store = None
+        self._reset_session_runtime_state()
         self._session_id = session_id
         self._principal_scope = _build_principal_scope(**kwargs)
         self._principal_scope_key = str(self._principal_scope.get("principal_scope_key") or "").strip()
@@ -226,7 +249,11 @@ class BrainstackMemoryProvider(MemoryProvider):
     def system_prompt_block(self) -> str:
         if not self._store:
             return ""
-        return build_system_prompt_block(self._store, profile_limit=self._profile_prompt_limit)
+        return build_system_prompt_block(
+            self._store,
+            profile_limit=self._profile_prompt_limit,
+            principal_scope_key=self._principal_scope_key,
+        )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if not self._store:
@@ -320,6 +347,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                 session_id=sid,
                 turn_number=self._turn_counter,
                 source="sync_turn:user",
+                metadata=self._scoped_metadata(),
             )
         if plan.tier2_schedule.should_queue:
             self._queue_tier2_background(session_id=sid, turn_number=self._turn_counter, trigger_reason=plan.tier2_schedule.reason)
@@ -428,6 +456,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                     text=plan.graph_text,
                     session_id=self._session_id,
                     source="session_end_scan:user",
+                    metadata=self._scoped_metadata(),
                 )
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
@@ -460,14 +489,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         if self._store:
             self._store.close()
             self._store = None
-        self._last_turn_monotonic = None
-        self._pending_tier2_turns = 0
-        self._last_tier2_schedule = None
-        self._last_tier2_batch_result = None
-        self._tier2_batch_history = []
-        self._tier2_followup_requested = False
-        self._tier2_running = False
-        self._tier2_thread = None
+        self._reset_session_runtime_state()
 
     def _record_tier2_batch_result(self, result: Dict[str, Any]) -> None:
         self._last_tier2_batch_result = dict(result)

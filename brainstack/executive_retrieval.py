@@ -1192,7 +1192,11 @@ def retrieve_executive_context(
 
     keyword_profile_rows = (
         _profile_keyword_rows(
-            store.search_profile(query=query, limit=max(profile_limit * 4, 8)),
+            store.search_profile(
+                query=query,
+                limit=max(profile_limit * 4, 8),
+                principal_scope_key=principal_scope_key,
+            ),
             limit=max(profile_limit * 2, 6),
         )
         if profile_limit > 0
@@ -1262,14 +1266,15 @@ def retrieve_executive_context(
     keyword_corpus_rows = _annotate_query_flags(keyword_corpus_rows, query=query)
     semantic_conversation_rows = (
         _collect_query_rows(
-            shelf="transcript",
-            queries=search_queries,
-            searcher=lambda variant: store.search_conversation_semantic(
-                query=variant,
-                session_id=session_id,
-                limit=max(transcript_limit * 4, 8),
-            ),
-        )
+                shelf="transcript",
+                queries=search_queries,
+                searcher=lambda variant: store.search_conversation_semantic(
+                    query=variant,
+                    session_id=session_id,
+                    limit=max(transcript_limit * 4, 8),
+                    principal_scope_key=principal_scope_key,
+                ),
+            )
         if transcript_limit > 0
         else []
     )
@@ -1302,6 +1307,7 @@ def retrieve_executive_context(
                 searcher=lambda variant: store.search_graph(
                     query=variant,
                     limit=max(graph_limit * 4, 12),
+                    principal_scope_key=principal_scope_key,
                 ),
             ),
             limit=max(graph_limit * 3, 8),
@@ -1344,6 +1350,7 @@ def retrieve_executive_context(
                 searcher=lambda variant: store.search_graph(
                     query=variant,
                     limit=max(graph_limit * 6, 12),
+                    principal_scope_key=principal_scope_key,
                 ),
             ),
             limit=max(graph_limit * 2, 6),
