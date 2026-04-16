@@ -1,16 +1,9 @@
 {
   "type": "brainstack_phase25_broader_deployed_live_eval",
-  "bestie_root": "/home/lauratom/Asztal/ai/memory-repo-bakeoff/hermes-agent-bestie-latest",
-  "docker_container": "hermes-bestie",
   "staged_from": "docker:/opt/data",
   "scenario_count": 10,
   "pass_count": 9,
   "accuracy": 0.9,
-  "runtime": {
-    "provider": "nous",
-    "model": "xiaomi/mimo-v2-pro",
-    "base_url_present": true
-  },
   "by_category": {
     "coherent_continuous_conversation": {
       "total": 2,
@@ -52,7 +45,7 @@
     "avg_prompt_tokens": 11637.4
   },
   "baseline_comparison": {
-    "baseline_report": "/home/lauratom/Asztal/ai/atado/Brainstack/reports/phase23/brainstack-23-broader-deployed-live-eval.json",
+    "baseline_report": "/redacted-home/Asztal/ai/atado/Brainstack/reports/phase23/brainstack-23-broader-deployed-live-eval.json",
     "baseline_accuracy": 0.9,
     "current_accuracy": 0.9,
     "accuracy_delta": 0.0,

@@ -1,16 +1,9 @@
 {
   "type": "brainstack_phase23_broader_deployed_live_eval",
-  "bestie_root": "/home/lauratom/Asztal/ai/memory-repo-bakeoff/hermes-agent-bestie-latest",
-  "docker_container": "hermes-bestie",
   "staged_from": "docker:/opt/data",
   "scenario_count": 10,
   "pass_count": 9,
   "accuracy": 0.9,
-  "runtime": {
-    "provider": "nous",
-    "model": "xiaomi/mimo-v2-pro",
-    "base_url_present": true
-  },
   "by_category": {
     "coherent_continuous_conversation": {
       "total": 2,
