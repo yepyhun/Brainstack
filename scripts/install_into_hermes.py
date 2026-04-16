@@ -284,7 +284,7 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
         "            tool_guidance.append(SESSION_SEARCH_GUIDANCE)\n"
         "        if self._brainstack_only_mode:\n"
         "            tool_guidance.append(\n"
-        "                \"Brainstack owns personal memory in this mode. Keep user identity, preferences, communication style, and project context inside Brainstack. Do not create or maintain notes files, MEMORY.md, USER.md, or skill records for that kind of memory. Use skill_manage only for reusable procedures or workflows.\"\n"
+        "                \"Brainstack owns personal memory in this mode. Keep user identity, preferences, communication style, and project context inside Brainstack. Do not create or maintain notes files, MEMORY.md, USER.md, persona.md, or side skill files for that kind of memory. Do not use ad hoc code, terminal writes, file edits, cronjob scheduling, or other automation detours to persist or recover personal memory. Do not use secondary memory APIs from ad hoc code either. session_search may be used only as explicit conversation search, not as a second personal-memory system. Use skill_manage only for reusable procedures or workflows.\"\n"
         "            )\n"
         "        elif \"skill_manage\" in self.valid_tool_names:\n"
         "            tool_guidance.append(SKILLS_GUIDANCE)\n"
