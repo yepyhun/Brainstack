@@ -25,6 +25,8 @@ from .usefulness import (
 F = TypeVar("F", bound=Callable[..., Any])
 logger = logging.getLogger(__name__)
 NUMERIC_TOKEN_RE = re.compile(r"\d+(?::\d+)?(?:\.\d+)?")
+PROFILE_SCOPE_DELIMITER = "::principal_scope::"
+PRINCIPAL_SCOPED_PROFILE_CATEGORIES = {"identity", "preference"}
 
 
 def utc_now_iso() -> str:
@@ -149,6 +151,42 @@ def _merge_record_metadata(
     return merged
 
 
+def _is_principal_scoped_profile(*, stable_key: str = "", category: str = "") -> bool:
+    normalized_category = str(category or "").strip().lower()
+    if normalized_category in PRINCIPAL_SCOPED_PROFILE_CATEGORIES:
+        return True
+    key_prefix = str(stable_key or "").strip().split(":", 1)[0].lower()
+    return key_prefix in PRINCIPAL_SCOPED_PROFILE_CATEGORIES
+
+
+def _profile_storage_key(*, stable_key: str, category: str = "", principal_scope_key: str = "") -> str:
+    logical_key = str(stable_key or "").strip()
+    scope_key = str(principal_scope_key or "").strip()
+    if not logical_key:
+        return ""
+    if not scope_key or not _is_principal_scoped_profile(stable_key=logical_key, category=category):
+        return logical_key
+    return f"{logical_key}{PROFILE_SCOPE_DELIMITER}{scope_key}"
+
+
+def _split_profile_storage_key(storage_key: str) -> tuple[str, str]:
+    raw_key = str(storage_key or "").strip()
+    if PROFILE_SCOPE_DELIMITER not in raw_key:
+        return raw_key, ""
+    logical_key, scope_key = raw_key.rsplit(PROFILE_SCOPE_DELIMITER, 1)
+    return logical_key, scope_key
+
+
+def _profile_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    item = _row_to_dict(row)
+    storage_key = str(item.get("stable_key") or "").strip()
+    logical_key, embedded_scope_key = _split_profile_storage_key(storage_key)
+    item["storage_key"] = storage_key
+    item["stable_key"] = logical_key
+    item["principal_scope_key"] = _principal_scope_key_from_metadata(item.get("metadata")) or embedded_scope_key
+    return item
+
+
 def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     item = dict(row)
     if "metadata_json" in item:
@@ -189,10 +227,20 @@ def _annotate_principal_scope(
 ) -> bool:
     current_principal_scope_key = str(principal_scope_key or "").strip()
     item_scope_key = _principal_scope_key_from_metadata(item.get("metadata"))
+    if not item_scope_key:
+        item_scope_key = str(item.get("principal_scope_key") or "").strip()
+    if not item_scope_key:
+        storage_key = str(item.get("storage_key") or item.get("stable_key") or "").strip()
+        _, item_scope_key = _split_profile_storage_key(storage_key)
     item["principal_scope_key"] = item_scope_key
     item["same_principal"] = bool(current_principal_scope_key) and item_scope_key == current_principal_scope_key
-    if not current_principal_scope_key or not item_scope_key:
+    if not current_principal_scope_key:
         return True
+    if not item_scope_key:
+        return not _is_principal_scoped_profile(
+            stable_key=str(item.get("stable_key") or ""),
+            category=str(item.get("category") or ""),
+        )
     if item_scope_key == current_principal_scope_key:
         return True
     if session_id is not None and str(item.get("session_id") or "") == session_id:
@@ -1508,9 +1556,15 @@ class BrainstackStore:
         active: bool = True,
     ) -> int:
         now = utc_now_iso()
+        principal_scope_key = _principal_scope_key_from_metadata(metadata)
+        storage_key = _profile_storage_key(
+            stable_key=stable_key,
+            category=category,
+            principal_scope_key=principal_scope_key,
+        )
         existing = self.conn.execute(
             "SELECT id, metadata_json FROM profile_items WHERE stable_key = ?",
-            (stable_key,),
+            (storage_key,),
         ).fetchone()
         normalized_metadata = _merge_record_metadata(
             existing["metadata_json"] if existing else None,
@@ -1549,7 +1603,7 @@ class BrainstackStore:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    stable_key,
+                    storage_key,
                     category,
                     content,
                     source,
@@ -1593,7 +1647,7 @@ class BrainstackStore:
         rows = self.conn.execute(sql, tuple(params)).fetchall()
         parsed: List[Dict[str, Any]] = []
         for row in rows:
-            item = _row_to_dict(row)
+            item = _profile_row_to_dict(row)
             if not _annotate_principal_scope(item, principal_scope_key=principal_scope_key):
                 continue
             parsed.append(item)
@@ -1651,7 +1705,11 @@ class BrainstackStore:
         return parsed[:limit]
 
     @_locked
-    def get_profile_item(self, *, stable_key: str) -> Dict[str, Any] | None:
+    def get_profile_item(self, *, stable_key: str, principal_scope_key: str = "") -> Dict[str, Any] | None:
+        storage_key = _profile_storage_key(
+            stable_key=stable_key,
+            principal_scope_key=principal_scope_key,
+        )
         row = self.conn.execute(
             """
             SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at, active
@@ -1659,21 +1717,28 @@ class BrainstackStore:
             WHERE stable_key = ?
             LIMIT 1
             """,
-            (stable_key,),
+            (storage_key,),
         ).fetchone()
-        return _row_to_dict(row) if row else None
+        return _profile_row_to_dict(row) if row else None
 
     @_locked
     def record_profile_retrievals(self, *, rows: Iterable[Dict[str, Any]]) -> int:
         updated = 0
         now = utc_now_iso()
         for row in rows:
-            stable_key = str(row.get("stable_key") or "").strip()
-            if not stable_key:
+            logical_stable_key = str(row.get("stable_key") or "").strip()
+            storage_key = str(row.get("storage_key") or "").strip()
+            if not storage_key:
+                storage_key = _profile_storage_key(
+                    stable_key=logical_stable_key,
+                    category=str(row.get("category") or ""),
+                    principal_scope_key=str(row.get("principal_scope_key") or ""),
+                )
+            if not storage_key:
                 continue
             existing = self.conn.execute(
                 "SELECT id, metadata_json FROM profile_items WHERE stable_key = ?",
-                (stable_key,),
+                (storage_key,),
             ).fetchone()
             if not existing:
                 continue

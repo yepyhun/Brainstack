@@ -15,18 +15,18 @@ def _extract_identity_name(value: Any) -> str:
     text = _normalize_text(value)
     lowered = text.lower()
     if lowered.startswith("user identity:"):
-        return _normalize_text(text.split(":", 1)[1])
+        return _normalize_text(text.split(":", 1)[1]).rstrip(".,;:!?")
     if lowered.startswith("user's name is "):
         candidate = _normalize_text(text[len("User's name is ") :])
         if " (" in candidate:
             candidate = _normalize_text(candidate.split(" (", 1)[0])
-        return candidate
-    return text
+        return candidate.rstrip(".,;:!?")
+    return text.rstrip(".,;:!?")
 
 
-def _current_user_name(store: BrainstackStore) -> str:
+def _current_user_name(store: BrainstackStore, *, principal_scope_key: str = "") -> str:
     for stable_key in ("identity:name", "identity:user_name", "identity:user_identity"):
-        item = store.get_profile_item(stable_key=stable_key)
+        item = store.get_profile_item(stable_key=stable_key, principal_scope_key=principal_scope_key)
         if not item:
             continue
         extracted = _extract_identity_name(item.get("content"))
@@ -77,19 +77,18 @@ def _reconcile_profile_items(
     store: BrainstackStore,
     *,
     candidates: Iterable[Mapping[str, Any]],
-    session_id: str,
-    turn_number: int,
     source: str,
+    metadata: Mapping[str, Any],
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
-    base_metadata = {"session_id": session_id, "turn_number": turn_number, "tier": "tier2"}
     for candidate in candidates:
         category = _normalize_text(candidate.get("category")).lower()
         content = _normalize_text(candidate.get("content"))
         if not category or not content:
             continue
         stable_key = _profile_stable_key(candidate)
-        existing = store.get_profile_item(stable_key=stable_key)
+        principal_scope_key = str(metadata.get("principal_scope_key") or "").strip()
+        existing = store.get_profile_item(stable_key=stable_key, principal_scope_key=principal_scope_key)
         if existing and _normalize_text(existing.get("content")) == content:
             actions.append({"kind": "profile", "action": "NONE", "stable_key": stable_key, "category": category})
             continue
@@ -102,7 +101,7 @@ def _reconcile_profile_items(
             confidence=float(candidate.get("confidence", 0.75)),
             metadata=_candidate_metadata(
                 candidate,
-                base_metadata=base_metadata,
+                base_metadata=metadata,
                 confidence=float(candidate.get("confidence", 0.75)),
             ),
         )
@@ -380,12 +379,11 @@ def reconcile_tier2_candidates(
         _reconcile_profile_items(
             store,
             candidates=extracted.get("profile_items", []),
-            session_id=session_id,
-            turn_number=turn_number,
             source=source,
+            metadata=payload,
         )
     )
-    user_name = _current_user_name(store)
+    user_name = _current_user_name(store, principal_scope_key=str(payload.get("principal_scope_key") or ""))
     if user_name:
         merge_action = store.merge_entity_alias(alias_name="User", target_name=user_name)
         if merge_action.get("status") == "merged":

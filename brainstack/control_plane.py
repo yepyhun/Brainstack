@@ -74,6 +74,18 @@ PREFERENCE_TERMS = (
     "inkább",
     "szeretem",
 )
+CONTINUATION_TERMS = (
+    "continue",
+    "pick up where we left off",
+    "without repeating",
+    "continue that plan",
+    "resume",
+    "folytasd",
+    "folytatni",
+    "onnan folytassuk",
+    "ismétlés nélkül",
+    "ismételném",
+)
 
 
 def _contains_any(query: str, terms: tuple[str, ...]) -> bool:
@@ -87,6 +99,7 @@ class QueryAnalysis:
     explanatory: bool
     temporal: bool
     preference: bool
+    continuation: bool
 
 
 @dataclass
@@ -108,6 +121,7 @@ class WorkingMemoryPolicy:
     graph_limit: int
     corpus_limit: int
     corpus_char_budget: int
+    continuation_emphasis: bool
 
 
 def analyze_query(query: str) -> QueryAnalysis:
@@ -116,6 +130,7 @@ def analyze_query(query: str) -> QueryAnalysis:
         explanatory=_contains_any(query, EXPLANATION_TERMS),
         temporal=_contains_any(query, TEMPORAL_TERMS),
         preference=_contains_any(query, PREFERENCE_TERMS),
+        continuation=_contains_any(query, CONTINUATION_TERMS),
     )
 
 
@@ -149,6 +164,7 @@ def _initial_policy(
         graph_limit=min(graph_limit, 2),
         corpus_limit=min(corpus_limit, 2),
         corpus_char_budget=min(corpus_char_budget, 360),
+        continuation_emphasis=False,
     )
 
     if analysis.preference and not analysis.high_stakes:
@@ -172,6 +188,15 @@ def _initial_policy(
         policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
         policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
         policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 640))
+
+    if analysis.continuation and not analysis.high_stakes:
+        policy.mode = "balanced"
+        policy.continuation_emphasis = True
+        policy.continuity_match_limit = max(policy.continuity_match_limit, min(continuity_match_limit, 2))
+        policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
+        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
+        policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 640))
+        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 3))
 
     if analysis.temporal:
         policy.mode = "balanced"
@@ -320,6 +345,9 @@ def build_working_memory_packet(
             rows=[
                 {
                     "stable_key": row.get("stable_key"),
+                    "storage_key": row.get("storage_key"),
+                    "category": row.get("category"),
+                    "principal_scope_key": row.get("principal_scope_key"),
                     "matched": str(row.get("stable_key") or "").strip() in matched_profile_keys,
                     "fallback": False,
                 }

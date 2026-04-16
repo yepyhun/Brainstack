@@ -1,0 +1,268 @@
+# ruff: noqa: E402
+import importlib.util
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+_host_shims_path = REPO_ROOT / "tests" / "_host_import_shims.py"
+_host_shims_spec = importlib.util.spec_from_file_location("phase24_host_import_shims", _host_shims_path)
+assert _host_shims_spec and _host_shims_spec.loader
+_host_shims = importlib.util.module_from_spec(_host_shims_spec)
+_host_shims_spec.loader.exec_module(_host_shims)
+install_host_import_shims = _host_shims.install_host_import_shims
+
+install_host_import_shims(hermes_home=REPO_ROOT)
+
+from brainstack.db import BrainstackStore
+from brainstack.control_plane import build_working_memory_packet
+from brainstack.reconciler import reconcile_tier2_candidates
+
+
+def _scope(platform: str, user_id: str) -> dict[str, object]:
+    principal_scope = {
+        "platform": platform,
+        "user_id": user_id,
+        "agent_identity": "bestie",
+        "agent_workspace": "discord-main",
+    }
+    principal_scope_key = "|".join(f"{key}:{value}" for key, value in principal_scope.items())
+    return {
+        "principal_scope": principal_scope,
+        "principal_scope_key": principal_scope_key,
+    }
+
+
+def test_scoped_personal_profile_rows_do_not_fallback_to_global_rows(tmp_path):
+    store = BrainstackStore(str(tmp_path / "brainstack.db"))
+    store.open()
+
+    scope_a = _scope("discord", "user-a")
+
+    store.upsert_profile_item(
+        stable_key="preference:ai_name",
+        category="preference",
+        content="Call the assistant Hermes.",
+        source="test",
+        confidence=0.6,
+    )
+    store.upsert_profile_item(
+        stable_key="preference:response_language",
+        category="preference",
+        content="Always respond in Hungarian.",
+        source="test",
+        confidence=0.95,
+        metadata=scope_a,
+    )
+
+    scoped_language = store.get_profile_item(
+        stable_key="preference:response_language",
+        principal_scope_key=str(scope_a["principal_scope_key"]),
+    )
+    scoped_ai_name = store.get_profile_item(
+        stable_key="preference:ai_name",
+        principal_scope_key=str(scope_a["principal_scope_key"]),
+    )
+
+    assert scoped_language is not None
+    assert scoped_language["content"] == "Always respond in Hungarian."
+    assert scoped_language["stable_key"] == "preference:response_language"
+    assert scoped_language["storage_key"] != scoped_language["stable_key"]
+    assert scoped_language["principal_scope_key"] == scope_a["principal_scope_key"]
+    assert scoped_ai_name is None
+
+
+def test_tier2_profile_reconcile_isolates_personal_rows_by_principal(tmp_path):
+    store = BrainstackStore(str(tmp_path / "brainstack.db"))
+    store.open()
+
+    scope_a = _scope("discord", "user-a")
+    scope_b = _scope("discord", "user-b")
+
+    reconcile_tier2_candidates(
+        store,
+        session_id="session-a",
+        turn_number=1,
+        source="tier2:test",
+        metadata=scope_a,
+        extracted={
+            "profile_items": [
+                {
+                    "category": "preference",
+                    "slot": "preference:response_language",
+                    "content": "Always respond in Hungarian.",
+                    "confidence": 0.94,
+                },
+                {
+                    "category": "preference",
+                    "slot": "preference:ai_name",
+                    "content": "Refer to yourself as Bestie.",
+                    "confidence": 0.93,
+                },
+            ]
+        },
+    )
+
+    rows_a = store.list_profile_items(limit=10, principal_scope_key=str(scope_a["principal_scope_key"]))
+    rows_b = store.list_profile_items(limit=10, principal_scope_key=str(scope_b["principal_scope_key"]))
+
+    assert {row["stable_key"] for row in rows_a} == {"preference:response_language", "preference:ai_name"}
+    assert rows_b == []
+    assert all(row["principal_scope_key"] == scope_a["principal_scope_key"] for row in rows_a)
+
+
+def test_scoped_identity_lookup_drives_user_alias_canonicalization(tmp_path):
+    store = BrainstackStore(str(tmp_path / "brainstack.db"))
+    store.open()
+
+    scope_a = _scope("discord", "user-a")
+    scope_b = _scope("discord", "user-b")
+
+    store.upsert_profile_item(
+        stable_key="identity:user_name",
+        category="identity",
+        content="User's name is Tomi.",
+        source="test",
+        confidence=0.97,
+        metadata=scope_a,
+    )
+    store.upsert_profile_item(
+        stable_key="identity:user_name",
+        category="identity",
+        content="User's name is Anna.",
+        source="test",
+        confidence=0.97,
+        metadata=scope_b,
+    )
+
+    reconcile_tier2_candidates(
+        store,
+        session_id="session-b",
+        turn_number=2,
+        source="tier2:test",
+        metadata=scope_b,
+        extracted={
+            "states": [
+                {
+                    "subject": "User",
+                    "attribute": "dietary_preference",
+                    "value": "gluten-free",
+                    "supersede": False,
+                    "confidence": 0.87,
+                }
+            ]
+        },
+    )
+
+    rows = store.search_graph(query="dietary_preference gluten-free", limit=10)
+    assert any(row["subject"] == "Anna" and row["predicate"] == "dietary_preference" for row in rows)
+    assert not any(row["subject"] == "Tomi" and row["predicate"] == "dietary_preference" for row in rows)
+
+
+class _NoopStore:
+    def record_profile_retrievals(self, *, rows):
+        return len(list(rows))
+
+    def record_graph_retrievals(self, *, rows):
+        return len(list(rows))
+
+    def record_corpus_retrievals(self, *, rows):
+        return len(list(rows))
+
+
+def _mock_retrieval_payload() -> dict[str, object]:
+    return {
+        "profile_items": [],
+        "matched": [],
+        "recent": [],
+        "transcript_rows": [
+            {
+                "id": 1,
+                "session_id": "session-24",
+                "turn_number": 3,
+                "kind": "turn",
+                "content": "Anna needs gluten-free options.",
+                "source": "sync_turn:user",
+                "metadata": {},
+                "same_session": True,
+            }
+        ],
+        "graph_rows": [
+            {
+                "row_type": "state",
+                "row_id": 1,
+                "subject": "birthday dinner",
+                "predicate": "venue",
+                "object_value": "Riverside Kitchen",
+                "source": "tier2:test",
+                "metadata": {},
+                "is_current": 1,
+            }
+        ],
+        "corpus_rows": [],
+        "channels": [{"name": "graph", "status": "active", "candidate_count": 1}],
+        "routing": {
+            "requested_mode": "fact",
+            "applied_mode": "fact",
+            "source": "deterministic_route_hint",
+            "reason": "deterministic fact default: no strong structural route cues",
+            "fallback_used": False,
+            "bounds": {},
+        },
+        "fused_candidates": [],
+    }
+
+
+def test_continuation_queries_raise_carry_through_guidance(monkeypatch):
+    monkeypatch.setattr(
+        "brainstack.control_plane.retrieve_executive_context",
+        lambda *args, **kwargs: _mock_retrieval_payload(),
+    )
+
+    packet = build_working_memory_packet(
+        _NoopStore(),
+        query="Can You help me continue that plan without me repeating the details?",
+        session_id="session-24",
+        principal_scope_key="platform:discord|user_id:user-a",
+        profile_match_limit=4,
+        continuity_recent_limit=4,
+        continuity_match_limit=4,
+        transcript_match_limit=4,
+        transcript_char_budget=700,
+        graph_limit=4,
+        corpus_limit=2,
+        corpus_char_budget=360,
+    )
+
+    assert packet["policy"]["continuation_emphasis"] is True
+    assert packet["policy"]["transcript_limit"] >= 2
+    assert packet["policy"]["transcript_char_budget"] >= 640
+    assert "## Brainstack Continuation Guidance" in packet["block"]
+    assert "Do not invent missing details" in packet["block"]
+
+
+def test_non_continuation_queries_do_not_get_carry_through_guidance(monkeypatch):
+    monkeypatch.setattr(
+        "brainstack.control_plane.retrieve_executive_context",
+        lambda *args, **kwargs: _mock_retrieval_payload(),
+    )
+
+    packet = build_working_memory_packet(
+        _NoopStore(),
+        query="What restaurant was chosen for the birthday dinner?",
+        session_id="session-24",
+        principal_scope_key="platform:discord|user_id:user-a",
+        profile_match_limit=4,
+        continuity_recent_limit=4,
+        continuity_match_limit=4,
+        transcript_match_limit=4,
+        transcript_char_budget=700,
+        graph_limit=4,
+        corpus_limit=2,
+        corpus_char_budget=360,
+    )
+
+    assert packet["policy"]["continuation_emphasis"] is False
+    assert "## Brainstack Continuation Guidance" not in packet["block"]

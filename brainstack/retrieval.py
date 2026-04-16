@@ -686,6 +686,17 @@ def render_working_memory_block(
 
     sections.append(_render_evidence_priority_section("## Brainstack Evidence Priority"))
 
+    if policy.get("continuation_emphasis"):
+        sections.append(
+            "## Brainstack Continuation Guidance\n"
+            + _render_items(
+                [
+                    "The user is resuming an existing thread. Carry forward still-relevant concrete details, constraints, named participants, venues, and unresolved tasks from the recalled evidence below.",
+                    "Do not invent missing details or add constraints that are not grounded in the recalled evidence.",
+                ]
+            )
+        )
+
     contract_section = _render_contract_section("## Brainstack Active Communication Contract", contract_lines)
     if contract_section:
         sections.append(contract_section)
