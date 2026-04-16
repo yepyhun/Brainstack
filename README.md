@@ -5,7 +5,7 @@ always-on agents, long-lived user identity, durable preferences, evolving truths
 
 The current ambition is straightforward:
 
-- be one of the strongest practical local-first memory stacks for this always-on agent / second-brain use case
+- **be one of the strongest practical local-first memory stacks for this always-on agent / second-brain use case** (yes, SOTA if you want to hear that.)
 - combine the best parts of temporal continuity, graph truth, and corpus retrieval
 - keep them under one runtime ownership model instead of letting three half-systems fight each other
 
