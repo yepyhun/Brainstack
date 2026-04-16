@@ -440,6 +440,23 @@ class BrainstackStore:
                 tokenize = 'unicode61'
             );
 
+            CREATE TABLE IF NOT EXISTS continuity_lifecycle_state (
+                session_id TEXT PRIMARY KEY,
+                current_frontier_turn_number INTEGER NOT NULL DEFAULT 0,
+                last_snapshot_kind TEXT NOT NULL DEFAULT '',
+                last_snapshot_turn_number INTEGER NOT NULL DEFAULT 0,
+                last_snapshot_message_count INTEGER NOT NULL DEFAULT 0,
+                last_snapshot_input_count INTEGER NOT NULL DEFAULT 0,
+                last_snapshot_digest TEXT NOT NULL DEFAULT '',
+                last_snapshot_at TEXT NOT NULL DEFAULT '',
+                last_finalized_turn_number INTEGER NOT NULL DEFAULT 0,
+                last_finalized_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_continuity_lifecycle_updated
+            ON continuity_lifecycle_state(updated_at DESC);
+
             CREATE TABLE IF NOT EXISTS profile_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 stable_key TEXT NOT NULL UNIQUE,
@@ -1222,6 +1239,137 @@ class BrainstackStore:
             (session_id, limit),
         ).fetchall()
         return [_row_to_dict(row) for row in rows]
+
+    @_locked
+    def get_continuity_lifecycle_state(self, *, session_id: str) -> Dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT
+                session_id,
+                current_frontier_turn_number,
+                last_snapshot_kind,
+                last_snapshot_turn_number,
+                last_snapshot_message_count,
+                last_snapshot_input_count,
+                last_snapshot_digest,
+                last_snapshot_at,
+                last_finalized_turn_number,
+                last_finalized_at,
+                updated_at
+            FROM continuity_lifecycle_state
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        return _row_to_dict(row) if row is not None else None
+
+    @_locked
+    def record_continuity_snapshot_state(
+        self,
+        *,
+        session_id: str,
+        turn_number: int,
+        kind: str,
+        message_count: int = 0,
+        input_message_count: int = 0,
+        digest: str = "",
+        created_at: str | None = None,
+    ) -> Dict[str, Any]:
+        now = str(created_at or "").strip() or utc_now_iso()
+        self.conn.execute(
+            """
+            INSERT INTO continuity_lifecycle_state (
+                session_id,
+                current_frontier_turn_number,
+                last_snapshot_kind,
+                last_snapshot_turn_number,
+                last_snapshot_message_count,
+                last_snapshot_input_count,
+                last_snapshot_digest,
+                last_snapshot_at,
+                last_finalized_turn_number,
+                last_finalized_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, '', ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                current_frontier_turn_number = MAX(
+                    continuity_lifecycle_state.current_frontier_turn_number,
+                    excluded.current_frontier_turn_number
+                ),
+                last_snapshot_kind = excluded.last_snapshot_kind,
+                last_snapshot_turn_number = excluded.last_snapshot_turn_number,
+                last_snapshot_message_count = excluded.last_snapshot_message_count,
+                last_snapshot_input_count = excluded.last_snapshot_input_count,
+                last_snapshot_digest = excluded.last_snapshot_digest,
+                last_snapshot_at = excluded.last_snapshot_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                session_id,
+                max(0, int(turn_number or 0)),
+                str(kind or "").strip(),
+                max(0, int(turn_number or 0)),
+                max(0, int(message_count or 0)),
+                max(0, int(input_message_count or 0)),
+                str(digest or "").strip(),
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+        state = self.get_continuity_lifecycle_state(session_id=session_id)
+        assert state is not None
+        return state
+
+    @_locked
+    def finalize_continuity_session_state(
+        self,
+        *,
+        session_id: str,
+        turn_number: int,
+        created_at: str | None = None,
+    ) -> Dict[str, Any]:
+        now = str(created_at or "").strip() or utc_now_iso()
+        finalized_turn = max(0, int(turn_number or 0))
+        self.conn.execute(
+            """
+            INSERT INTO continuity_lifecycle_state (
+                session_id,
+                current_frontier_turn_number,
+                last_snapshot_kind,
+                last_snapshot_turn_number,
+                last_snapshot_message_count,
+                last_snapshot_input_count,
+                last_snapshot_digest,
+                last_snapshot_at,
+                last_finalized_turn_number,
+                last_finalized_at,
+                updated_at
+            ) VALUES (?, ?, '', 0, 0, 0, '', '', ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                current_frontier_turn_number = MAX(
+                    continuity_lifecycle_state.current_frontier_turn_number,
+                    excluded.current_frontier_turn_number
+                ),
+                last_finalized_turn_number = MAX(
+                    continuity_lifecycle_state.last_finalized_turn_number,
+                    excluded.last_finalized_turn_number
+                ),
+                last_finalized_at = excluded.last_finalized_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                session_id,
+                finalized_turn,
+                finalized_turn,
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+        state = self.get_continuity_lifecycle_state(session_id=session_id)
+        assert state is not None
+        return state
 
     @_locked
     def search_temporal_continuity(

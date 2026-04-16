@@ -401,6 +401,10 @@ class BrainstackMemoryProvider(MemoryProvider):
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
         if not self._store:
             return ""
+        snapshot_window = continuity_adapter.build_snapshot_source_window(
+            messages,
+            max_items=self._compression_snapshot_limit,
+        )
         summary = continuity_adapter.write_snapshot_records(
             self._store,
             session_id=self._session_id,
@@ -414,6 +418,14 @@ class BrainstackMemoryProvider(MemoryProvider):
         )
         if not summary:
             return ""
+        self._store.record_continuity_snapshot_state(
+            session_id=self._session_id,
+            turn_number=self._turn_counter,
+            kind="compression_snapshot",
+            message_count=int(snapshot_window.get("captured_message_count") or 0),
+            input_message_count=int(snapshot_window.get("input_message_count") or 0),
+            digest=str(snapshot_window.get("window_digest") or ""),
+        )
         return build_compression_hint(summary)
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
@@ -429,7 +441,8 @@ class BrainstackMemoryProvider(MemoryProvider):
                 with self._tier2_lock:
                     self._pending_tier2_turns = 0
                     self._tier2_followup_requested = False
-        continuity_adapter.write_snapshot_records(
+        snapshot_window = continuity_adapter.build_snapshot_source_window(messages, max_items=8)
+        summary = continuity_adapter.write_snapshot_records(
             self._store,
             session_id=self._session_id,
             turn_number=self._turn_counter,
@@ -439,6 +452,19 @@ class BrainstackMemoryProvider(MemoryProvider):
             source="on_session_end",
             max_items=8,
             metadata=self._scoped_metadata(),
+        )
+        if summary:
+            self._store.record_continuity_snapshot_state(
+                session_id=self._session_id,
+                turn_number=self._turn_counter,
+                kind="session_summary",
+                message_count=int(snapshot_window.get("captured_message_count") or 0),
+                input_message_count=int(snapshot_window.get("input_message_count") or 0),
+                digest=str(snapshot_window.get("window_digest") or ""),
+            )
+        self._store.finalize_continuity_session_state(
+            session_id=self._session_id,
+            turn_number=self._turn_counter,
         )
         for message in messages:
             message_content = str(message.get("content", ""))
