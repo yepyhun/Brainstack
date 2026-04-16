@@ -23,6 +23,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PLUGIN = REPO_ROOT / "brainstack"
 SOURCE_RTK = REPO_ROOT / "rtk_sidecar.py"
 SOURCE_HOST_PAYLOAD = REPO_ROOT / "host_payload"
+BACKEND_DEPENDENCIES = {
+    "kuzu": "kuzu",
+    "chromadb": "chromadb",
+}
 
 
 def _hash_file(path: Path) -> str:
@@ -39,6 +43,62 @@ def _iter_payload_files(root: Path) -> list[Path]:
         if path.is_file() and "__pycache__" not in path.parts and not path.name.endswith(".pyc"):
             files.append(path)
     return files
+
+
+def _default_target_python(target: Path) -> Path | None:
+    candidates = [
+        target / ".venv" / "bin" / "python",
+        target / "venv" / "bin" / "python",
+        target / ".venv" / "Scripts" / "python.exe",
+        target / "venv" / "Scripts" / "python.exe",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _python_can_import(python_bin: Path, module_name: str) -> bool:
+    try:
+        proc = subprocess.run(
+            [
+                str(python_bin),
+                "-c",
+                (
+                    "import importlib.util, sys; "
+                    f"sys.exit(0 if importlib.util.find_spec({module_name!r}) else 1)"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _ensure_backend_dependencies(
+    python_bin: Path | None,
+    *,
+    dry_run: bool,
+    skip_deps: bool,
+) -> dict[str, Any]:
+    if skip_deps:
+        return {"status": "skipped", "reason": "skip_deps"}
+    if python_bin is None:
+        return {"status": "skipped", "reason": "no_target_python"}
+
+    missing = [dist for module, dist in BACKEND_DEPENDENCIES.items() if not _python_can_import(python_bin, module)]
+    if not missing:
+        return {"status": "already_satisfied", "python": str(python_bin), "packages": []}
+    if dry_run:
+        return {"status": "planned", "python": str(python_bin), "packages": missing}
+
+    cmd = [str(python_bin), "-m", "pip", "install", *missing]
+    proc = subprocess.run(cmd, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"Dependency install failed for {' '.join(missing)} using {python_bin}")
+    return {"status": "installed", "python": str(python_bin), "packages": missing}
 
 
 def _copy_tree(src: Path, dst: Path, dry_run: bool) -> list[dict[str, str]]:
@@ -116,6 +176,16 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
                     "    is_brainstack_only_mode,\n"
                     ")\n",
                 ),
+                (
+                    "from agent.memory_manager import build_memory_context_block, sanitize_context\n",
+                    "from agent.memory_manager import build_memory_context_block, sanitize_context\n"
+                    "from agent.brainstack_mode import (\n"
+                    "    LEGACY_MEMORY_TOOL_NAMES,\n"
+                    "    blocked_brainstack_only_tool_error,\n"
+                    "    filter_legacy_memory_tool_defs,\n"
+                    "    is_brainstack_only_mode,\n"
+                    ")\n",
+                ),
             ],
             label="run_agent import",
             path=path,
@@ -137,6 +207,23 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
         "                if _tname:\n"
         "                    self.valid_tool_names.add(_tname)\n"
     )
+    filter_anchor_with_existing_names = (
+        "        if self._memory_manager and self.tools is not None:\n"
+        "            _existing_tool_names = {\n"
+        "                t.get(\"function\", {}).get(\"name\")\n"
+        "                for t in self.tools\n"
+        "                if isinstance(t, dict)\n"
+        "            }\n"
+        "            for _schema in self._memory_manager.get_all_tool_schemas():\n"
+        "                _tname = _schema.get(\"name\", \"\")\n"
+        "                if _tname and _tname in _existing_tool_names:\n"
+        "                    continue  # already registered via plugin path\n"
+        "                _wrapped = {\"type\": \"function\", \"function\": _schema}\n"
+        "                self.tools.append(_wrapped)\n"
+        "                if _tname:\n"
+        "                    self.valid_tool_names.add(_tname)\n"
+        "                    _existing_tool_names.add(_tname)\n"
+    )
     filter_inject = filter_anchor + (
         "        if self.tools is not None:\n"
         "            filtered_tools = filter_legacy_memory_tool_defs(self.tools, config=_agent_cfg)\n"
@@ -149,7 +236,28 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
         "                }\n"
     )
     if "filtered_tools = filter_legacy_memory_tool_defs(self.tools, config=_agent_cfg)" not in text:
-        text = _replace_once(text, filter_anchor, filter_inject, label="run_agent tool filter", path=path)
+        text = _replace_once_any(
+            text,
+            [
+                (filter_anchor, filter_inject),
+                (
+                    filter_anchor_with_existing_names,
+                    filter_anchor_with_existing_names + (
+                        "        if self.tools is not None:\n"
+                        "            filtered_tools = filter_legacy_memory_tool_defs(self.tools, config=_agent_cfg)\n"
+                        "            if len(filtered_tools) != len(self.tools):\n"
+                        "                self.tools = filtered_tools\n"
+                        "                self.valid_tool_names = {\n"
+                        "                    tool[\"function\"][\"name\"]\n"
+                        "                    for tool in self.tools\n"
+                        "                    if tool.get(\"function\", {}).get(\"name\")\n"
+                        "                }\n"
+                    ),
+                ),
+            ],
+            label="run_agent tool filter",
+            path=path,
+        )
         applied.append("run_agent:filter_legacy_tools")
 
     guidance_replacements = [
@@ -626,7 +734,20 @@ def _patch_gateway_status(path: Path, dry_run: bool) -> list[str]:
         "    error_message: Any = _UNSET,\n"
         ") -> None:\n"
     )
-    if new_signature not in text:
+    current_signature = (
+        "def write_runtime_status(\n"
+        "    *,\n"
+        "    gateway_state: Any = _UNSET,\n"
+        "    exit_reason: Any = _UNSET,\n"
+        "    restart_requested: Any = _UNSET,\n"
+        "    active_agents: Any = _UNSET,\n"
+        "    platform: Any = _UNSET,\n"
+        "    platform_state: Any = _UNSET,\n"
+        "    error_code: Any = _UNSET,\n"
+        "    error_message: Any = _UNSET,\n"
+        ") -> None:\n"
+    )
+    if new_signature not in text and current_signature not in text:
         text = _replace_once(text, old_signature, new_signature, label="gateway status signature", path=path)
         applied.append("gateway_status:signature")
 
@@ -650,7 +771,7 @@ def _patch_gateway_status(path: Path, dry_run: bool) -> list[str]:
         ),
     ]
     for old, new, label in replacements:
-        if new not in text:
+        if new not in text and old in text:
             text = _replace_once(text, old, new, label=label, path=path)
             applied.append(label)
 
@@ -662,6 +783,10 @@ def _patch_gateway_status(path: Path, dry_run: bool) -> list[str]:
 def _patch_discord_platform(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
+    modern_post_connect_flow = (
+        "self._post_connect_task: Optional[asyncio.Task] = None" in text
+        and "async def _run_post_connect_initialization(self) -> None:" in text
+    )
 
     init_anchor = "        self._typing_tasks: Dict[str, asyncio.Task] = {}\n        self._bot_task: Optional[asyncio.Task] = None\n"
     init_inject = (
@@ -698,7 +823,7 @@ def _patch_discord_platform(path: Path, dry_run: bool) -> list[str]:
         "\n"
         "    async def connect(self) -> bool:\n"
     )
-    if "async def _sync_slash_commands_background(self) -> None:" not in text:
+    if "async def _sync_slash_commands_background(self) -> None:" not in text and not modern_post_connect_flow:
         text = _replace_once(text, helper_anchor, helper_inject, label="discord slash sync helpers", path=path)
         applied.append("discord:add_background_slash_sync")
 
@@ -715,7 +840,7 @@ def _patch_discord_platform(path: Path, dry_run: bool) -> list[str]:
         "                adapter_self._ready_event.set()\n"
         "                adapter_self._ensure_background_slash_sync()\n"
     )
-    if "adapter_self._ensure_background_slash_sync()" not in text:
+    if "adapter_self._ensure_background_slash_sync()" not in text and not modern_post_connect_flow:
         text = _replace_once(text, ready_old, ready_new, label="discord ready before slash sync", path=path)
         applied.append("discord:decouple_ready_from_slash_sync")
 
@@ -747,7 +872,7 @@ def _patch_discord_platform(path: Path, dry_run: bool) -> list[str]:
         "\n"
         "        self._running = False\n"
     )
-    if "Slash sync task cleanup" not in text:
+    if "Slash sync task cleanup" not in text and not modern_post_connect_flow:
         text = _replace_once(text, disconnect_anchor, disconnect_inject, label="discord slash sync cleanup", path=path)
         applied.append("discord:cleanup_background_slash_sync")
 
@@ -1119,6 +1244,9 @@ def _run_doctor(target: Path, args: argparse.Namespace, planned_install: bool) -
         cmd.extend(["--compose-file", str(args.compose_file)])
     if args.desktop_launcher:
         cmd.extend(["--desktop-launcher", str(args.desktop_launcher)])
+    doctor_python = args.python or _default_target_python(target)
+    if doctor_python:
+        cmd.extend(["--python", str(doctor_python)])
     proc = subprocess.run(cmd, text=True)
     return proc.returncode
 
@@ -1129,8 +1257,10 @@ def main() -> int:
     parser.add_argument("--config", type=Path, help="Path to Hermes config.yaml")
     parser.add_argument("--compose-file", type=Path, help="Path to Docker compose file for doctor checks")
     parser.add_argument("--desktop-launcher", type=Path, help="Path to desktop launcher for doctor checks")
+    parser.add_argument("--python", type=Path, help="Target Hermes Python interpreter for dependency install and doctor checks")
     parser.add_argument("--runtime", choices=["auto", "docker", "local"], default="auto", help="Target runtime mode")
     parser.add_argument("--enable", action="store_true", help="Patch config.yaml to enable Brainstack and disable builtin memory")
+    parser.add_argument("--skip-deps", action="store_true", help="Skip installing missing kuzu/chromadb into the target Hermes Python")
     parser.add_argument("--doctor", action="store_true", help="Run brainstack_doctor after install")
     parser.add_argument("--dry-run", action="store_true", help="Show planned actions without changing files")
     args = parser.parse_args()
@@ -1144,6 +1274,7 @@ def main() -> int:
         return 2
 
     plugin_target = target / "plugins" / "memory" / "brainstack"
+    selected_python = args.python.expanduser() if args.python else _default_target_python(target)
     files = _copy_tree(SOURCE_PLUGIN, plugin_target, args.dry_run)
     helper_files: list[dict[str, str]] = []
     if SOURCE_RTK.exists() and (target / "agent").is_dir():
@@ -1162,6 +1293,7 @@ def main() -> int:
     config_result = None
     if args.enable:
         config_result = _patch_config(args.config or _default_config_path(target), args.dry_run)
+    deps_result = _ensure_backend_dependencies(selected_python, dry_run=args.dry_run, skip_deps=args.skip_deps)
 
     host_helper_files: list[dict[str, str]] = []
     if SOURCE_HOST_PAYLOAD.exists():
@@ -1192,6 +1324,7 @@ def main() -> int:
         "host_patches": host_patches,
         "generated_files": generated_files,
         "config": config_result,
+        "dependency_install": deps_result,
         "secrets_included": False,
     }
     _write_manifest(target, manifest, args.dry_run)
@@ -1207,6 +1340,10 @@ def main() -> int:
         print(f"{action} generated files: {len(generated_files)}")
     if config_result:
         print(f"{action} config: {config_result['config_path']}")
+    if deps_result.get("status") in {"planned", "installed", "already_satisfied"}:
+        print(f"{action} backend deps: {deps_result['status']}")
+    elif deps_result.get("status") == "skipped":
+        print(f"{action} backend deps: skipped ({deps_result.get('reason')})")
     if not args.dry_run:
         print(f"Wrote manifest: {target / '.brainstack-install-manifest.json'}")
 

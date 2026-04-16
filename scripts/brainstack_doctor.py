@@ -83,6 +83,19 @@ def _default_compose_path(target: Path) -> Path:
     return target / "docker-compose.yml"
 
 
+def _default_target_python(target: Path) -> Path | None:
+    candidates = [
+        target / ".venv" / "bin" / "python",
+        target / "venv" / "bin" / "python",
+        target / ".venv" / "Scripts" / "python.exe",
+        target / "venv" / "Scripts" / "python.exe",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _default_desktop_launcher(target: Path) -> Path | None:
     expected = str(target / "scripts" / "hermes-brainstack-start.sh")
     desktop_dir = Path.home() / "Asztal"
@@ -214,7 +227,14 @@ def _check_host_surfaces(target: Path) -> list[Check]:
     else:
         checks.append(Check("gateway_session_boundary_gate", "fail", "gateway still lacks a Brainstack-aware session boundary finalizer"))
 
-    if "_ensure_background_slash_sync" in discord_platform and "adapter_self._ensure_background_slash_sync()" in discord_platform:
+    legacy_ready_flow = "_ensure_background_slash_sync" in discord_platform and "adapter_self._ensure_background_slash_sync()" in discord_platform
+    modern_ready_flow = (
+        "self._post_connect_task: Optional[asyncio.Task] = None" in discord_platform
+        and "async def _run_post_connect_initialization(self) -> None:" in discord_platform
+        and "adapter_self._ready_event.set()" in discord_platform
+        and "adapter_self._post_connect_task = asyncio.create_task(" in discord_platform
+    )
+    if legacy_ready_flow or modern_ready_flow:
         checks.append(Check("discord_readiness_gate", "pass", "Discord readiness is decoupled from slash command sync"))
     else:
         checks.append(Check("discord_readiness_gate", "fail", "Discord startup still blocks readiness on slash command sync"))
@@ -266,7 +286,7 @@ def _check_plugin(target: Path, planned_install: bool) -> list[Check]:
     return checks
 
 
-def _check_config(config_path: Path, planned_install: bool) -> list[Check]:
+def _check_config(config_path: Path, planned_install: bool, *, python_bin: Path | None) -> list[Check]:
     checks: list[Check] = []
     if not config_path.exists():
         status = "pass" if planned_install else "fail"
@@ -315,10 +335,9 @@ def _check_config(config_path: Path, planned_install: bool) -> list[Check]:
             checks.append(Check("graph_backend_path", "pass", "plugins.brainstack.graph_db_path will be added by installer"))
         else:
             checks.append(Check("graph_backend_path", "warn", "plugins.brainstack.graph_db_path is absent; provider defaults will be used"))
-        try:
-            importlib.import_module("kuzu")
+        if _python_can_import("kuzu", python_bin):
             checks.append(Check("graph_backend_dependency", "pass", "Python kuzu package is importable"))
-        except Exception:
+        else:
             checks.append(Check("graph_backend_dependency", "fail", "Python kuzu package is missing for graph_backend='kuzu'"))
     elif planned_install:
         checks.append(Check("graph_backend_target", "pass", "graph backend is not Kuzu yet, but installer will set it"))
@@ -333,10 +352,9 @@ def _check_config(config_path: Path, planned_install: bool) -> list[Check]:
             checks.append(Check("corpus_backend_path", "pass", "plugins.brainstack.corpus_db_path will be added by installer"))
         else:
             checks.append(Check("corpus_backend_path", "warn", "plugins.brainstack.corpus_db_path is absent; provider defaults will be used"))
-        try:
-            importlib.import_module("chromadb")
+        if _python_can_import("chromadb", python_bin):
             checks.append(Check("corpus_backend_dependency", "pass", "Python chromadb package is importable"))
-        except Exception:
+        else:
             checks.append(Check("corpus_backend_dependency", "fail", "Python chromadb package is missing for corpus_backend='chroma'"))
     elif planned_install:
         checks.append(Check("corpus_backend_target", "pass", "corpus backend is not Chroma yet, but installer will set it"))
@@ -344,6 +362,31 @@ def _check_config(config_path: Path, planned_install: bool) -> list[Check]:
         checks.append(Check("corpus_backend_target", "fail", f"plugins.brainstack.corpus_backend is {corpus_backend!r}, expected 'chroma'"))
 
     return checks
+
+
+def _python_can_import(module_name: str, python_bin: Path | None) -> bool:
+    if python_bin is None:
+        try:
+            importlib.import_module(module_name)
+            return True
+        except Exception:
+            return False
+    try:
+        proc = subprocess.run(
+            [
+                str(python_bin),
+                "-c",
+                (
+                    "import importlib.util, sys; "
+                    f"sys.exit(0 if importlib.util.find_spec({module_name!r}) else 1)"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
 
 
 def _check_compose(compose_path: Path, planned_install: bool) -> list[Check]:
@@ -418,14 +461,19 @@ def run_doctor(args: argparse.Namespace) -> tuple[int, list[Check]]:
     config_path = Path(args.config).expanduser().resolve() if args.config else _default_config_path(target)
     compose_path = Path(args.compose_file).expanduser().resolve() if args.compose_file else _default_compose_path(target)
     launcher = Path(args.desktop_launcher).expanduser().resolve() if args.desktop_launcher else _default_desktop_launcher(target)
+    python_bin = Path(args.python).expanduser() if args.python else _default_target_python(target)
     runtime = _infer_runtime(target, args.runtime, compose_path, launcher)
 
     checks: list[Check] = []
     checks.append(Check("runtime_mode", "pass", f"Doctor running in {runtime} mode"))
+    if python_bin is not None:
+        checks.append(Check("python_target", "pass", f"Dependency checks use {python_bin}"))
+    else:
+        checks.append(Check("python_target", "warn", "No target Python detected; dependency checks fall back to the current interpreter"))
     checks.extend(_check_target_shape(target))
     checks.extend(_check_host_surfaces(target))
     checks.extend(_check_plugin(target, planned_install=args.planned_install))
-    checks.extend(_check_config(config_path, planned_install=args.planned_install))
+    checks.extend(_check_config(config_path, planned_install=args.planned_install, python_bin=python_bin))
     if runtime == "docker" and args.check_docker:
         checks.extend(_check_compose(compose_path, planned_install=args.planned_install))
         checks.extend(_check_docker_helpers(target, planned_install=args.planned_install))
@@ -445,6 +493,7 @@ def main() -> int:
     parser.add_argument("--config", help="Path to Hermes config.yaml")
     parser.add_argument("--compose-file", help="Path to Docker compose file")
     parser.add_argument("--desktop-launcher", help="Path to desktop launcher")
+    parser.add_argument("--python", help="Target Hermes Python interpreter for dependency checks")
     parser.add_argument("--runtime", choices=["auto", "docker", "local"], default="auto", help="Runtime mode to validate")
     parser.add_argument("--planned-install", action="store_true", help="Treat missing Brainstack/config changes as planned dry-run actions")
     parser.add_argument("--check-docker", action="store_true", help="Validate Docker compose gateway mode")

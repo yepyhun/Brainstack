@@ -26,9 +26,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Update upstream Hermes and re-apply Brainstack.")
     parser.add_argument("target", help="Path to target Hermes checkout")
     parser.add_argument("--runtime", choices=["auto", "docker", "local"], default="auto", help="Target runtime mode")
+    parser.add_argument("--python", type=Path, help="Target Hermes Python interpreter for dependency install and doctor checks")
     parser.add_argument("--pull", action="store_true", help="Run git pull --ff-only in the target Hermes checkout first")
     parser.add_argument("--reinstall", action="store_true", help="Reinstall Brainstack payload and config")
     parser.add_argument("--doctor", action="store_true", help="Run doctor checks")
+    parser.add_argument("--skip-deps", action="store_true", help="Skip installing missing backend dependencies into the target Hermes Python")
     parser.add_argument("--docker-rebuild", action="store_true", help="Run docker compose build after install")
     parser.add_argument("--compose-file", type=Path, help="Docker compose file")
     parser.add_argument("--compose-service", help="Optional compose service name for targeted rebuilds")
@@ -52,6 +54,10 @@ def main() -> int:
             "--runtime",
             args.runtime,
         ]
+        if args.python:
+            install_cmd.extend(["--python", str(args.python)])
+        if args.skip_deps:
+            install_cmd.append("--skip-deps")
         if args.doctor:
             install_cmd.append("--doctor")
         if args.compose_file:
