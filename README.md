@@ -273,7 +273,7 @@ What the installer does:
 - copies Brainstack host helper payload into the target Hermes checkout:
   - `agent/brainstack_mode.py`
 - patches recognized Hermes host files so Brainstack can be the single live memory owner:
-  - `run_agent.py` strips legacy `memory` and `session_search` tools in Brainstack-only mode
+  - `run_agent.py` strips legacy `memory` while leaving bounded `session_search` available as explicit conversation search in Brainstack-only mode
   - `gateway/run.py` routes reset / resume / expiry boundaries through a Brainstack-aware finalizer
   - `gateway/run.py` also keeps platform runtime status truthful during connect, reconnect, and disconnect paths
   - `gateway/status.py` is patched so `None` can clear stale `exit_reason` and platform error fields instead of silently preserving old failure state
@@ -349,7 +349,8 @@ This helper is intentionally small:
 - memory provider/plugin loader surfaces exist
 - Brainstack plugin payload is present and importable
 - Brainstack-only host helper is present
-- `run_agent.py` gates legacy `memory` and `session_search` tool exposure
+- `run_agent.py` gates legacy `memory` tool exposure while allowing bounded `session_search`
+- `agent/brainstack_mode.py` blocks side-memory file, code/shell, and automation detours
 - `gateway/run.py` uses a Brainstack-aware session-boundary finalizer instead of legacy builtin-memory flush paths
 - config selects Brainstack and builtin memory is off
 - in `docker` mode: Docker compose uses `gateway run --replace`

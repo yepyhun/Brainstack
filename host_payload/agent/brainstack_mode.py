@@ -1,15 +1,18 @@
 """Brainstack-only host mode helpers.
 
-These helpers define when Hermes must treat Brainstack as the sole memory
-authority and hide legacy memory/session-search tool paths.
+These helpers define when Hermes must treat Brainstack as the sole owner of
+durable personal memory while still allowing adjacent host capabilities that do
+not become shadow memory stores.
 """
 
 from __future__ import annotations
 
 from typing import Any, Iterable
 
-LEGACY_MEMORY_TOOL_NAMES = frozenset({"memory", "session_search"})
+LEGACY_MEMORY_TOOL_NAMES = frozenset({"memory"})
 PERSONAL_MEMORY_FILE_TOOL_NAMES = frozenset({"read_file", "write_file", "patch"})
+PERSONAL_MEMORY_EXECUTION_TOOL_NAMES = frozenset({"execute_code", "terminal"})
+PERSONAL_MEMORY_AUTONOMY_TOOL_NAMES = frozenset({"cronjob"})
 PERSONAL_MEMORY_SKILL_ACTIONS = frozenset({"create", "edit", "patch", "write_file"})
 PERSONAL_MEMORY_SKILL_MARKERS = (
     "user-profile",
@@ -36,6 +39,41 @@ PERSONAL_MEMORY_NOTES_PATH_MARKERS = (
 PERSONAL_MEMORY_HERMES_ROOT_MARKERS = (
     "/.hermes/",
     "~/.hermes/",
+)
+PERSONAL_MEMORY_SIDE_FILE_SUFFIXES = (
+    "/memory.md",
+    "/user.md",
+    "/persona.md",
+)
+PERSONAL_MEMORY_SKILL_PATH_MARKERS = (
+    "/.hermes/skills/",
+    "~/.hermes/skills/",
+)
+PERSONAL_MEMORY_AUTONOMY_ACTIONS = frozenset({"create", "update", "run"})
+PERSONAL_MEMORY_AUTONOMY_MARKERS = (
+    "remember",
+    "memorize",
+    "memory",
+    "profile",
+    "preference",
+    "preferences",
+    "persona",
+    "humanizer",
+    "style",
+    "communication",
+    "identity",
+    "bestie",
+    "tomi",
+    "assistant name",
+    "store user",
+)
+PERSONAL_MEMORY_SECONDARY_MEMORY_API_MARKERS = (
+    "plur_learn",
+    "plur_recall",
+    "plur_recall_hybrid",
+    "plur_inject",
+    "plur_inject_hybrid",
+    "hermes_tools",
 )
 
 
@@ -105,18 +143,55 @@ def _file_tool_targets_personal_memory(function_args: dict[str, Any] | None) -> 
         if any(marker in candidate for marker in PERSONAL_MEMORY_NOTES_PATH_MARKERS):
             return True
         if any(marker in candidate for marker in PERSONAL_MEMORY_HERMES_ROOT_MARKERS) and candidate.endswith(
-            ("/memory.md", "/user.md")
+            PERSONAL_MEMORY_SIDE_FILE_SUFFIXES
         ):
             return True
     return False
+
+
+def _payload_targets_personal_memory(function_args: dict[str, Any] | None) -> bool:
+    if not isinstance(function_args, dict):
+        return False
+    payload = "\n".join(
+        _normalize_candidate_path(function_args.get(key))
+        for key in ("code", "command", "content", "file_content", "path", "file_path")
+    )
+    if not payload:
+        return False
+    if any(marker in payload for marker in PERSONAL_MEMORY_NOTES_PATH_MARKERS):
+        return True
+    if any(marker in payload for marker in PERSONAL_MEMORY_SIDE_FILE_SUFFIXES):
+        return True
+    if any(marker in payload for marker in PERSONAL_MEMORY_SECONDARY_MEMORY_API_MARKERS):
+        return True
+    return any(marker in payload for marker in PERSONAL_MEMORY_SKILL_PATH_MARKERS) and any(
+        marker in payload for marker in PERSONAL_MEMORY_SKILL_MARKERS
+    )
+
+
+def _autonomy_tool_targets_personal_memory(function_args: dict[str, Any] | None) -> bool:
+    if not isinstance(function_args, dict):
+        return False
+    action = str(function_args.get("action", "")).strip().lower()
+    if action not in PERSONAL_MEMORY_AUTONOMY_ACTIONS:
+        return False
+    payload = "\n".join(
+        str(function_args.get(key, "")).strip().lower()
+        for key in ("name", "prompt", "description", "skills", "script")
+    )
+    return any(marker in payload for marker in PERSONAL_MEMORY_AUTONOMY_MARKERS)
 
 
 def brainstack_only_personal_memory_guidance() -> str:
     return (
         "Brainstack owns personal memory in this mode. Keep user identity, preferences, "
         "communication style, and project context inside Brainstack. Do not create or "
-        "maintain notes files, MEMORY.md, USER.md, or skill records for that kind of memory. "
-        "Use skill_manage only for reusable procedures or workflows."
+        "maintain notes files, MEMORY.md, USER.md, persona.md, or side skill files for that kind "
+        "of memory. Do not use ad hoc code, terminal writes, file edits, cronjob scheduling, or "
+        "other automation detours to persist or recover personal memory. Do not use secondary "
+        "memory APIs from ad hoc code either. session_search may be used only as explicit "
+        "conversation search, not as a second personal-memory system. Use skill_manage only for "
+        "reusable procedures or workflows."
     )
 
 
@@ -130,5 +205,15 @@ def blocked_brainstack_only_tool_error(function_name: str, function_args: dict[s
         return (
             f"{name} cannot read or write Hermes side-memory files while Brainstack owns personal memory. "
             "Keep personal preferences and identity in Brainstack instead."
+        )
+    if name in PERSONAL_MEMORY_EXECUTION_TOOL_NAMES and _payload_targets_personal_memory(function_args):
+        return (
+            f"{name} cannot use code or shell detours to read or write Hermes side-memory files or "
+            "secondary memory APIs while Brainstack owns personal memory."
+        )
+    if name in PERSONAL_MEMORY_AUTONOMY_TOOL_NAMES and _autonomy_tool_targets_personal_memory(function_args):
+        return (
+            f"{name} cannot create or update automation jobs that store personal identity, preferences, "
+            "or communication style while Brainstack owns personal memory."
         )
     return None

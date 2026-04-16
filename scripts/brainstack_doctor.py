@@ -212,8 +212,18 @@ def _check_host_surfaces(target: Path) -> list[Check]:
     else:
         checks.append(Check("personal_memory_file_boundary", "fail", "agent/brainstack_mode.py does not block Hermes side-memory file detours"))
 
+    if "PERSONAL_MEMORY_EXECUTION_TOOL_NAMES" in brainstack_mode and "secondary memory APIs" in brainstack_mode:
+        checks.append(Check("personal_memory_execution_boundary", "pass", "Brainstack-only helper blocks code and shell memory detours"))
+    else:
+        checks.append(Check("personal_memory_execution_boundary", "fail", "agent/brainstack_mode.py does not block code or shell detours into side memory"))
+
+    if "PERSONAL_MEMORY_AUTONOMY_TOOL_NAMES" in brainstack_mode and "automation jobs" in brainstack_mode:
+        checks.append(Check("personal_memory_autonomy_boundary", "pass", "Brainstack-only helper blocks automation jobs from becoming shadow memory"))
+    else:
+        checks.append(Check("personal_memory_autonomy_boundary", "fail", "agent/brainstack_mode.py does not block autonomy tools from storing personal memory"))
+
     if "filter_legacy_memory_tool_defs" in run_agent and "LEGACY_MEMORY_TOOL_NAMES" in run_agent:
-        checks.append(Check("legacy_tool_surface_gate", "pass", "run_agent strips legacy memory and session_search tools in Brainstack-only mode"))
+        checks.append(Check("legacy_tool_surface_gate", "pass", "run_agent gates legacy memory tool exposure for Brainstack-only mode"))
     else:
         checks.append(Check("legacy_tool_surface_gate", "fail", "run_agent does not gate legacy memory tool surface for Brainstack-only mode"))
 

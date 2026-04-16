@@ -226,3 +226,41 @@ class TestBrainstackIntegrationInvariants:
         assert "side-memory files" in blocked_notes
         assert blocked_memory_md is not None
         assert allowed_workspace_file is None
+
+    def test_session_search_remains_available_as_bounded_conversation_search(self):
+        blocked = blocked_brainstack_only_tool_error(
+            "session_search",
+            {"query": "how did we solve docker networking last time?"},
+        )
+
+        assert blocked is None
+
+    def test_execution_and_autonomy_detours_cannot_be_used_as_shadow_memory(self):
+        blocked_execute = blocked_brainstack_only_tool_error(
+            "execute_code",
+            {"code": "open('/root/.hermes/persona.md').read(); plur_recall_hybrid('tomi')"},
+        )
+        blocked_terminal = blocked_brainstack_only_tool_error(
+            "terminal",
+            {"command": "cat ~/.hermes/memory.md"},
+        )
+        blocked_cron = blocked_brainstack_only_tool_error(
+            "cronjob",
+            {
+                "action": "create",
+                "name": "remember-user-style",
+                "prompt": "Store user communication style and persona for later",
+            },
+        )
+        allowed_terminal = blocked_brainstack_only_tool_error(
+            "terminal",
+            {"command": "git status"},
+        )
+
+        assert blocked_execute is not None
+        assert "secondary memory apis" in blocked_execute.lower()
+        assert blocked_terminal is not None
+        assert "side-memory files" in blocked_terminal.lower()
+        assert blocked_cron is not None
+        assert "automation jobs" in blocked_cron.lower()
+        assert allowed_terminal is None
