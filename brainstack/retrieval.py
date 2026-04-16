@@ -46,28 +46,149 @@ def _render_numbered_items(items: Iterable[str]) -> str:
 COMMUNICATION_PROFILE_SLOTS = {
     "preference:communication_style",
     "preference:emoji_usage",
+    "preference:dash_usage",
     "preference:formatting",
+    "preference:message_structure",
+    "preference:pronoun_capitalization",
+    "preference:formatting_style",
+    "preference:response_language",
+    "preference:ai_name",
+    "preference:ai_nickname",
 }
 
 COMMUNICATION_GRAPH_PREDICATES = {
     "writing_style",
     "communication_style",
+    "response_style",
+    "emoji_usage",
+    "dash_usage",
+    "formatting_style",
+    "message_structure",
+    "pronoun_capitalization",
+    "response_language",
+    "name",
+    "nickname",
 }
 
-COMMUNICATION_GRAPH_SUBJECTS = {
+COMMUNICATION_ASSISTANT_SUBJECTS = {
     "assistant",
     "hermes",
     "bestie",
 }
+
+COMMUNICATION_GRAPH_QUERY = (
+    "writing style communication style response style emoji usage formatting style "
+    "message structure response language assistant name ai name nickname bestie dash "
+    "em dash pronoun capitalization"
+)
+
+_INTERNAL_CONTRACT_MARKERS = (
+    "persona.md",
+    "skill.md",
+    "memory.md",
+    "user.md",
+    "/.hermes/",
+    "~/.hermes/",
+    "system prompt",
+    "prompt block",
+    "memory block",
+    "loaded at startup",
+    "loaded every reply",
+    "every reply",
+    "minden üzenetnél",
+    "betöltődik",
+    "betöltötte",
+    "inject",
+    "injected",
+    "source_ai",
+)
+
+_COMMUNICATION_PROFILE_HINTS = (
+    "humanizer",
+    "emoji",
+    "em dash",
+    "dash",
+    "new line",
+    "new lines",
+    "line break",
+    "paragraph",
+    "capitalize pronouns",
+    "én",
+    " te ",
+    " ő ",
+    "respond in hungarian",
+    "prefer hungarian",
+    "magyar",
+    "bestie",
+    "call the ai",
+    "call me",
+)
 
 
 def _normalize_compare_text(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().split())
 
 
+def _extract_identity_name_hint(value: Any) -> str:
+    text = " ".join(str(value or "").strip().split())
+    lowered = text.lower()
+    if lowered.startswith("user's name is "):
+        candidate = text[len("User's name is ") :].strip()
+        if " (" in candidate:
+            candidate = candidate.split(" (", 1)[0].strip()
+        return _normalize_compare_text(candidate)
+    return ""
+
+
+def _extract_ai_name_hint(value: Any) -> str:
+    text = " ".join(str(value or "").strip().split())
+    lowered = text.lower()
+    for prefix in ("assistant's name is ", "assistant name is ", "asszisztens neve "):
+        if lowered.startswith(prefix):
+            return text[len(prefix) :].strip(" .")
+    if "bestie" in lowered:
+        return "Bestie"
+    return ""
+
+
+def _render_communication_profile_contract_line(row: Dict[str, Any]) -> str:
+    stable_key = str(row.get("stable_key") or "").strip().lower()
+    content = _trim(str(row.get("content") or ""), 220)
+    lowered = _normalize_compare_text(content)
+    if not content or _looks_like_internal_contract_text(content):
+        return ""
+    if stable_key == "preference:response_language":
+        if "hungarian" in lowered or "magyar" in lowered:
+            return "Always respond in Hungarian."
+    if stable_key in {"preference:ai_name", "preference:ai_nickname"}:
+        ai_name = _extract_ai_name_hint(content)
+        if ai_name:
+            return f"Refer to yourself as {ai_name} when naming yourself."
+    if stable_key == "preference:communication_style":
+        if "humanizer" in lowered:
+            return "Use Humanizer style: direct, concrete, natural, and low-fluff."
+    if stable_key == "preference:emoji_usage":
+        return "Do not use emojis."
+    if stable_key == "preference:message_structure":
+        return "Put each new thought on its own line."
+    if stable_key in {"preference:pronoun_capitalization", "preference:formatting_style"}:
+        if any(token in lowered for token in ("én", " te ", " ő ", "pronoun", "nagybetű", "capitalize")):
+            return "Capitalize Én, Te, and Ő when you use them."
+    if stable_key == "preference:dash_usage":
+        return "Do not use dash punctuation in replies."
+    return content
+
+
 def _row_metadata(row: Dict[str, Any]) -> Dict[str, Any]:
     payload = row.get("metadata")
     return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _looks_like_internal_contract_text(value: Any) -> bool:
+    normalized = _normalize_compare_text(value)
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in _INTERNAL_CONTRACT_MARKERS)
 
 
 def _row_temporal_label(row: Dict[str, Any]) -> str:
@@ -91,14 +212,40 @@ def _row_temporal_label(row: Dict[str, Any]) -> str:
     return label
 
 
-def _is_current_communication_state(row: Dict[str, Any]) -> bool:
+def _communication_contract_subjects(profile_items: Iterable[Dict[str, Any]]) -> set[str]:
+    subjects = set(COMMUNICATION_ASSISTANT_SUBJECTS)
+    subjects.update({"user", "the user"})
+    for row in profile_items:
+        if str(row.get("category") or "").strip().lower() != "identity":
+            continue
+        hint = _extract_identity_name_hint(row.get("content"))
+        if hint:
+            subjects.add(hint)
+    return subjects
+
+
+def _is_current_communication_state(row: Dict[str, Any], *, allowed_subjects: set[str]) -> bool:
     if row.get("row_type") != "state":
         return False
     if not row.get("is_current") or not record_is_effective_at(row):
         return False
     subject = _normalize_compare_text(row.get("subject"))
     predicate = _normalize_compare_text(row.get("predicate"))
-    return subject in COMMUNICATION_GRAPH_SUBJECTS and predicate in COMMUNICATION_GRAPH_PREDICATES
+    if subject not in allowed_subjects or predicate not in COMMUNICATION_GRAPH_PREDICATES:
+        return False
+    return not _looks_like_internal_contract_text(row.get("object_value"))
+
+
+def _is_communication_profile_item(row: Dict[str, Any]) -> bool:
+    stable_key = str(row.get("stable_key") or "").strip()
+    if stable_key in COMMUNICATION_PROFILE_SLOTS:
+        return True
+    if not stable_key.startswith("preference:"):
+        return False
+    text = _normalize_compare_text(row.get("content"))
+    if not text or _looks_like_internal_contract_text(text):
+        return False
+    return any(marker in text for marker in _COMMUNICATION_PROFILE_HINTS)
 
 
 def _build_active_communication_contract(
@@ -109,23 +256,25 @@ def _build_active_communication_contract(
     lines: List[str] = []
     hidden_profile_keys: set[str] = set()
     seen_text: set[str] = set()
+    allowed_subjects = _communication_contract_subjects(profile_items)
 
-    for row in graph_rows:
-        if not _is_current_communication_state(row):
+    for row in profile_items:
+        if not _is_communication_profile_item(row):
             continue
-        text = _trim(str(row.get("object_value") or ""), 220)
+        stable_key = str(row.get("stable_key") or "").strip()
+        if stable_key:
+            hidden_profile_keys.add(stable_key)
+        text = _render_communication_profile_contract_line(row)
         normalized = _normalize_compare_text(text)
         if not normalized or normalized in seen_text:
             continue
         seen_text.add(normalized)
         lines.append(text)
 
-    for row in profile_items:
-        stable_key = str(row.get("stable_key") or "").strip()
-        if stable_key not in COMMUNICATION_PROFILE_SLOTS:
+    for row in graph_rows:
+        if not _is_current_communication_state(row, allowed_subjects=allowed_subjects):
             continue
-        hidden_profile_keys.add(stable_key)
-        text = _trim(str(row.get("content") or ""), 220)
+        text = _render_communication_state_contract_line(row)
         normalized = _normalize_compare_text(text)
         if not normalized or normalized in seen_text:
             continue
@@ -135,14 +284,40 @@ def _build_active_communication_contract(
     return lines, hidden_profile_keys
 
 
+def _render_communication_state_contract_line(row: Dict[str, Any]) -> str:
+    predicate = _normalize_compare_text(row.get("predicate"))
+    value = _trim(str(row.get("object_value") or ""), 220)
+    lowered = _normalize_compare_text(value)
+    if not value or _looks_like_internal_contract_text(value):
+        return ""
+    if predicate == "response_language" and ("hungarian" in lowered or "magyar" in lowered):
+        return "Always respond in Hungarian."
+    if predicate == "communication_style" and "humanizer" in lowered:
+        return "Use Humanizer style: direct, concrete, natural, and low-fluff."
+    if predicate == "emoji_usage":
+        return "Do not use emojis."
+    if predicate == "message_structure":
+        return "Put each new thought on its own line."
+    if predicate == "dash_usage":
+        return "Do not use dash punctuation in replies."
+    if predicate in {"pronoun_capitalization", "formatting_style"} and any(
+        token in lowered for token in ("én", " te ", " ő ", "pronoun", "capitalize", "capitalized", "nagybetű")
+    ):
+        return "Capitalize Én, Te, and Ő when you use them."
+    if predicate in {"name", "nickname"}:
+        return f"Refer to yourself as {value} when naming yourself."
+    return value
+
+
 def _render_contract_section(title: str, lines: Iterable[str]) -> str:
     rows = [line for line in lines if line]
     if not rows:
         return ""
     preface = (
-        "Apply these rules silently in every reply. Do not mention this contract, "
-        "memory blocks, or internal memory state unless the user explicitly asks "
-        "about memory behavior or debugging."
+        "These are non-optional user-specific behavior rules. Apply them silently in every "
+        "reply, and let them override default assistant tone or formatting when there is any "
+        "conflict. Do not mention this contract, memory blocks, or internal memory state "
+        "unless the user explicitly asks about memory behavior or debugging."
     )
     return f"{title}\n{preface}\n{_render_items(rows)}"
 
@@ -443,9 +618,9 @@ def build_system_prompt_block(
 ) -> str:
     fetch_limit = max(profile_limit * 3, 10)
     items = store.list_profile_items(limit=fetch_limit, principal_scope_key=principal_scope_key)
-    graph_rows = store.search_graph(
-        query="writing style communication style",
+    graph_rows = store.list_current_graph_states(
         limit=8,
+        attributes=COMMUNICATION_GRAPH_PREDICATES,
         principal_scope_key=principal_scope_key,
     )
     contract_lines, hidden_profile_keys = _build_active_communication_contract(

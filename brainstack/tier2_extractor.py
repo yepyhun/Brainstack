@@ -16,6 +16,8 @@ _SLOT_ALIASES = {
     "name": "identity:name",
     "identity_name": "identity:name",
     "identity:name": "identity:name",
+    "user_name": "identity:user_name",
+    "identity:user_name": "identity:user_name",
     "age": "identity:age",
     "identity_age": "identity:age",
     "identity:age": "identity:age",
@@ -29,10 +31,76 @@ _SLOT_ALIASES = {
     "preference:emojis": "preference:emoji_usage",
     "communication": "preference:communication_style",
     "communication_style": "preference:communication_style",
+    "humanizer": "preference:communication_style",
+    "humanizer_style": "preference:communication_style",
+    "style_humanizer": "preference:communication_style",
+    "preference:style:humanizer": "preference:communication_style",
     "preference:communication_style": "preference:communication_style",
     "formatting": "preference:formatting",
-    "humanizer": "preference:formatting",
     "preference:formatting": "preference:formatting",
+    "message_structure": "preference:message_structure",
+    "new_lines": "preference:message_structure",
+    "newline_formatting": "preference:message_structure",
+    "line_breaks": "preference:message_structure",
+    "preference:message_structure": "preference:message_structure",
+    "formatting_style": "preference:formatting_style",
+    "dash_usage": "preference:dash_usage",
+    "no_dash": "preference:dash_usage",
+    "no_dashes": "preference:dash_usage",
+    "dash_style": "preference:dash_usage",
+    "punctuation_dash": "preference:dash_usage",
+    "preference:dash_usage": "preference:dash_usage",
+    "pronoun_capitalization": "preference:pronoun_capitalization",
+    "capitalized_pronouns": "preference:pronoun_capitalization",
+    "uppercase_pronouns": "preference:pronoun_capitalization",
+    "capitalize_pronouns": "preference:pronoun_capitalization",
+    "preference:pronoun_capitalization": "preference:pronoun_capitalization",
+    "preference:formatting_style": "preference:formatting_style",
+    "language": "preference:response_language",
+    "preferred_language": "preference:response_language",
+    "response_language": "preference:response_language",
+    "preference:response_language": "preference:response_language",
+    "ai_name": "preference:ai_name",
+    "assistant_name": "preference:ai_name",
+    "preference:ai_name": "preference:ai_name",
+    "ai_nickname": "preference:ai_nickname",
+    "assistant_nickname": "preference:ai_nickname",
+    "preference:ai_nickname": "preference:ai_nickname",
+}
+
+_INTERNAL_MEMORY_FILE_MARKERS = (
+    "persona.md",
+    "skill.md",
+    "memory.md",
+    "user.md",
+    "/.hermes/",
+    "~/.hermes/",
+)
+
+_INTERNAL_PROMPT_MARKERS = (
+    "system prompt",
+    "prompt block",
+    "memory block",
+    "loaded at startup",
+    "loaded every reply",
+    "every reply",
+    "minden üzenetnél",
+    "betöltődik",
+    "betöltötte",
+    "inject",
+    "injected",
+    "brainstack active communication contract",
+)
+
+_INTERNAL_STATE_ATTRIBUTES = {
+    "persona_source",
+    "profile_source",
+    "skill_source",
+    "source_ai",
+    "default_style",
+    "memory_method",
+    "prompt_source",
+    "storage_method",
 }
 
 
@@ -56,6 +124,89 @@ def _normalize_predicate(value: Any) -> str:
 def _normalize_slot(value: Any) -> str:
     normalized = _SLOT_RE.sub("_", _normalize_text(value).lower()).strip("_")
     return _SLOT_ALIASES.get(normalized, normalized)
+
+
+def _normalize_compare_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _communication_bundle_items(
+    *,
+    category: str,
+    content: str,
+    slot: str,
+    confidence: float,
+) -> List[Dict[str, Any]]:
+    lowered = _normalize_compare_text(content)
+    if not lowered:
+        return []
+
+    candidates: List[tuple[str, str]] = []
+    if slot == "preference:response_language" or any(token in lowered for token in ("magyar", "hungarian")):
+        candidates.append(("preference:response_language", "Always respond in Hungarian."))
+    if slot in {"preference:ai_name", "preference:ai_nickname"} or "bestie" in lowered:
+        candidates.append(("preference:ai_name", "Assistant's name is Bestie."))
+    if slot == "preference:communication_style" or "humanizer" in lowered:
+        candidates.append(("preference:communication_style", "Use humanizer style."))
+    if slot == "preference:emoji_usage" or "emoji" in lowered or "emoj" in lowered:
+        candidates.append(("preference:emoji_usage", "Do not use emojis."))
+    if slot == "preference:message_structure" or any(
+        token in lowered for token in ("new line", "new lines", "line break", "új sor", "külön sor")
+    ):
+        candidates.append(("preference:message_structure", "Put each new thought on a new line."))
+    if slot in {"preference:formatting_style", "preference:pronoun_capitalization"} or any(
+        token in lowered for token in ("capitalize pronouns", "capitalized pronouns", "nagybetű", "én", " te ", " ő ")
+    ):
+        candidates.append(
+            ("preference:pronoun_capitalization", "Capitalize Én, Te, and Ő when used as pronouns.")
+        )
+    if slot == "preference:dash_usage" or any(
+        token in lowered for token in ("em dash", "dash", "—", "kötőjel")
+    ):
+        candidates.append(("preference:dash_usage", "Do not use dash punctuation in replies."))
+
+    deduped: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for stable_slot, stable_content in candidates:
+        key = (stable_slot, stable_content)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(
+            {
+                "category": category,
+                "content": stable_content,
+                "confidence": confidence,
+                "source": "tier2_llm",
+                "slot": stable_slot,
+            }
+        )
+    return deduped
+
+
+def _looks_like_internal_mechanics_text(value: Any) -> bool:
+    normalized = _normalize_text(value).lower()
+    if not normalized:
+        return False
+    if any(marker in normalized for marker in _INTERNAL_MEMORY_FILE_MARKERS):
+        return True
+    if any(marker in normalized for marker in _INTERNAL_PROMPT_MARKERS):
+        return True
+    return "brainstack" in normalized and any(
+        marker in normalized for marker in ("prompt", "loaded", "inject", "persona", "skill", "file")
+    )
+
+
+def _should_drop_profile_item(*, category: str, content: str) -> bool:
+    if category not in {"identity", "preference", "shared_work"}:
+        return True
+    return _looks_like_internal_mechanics_text(content)
+
+
+def _should_drop_state(*, attribute: str, value: str) -> bool:
+    if attribute in _INTERNAL_STATE_ATTRIBUTES:
+        return True
+    return _looks_like_internal_mechanics_text(value)
 
 
 def _extract_reasoning_details_text(details: Any) -> str:
@@ -166,6 +317,48 @@ def _repair_truncated_json_object(text: str) -> Dict[str, Any]:
     return {}
 
 
+def _extract_last_complete_json_object(text: str) -> Dict[str, Any]:
+    last_payload: Dict[str, Any] = {}
+    start_index: int | None = None
+    depth = 0
+    in_string = False
+    escape = False
+
+    for index, char in enumerate(text):
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            if depth == 0:
+                start_index = index
+            depth += 1
+            continue
+        if char == "}":
+            if depth <= 0:
+                continue
+            depth -= 1
+            if depth == 0 and start_index is not None:
+                candidate = text[start_index : index + 1]
+                try:
+                    payload = json.loads(candidate)
+                except json.JSONDecodeError:
+                    start_index = None
+                    continue
+                if isinstance(payload, dict):
+                    last_payload = payload
+                start_index = None
+    return last_payload
+
+
 def _extract_json_object_with_status(raw_text: str, *, context: str = "") -> tuple[Dict[str, Any], str]:
     text = _JSON_FENCE_RE.sub("", str(raw_text or "").strip())
     if not text:
@@ -175,6 +368,10 @@ def _extract_json_object_with_status(raw_text: str, *, context: str = "") -> tup
         return (payload if isinstance(payload, dict) else {}), "json_object"
     except json.JSONDecodeError:
         pass
+
+    embedded = _extract_last_complete_json_object(text)
+    if embedded:
+        return embedded, "json_embedded"
 
     start = text.find("{")
     end = text.rfind("}")
@@ -229,26 +426,97 @@ def _format_transcript_batch(entries: Iterable[Mapping[str, Any]], *, limit: int
 
 
 def _normalize_profile_items(items: Any) -> List[Dict[str, Any]]:
-    allowed_categories = {"identity", "preference", "shared_work"}
     normalized: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
     for raw in items or []:
         if not isinstance(raw, Mapping):
             continue
         category = _normalize_text(raw.get("category")).lower()
         content = _normalize_text(raw.get("content"))
-        if category not in allowed_categories or not content:
+        if not content or _should_drop_profile_item(category=category, content=content):
             continue
-        item = {
-            "category": category,
-            "content": content,
-            "confidence": _coerce_confidence(raw.get("confidence"), default=0.78),
-            "source": "tier2_llm",
-        }
         slot = _normalize_slot(raw.get("slot"))
-        if slot:
-            item["slot"] = slot
-        normalized.append(item)
+        confidence = _coerce_confidence(raw.get("confidence"), default=0.78)
+        expanded = _communication_bundle_items(
+            category=category,
+            content=content,
+            slot=slot,
+            confidence=confidence,
+        )
+        if not expanded:
+            item = {
+                "category": category,
+                "content": content,
+                "confidence": confidence,
+                "source": "tier2_llm",
+            }
+            if slot:
+                item["slot"] = slot
+            expanded = [item]
+        for item in expanded:
+            key = (
+                str(item.get("category") or ""),
+                str(item.get("slot") or ""),
+                str(item.get("content") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(item)
     return normalized[:8]
+
+
+def _derive_transcript_communication_profile_items(
+    transcript_entries: Iterable[Mapping[str, Any]],
+    *,
+    existing_items: Iterable[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    existing_slots = {str(item.get("slot") or "").strip() for item in existing_items}
+    text = "\n".join(_normalize_text(row.get("content")) for row in transcript_entries if _normalize_text(row.get("content")))
+    lowered = _normalize_compare_text(text)
+    if not lowered:
+        return []
+
+    candidates: List[tuple[str, str]] = []
+    if "preference:response_language" not in existing_slots and any(
+        token in lowered for token in ("magyarul válaszolj", "always respond in hungarian", "respond in hungarian")
+    ):
+        candidates.append(("preference:response_language", "Always respond in Hungarian."))
+    if "preference:ai_name" not in existing_slots and (
+        "bestie" in lowered and any(token in lowered for token in ("te neved", "assistant", "asszisztens neve", "hívj"))
+    ):
+        candidates.append(("preference:ai_name", "Assistant's name is Bestie."))
+    if "preference:communication_style" not in existing_slots and "humanizer" in lowered:
+        candidates.append(("preference:communication_style", "Use humanizer style."))
+    if "preference:emoji_usage" not in existing_slots and any(
+        token in lowered for token in ("ne használj emoj", "do not use emoji", "no emoji")
+    ):
+        candidates.append(("preference:emoji_usage", "Do not use emojis."))
+    if "preference:message_structure" not in existing_slots and any(
+        token in lowered for token in ("új gondolat új sor", "new thought on new line", "külön sor")
+    ):
+        candidates.append(("preference:message_structure", "Put each new thought on a new line."))
+    if "preference:pronoun_capitalization" not in existing_slots and (
+        "nagybetű" in lowered and all(token in text for token in ("Én", "Te", "Ő"))
+    ):
+        candidates.append(
+            ("preference:pronoun_capitalization", "Capitalize Én, Te, and Ő when used as pronouns.")
+        )
+    if "preference:dash_usage" not in existing_slots and any(
+        token in lowered for token in ("dash jele", "em dash", "dash punctuation", "kötőjel", "dash")
+    ):
+        candidates.append(("preference:dash_usage", "Do not use dash punctuation in replies."))
+
+    return [
+        {
+            "category": "preference",
+            "content": content,
+            "confidence": 0.86,
+            "source": "tier2_transcript_rule",
+            "slot": slot,
+        }
+        for slot, content in candidates
+    ]
 
 
 def _normalize_states(items: Any) -> List[Dict[str, Any]]:
@@ -259,7 +527,7 @@ def _normalize_states(items: Any) -> List[Dict[str, Any]]:
         subject = _normalize_text(raw.get("subject"))
         attribute = _normalize_predicate(raw.get("attribute"))
         value = _normalize_text(raw.get("value"))
-        if not subject or not attribute or not value:
+        if not subject or not attribute or not value or _should_drop_state(attribute=attribute, value=value):
             continue
         normalized.append(
             {
@@ -381,6 +649,8 @@ _TYPED_ENTITY_NUMERIC_KEYS = {
     "quantity",
 }
 
+_TIER2_RESPONSE_FORMAT = {"type": "json_object"}
+
 
 def _normalize_typed_entity_attributes(raw: Any) -> Dict[str, str]:
     if not isinstance(raw, Mapping):
@@ -451,13 +721,14 @@ def _normalize_typed_entities(
 
 
 def _default_llm_caller(*, task: str, messages: list, timeout: float, max_tokens: int) -> Any:
-    from agent.auxiliary_client import call_llm
+    from agent.auxiliary_client import call_llm  # type: ignore[import-not-found,import-untyped]
 
     return call_llm(
         task=task,
         messages=messages,
         temperature=0.0,
         max_tokens=max_tokens,
+        response_format=_TIER2_RESPONSE_FORMAT,
         timeout=timeout,
     )
 
@@ -511,9 +782,17 @@ def extract_tier2_candidates(
                 "- prefer durable user facts and current project context\n"
                 "- ignore markdown tables, quoted transcript dumps, code, wrappers, and assistant policy chatter\n"
                 "- keep the JSON compact; prefer the fewest useful items rather than broad coverage\n"
-                "- hard caps: profile_items<=3, states<=2, relations<=1, inferred_relations<=1, typed_entities<=4, temporal_events<=4, decisions<=2\n"
+                "- hard caps: profile_items<=6, states<=2, relations<=1, inferred_relations<=1, typed_entities<=4, temporal_events<=4, decisions<=2\n"
                 "- keep content values short and factual; target <=12 words for each content/reason/decision string; if unsure, emit [] or \"\" instead of extra explanation\n"
                 "- use stable slots only when a profile fact has one obvious durable owner, such as identity:name\n"
+                "- when the user sets communication or assistant-behavior rules, emit them as separate durable profile_items instead of collapsing them into one generic sentence\n"
+                "- for communication rules, prefer these stable slots when applicable: preference:response_language, preference:ai_name, preference:communication_style, preference:emoji_usage, preference:message_structure, preference:pronoun_capitalization, preference:dash_usage, preference:formatting_style\n"
+                "- prefer profile_items over states for user communication preferences and assistant naming rules\n"
+                "- do not bury communication rules inside continuity_summary or decisions when they can be emitted as separate profile_items\n"
+                "- if the user specifies capitalization conventions such as uppercase pronouns (for example Én, Te, Ő), emit that as a separate durable profile_item\n"
+                "- if the user specifies punctuation constraints such as avoiding dash or em-dash punctuation, emit that as a separate durable profile_item\n"
+                "- never emit filesystem paths, prompt-loading claims, or skill/persona file mechanics as durable memory facts or states\n"
+                "- do not mention persona.md, SKILL.md, MEMORY.md, USER.md, ~/.hermes, or how prompts were loaded inside profile_items, states, decisions, or continuity_summary\n"
                 "- use explicit entity names when clear, otherwise use User\n"
                 "- inferred_relations are optional; include them only when a relation is strongly implied by multiple transcript cues or stable shared context\n"
                 "- keep inferred_relations bounded and conservative; omit weak guesses\n"
@@ -554,8 +833,15 @@ def extract_tier2_candidates(
     parse_context = f"turns={turn_numbers}" if turn_numbers else ""
     raw_text = _extract_text_content(response)
     payload, parse_status = _extract_json_object_with_status(raw_text, context=parse_context)
+    profile_items = _normalize_profile_items(payload.get("profile_items"))
+    profile_items.extend(
+        _derive_transcript_communication_profile_items(
+            entries,
+            existing_items=profile_items,
+        )
+    )
     return {
-        "profile_items": _normalize_profile_items(payload.get("profile_items")),
+        "profile_items": profile_items[:8],
         "states": _normalize_states(payload.get("states")),
         "relations": _normalize_relations(payload.get("relations")),
         "inferred_relations": _normalize_inferred_relations(payload.get("inferred_relations")),

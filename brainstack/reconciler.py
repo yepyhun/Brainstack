@@ -16,14 +16,23 @@ def _extract_identity_name(value: Any) -> str:
     lowered = text.lower()
     if lowered.startswith("user identity:"):
         return _normalize_text(text.split(":", 1)[1])
+    if lowered.startswith("user's name is "):
+        candidate = _normalize_text(text[len("User's name is ") :])
+        if " (" in candidate:
+            candidate = _normalize_text(candidate.split(" (", 1)[0])
+        return candidate
     return text
 
 
 def _current_user_name(store: BrainstackStore) -> str:
-    item = store.get_profile_item(stable_key="identity:identity:name")
-    if not item:
-        return ""
-    return _extract_identity_name(item.get("content"))
+    for stable_key in ("identity:name", "identity:user_name", "identity:user_identity"):
+        item = store.get_profile_item(stable_key=stable_key)
+        if not item:
+            continue
+        extracted = _extract_identity_name(item.get("content"))
+        if extracted:
+            return extracted
+    return ""
 
 
 def _canonicalize_person_subject(name: Any, *, user_name: str) -> str:
@@ -39,6 +48,8 @@ def _profile_stable_key(candidate: Mapping[str, Any]) -> str:
     category = _normalize_text(candidate.get("category")).lower()
     slot = _normalize_text(candidate.get("slot")).lower()
     if slot:
+        if slot.split(":", 1)[0] in {"identity", "preference", "shared_work"}:
+            return slot
         return f"{category}:{slot}"
     return build_profile_stable_key(category, _normalize_text(candidate.get("content")))
 

@@ -1600,6 +1600,57 @@ class BrainstackStore:
         return parsed[:limit]
 
     @_locked
+    def list_current_graph_states(
+        self,
+        *,
+        limit: int,
+        subjects: Iterable[str] | None = None,
+        attributes: Iterable[str] | None = None,
+        principal_scope_key: str = "",
+    ) -> List[Dict[str, Any]]:
+        params: list[Any] = []
+        fetch_limit = max(limit * 4, 16) if principal_scope_key else limit
+        sql = """
+            SELECT
+                gs.id AS row_id,
+                'state' AS row_type,
+                e.canonical_name AS subject,
+                gs.attribute AS predicate,
+                gs.value_text AS object_value,
+                gs.source,
+                gs.metadata_json,
+                gs.valid_from AS created_at,
+                gs.valid_from,
+                gs.valid_to,
+                gs.is_current
+            FROM graph_states gs
+            JOIN graph_entities e ON e.id = gs.entity_id
+            WHERE gs.is_current = 1
+        """
+        if subjects:
+            normalized_subjects = [" ".join(str(value or "").strip().lower().split()) for value in subjects if str(value or "").strip()]
+            if normalized_subjects:
+                sql += f" AND lower(e.canonical_name) IN ({','.join('?' for _ in normalized_subjects)})"
+                params.extend(normalized_subjects)
+        if attributes:
+            normalized_attributes = [" ".join(str(value or "").strip().lower().split()) for value in attributes if str(value or "").strip()]
+            if normalized_attributes:
+                sql += f" AND lower(gs.attribute) IN ({','.join('?' for _ in normalized_attributes)})"
+                params.extend(normalized_attributes)
+        sql += " ORDER BY gs.valid_from DESC, gs.id DESC LIMIT ?"
+        params.append(fetch_limit)
+        rows = self.conn.execute(sql, tuple(params)).fetchall()
+        parsed: List[Dict[str, Any]] = []
+        for row in rows:
+            item = _row_to_dict(row)
+            if not record_is_effective_at(item):
+                continue
+            if not _annotate_principal_scope(item, principal_scope_key=principal_scope_key):
+                continue
+            parsed.append(item)
+        return parsed[:limit]
+
+    @_locked
     def get_profile_item(self, *, stable_key: str) -> Dict[str, Any] | None:
         row = self.conn.execute(
             """
