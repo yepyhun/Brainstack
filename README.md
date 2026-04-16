@@ -17,6 +17,22 @@ The promise is simple:
 
 This repo is for people building serious Hermes-based second-brain systems. It is not trying to pretend that transcript search, vector recall, and profile tables are the same job.
 
+## Core foundation
+
+Brainstack is built from three donor lines, then reshaped into one Hermes-native memory system:
+
+| Layer | Base | What Brainstack takes from it |
+| :--- | :--- | :--- |
+| **L1** | **[Hindsight](https://github.com/vectorize-io/hindsight)** | temporal carry-through, bounded recent history, after-turn continuity |
+| **L2** | **[Graphiti](https://github.com/getzep/graphiti)** | entity/relation memory, temporal truth, conflict-aware graph state |
+| **L3** | **[MemPalace](https://github.com/yepyhun/MemPalace)** | large-corpus retrieval, FTS/semantic fusion, packed evidence recall |
+
+Additional patterns also shape the current code:
+
+- **Hermes-LCM** for bounded transcript evidence fallback
+- **RTK-style sidecar discipline** for token-aware auxiliary processing without taking memory ownership
+
+
 ## How a query flows through Brainstack
 
 ```text
