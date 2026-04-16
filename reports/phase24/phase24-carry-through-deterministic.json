@@ -1,0 +1,71 @@
+{
+  "query": "Can You help me continue that plan without me repeating the details?",
+  "with_constraint": {
+    "block_has_continuation_guidance": true,
+    "block_has_gluten_free": true,
+    "selected_row_counts": {},
+    "policy": {
+      "mode": "balanced",
+      "collapse_mode": "balanced",
+      "provenance_mode": "compact",
+      "confidence_band": "medium",
+      "show_graph_history": false,
+      "conflict_escalation": false,
+      "tool_avoidance_allowed": true,
+      "tool_avoidance_reason": "memory support is sufficient for a first response",
+      "show_policy": false,
+      "profile_limit": 3,
+      "continuity_match_limit": 2,
+      "continuity_recent_limit": 2,
+      "transcript_limit": 2,
+      "transcript_char_budget": 560,
+      "graph_limit": 3,
+      "corpus_limit": 2,
+      "corpus_char_budget": 360,
+      "continuation_emphasis": true
+    },
+    "routing": {
+      "requested_mode": "fact",
+      "applied_mode": "fact",
+      "source": "deterministic_route_hint",
+      "reason": "deterministic fact default: no strong structural route cues",
+      "fallback_used": false,
+      "bounds": {}
+    },
+    "block_excerpt": "## Brainstack Evidence Priority\nUse recalled memory silently. When recalled memory provides a specific, non-conflicted user fact such as a name, number, date, or preference, treat it as authoritative over assistant suggestions or generic prior knowledge unless another recalled fact in this memory block conflicts with it.\n\n## Brainstack Continuation Guidance\n- The user is resuming an existing thread. Carry forward still-relevant concrete details, constraints, named participants, venues, and unresolved tasks from the recalled evidence below.\n- Do not invent missing details or add constraints that are not grounded in the recalled evidence.\n\n## Brainstack Transcript Evidence\n- [2026-04-16 | turn 1 | turn] User: I'm planning a birthday dinner for Saturday. Assistant: ack-1\n- [2026-04-16 | turn 3 | turn] User: Anna needs gluten-free options. Assistant: ack-3\n- [2026-04-16 | turn 2 | turn] User: The restaurant is Riverside Kitchen. Assistant: ack-2"
+  },
+  "without_constraint": {
+    "block_has_continuation_guidance": true,
+    "block_has_gluten_free": false,
+    "selected_row_counts": {},
+    "policy": {
+      "mode": "balanced",
+      "collapse_mode": "balanced",
+      "provenance_mode": "compact",
+      "confidence_band": "medium",
+      "show_graph_history": false,
+      "conflict_escalation": false,
+      "tool_avoidance_allowed": true,
+      "tool_avoidance_reason": "memory support is sufficient for a first response",
+      "show_policy": false,
+      "profile_limit": 3,
+      "continuity_match_limit": 2,
+      "continuity_recent_limit": 2,
+      "transcript_limit": 2,
+      "transcript_char_budget": 560,
+      "graph_limit": 3,
+      "corpus_limit": 2,
+      "corpus_char_budget": 360,
+      "continuation_emphasis": true
+    },
+    "routing": {
+      "requested_mode": "fact",
+      "applied_mode": "fact",
+      "source": "deterministic_route_hint",
+      "reason": "deterministic fact default: no strong structural route cues",
+      "fallback_used": false,
+      "bounds": {}
+    },
+    "block_excerpt": "## Brainstack Evidence Priority\nUse recalled memory silently. When recalled memory provides a specific, non-conflicted user fact such as a name, number, date, or preference, treat it as authoritative over assistant suggestions or generic prior knowledge unless another recalled fact in this memory block conflicts with it.\n\n## Brainstack Continuation Guidance\n- The user is resuming an existing thread. Carry forward still-relevant concrete details, constraints, named participants, venues, and unresolved tasks from the recalled evidence below.\n- Do not invent missing details or add constraints that are not grounded in the recalled evidence.\n\n## Brainstack Transcript Evidence\n- [2026-04-16 | turn 1 | turn] User: I'm planning a birthday dinner for Saturday. Assistant: ack-1\n- [2026-04-16 | turn 3 | turn] User: We have not discussed any dietary restrictions yet. Assistant: ack-3\n- [2026-04-16 | turn 2 | turn] User: The restaurant is Riverside Kitchen. Assistant: ack-2"
+  }
+}

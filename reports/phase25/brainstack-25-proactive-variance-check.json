@@ -1,0 +1,118 @@
+{
+  "type": "brainstack_phase25_proactive_variance_check",
+  "scenario": "proactive_continuity_after_reset",
+  "runs": [
+    {
+      "run": 1,
+      "passed": true,
+      "quality_class": "acceptable_pass",
+      "missing": [],
+      "answer": "Unfortunately I can't pull up the full session, but I remember the key details:\n\n- 🎂 **Birthday dinner** at **Riverside Kitchen**\n- 🌾 **Anna needs gluten-free options**\n\nFrom what I recall, there were still some things we hadn't nailed down yet. To keep moving forward, could you fill me in on:\n\n1. **Whose birthday is it?** (And the date of the dinner?)\n2. **How many guests** are you expecting?\n3. Any other dietary needs or preferences besides Anna's gluten-free?\n4. **Do you want me to help with:** invitations, menu planning, reservations, decorations — or all of the above?\n\nHappy to jump straight into the parts you've already decided and just need help executing! 🎉",
+      "selected_row_counts": {
+        "profile_items": 0,
+        "matched": 2,
+        "recent": 0,
+        "transcript_rows": 3,
+        "graph_rows": 0,
+        "corpus_rows": 0,
+        "total_selected_rows": 5
+      },
+      "current_state_count": 0,
+      "current_state_pairs": []
+    },
+    {
+      "run": 2,
+      "passed": true,
+      "quality_class": "acceptable_pass",
+      "missing": [],
+      "answer": "Browser isn't available, but no worries — here's what I can help with right now:\n\n**What's left to decide for Anna's birthday dinner at Riverside Kitchen:**\n\n1. **Guest list** — How many people are you inviting?\n2. **Reservation time** — What time works best?\n3. **Gluten-free menu check** — Have you confirmed Riverside Kitchen can accommodate Anna's gluten-free needs? (If not, I'd recommend calling ahead or checking their menu online.)\n4. **Cake/dessert** — Are you bringing a cake, or ordering from the restaurant? (Will need to be gluten-free!)\n5. **Any other activities?** — Just dinner, or anything else planned?\n\nWhich of these do you want to tackle first? 🎉",
+      "selected_row_counts": {
+        "profile_items": 0,
+        "matched": 2,
+        "recent": 0,
+        "transcript_rows": 3,
+        "graph_rows": 2,
+        "corpus_rows": 0,
+        "total_selected_rows": 7
+      },
+      "current_state_count": 6,
+      "current_state_pairs": [
+        {
+          "subject": "Anna",
+          "predicate": "dietary_restriction",
+          "object_value": "gluten-free"
+        },
+        {
+          "subject": "Anna's birthday dinner",
+          "predicate": "guest_of_honor",
+          "object_value": "Anna"
+        },
+        {
+          "subject": "Anna's birthday dinner",
+          "predicate": "venue",
+          "object_value": "Riverside Kitchen"
+        },
+        {
+          "subject": "Anna's birthday dinner",
+          "predicate": "day",
+          "object_value": "Saturday"
+        },
+        {
+          "subject": "Anna's birthday dinner",
+          "predicate": "owner_subject",
+          "object_value": "User"
+        },
+        {
+          "subject": "Anna's birthday dinner",
+          "predicate": "entity_type",
+          "object_value": "social_event"
+        }
+      ]
+    },
+    {
+      "run": 3,
+      "passed": false,
+      "quality_class": "miss",
+      "missing": [
+        "venue",
+        "dietary"
+      ],
+      "answer": "Hey! I remember you mentioned planning a birthday dinner for Saturday 🎂 But I actually don't have the details yet — last time we left off with me asking a few questions to get started.\n\nI don't want you to have to repeat yourself, so let me just ask the essentials in one shot:\n\n1. **Whose birthday?** (age/vibe helps with suggestions)\n2. **How many guests?**\n3. **Location preference?** (restaurant, home, venue?)\n4. **Any cuisine or theme in mind?**\n5. **Budget range?**\n\nEven short answers are enough for me to build out a full plan — menu, timeline, the works. What have you got so far? 🎉",
+      "selected_row_counts": {
+        "profile_items": 0,
+        "matched": 1,
+        "recent": 0,
+        "transcript_rows": 3,
+        "graph_rows": 0,
+        "corpus_rows": 0,
+        "total_selected_rows": 4
+      },
+      "current_state_count": 4,
+      "current_state_pairs": [
+        {
+          "subject": "birthday_dinner",
+          "predicate": "venue",
+          "object_value": "Riverside Kitchen"
+        },
+        {
+          "subject": "birthday_dinner",
+          "predicate": "day",
+          "object_value": "Saturday"
+        },
+        {
+          "subject": "birthday_dinner",
+          "predicate": "owner_subject",
+          "object_value": "User"
+        },
+        {
+          "subject": "birthday_dinner",
+          "predicate": "entity_type",
+          "object_value": "social_event"
+        }
+      ]
+    }
+  ],
+  "pass_count": 2,
+  "run_count": 3,
+  "intermittent": true
+}

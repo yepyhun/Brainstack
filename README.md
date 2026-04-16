@@ -8,6 +8,36 @@ It currently runs **inside Hermes-Agent as a direct `MemoryProvider` plugin**, n
 - embedded `Kuzu` for L2 graph truth
 - embedded `Chroma` for L3 semantic corpus retrieval
 
+## Proof snapshot
+
+What is already proven in this repository:
+
+- **90% broader deployed-live pass rate** on the current 10-scenario matrix:
+  - `9 / 10` in Phase `23`
+  - `9 / 10` again after the Phase `24` correctness fixes in Phase `25`
+- **100% pass** on the long-range relation-tracking bucket in the broader live matrix:
+  - `4 / 4`
+- **Cross-principal profile bleed was closed** in the targeted principal canary:
+  - `bleed_detected = false`
+- **Focused proactive carry-through repair passed** in deterministic and deployed-path follow-ups:
+  - the constrained deterministic case kept the required dietary constraint
+  - the negative control did not fabricate it
+  - the focused live rerun passed
+- **Broader live packet discipline stayed bounded** in the published 10-scenario matrix:
+  - average selected row count: `6.7`
+  - average transcript rows: `2.4`
+  - average graph rows: `1.5`
+  - average corpus rows: `0.0`
+- **Bestie mirror instrumentation landed with 0% measured ordinary-turn token regression** for the added provenance/lifecycle slices:
+  - `775 -> 775`
+  - `1049 -> 1049`
+
+What that means in plain language:
+
+- Brainstack is already strong enough to sustain a credible deployed-live memory story.
+- The hardest recent correctness seam was repaired and re-proven.
+- Extra auditability was added without bloating the measured ordinary turn in the mirrored case.
+
 ## Core inspiration
 
 Brainstack is primarily built from three donor lines:
@@ -82,19 +112,21 @@ On top of the shelves, Brainstack uses a **risk-aware control plane**:
 
 ## Current proof status
 
-The current codebase is past the broad donor-first recovery track, but it is **not** claiming full restoration yet.
+The current codebase is past the broad donor-first recovery track, and the proof story is now stronger than a generic architecture prototype.
 
 What is currently true:
 
-- the Phase `20` first final-boss benchmark came in at `3 / 15`
-- Phase `20.1` repaired benchmark-exposed memory-fidelity gaps without rolling back the donor-first architecture
-- the post-`20.1` final-boss rerun improved to `9 / 15`
+- the broader deployed-live matrix is holding at **`9 / 10` (`90%`)**
+- the principal-isolation correctness bug that polluted profile state across users was repaired and re-proven
+- the proactive carry-through seam was repaired enough to pass focused deterministic and live follow-up checks
+- the later selective `hermes-lcm` donor uptake improved auditability / diagnostics without adding measured ordinary-turn token overhead in the mirrored scenario
 
 That means:
 
-- the architecture recovery is materially working
-- the remaining blocker is no longer a broad shell-vs-donor problem
-- the remaining blocker is a narrower **high-precision conversational fact retrieval** problem
+- the architecture recovery is materially working in live product terms, not only in internal shape
+- the remaining weakness is narrower than before
+- the main open ceiling is no longer broad memory ownership or principal isolation
+- the remaining gaps are mostly about higher-precision retrieval and future host ergonomics
 
 The next recorded corrective direction is therefore:
 
@@ -105,8 +137,9 @@ The next recorded corrective direction is therefore:
 
 This repository should currently be read as:
 
-- **architecturally recovered enough to prove direction**
-- **not yet strong enough to claim full donor-level final-boss fidelity**
+- **architecturally recovered enough to prove real direction**
+- **already able to support a credible live-memory story**
+- **not yet at “claim final-boss solved” status**
 
 ## What this repo is not claiming
 
@@ -156,6 +189,32 @@ scripts/
 tests/
 rtk_sidecar.py
 ```
+
+## Included operational tooling
+
+The repository already includes the useful operational scripts you would actually want in a source tree:
+
+- doctor / install / refresh:
+  - `brainstack_doctor.py`
+  - `install_into_hermes.py`
+  - `update_hermes_with_brainstack.py`
+  - `scripts/brainstack_doctor.py`
+  - `scripts/brainstack_refresh_donors.py`
+  - `scripts/install_into_hermes.py`
+  - `scripts/update_hermes_with_brainstack.py`
+
+## Published proof artifacts
+
+The repository includes a small set of proof artifacts that are actually worth reading:
+
+- Phase `23` broader deployed-live baseline
+- Phase `24` correctness proofs:
+  - principal-bleed canary
+  - deterministic carry-through proof
+  - focused deployed-path proactive rerun
+- Phase `25` broader post-fix baseline and proactive variance check
+
+These are intentionally narrower than “upload every log ever produced”. They are here to back the main claims in this README, not to turn the repo into a dump folder.
 
 ## Running expectations
 

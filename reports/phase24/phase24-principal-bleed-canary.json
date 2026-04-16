@@ -1,0 +1,20 @@
+{
+  "scope_a_key": "platform:discord|user_id:user-a|agent_identity:bestie|agent_workspace:discord-main",
+  "scope_b_key": "platform:discord|user_id:user-b|agent_identity:bestie|agent_workspace:discord-main",
+  "rows_a": [
+    {
+      "stable_key": "preference:response_language",
+      "storage_key": "preference:response_language::principal_scope::platform:discord|user_id:user-a|agent_identity:bestie|agent_workspace:discord-main",
+      "principal_scope_key": "platform:discord|user_id:user-a|agent_identity:bestie|agent_workspace:discord-main",
+      "content": "Always respond in Hungarian."
+    },
+    {
+      "stable_key": "preference:ai_name",
+      "storage_key": "preference:ai_name::principal_scope::platform:discord|user_id:user-a|agent_identity:bestie|agent_workspace:discord-main",
+      "principal_scope_key": "platform:discord|user_id:user-a|agent_identity:bestie|agent_workspace:discord-main",
+      "content": "Refer to yourself as Bestie."
+    }
+  ],
+  "rows_b": [],
+  "bleed_detected": false
+}

@@ -1,5 +1,8 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+logs/
+auth.lock
+SOUL.md
 reports/longmemeval/*.json
 reports/phase20/*.json
