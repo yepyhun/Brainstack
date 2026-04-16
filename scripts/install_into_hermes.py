@@ -852,9 +852,9 @@ else
   COMPOSE_FILE="$REPO_ROOT/docker-compose.yml"
 fi
 
-SERVICE=""
-if grep -q '^  hermes-bestie:' "$COMPOSE_FILE" 2>/dev/null; then
-  SERVICE="hermes-bestie"
+SERVICE="${HERMES_DOCKER_SERVICE:-}"
+if [ -z "$SERVICE" ] && [ -f "$COMPOSE_FILE" ]; then
+  SERVICE=$(awk '/^[[:space:]]{2}[A-Za-z0-9_.-]+:$/ {gsub(":","",$1); print $1; exit}' "$COMPOSE_FILE")
 fi
 
 dc() {
@@ -912,7 +912,11 @@ confirm_destructive_reset() {
 }
 
 purge_runtime_state() {
-  CLEANUP_SERVICE="${SERVICE:-hermes-bestie}"
+  CLEANUP_SERVICE="$SERVICE"
+  if [ -z "$CLEANUP_SERVICE" ]; then
+    echo "Nincs egyertelmuen detektalhato compose service. Add meg HERMES_DOCKER_SERVICE kornyezeti valtozokent."
+    exit 1
+  fi
   docker compose -f "$COMPOSE_FILE" run --rm --no-deps --entrypoint sh "$CLEANUP_SERVICE" -lc '
     rm -f \
       /opt/data/gateway_state.json \

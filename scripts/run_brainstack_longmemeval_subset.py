@@ -23,9 +23,19 @@ import yaml  # type: ignore[import-untyped]
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_HERMES_ROOT = Path("/home/lauratom/Asztal/ai/memory-repo-bakeoff/hermes-agent-bestie-latest")
-DEFAULT_CORE2_ROOT = Path("/home/lauratom/Asztal/ai/hermes-agent-core2")
-DEFAULT_REPORT_PATH = Path("/home/lauratom/Asztal/ai/atado/Brainstack/reports/longmemeval/brainstack-subset-latest.json")
+
+
+def _env_path(*names: str) -> Path | None:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return Path(value).expanduser()
+    return None
+
+
+DEFAULT_HERMES_ROOT = _env_path("BRAINSTACK_HERMES_ROOT", "HERMES_ROOT")
+DEFAULT_CORE2_ROOT = _env_path("BRAINSTACK_CORE2_ROOT")
+DEFAULT_REPORT_PATH = REPO_ROOT / "reports" / "longmemeval" / "brainstack-subset-latest.json"
 FIXED_CANARY_QUESTION_IDS = [
     "c8c3f81d",
     "5d3d2817",

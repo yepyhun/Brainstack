@@ -1,6 +1,5 @@
 {
   "type": "brainstack_phase23_broader_deployed_live_eval",
-  "staged_from": "docker:/opt/data",
   "scenario_count": 10,
   "pass_count": 9,
   "accuracy": 0.9,

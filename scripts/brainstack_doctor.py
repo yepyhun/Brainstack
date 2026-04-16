@@ -84,11 +84,18 @@ def _default_compose_path(target: Path) -> Path:
 
 
 def _default_desktop_launcher(target: Path) -> Path | None:
-    expected = str(target / "scripts" / "desktop" / "hermes-bestie-start.sh")
-    desktop = Path.home() / "Asztal" / "Hermes-Bestie-Start.desktop"
-    if desktop.exists() and expected in _read(desktop):
-        return desktop
-    return desktop if desktop.exists() else None
+    expected = str(target / "scripts" / "hermes-brainstack-start.sh")
+    desktop_dir = Path.home() / "Asztal"
+    preferred = desktop_dir / "Hermes-Brainstack-Start.desktop"
+    if preferred.exists() and expected in _read(preferred):
+        return preferred
+    for candidate in sorted(desktop_dir.glob("*.desktop")):
+        try:
+            if expected in _read(candidate):
+                return candidate
+        except Exception:
+            continue
+    return preferred if preferred.exists() else None
 
 
 def _infer_runtime(target: Path, explicit: str, compose_path: Path | None, launcher: Path | None) -> str:
@@ -381,9 +388,9 @@ def _check_desktop_launcher(target: Path, launcher: Path | None, runtime: str) -
         checks.append(Check("desktop_launcher_target", "warn", "Desktop launcher target is not explicit; manual local start may still be valid"))
 
     if runtime == "docker":
-        start_script = str(target / "scripts" / "desktop" / "hermes-bestie-start.sh")
+        start_script = str(target / "scripts" / "hermes-brainstack-start.sh")
         if start_script in text or "docker compose" in text.lower():
-            checks.append(Check("desktop_launcher_mode", "pass", "Desktop launcher uses the Docker Bestie start path"))
+            checks.append(Check("desktop_launcher_mode", "pass", "Desktop launcher uses the Docker Brainstack start path"))
         else:
             checks.append(Check("desktop_launcher_mode", "warn", "Desktop launcher mode is unclear for Docker runtime"))
     else:

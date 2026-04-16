@@ -31,6 +31,7 @@ def main() -> int:
     parser.add_argument("--doctor", action="store_true", help="Run doctor checks")
     parser.add_argument("--docker-rebuild", action="store_true", help="Run docker compose build after install")
     parser.add_argument("--compose-file", type=Path, help="Docker compose file")
+    parser.add_argument("--compose-service", help="Optional compose service name for targeted rebuilds")
     parser.add_argument("--desktop-launcher", type=Path, help="Desktop launcher path")
     args = parser.parse_args()
 
@@ -64,7 +65,10 @@ def main() -> int:
             print("FAIL --docker-rebuild cannot be used with --runtime local", file=sys.stderr)
             return 2
         compose_file = args.compose_file or (target / "docker-compose.bestie.yml")
-        _run(["docker", "compose", "-f", str(compose_file), "build", "hermes-bestie"], cwd=target)
+        rebuild_cmd = ["docker", "compose", "-f", str(compose_file), "build"]
+        if args.compose_service:
+            rebuild_cmd.append(args.compose_service)
+        _run(rebuild_cmd, cwd=target)
 
     print("Brainstack update workflow completed.")
     return 0

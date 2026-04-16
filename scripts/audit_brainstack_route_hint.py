@@ -15,6 +15,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+
+def _env_path(*names: str) -> Path | None:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return Path(value).expanduser()
+    return None
+
 try:
     from brainstack.executive_retrieval import (  # noqa: E402
         _default_route_resolver,
@@ -35,8 +43,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised by script san
     )
 
 
-DEFAULT_DATASET = Path("/home/lauratom/LongMemEval/data/longmemeval_s_cleaned.json")
-DEFAULT_REPORT_PATH = Path("/home/lauratom/Asztal/ai/atado/Brainstack/reports/phase20/brainstack-route-hint-20.8-audit.json")
+DEFAULT_DATASET = _env_path("BRAINSTACK_LONGMEMEVAL_DATASET")
+DEFAULT_REPORT_PATH = REPO_ROOT / "reports" / "phase20" / "brainstack-route-hint-20.8-audit.json"
 FIXED_CANARY_QUESTION_IDS = [
     "c8c3f81d",
     "5d3d2817",
@@ -129,6 +137,9 @@ def main() -> None:
     parser.add_argument("--include-llm", action="store_true")
     parser.add_argument("--report-path", type=Path, default=DEFAULT_REPORT_PATH)
     args = parser.parse_args()
+
+    if args.report_input is None and args.dataset is None:
+        raise SystemExit("--dataset is required when --report-input is not set (or set BRAINSTACK_LONGMEMEVAL_DATASET).")
 
     if args.report_input is not None:
         entries = _load_entries_from_report(args.report_input)

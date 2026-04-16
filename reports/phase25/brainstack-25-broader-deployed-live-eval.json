@@ -1,6 +1,5 @@
 {
   "type": "brainstack_phase25_broader_deployed_live_eval",
-  "staged_from": "docker:/opt/data",
   "scenario_count": 10,
   "pass_count": 9,
   "accuracy": 0.9,
@@ -45,7 +44,7 @@
     "avg_prompt_tokens": 11637.4
   },
   "baseline_comparison": {
-    "baseline_report": "/redacted-home/Asztal/ai/atado/Brainstack/reports/phase23/brainstack-23-broader-deployed-live-eval.json",
+    "baseline_report": "reports/phase23/brainstack-23-broader-deployed-live-eval.json",
     "baseline_accuracy": 0.9,
     "current_accuracy": 0.9,
     "accuracy_delta": 0.0,

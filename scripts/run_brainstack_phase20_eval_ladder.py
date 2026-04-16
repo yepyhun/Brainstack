@@ -7,13 +7,24 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_HERMES_ROOT = Path("/home/lauratom/Asztal/ai/memory-repo-bakeoff/hermes-agent-bestie-latest")
-DEFAULT_PYTHON = Path("/home/lauratom/Asztal/ai/hermes-agent-port/venv/bin/python")
+
+
+def _env_path(*names: str) -> Path | None:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return Path(value).expanduser()
+    return None
+
+
+DEFAULT_HERMES_ROOT = _env_path("BRAINSTACK_HERMES_ROOT", "HERMES_ROOT")
+DEFAULT_PYTHON = Path(os.environ.get("BRAINSTACK_PYTHON") or sys.executable).expanduser()
 DEFAULT_BENCH_REPORT = REPO_ROOT / "reports" / "phase20" / "brainstack-final-boss.json"
 
 
@@ -60,12 +71,14 @@ def main() -> int:
     )
     parser.add_argument(
         "--python",
-        default=str(DEFAULT_PYTHON),
+        type=Path,
+        default=DEFAULT_PYTHON,
         help="Python interpreter used for pytest and helper scripts.",
     )
     parser.add_argument(
         "--hermes-root",
-        default=str(DEFAULT_HERMES_ROOT),
+        type=Path,
+        default=DEFAULT_HERMES_ROOT,
         help="Hermes checkout used for plugin import seams and benchmark runs.",
     )
     parser.add_argument(
@@ -82,8 +95,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    python_bin = Path(args.python)
-    hermes_root = Path(args.hermes_root)
+    if args.hermes_root is None:
+        raise SystemExit("--hermes-root is required (or set BRAINSTACK_HERMES_ROOT / HERMES_ROOT).")
+
+    python_bin = args.python
+    hermes_root = args.hermes_root
     overlay = _build_overlay()
     overlay_root = Path(overlay.name)
     env = _env(overlay_root=overlay_root, hermes_root=hermes_root)

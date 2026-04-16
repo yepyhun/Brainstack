@@ -26,16 +26,21 @@ from typing import Any, Dict, Iterable, List, Sequence
 import yaml  # type: ignore[import-untyped]
 
 
-DEFAULT_BESTIE_ROOT = Path(
-    "/home/lauratom/Asztal/ai/memory-repo-bakeoff/hermes-agent-bestie-latest"
-)
-DEFAULT_REPORT = Path(
-    "/home/lauratom/Asztal/ai/atado/Brainstack/reports/phase23/brainstack-23-broader-deployed-live-eval.json"
-)
-DEFAULT_MATRIX = Path(
-    "/home/lauratom/Asztal/ai/atado/Brainstack/reports/phase23/brainstack-23-scenario-matrix.json"
-)
-DEFAULT_DOCKER_CONTAINER = "hermes-bestie"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _env_path(*names: str) -> Path | None:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return Path(value).expanduser()
+    return None
+
+
+DEFAULT_BESTIE_ROOT = _env_path("BRAINSTACK_BESTIE_ROOT", "BRAINSTACK_HERMES_ROOT", "HERMES_ROOT")
+DEFAULT_REPORT = REPO_ROOT / "reports" / "phase23" / "brainstack-23-broader-deployed-live-eval.json"
+DEFAULT_MATRIX = REPO_ROOT / "reports" / "phase23" / "brainstack-23-scenario-matrix.json"
+DEFAULT_DOCKER_CONTAINER = os.environ.get("BRAINSTACK_DOCKER_CONTAINER", "").strip() or None
 
 
 def _normalize_text(value: str) -> str:
@@ -724,6 +729,9 @@ def main() -> int:
     parser.add_argument("--matrix-output", type=Path, default=DEFAULT_MATRIX)
     args = parser.parse_args()
 
+    if args.hermes_root is None:
+        raise SystemExit("--hermes-root is required (or set BRAINSTACK_BESTIE_ROOT / BRAINSTACK_HERMES_ROOT / HERMES_ROOT).")
+
     with tempfile.TemporaryDirectory(prefix="brainstack-phase23-home-") as tmp_dir:
         temp_home = Path(tmp_dir)
         _stage_deployed_subset(
@@ -786,17 +794,9 @@ def main() -> int:
         residuals = _classify_residuals(results)
         report = {
             "type": "brainstack_phase23_broader_deployed_live_eval",
-            "bestie_root": str(args.hermes_root),
-            "docker_container": None if args.deployed_home else args.docker_container,
-            "staged_from": str(args.deployed_home) if args.deployed_home else "docker:/opt/data",
             "scenario_count": len(results),
             "pass_count": sum(1 for item in results if item.get("passed")),
             "accuracy": round(sum(1 for item in results if item.get("passed")) / len(results), 4) if results else 0.0,
-            "runtime": {
-                "provider": runtime["provider"],
-                "model": runtime["model"],
-                "base_url_present": bool(runtime.get("base_url")),
-            },
             "by_category": by_category,
             "packet_overhead": _packet_overhead(results),
             "residuals": residuals,
