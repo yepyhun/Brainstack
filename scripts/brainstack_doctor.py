@@ -69,10 +69,49 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         return {}
 
 
+def _load_docker_runtime_yaml(compose_path: Path, *, service: str = "hermes-bestie", container_path: str = "/opt/data/config.yaml") -> dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-f",
+                str(compose_path),
+                "exec",
+                "-T",
+                service,
+                "python3",
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    f"path = Path({container_path!r}); "
+                    "print(path.read_text(encoding='utf-8')) if path.exists() else None"
+                ),
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+        )
+    except Exception:
+        return {}
+
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return {}
+
+    try:
+        import yaml  # type: ignore[import-untyped]
+
+        data = yaml.safe_load(proc.stdout) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def _default_config_path(target: Path) -> Path:
-    bestie = target / "hermes-config" / "bestie" / "config.yaml"
-    if bestie.exists():
-        return bestie
+    bestie_dir = target / "hermes-config" / "bestie"
+    if bestie_dir.exists():
+        return bestie_dir / "config.yaml"
     return target / "config.yaml"
 
 
@@ -232,6 +271,18 @@ def _check_host_surfaces(target: Path) -> list[Check]:
     else:
         checks.append(Check("personal_memory_guidance", "fail", "run_agent still lacks explicit Brainstack-owned personal memory guidance"))
 
+    required_rtk_terms = [
+        "build_rtk_sidecar_config",
+        "RTKSidecarStats",
+        "maybe_preprocess_tool_result",
+        "config=self._rtk_sidecar.budget",
+    ]
+    missing_rtk = [term for term in required_rtk_terms if term not in run_agent]
+    if missing_rtk:
+        checks.append(Check("rtk_sidecar_wiring", "fail", f"run_agent is missing RTK sidecar wiring terms: {', '.join(missing_rtk)}"))
+    else:
+        checks.append(Check("rtk_sidecar_wiring", "pass", "run_agent wires RTK sidecar config, preprocessing, and budgeted persistence"))
+
     if "_async_finalize_session_memory" in gateway_run and "_finalize_brainstack_session_memory" in gateway_run:
         checks.append(Check("gateway_session_boundary_gate", "pass", "gateway routes session boundaries through a Brainstack-aware finalizer"))
     else:
@@ -296,14 +347,31 @@ def _check_plugin(target: Path, planned_install: bool) -> list[Check]:
     return checks
 
 
-def _check_config(config_path: Path, planned_install: bool, *, python_bin: Path | None) -> list[Check]:
+def _check_config(
+    config_path: Path,
+    planned_install: bool,
+    *,
+    python_bin: Path | None,
+    runtime: str,
+    compose_path: Path | None,
+) -> list[Check]:
     checks: list[Check] = []
-    if not config_path.exists():
+    config: dict[str, Any] = {}
+    loaded_from = str(config_path)
+
+    if config_path.exists():
+        config = _load_yaml(config_path)
+    elif runtime == "docker" and compose_path and compose_path.exists():
+        config = _load_docker_runtime_yaml(compose_path)
+        if config:
+            loaded_from = "docker runtime /opt/data/config.yaml"
+
+    if not config:
         status = "pass" if planned_install else "fail"
-        checks.append(Check("config_present", status, f"Config path does not exist: {config_path}"))
+        checks.append(Check("config_present", status, f"Config path is not readable: {config_path}"))
         return checks
 
-    config = _load_yaml(config_path)
+    checks.append(Check("config_present", "pass", f"Config loaded from {loaded_from}"))
     memory = config.get("memory", {}) if isinstance(config.get("memory", {}), dict) else {}
     provider = memory.get("provider")
     memory_enabled = memory.get("memory_enabled")
@@ -370,6 +438,23 @@ def _check_config(config_path: Path, planned_install: bool, *, python_bin: Path 
         checks.append(Check("corpus_backend_target", "pass", "corpus backend is not Chroma yet, but installer will set it"))
     else:
         checks.append(Check("corpus_backend_target", "fail", f"plugins.brainstack.corpus_backend is {corpus_backend!r}, expected 'chroma'"))
+
+    sidecars = config.get("sidecars", {}) if isinstance(config.get("sidecars", {}), dict) else {}
+    rtk = sidecars.get("rtk", {}) if isinstance(sidecars.get("rtk", {}), dict) else {}
+    if rtk.get("enabled") is True:
+        checks.append(Check("rtk_sidecar_config", "pass", "sidecars.rtk.enabled is true"))
+    elif planned_install:
+        checks.append(Check("rtk_sidecar_config", "pass", "sidecars.rtk.enabled is not true yet, but installer will patch it"))
+    else:
+        checks.append(Check("rtk_sidecar_config", "fail", "sidecars.rtk.enabled must be true for shipped RTK sidecar wiring"))
+
+    mode = str(rtk.get("mode") or "").strip().lower()
+    if mode in {"balanced", "aggressive"}:
+        checks.append(Check("rtk_sidecar_mode", "pass", f"sidecars.rtk.mode is {mode!r}"))
+    elif planned_install:
+        checks.append(Check("rtk_sidecar_mode", "pass", "sidecars.rtk.mode is absent or invalid yet, but installer will patch it"))
+    else:
+        checks.append(Check("rtk_sidecar_mode", "fail", "sidecars.rtk.mode must be 'balanced' or 'aggressive'"))
 
     return checks
 
@@ -483,7 +568,15 @@ def run_doctor(args: argparse.Namespace) -> tuple[int, list[Check]]:
     checks.extend(_check_target_shape(target))
     checks.extend(_check_host_surfaces(target))
     checks.extend(_check_plugin(target, planned_install=args.planned_install))
-    checks.extend(_check_config(config_path, planned_install=args.planned_install, python_bin=python_bin))
+    checks.extend(
+        _check_config(
+            config_path,
+            planned_install=args.planned_install,
+            python_bin=python_bin,
+            runtime=runtime,
+            compose_path=compose_path,
+        )
+    )
     if runtime == "docker" and args.check_docker:
         checks.extend(_check_compose(compose_path, planned_install=args.planned_install))
         checks.extend(_check_docker_helpers(target, planned_install=args.planned_install))

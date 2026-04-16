@@ -6,6 +6,8 @@ install_host_import_shims()
 
 from plugins.memory.brainstack import BrainstackMemoryProvider
 from run_agent import AIAgent
+from rtk_sidecar import RTKSidecarConfig, maybe_preprocess_tool_result
+from tools.budget_config import DEFAULT_BUDGET
 
 
 def _tool_defs(*names):
@@ -94,6 +96,18 @@ def _mock_assistant_message(*tool_calls):
 
 
 class TestRTKSidecarIntegration:
+    def test_rtk_sidecar_preprocesses_noisy_plain_text_without_touching_structure(self):
+        cfg = RTKSidecarConfig(enabled=True, mode="balanced", budget=DEFAULT_BUDGET)
+        noisy = "INFO heartbeat\nINFO heartbeat\nINFO heartbeat\n\n\nnext line\n"
+        cleaned = maybe_preprocess_tool_result(noisy, cfg)
+
+        assert cleaned != noisy
+        assert "[x2 repeats omitted]" in cleaned
+        assert "\n\n\n" not in cleaned
+
+        structured = '{"items": [1, 2, 3]}\n'
+        assert maybe_preprocess_tool_result(structured, cfg) == structured
+
     def test_rtk_sidecar_tightens_large_tool_result_budget_and_records_savings(self, monkeypatch, tmp_path):
         agent = _make_agent(monkeypatch, tmp_path, rtk_enabled=True, skip_memory=True)
         tc = _mock_tool_call(name="web_search", call_id="c1")
@@ -105,6 +119,7 @@ class TestRTKSidecarIntegration:
 
         assert len(messages) == 1
         assert len(messages[0]["content"]) < 120_000
+        assert agent._rtk_sidecar_stats.total_chars_saved > 0
         assert (
             "<persisted-output>" in messages[0]["content"]
             or "[Truncated:" in messages[0]["content"]

@@ -148,6 +148,27 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
 
+    if "from agent.rtk_sidecar import build_rtk_sidecar_config, RTKSidecarStats, maybe_preprocess_tool_result" not in text:
+        text = _replace_once_any(
+            text,
+            [
+                (
+                    "from agent.trajectory import (\n"
+                    "    convert_scratchpad_to_think, has_incomplete_scratchpad,\n"
+                    "    save_trajectory as _save_trajectory_to_file,\n"
+                    ")\n",
+                    "from agent.trajectory import (\n"
+                    "    convert_scratchpad_to_think, has_incomplete_scratchpad,\n"
+                    "    save_trajectory as _save_trajectory_to_file,\n"
+                    ")\n"
+                    "from agent.rtk_sidecar import build_rtk_sidecar_config, RTKSidecarStats, maybe_preprocess_tool_result\n",
+                ),
+            ],
+            label="run_agent rtk import",
+            path=path,
+        )
+        applied.append("run_agent:import_rtk_sidecar")
+
     if "from agent.brainstack_mode import (" not in text:
         text = _replace_once_any(
             text,
@@ -191,6 +212,29 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
             path=path,
         )
         applied.append("run_agent:import_brainstack_mode")
+
+    if "self._rtk_sidecar = build_rtk_sidecar_config(_agent_cfg)" not in text:
+        text = _replace_once_any(
+            text,
+            [
+                (
+                    "        self._brainstack_only_mode = is_brainstack_only_mode(_agent_cfg)\n",
+                    "        self._rtk_sidecar = build_rtk_sidecar_config(_agent_cfg)\n"
+                    "        self._rtk_sidecar_stats = RTKSidecarStats()\n"
+                    "        self._brainstack_only_mode = is_brainstack_only_mode(_agent_cfg)\n",
+                ),
+                (
+                    "        except Exception:\n            _agent_cfg = {}\n",
+                    "        except Exception:\n"
+                    "            _agent_cfg = {}\n"
+                    "        self._rtk_sidecar = build_rtk_sidecar_config(_agent_cfg)\n"
+                    "        self._rtk_sidecar_stats = RTKSidecarStats()\n",
+                ),
+            ],
+            label="run_agent rtk init",
+            path=path,
+        )
+        applied.append("run_agent:init_rtk_sidecar")
 
     cfg_anchor = "        except Exception:\n            _agent_cfg = {}\n"
     cfg_inject = "        except Exception:\n            _agent_cfg = {}\n        self._brainstack_only_mode = is_brainstack_only_mode(_agent_cfg)\n"
@@ -372,6 +416,131 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
     if "brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)" not in text or "elif function_name == \"todo\":" not in text:
         text = _replace_once(text, seq_anchor, seq_inject, label="run_agent sequential guard", path=path)
         applied.append("run_agent:block_legacy_sequential_path")
+
+    if "self._rtk_sidecar_stats.record_preprocessing_effect(raw_result, preprocessed_result)" not in text:
+        text = _replace_once_any(
+            text,
+            [
+                (
+                    "            function_result = maybe_persist_tool_result(\n"
+                    "                content=function_result,\n"
+                    "                tool_name=name,\n"
+                    "                tool_use_id=tc.id,\n"
+                    "                env=get_active_env(effective_task_id),\n"
+                    "            )\n",
+                    "            raw_result = function_result\n"
+                    "            preprocessed_result = maybe_preprocess_tool_result(function_result, self._rtk_sidecar)\n"
+                    "            self._rtk_sidecar_stats.record_preprocessing_effect(raw_result, preprocessed_result)\n"
+                    "            function_result = maybe_persist_tool_result(\n"
+                    "                content=preprocessed_result,\n"
+                    "                tool_name=name,\n"
+                    "                tool_use_id=tc.id,\n"
+                    "                env=get_active_env(effective_task_id),\n"
+                    "                config=self._rtk_sidecar.budget,\n"
+                    "            )\n"
+                    "            self._rtk_sidecar_stats.record_result(raw_result, function_result)\n",
+                ),
+                (
+                    "            raw_result = function_result\n"
+                    "            function_result = maybe_persist_tool_result(\n"
+                    "                content=function_result,\n"
+                    "                tool_name=name,\n"
+                    "                tool_use_id=tc.id,\n"
+                    "                env=get_active_env(effective_task_id),\n"
+                    "                config=self._rtk_sidecar.budget,\n"
+                    "            )\n"
+                    "            self._rtk_sidecar_stats.record_result(raw_result, function_result)\n",
+                    "            raw_result = function_result\n"
+                    "            preprocessed_result = maybe_preprocess_tool_result(function_result, self._rtk_sidecar)\n"
+                    "            self._rtk_sidecar_stats.record_preprocessing_effect(raw_result, preprocessed_result)\n"
+                    "            function_result = maybe_persist_tool_result(\n"
+                    "                content=preprocessed_result,\n"
+                    "                tool_name=name,\n"
+                    "                tool_use_id=tc.id,\n"
+                    "                env=get_active_env(effective_task_id),\n"
+                    "                config=self._rtk_sidecar.budget,\n"
+                    "            )\n"
+                    "            self._rtk_sidecar_stats.record_result(raw_result, function_result)\n",
+                ),
+                (
+                    "            function_result = maybe_persist_tool_result(\n"
+                    "                content=function_result,\n"
+                    "                tool_name=function_name,\n"
+                    "                tool_use_id=tool_call.id,\n"
+                    "                env=get_active_env(effective_task_id),\n"
+                    "            )\n",
+                    "            raw_result = function_result\n"
+                    "            preprocessed_result = maybe_preprocess_tool_result(function_result, self._rtk_sidecar)\n"
+                    "            self._rtk_sidecar_stats.record_preprocessing_effect(raw_result, preprocessed_result)\n"
+                    "            function_result = maybe_persist_tool_result(\n"
+                    "                content=preprocessed_result,\n"
+                    "                tool_name=function_name,\n"
+                    "                tool_use_id=tool_call.id,\n"
+                    "                env=get_active_env(effective_task_id),\n"
+                    "                config=self._rtk_sidecar.budget,\n"
+                    "            )\n"
+                    "            self._rtk_sidecar_stats.record_result(raw_result, function_result)\n",
+                ),
+                (
+                    "            raw_result = function_result\n"
+                    "            function_result = maybe_persist_tool_result(\n"
+                    "                content=function_result,\n"
+                    "                tool_name=function_name,\n"
+                    "                tool_use_id=tool_call.id,\n"
+                    "                env=get_active_env(effective_task_id),\n"
+                    "                config=self._rtk_sidecar.budget,\n"
+                    "            )\n"
+                    "            self._rtk_sidecar_stats.record_result(raw_result, function_result)\n",
+                    "            raw_result = function_result\n"
+                    "            preprocessed_result = maybe_preprocess_tool_result(function_result, self._rtk_sidecar)\n"
+                    "            self._rtk_sidecar_stats.record_preprocessing_effect(raw_result, preprocessed_result)\n"
+                    "            function_result = maybe_persist_tool_result(\n"
+                    "                content=preprocessed_result,\n"
+                    "                tool_name=function_name,\n"
+                    "                tool_use_id=tool_call.id,\n"
+                    "                env=get_active_env(effective_task_id),\n"
+                    "                config=self._rtk_sidecar.budget,\n"
+                    "            )\n"
+                    "            self._rtk_sidecar_stats.record_result(raw_result, function_result)\n",
+                ),
+            ],
+            label="run_agent rtk preprocess path",
+            path=path,
+        )
+        applied.append("run_agent:rtk_preprocess_path")
+
+    if "self._rtk_sidecar_stats.record_turn_budget_effect(before_budget_total, after_budget_total)" not in text:
+        text = _replace_once_any(
+            text,
+            [
+                (
+                    "            enforce_turn_budget(turn_tool_msgs, env=get_active_env(effective_task_id))\n",
+                    "            before_budget_total = sum(len(msg.get(\"content\", \"\")) for msg in turn_tool_msgs)\n"
+                    "            enforce_turn_budget(\n"
+                    "                turn_tool_msgs,\n"
+                    "                env=get_active_env(effective_task_id),\n"
+                    "                config=self._rtk_sidecar.budget,\n"
+                    "            )\n"
+                    "            after_budget_total = sum(len(msg.get(\"content\", \"\")) for msg in turn_tool_msgs)\n"
+                    "            self._rtk_sidecar_stats.record_turn_budget_effect(before_budget_total, after_budget_total)\n",
+                ),
+                (
+                    "            enforce_turn_budget(messages[-num_tools_seq:], env=get_active_env(effective_task_id))\n",
+                    "            turn_tool_msgs = messages[-num_tools_seq:]\n"
+                    "            before_budget_total = sum(len(msg.get(\"content\", \"\")) for msg in turn_tool_msgs)\n"
+                    "            enforce_turn_budget(\n"
+                    "                turn_tool_msgs,\n"
+                    "                env=get_active_env(effective_task_id),\n"
+                    "                config=self._rtk_sidecar.budget,\n"
+                    "            )\n"
+                    "            after_budget_total = sum(len(msg.get(\"content\", \"\")) for msg in turn_tool_msgs)\n"
+                    "            self._rtk_sidecar_stats.record_turn_budget_effect(before_budget_total, after_budget_total)\n",
+                ),
+            ],
+            label="run_agent rtk turn budget",
+            path=path,
+        )
+        applied.append("run_agent:rtk_turn_budget")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -903,9 +1072,9 @@ def _write_yaml(path: Path, data: dict[str, Any]) -> None:
 
 
 def _default_config_path(target: Path) -> Path:
-    bestie = target / "hermes-config" / "bestie" / "config.yaml"
-    if bestie.exists():
-        return bestie
+    bestie_dir = target / "hermes-config" / "bestie"
+    if bestie_dir.exists():
+        return bestie_dir / "config.yaml"
     return target / "config.yaml"
 
 
@@ -945,6 +1114,15 @@ def _patch_config(config_path: Path, dry_run: bool) -> dict[str, Any]:
     brainstack.setdefault("graph_match_limit", 6)
     brainstack.setdefault("corpus_match_limit", 4)
     brainstack.setdefault("corpus_char_budget", 700)
+    config.setdefault("sidecars", {})
+    if not isinstance(config["sidecars"], dict):
+        raise RuntimeError("config.yaml has non-object `sidecars` section")
+    rtk = config["sidecars"].setdefault("rtk", {})
+    if not isinstance(rtk, dict):
+        rtk = {}
+        config["sidecars"]["rtk"] = rtk
+    rtk.setdefault("enabled", True)
+    rtk.setdefault("mode", "balanced")
     if not dry_run:
         _write_yaml(config_path, config)
     return {
@@ -952,6 +1130,7 @@ def _patch_config(config_path: Path, dry_run: bool) -> dict[str, Any]:
         "memory_provider": "brainstack",
         "memory_enabled": False,
         "user_profile_enabled": False,
+        "rtk_sidecar_enabled": bool(rtk.get("enabled", False)),
     }
 
 

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from scripts.install_into_hermes import (
+    _default_config_path,
     _patch_config,
     _patch_gateway_run,
     _patch_memory_manager,
@@ -48,6 +49,10 @@ def test_gateway_run_patch_supports_multiline_platform_import(tmp_path: Path):
 def test_run_agent_patch_supports_multiline_memory_manager_import(tmp_path: Path):
     path = tmp_path / "run_agent.py"
     path.write_text(
+        "from agent.trajectory import (\n"
+        "    convert_scratchpad_to_think, has_incomplete_scratchpad,\n"
+        "    save_trajectory as _save_trajectory_to_file,\n"
+        ")\n"
         "from agent.memory_manager import (\n"
         "    build_memory_context_block,\n"
         ")\n"
@@ -76,6 +81,20 @@ def test_run_agent_patch_supports_multiline_memory_manager_import(tmp_path: Path
         "        tools. Used by the concurrent execution path; the sequential path retains\n"
         "        its own inline invocation for backward-compatible display handling.\n"
         "        \"\"\"\n"
+        "            function_result = maybe_persist_tool_result(\n"
+        "                content=function_result,\n"
+        "                tool_name=name,\n"
+        "                tool_use_id=tc.id,\n"
+        "                env=get_active_env(effective_task_id),\n"
+        "            )\n"
+        "            enforce_turn_budget(turn_tool_msgs, env=get_active_env(effective_task_id))\n"
+        "            function_result = maybe_persist_tool_result(\n"
+        "                content=function_result,\n"
+        "                tool_name=function_name,\n"
+        "                tool_use_id=tool_call.id,\n"
+        "                env=get_active_env(effective_task_id),\n"
+        "            )\n"
+        "            enforce_turn_budget(messages[-num_tools_seq:], env=get_active_env(effective_task_id))\n"
         "            if function_name == \"todo\":\n",
         encoding="utf-8",
     )
@@ -84,7 +103,16 @@ def test_run_agent_patch_supports_multiline_memory_manager_import(tmp_path: Path
     content = path.read_text(encoding="utf-8")
 
     assert "run_agent:import_brainstack_mode" in applied
+    assert "run_agent:import_rtk_sidecar" in applied
+    assert "run_agent:init_rtk_sidecar" in applied
+    assert "run_agent:rtk_preprocess_path" in applied
     assert "from agent.brainstack_mode import (" in content
+    assert "from agent.rtk_sidecar import build_rtk_sidecar_config, RTKSidecarStats, maybe_preprocess_tool_result" in content
+    assert "self._rtk_sidecar = build_rtk_sidecar_config(_agent_cfg)" in content
+    assert "self._rtk_sidecar_stats = RTKSidecarStats()" in content
+    assert "preprocessed_result = maybe_preprocess_tool_result(function_result, self._rtk_sidecar)" in content
+    assert "config=self._rtk_sidecar.budget" in content
+    assert "record_turn_budget_effect(before_budget_total, after_budget_total)" in content
     assert "Brainstack owns personal memory in this mode." in content
     assert "persona.md, or side skill files" in content
     assert "secondary memory APIs from ad hoc code" in content
@@ -148,3 +176,14 @@ def test_patch_config_sets_embedded_graph_and_corpus_defaults(tmp_path: Path):
     assert "graph_db_path: $HERMES_HOME/brainstack/brainstack.kuzu" in content
     assert "corpus_backend: chroma" in content
     assert "corpus_db_path: $HERMES_HOME/brainstack/brainstack.chroma" in content
+    assert "sidecars:" in content
+    assert "rtk:" in content
+    assert "enabled: true" in content
+    assert "mode: balanced" in content
+
+
+def test_default_config_path_prefers_bestie_runtime_dir_even_before_config_exists(tmp_path: Path):
+    bestie_dir = tmp_path / "hermes-config" / "bestie"
+    bestie_dir.mkdir(parents=True)
+
+    assert _default_config_path(tmp_path) == bestie_dir / "config.yaml"
