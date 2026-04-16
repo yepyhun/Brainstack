@@ -1,14 +1,7 @@
-```text
-  ____            _           _             _    
- |  _ \          (_)         | |           | |   
- | |_) |_ __ __ _ _ _ __  ___| |_ __ _  ___| | __
- |  _ <| '__/ _` | | '_ \/ __| __/ _` |/ __| |/ /
- | |_) | | | (_| | | | | \__ \ || (_| | (__|   < 
- |____/|_|  \__,_|_|_| |_|___/\__\__,_|\___|_|\_\
-                                                 
-                                                 
-```
 
+<img width="1024" height="1536" alt="image" src="https://github.com/user-attachments/assets/c10a4ea1-76b7-45f5-93db-9f5eae98d9b3" />
+
+# Brainstack
 
 `Hermes-native` `local-first` `experimental`
 
@@ -23,6 +16,37 @@ The promise is simple:
 - cleaner truth handling when preferences, facts, and large recalled bodies need different treatment
 
 This repo is for people building serious Hermes-based second-brain systems. It is not trying to pretend that transcript search, vector recall, and profile tables are the same job.
+
+## How a query flows through Brainstack
+
+```text
+User query
+   |
+   v
+Risk + intent check
+   |
+   +--> profile recall      -> preferences, identity, stable user facts
+   +--> continuity recall   -> recent session state, pending context
+   +--> graph recall        -> current facts, relations, temporal truth
+   +--> corpus recall       -> larger external knowledge and packed evidence
+   +--> transcript fallback -> only bounded raw evidence when needed
+   |
+   v
+Control plane packs the smallest useful evidence set
+   |
+   v
+Hermes answers
+   |
+   v
+After-turn learning updates the right shelf, not one giant memory blob
+```
+
+In plain language:
+
+- Brainstack first decides what kind of question this is.
+- Then it pulls from the right shelves instead of dumping everything into the prompt.
+- Hermes gets a small, purpose-built evidence packet.
+- After the answer, the new information is written back to the right place.
 
 ## Why Brainstack exists
 
