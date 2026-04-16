@@ -1,59 +1,96 @@
-# Brainstack
+```text
+░▒▓███████▓▒░░▒▓███████▓▒░ ░▒▓██████▓▒░░▒▓█▓▒░▒▓███████▓▒░ ░▒▓███████▓▒░▒▓████████▓▒░▒▓██████▓▒░ ░▒▓██████▓▒░░▒▓█▓▒░░▒▓█▓▒░
+░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░         ░▒▓█▓▒░  ░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░
+░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░         ░▒▓█▓▒░  ░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░      ░▒▓█▓▒░░▒▓█▓▒░
+░▒▓███████▓▒░░▒▓███████▓▒░░▒▓████████▓▒░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░░▒▓██████▓▒░   ░▒▓█▓▒░  ░▒▓████████▓▒░▒▓█▓▒░      ░▒▓███████▓▒░
+░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░      ░▒▓█▓▒░  ░▒▓█▓▒░  ░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░      ░▒▓█▓▒░░▒▓█▓▒░
+░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░      ░▒▓█▓▒░  ░▒▓█▓▒░  ░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░
+░▒▓███████▓▒░░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓███████▓▒░   ░▒▓█▓▒░  ░▒▓█▓▒░░▒▓█▓▒░░▒▓██████▓▒░░▒▓█▓▒░░▒▓█▓▒░
+```
 
-Brainstack is a Hermes-native composite memory provider built for **persistent second-brain usage**:
-always-on agents, long-lived user identity, durable preferences, evolving truths, and larger bodies of recalled knowledge without turning the prompt into sludge.
 
-The current ambition is straightforward:
+`Hermes-native` `local-first` `experimental`
 
-- **be one of the strongest practical local-first memory stacks for this always-on agent / second-brain use case** (yes, SOTA if you want to hear that.)
-- combine the best parts of temporal continuity, graph truth, and corpus retrieval
-- keep them under one runtime ownership model instead of letting three half-systems fight each other
+Brainstack gives Hermes a memory model instead of a memory blob.
 
-It currently runs **inside Hermes-Agent as a direct `MemoryProvider` plugin**, not as a standalone API-first memory server. Runtime memory ownership stays with Brainstack, while the storage layer is split by responsibility:
+It is a composite `MemoryProvider` for persistent agents: profile memory, session continuity, temporal graph truth, and corpus retrieval under one runtime owner.
 
-- `SQLite` for shell/session/profile/transcript state
-- embedded `Kuzu` for L2 graph truth
-- embedded `Chroma` for L3 semantic corpus retrieval
+The promise is simple:
 
-## Proof snapshot
+- better long-horizon memory for always-on Hermes agents
+- less prompt sludge from blind transcript stuffing
+- cleaner truth handling when preferences, facts, and large recalled bodies need different treatment
 
-What is already proven in this repository:
+This repo is for people building serious Hermes-based second-brain systems. It is not trying to pretend that transcript search, vector recall, and profile tables are the same job.
 
-- **90% broader deployed-live pass rate** on the current 10-scenario matrix:
-  - `9 / 10` in Phase `23`
-  - `9 / 10` again after the Phase `24` correctness fixes in Phase `25`
-- **100% pass** on the long-range relation-tracking bucket in the broader live matrix:
-  - `4 / 4`
-- **Cross-principal profile bleed was closed** in the targeted principal canary:
-  - `bleed_detected = false`
-- **Focused proactive carry-through repair passed** in deterministic and deployed-path follow-ups:
-  - the constrained deterministic case kept the required dietary constraint
-  - the negative control did not fabricate it
-  - the focused live rerun passed
-- **Broader live packet discipline stayed bounded** in the published 10-scenario matrix:
-  - average selected row count: `6.7`
-  - average transcript rows: `2.4`
-  - average graph rows: `1.5`
-  - average corpus rows: `0.0`
-- **Bestie mirror instrumentation landed with 0% measured ordinary-turn token regression** for the added provenance/lifecycle slices:
-  - `775 -> 775`
-  - `1049 -> 1049`
+## Why Brainstack exists
 
-What that means in plain language:
+Most agent memory stacks fail in predictable ways:
 
-- Brainstack is already strong enough to sustain a credible deployed-live memory story.
-- The hardest recent correctness seam was repaired and re-proven.
-- Extra auditability was added without bloating the measured ordinary turn in the mirrored case.
+- they flatten profile, transcript, graph, and corpus into one blob
+- they overwrite old facts instead of tracking change over time
+- they split memory ownership across multiple subsystems that quietly disagree with each other
+- they solve recall by stuffing more and more text back into the prompt
 
-## Core inspiration
+Brainstack takes the opposite approach:
 
-Brainstack is primarily built from three donor lines:
+- one live memory owner
+- clear separation of responsibilities
+- bounded evidence instead of transcript abuse
+- temporal truth handled explicitly, not as an afterthought
+
+Transcript is evidence. Graph is truth. Corpus is corpus. Profile is profile. That sounds obvious. In practice, it usually is not.
+
+## What Brainstack is trying to do
+
+- be one of the strongest practical local-first memory stacks for always-on Hermes agents
+- combine temporal continuity, graph truth, and corpus retrieval in one system
+- keep runtime ownership inside Brainstack instead of letting three half-systems fight each other
+- stay useful in real deployed runs, not just in architecture diagrams
+
+## Current status
+
+- runs inside Hermes-Agent as a direct `MemoryProvider` plugin
+- is intended to be the single live memory path when Hermes builtin memory is disabled
+- keeps runtime ownership in Brainstack while storage is split by responsibility
+- uses `SQLite` for shell, session, profile, transcript, and lexical fallback state
+- uses embedded `Kuzu` for L2 graph truth
+- uses embedded `Chroma` for L3 semantic corpus retrieval
+- is experimental, working, and opinionated
+
+## Quickstart
+
+Dry-run compatibility check:
+
+```bash
+python install_into_hermes.py /path/to/hermes-agent --enable --doctor --dry-run --runtime docker
+```
+
+Real install:
+
+```bash
+python install_into_hermes.py /path/to/hermes-agent --enable --doctor --runtime docker
+```
+
+Local non-Docker install:
+
+```bash
+python install_into_hermes.py /path/to/hermes-agent --enable --doctor --runtime local
+```
+
+After install, run the doctor and confirm that Brainstack is the active memory provider.
+
+## What Brainstack is built from
+
+Brainstack is built from three donor lines, then re-composed into a single Hermes-native memory system:
 
 1. **[Hindsight](https://github.com/vectorize-io/hindsight)** - For temporal state preservation, bounded history, and preserving old states rather than destructively overwriting past knowledge.
 2. **[Graphiti](https://github.com/getzep/graphiti)** - For explicitly surfacing graph conflicts, tracking entity relationships, and managing temporal truths natively.
 3. **[MemPalace](https://github.com/yepyhun/MemPalace)** - For modular, high-performance retrieval and FTS/Semantic FUSION handling of large corpuses without massive token overhead.
 
-This translates into a strict internal separation of concerns:
+That donor base is not the whole point. Brainstack's value is that it gives Hermes one runtime owner for these jobs instead of leaving them as separate memory-shaped subsystems.
+
+This shows up as a strict internal separation of concerns:
 
 | Layer | Inspiration | Core Responsibility |
 | :--- | :--- | :--- |
@@ -66,183 +103,105 @@ Additional patterns also influence the current code:
 - **Hermes-LCM transcript pattern** for bounded raw transcript retention and temporal evidence fallback
 - **RTK-style sidecar discipline** for token-aware auxiliary work without taking memory ownership
 
+## What Brainstack adds on top
+
+Using the donors directly would still leave a lot of hard integration work in the host.
+
+Brainstack adds the parts that make the system usable as one memory kernel instead of a donor bundle:
+
+- one live memory owner inside Hermes
+- explicit shelf separation instead of a flat memory blob
+- current truth, historical truth, and conflict state kept distinct
+- bounded packing discipline so recall helps the turn instead of flooding it
+- host-aware install, doctor, and boundary tooling so the memory layer can actually survive real runtime drift
+
 ## Current runtime architecture
 
-Brainstack currently routes memory into five shelves instead of a flat memory blob:
+Brainstack routes memory into five shelves instead of a flat memory blob:
 
-1. **Profile shelf**  
-   Durable identity, preference, and shared-work anchors.
-2. **Continuity shelf**  
-   Session carry-over, compression snapshots, and pending work state.
-3. **Transcript shelf**  
-   Append-only raw turns used only as bounded evidence, not as a second live memory engine.
-4. **Graph-truth shelf**  
-   Entities, explicit relations, bounded inferred links, temporal state, supersession, and explicit conflict surfacing.
-5. **Corpus shelf**  
-   External documents, sectioning, bounded recall, and large-corpus packing.
+| Shelf | Purpose |
+| :--- | :--- |
+| Profile shelf | Durable identity, preference, and shared-work anchors |
+| Continuity shelf | Session carry-over, compression snapshots, and pending work state |
+| Transcript shelf | Append-only raw turns used as bounded evidence, not as a second live memory engine |
+| Graph-truth shelf | Entities, explicit relations, bounded inferred links, temporal state, supersession, and conflict surfacing |
+| Corpus shelf | External documents, sectioning, bounded recall, and large-corpus packing |
 
-On top of the shelves, Brainstack uses a **risk-aware control plane**:
+Under those shelves, storage is split by responsibility:
 
-- high-stakes questions suppress memory-only bluffing
-- preference-style questions prefer compact profile recall
-- temporal/explanatory questions expand continuity and graph evidence
-- transcript recall is bounded and session-scoped
-- active communication-style rules are packed into a short internal contract and
-  should be applied silently instead of being echoed back to the user
-- bounded retrieval telemetry can gently deprioritize non-core fallback rows
-  without deleting them or overriding temporal truth
-- graph recall keeps explicit current truth first, historical truth separate,
-  inferred links bounded, and conflicts visible without flattening them into one blob
+| Responsibility | Backend |
+| :--- | :--- |
+| shell, session, profile, transcript state, lexical corpus fallback | `SQLite` |
+| L2 graph truth | `Kuzu` |
+| L3 semantic corpus retrieval | `Chroma` |
 
-## What is true in the current codebase
+On top of the shelves, Brainstack uses a risk-aware control plane:
 
-- Brainstack is intended to be the **single live memory path** when Hermes builtin memory is disabled.
-- L2 now separates **current explicit truth**, **historical truth**, **open conflicts**,
-  and **bounded inferred links** in recall packaging instead of flattening them together.
-- The donor-inspired parts are behind **explicit local adapters**:
-  - `brainstack/donors/continuity_adapter.py`
-  - `brainstack/donors/graph_adapter.py`
-  - `brainstack/donors/corpus_adapter.py`
-- Donor baselines are tracked via a **bounded refresh workflow**, not hidden copy-paste drift.
-- The refresh script can report local adapter state and optionally run local smoke checks.
-- The current Brainstack baseline is **embedded-backend based**:
-  - `SQLite` keeps shell state and lexical corpus fallback
-  - `Kuzu` is the active graph backend target
-  - `Chroma` is the active corpus semantic backend target
-- L1 now consumes a stable executive retrieval contract instead of hardcoding backend specifics.
-- Cross-store ingest consistency is treated as shell work, not as optional follow-up glue.
-- Conversation history now participates in semantic retrieval through the same embedded `Chroma` path used for corpus recall.
-- Retrieved conversational evidence now carries explicit date labels when known, instead of relying only on implicit ordering.
-- Prompt-side evidence priority is now explicit in the rendered working-memory block:
-  - specific, non-conflicted recalled facts should outrank generic prior knowledge
-  - this is intentionally narrower than a blind “always trust memory” rule
+- high-stakes questions should not bluff from memory alone
+- preference-style questions should prefer compact profile recall
+- temporal and explanatory questions should expand continuity and graph evidence
+- transcript recall stays bounded and session-scoped
+- active communication rules are packed into a short internal contract and applied silently
+- graph recall keeps current truth, historical truth, inferred links, and conflicts separate instead of flattening them together
 
-## Current proof status
+## What is already working
 
-The current codebase is past the broad donor-first recovery track, and the proof story is now stronger than a generic architecture prototype.
+This repo is past the "interesting architecture sketch" stage.
 
 What is currently true:
 
-- the broader deployed-live matrix is holding at **`9 / 10` (`90%`)**
-- the principal-isolation correctness bug that polluted profile state across users was repaired and re-proven
+- the broader deployed-live matrix is holding at `9 / 10`
+- the principal-isolation bug that polluted profile state across users was repaired and re-proven
 - the proactive carry-through seam was repaired enough to pass focused deterministic and live follow-up checks
-- the later selective `hermes-lcm` donor uptake improved auditability / diagnostics without adding measured ordinary-turn token overhead in the mirrored scenario
+- provenance and lifecycle instrumentation landed without measured ordinary-turn token regression in the mirrored scenario
 
-That means:
+That does not mean every hard problem is solved. It means the core shape is already working as a real memory system, and the remaining gains are mostly about retrieval precision and packing quality, not basic ownership or identity correctness.
 
-- the architecture recovery is materially working in live product terms, not only in internal shape
-- the remaining weakness is narrower than before
-- the main open ceiling is no longer broad memory ownership or principal isolation
-- the remaining gaps are mostly about higher-precision retrieval and future host ergonomics
-
-The next recorded corrective direction is therefore:
-
-- better exact-fact turn selection
-- better update/supersession preference for fresher values
-- better packing fidelity for answer-bearing details
-- bounded query decomposition only where truly needed
-
-This repository should currently be read as:
-
-- **architecturally recovered enough to prove real direction**
-- **already able to support a credible live-memory story**
-- **not yet at “claim final-boss solved” status**
+Proof artifacts for the current phases live under `reports/`.
 
 ## What this repo is not claiming
 
-- It is **not** a standalone API-first memory product yet.
-- It is **not** a one-click upstream auto-update system.
-- It is **not** the full Hermes repository.
-- It does **not** claim automatic donor compatibility without review.
+- It is not a standalone API-first memory product yet.
+- It is not a one-click upstream auto-update system.
+- It is not the full Hermes repository.
+- It does not claim automatic donor compatibility without review.
+
+The current framing is simple: native Hermes integration first, shared local store second, standalone API later, only if it is intentionally built.
 
 ## Repo scope
 
 This repository is a focused Brainstack slice containing:
 
-- the Hermes-native Brainstack plugin code under [`brainstack/`](./brainstack)
-- donor boundary and refresh logic under [`brainstack/donors/`](./brainstack/donors) and [`scripts/`](./scripts)
-- focused test slices under [`tests/`](./tests)
-- optional RTK sidecar integration surface in [`rtk_sidecar.py`](./rtk_sidecar.py)
+- the Hermes-native Brainstack plugin code under `brainstack/`
+- donor boundaries and refresh logic under `brainstack/donors/` and `scripts/`
+- focused test slices under `tests/`
+- optional RTK sidecar integration surface in `rtk_sidecar.py`
+- proof artifacts under `reports/`
 
 ## Repo layout
 
 ```text
 brainstack/
-  __init__.py
-  control_plane.py
-  corpus_backend.py
-  corpus_backend_chroma.py
-  db.py
-  graph_backend.py
-  graph_backend_kuzu.py
-  extraction_pipeline.py
-  transcript.py
-  graph.py
-  corpus.py
-  retrieval.py
-  stable_memory_guardrails.py
-  temporal.py
-  provenance.py
-  reconciler.py
-  tier1_extractor.py
-  tier2_extractor.py
-  usefulness.py
-  donors/
+docs/
+host_payload/agent/
+reports/
 scripts/
-  brainstack_doctor.py
-  install_into_hermes.py
-  brainstack_refresh_donors.py
-  update_hermes_with_brainstack.py
 tests/
+brainstack_doctor.py
+install_into_hermes.py
 rtk_sidecar.py
+update_hermes_with_brainstack.py
 ```
 
 ## Included operational tooling
 
-The repository already includes the useful operational scripts you would actually want in a source tree:
-
-- doctor / install / refresh:
-  - `brainstack_doctor.py`
-  - `install_into_hermes.py`
-  - `update_hermes_with_brainstack.py`
-  - `scripts/brainstack_doctor.py`
-  - `scripts/brainstack_refresh_donors.py`
-  - `scripts/install_into_hermes.py`
-  - `scripts/update_hermes_with_brainstack.py`
-
-## Published proof artifacts
-
-The repository includes a small set of proof artifacts that are actually worth reading:
-
-- Phase `23` broader deployed-live baseline
-- Phase `24` correctness proofs:
-  - principal-bleed canary
-  - deterministic carry-through proof
-  - focused deployed-path proactive rerun
-- Phase `25` broader post-fix baseline and proactive variance check
-
-These are intentionally narrower than “upload every log ever produced”. They are here to back the main claims in this README, not to turn the repo into a dump folder.
-
-## Running expectations
-
-This repository reflects a **Hermes-integrated** Brainstack slice. Some modules and tests still depend on Hermes runtime interfaces such as `agent.memory_provider` and Hermes home/config conventions.
-
-So the correct framing is:
-
-- **native Hermes integration first**
-- **shared local store second**
-- **standalone API later, only if intentionally built**
-
-## Update model
-
-Current updateability is the middle path:
-
-- explicit donor registry
-- explicit local adapter seams
-- bounded refresh reporting
-- local smoke verification
-
-This is much cleaner than baked-in donor drift, but it is still **not** full automatic upstream syncing.
+| Script | Role |
+| :--- | :--- |
+| `install_into_hermes.py` | Install Brainstack into a Hermes checkout |
+| `update_hermes_with_brainstack.py` | Refresh Hermes upstream and reinstall Brainstack |
+| `brainstack_doctor.py` | Validate install assumptions and fail closed when upstream changed something important |
+| `scripts/brainstack_refresh_donors.py` | Report donor state and run bounded refresh workflow |
+| `rtk_sidecar.py` | Optional token-aware sidecar surface |
 
 ## Installation into Hermes
 
@@ -268,32 +227,16 @@ python install_into_hermes.py /path/to/hermes-agent --enable --doctor --runtime 
 
 What the installer does:
 
-- copies `brainstack/` into `plugins/memory/brainstack/`
-- copies `rtk_sidecar.py` when the target Hermes checkout has `agent/`
-- copies Brainstack host helper payload into the target Hermes checkout:
-  - `agent/brainstack_mode.py`
-- patches recognized Hermes host files so Brainstack can be the single live memory owner:
-  - `run_agent.py` strips legacy `memory` while leaving bounded `session_search` available as explicit conversation search in Brainstack-only mode
-  - `gateway/run.py` routes reset / resume / expiry boundaries through a Brainstack-aware finalizer
-  - `gateway/run.py` also keeps platform runtime status truthful during connect, reconnect, and disconnect paths
-  - `gateway/status.py` is patched so `None` can clear stale `exit_reason` and platform error fields instead of silently preserving old failure state
-  - gateway maintenance agents stop carrying the legacy memory toolset in Brainstack-only mode
-- patches recognized Hermes config so:
-  - `memory.provider: brainstack`
-  - `memory.memory_enabled: false`
-  - `memory.user_profile_enabled: false`
-  - `plugins.brainstack.graph_backend: kuzu`
-  - `plugins.brainstack.graph_db_path: $HERMES_HOME/brainstack/brainstack.kuzu`
-  - `plugins.brainstack.corpus_backend: chroma`
-  - `plugins.brainstack.corpus_db_path: $HERMES_HOME/brainstack/brainstack.chroma`
-- writes a sanitized `.brainstack-install-manifest.json`
-- runs doctor checks if requested
-- supports both `docker` and `local` runtime modes through the same installer
-- in `docker` mode, generates `scripts/hermes-brainstack-start.sh` inside the target Hermes checkout
-- in `docker` mode, generates `scripts/hermes-gateway-healthcheck.py` and patches Compose to use readiness-aware health instead of process-only health
-- keeps Brainstack as the owner of personal profile/style memory while still allowing procedural skill usage
+| Area | Action |
+| :--- | :--- |
+| Plugin payload | Copies `brainstack/` into `plugins/memory/brainstack/` |
+| Host helper | Copies `agent/brainstack_mode.py` and `rtk_sidecar.py` when the target checkout supports them |
+| Host patching | Gates legacy `memory` and `session_search` tool exposure in Brainstack-only mode and routes session boundaries through a Brainstack-aware finalizer |
+| Config | Sets `memory.provider: brainstack`, disables builtin memory and builtin profile memory, and wires the `Kuzu` and `Chroma` paths |
+| Docker support | Generates `scripts/hermes-brainstack-start.sh`, adds a readiness-aware healthcheck, and supports the same install flow as local mode |
+| Verification | Writes a sanitized install manifest and can run doctor checks immediately |
 
-What it intentionally does **not** do:
+What it intentionally does not do:
 
 - it does not guess unknown upstream host changes
 - it does not inject secrets
@@ -314,7 +257,16 @@ If the target runtime is Dockerized and the Docker image bakes Hermes source int
 python update_hermes_with_brainstack.py /path/to/hermes-agent --pull --reinstall --doctor --docker-rebuild --runtime docker
 ```
 
-Docker helper after install:
+Current updateability is the middle path:
+
+- explicit donor registry
+- explicit local adapter seams
+- bounded refresh reporting
+- local smoke verification
+
+That is much cleaner than silent donor drift, but it is still not full automatic upstream syncing.
+
+## Docker helper after install
 
 ```bash
 cd /path/to/hermes-agent
@@ -327,36 +279,32 @@ cd /path/to/hermes-agent
 ./scripts/hermes-brainstack-start.sh logs
 ```
 
-This helper is intentionally small:
+The helper is intentionally small:
 
-- `start` = bring the stack up
-- `rebuild` = rebuild with cache and restart
-- `full` = no-cache pull+build and restart
-- `stop` = stop the running service
-- `purge` = stop the service and clear conversational persistence, including Brainstack DB, state DB, and session replay files
-- `reset` = purge conversational persistence and start the service again
-- `status` = show compose status plus the current readiness summary from `gateway_state.json`
-- `logs` = tail live logs
-- `start` / `rebuild` / `full` wait for readiness instead of claiming success as soon as the container exists
-- `purge` / `reset` ask for an explicit `DELETE` confirmation before wiping memory/session state
-- `purge` / `reset` also clear hidden session replay under `/opt/data/sessions/`
+- `start` brings the stack up
+- `rebuild` rebuilds with cache and restarts
+- `full` does a no-cache pull, build, and restart
+- `stop` stops the running service
+- `purge` clears conversational persistence, including Brainstack DB, state DB, and session replay files
+- `reset` purges conversational persistence and starts again
+- `status` shows compose status plus readiness summary from `gateway_state.json`
+- `logs` tails live logs
+
+`start`, `rebuild`, and `full` wait for readiness instead of claiming success as soon as the container exists. `purge` and `reset` ask for an explicit `DELETE` confirmation before wiping memory and session state.
 
 ## Doctor checks
 
-`brainstack_doctor.py` validates:
+`brainstack_doctor.py` is designed to fail closed.
 
-- target checkout really looks like Hermes
-- memory provider/plugin loader surfaces exist
-- Brainstack plugin payload is present and importable
-- Brainstack-only host helper is present
-- `run_agent.py` gates legacy `memory` tool exposure while allowing bounded `session_search`
-- `agent/brainstack_mode.py` blocks side-memory file, code/shell, and automation detours
-- `gateway/run.py` uses a Brainstack-aware session-boundary finalizer instead of legacy builtin-memory flush paths
-- config selects Brainstack and builtin memory is off
-- in `docker` mode: Docker compose uses `gateway run --replace`
-- in `docker` mode: Docker compose uses a readiness-aware gateway healthcheck rather than a process-only healthcheck
-- in `docker` mode: `scripts/hermes-gateway-healthcheck.py` exists
-- in `docker` mode: the desktop launcher points at the intended Hermes checkout
-- in `local` mode: Docker-specific checks are skipped and the doctor validates the Hermes checkout/config/plugin path without assuming container runtime
+It validates that the target checkout still looks like Hermes, that the provider/plugin loader surfaces exist, that Brainstack is present and importable, that Brainstack-only helpers are present, that legacy `memory` and `session_search` exposure is properly gated, and that config really selects Brainstack with builtin memory turned off. In `docker` mode it also checks the readiness-aware health wiring. In `local` mode it skips the Docker-specific assumptions.
 
-The doctor is designed to fail closed. If upstream Hermes removes a required provider surface, the right outcome is an explicit incompatibility report, not a silent half-wire.
+If Hermes upstream removes a required provider surface, the correct outcome is an explicit incompatibility report, not a silent partial install.
+
+## Current direction
+
+The next recorded corrective direction is narrow and concrete:
+
+- better exact-fact turn selection
+- better update and supersession preference for fresher values
+- better packing fidelity for answer-bearing details
+- bounded query decomposition only where it is actually needed
