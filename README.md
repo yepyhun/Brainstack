@@ -1,8 +1,15 @@
 # Brainstack
 
-Brainstack is a Hermes-native composite memory provider and local memory substrate.
+Brainstack is a Hermes-native composite memory provider built for **persistent second-brain usage**:
+always-on agents, long-lived user identity, durable preferences, evolving truths, and larger bodies of recalled knowledge without turning the prompt into sludge.
 
-It currently runs **inside Hermes-Agent as a direct `MemoryProvider` plugin**, not as a standalone API-first memory server. Runtime memory ownership stays with Brainstack, while the storage layer is now split by responsibility:
+The current ambition is straightforward:
+
+- be one of the strongest practical local-first memory stacks for this always-on agent / second-brain use case
+- combine the best parts of temporal continuity, graph truth, and corpus retrieval
+- keep them under one runtime ownership model instead of letting three half-systems fight each other
+
+It currently runs **inside Hermes-Agent as a direct `MemoryProvider` plugin**, not as a standalone API-first memory server. Runtime memory ownership stays with Brainstack, while the storage layer is split by responsibility:
 
 - `SQLite` for shell/session/profile/transcript state
 - embedded `Kuzu` for L2 graph truth
