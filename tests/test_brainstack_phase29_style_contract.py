@@ -122,6 +122,76 @@ def test_reconcile_tier2_candidates_upserts_canonical_style_contract_profile_row
     assert any(action["kind"] == "style_contract" and action["action"] == "ADD" for action in result["actions"])
 
 
+def test_reconcile_tier2_candidates_accepts_extractor_normalized_style_contract(tmp_path):
+    store = BrainstackStore(str(tmp_path / "brainstack.db"))
+    store.open()
+    scope = _scope("discord", "user-a")
+    principal_scope_key = str(scope["principal_scope_key"])
+
+    def _fake_llm_caller(**kwargs):
+        return {
+            "content": json.dumps(
+                {
+                    "profile_items": [],
+                    "style_contract": {
+                        "title": "27 Communication Rules",
+                        "summary": "Detailed multi-section communication pack for Hungarian chat style.",
+                        "sections": [
+                            {
+                                "heading": "tartalmi minták (1-5)",
+                                "lines": [
+                                    "konkrét tények nem jelentőségfelfújás",
+                                    "egy konkrét forrás nem homályos hivatkozások",
+                                ],
+                            },
+                            {
+                                "heading": "kommunikációs minták (18-20)",
+                                "lines": [
+                                    "chatbot maradványok tilos",
+                                    "knowledge cutoff disclaimer tilos",
+                                ],
+                            },
+                        ],
+                        "confidence": 0.98,
+                    },
+                    "states": [],
+                    "relations": [],
+                    "inferred_relations": [],
+                    "typed_entities": [],
+                    "temporal_events": [],
+                    "continuity_summary": "",
+                    "decisions": [],
+                }
+            )
+        }
+
+    extracted = extract_tier2_candidates(
+        [{"turn_number": 1, "kind": "turn", "content": "User pasted the 27 communication rules."}],
+        llm_caller=_fake_llm_caller,
+    )
+
+    assert extracted["style_contract"] is not None
+    assert extracted["style_contract"]["slot"] == STYLE_CONTRACT_SLOT
+
+    result = reconcile_tier2_candidates(
+        store,
+        session_id="session-style-normalized",
+        turn_number=1,
+        source="tier2:test",
+        metadata=scope,
+        extracted=extracted,
+    )
+
+    row = store.get_profile_item(
+        stable_key=STYLE_CONTRACT_SLOT,
+        principal_scope_key=principal_scope_key,
+    )
+    assert row is not None
+    assert "27 Communication Rules" in row["content"]
+    assert "tartalmi minták (1-5):" in row["content"]
+    assert any(action["kind"] == "style_contract" and action["action"] == "ADD" for action in result["actions"])
+
+
 def test_style_contract_explicit_recall_uses_canonical_profile_slot_without_leaking_into_ordinary_turns(tmp_path):
     store = BrainstackStore(str(tmp_path / "brainstack.db"))
     store.open()

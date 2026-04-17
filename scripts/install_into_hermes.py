@@ -949,6 +949,38 @@ def _patch_gateway_status(path: Path, dry_run: bool) -> list[str]:
     return applied
 
 
+def _patch_auxiliary_client(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    old = "    resolved_model = model or cfg_model\n"
+    new = (
+        "    resolved_model = model or cfg_model\n"
+        "    # Brainstack relies on auxiliary.flush_memories.provider: main meaning\n"
+        "    # the task should inherit the agent's actual active model, not the\n"
+        "    # provider default auxiliary model. Without this, a Nous-backed main\n"
+        "    # provider can silently drift to a missing Gemini auxiliary default\n"
+        "    # and durable Tier-2 writes fail at runtime.\n"
+        "    if not resolved_model:\n"
+        "        explicit_provider = str(provider or cfg_provider or \"\").strip().lower()\n"
+        "        if explicit_provider == \"main\":\n"
+        "            resolved_model = _read_main_model() or None\n"
+    )
+    if "explicit_provider == \"main\"" not in text:
+        text = _replace_once(
+            text,
+            old,
+            new,
+            label="auxiliary_client main model inheritance",
+            path=path,
+        )
+        applied.append("auxiliary_client:inherit_main_model")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
 def _patch_discord_platform(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
@@ -1772,6 +1804,7 @@ def main() -> int:
 
     host_patches: list[str] = []
     host_patches.extend(_patch_run_agent(target / "run_agent.py", args.dry_run))
+    host_patches.extend(_patch_auxiliary_client(target / "agent" / "auxiliary_client.py", args.dry_run))
     host_patches.extend(_patch_memory_manager(target / "agent" / "memory_manager.py", args.dry_run))
     host_patches.extend(_patch_gateway_run(target / "gateway" / "run.py", args.dry_run))
     host_patches.extend(_patch_gateway_status(target / "gateway" / "status.py", args.dry_run))

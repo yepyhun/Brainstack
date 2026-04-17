@@ -68,11 +68,20 @@ def render_style_contract_content(
 def normalize_style_contract_payload(payload: Any) -> Dict[str, Any] | None:
     if not isinstance(payload, Mapping):
         return None
-    title = _normalize_text(payload.get("title")) or STYLE_CONTRACT_DEFAULT_TITLE
-    summary = _normalize_text(payload.get("summary"))
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
+    slot = _normalize_text(payload.get("slot"))
+    title = (
+        _normalize_text(payload.get("title"))
+        or _normalize_text(metadata.get("style_contract_title"))
+        or STYLE_CONTRACT_DEFAULT_TITLE
+    )
+    summary = _normalize_text(payload.get("summary")) or _normalize_text(metadata.get("style_contract_summary"))
     confidence = _coerce_confidence(payload.get("confidence"), default=0.9)
+    section_source = payload.get("sections")
+    if not section_source:
+        section_source = metadata.get("style_contract_sections")
     sections: List[Dict[str, Any]] = []
-    for raw_section in payload.get("sections") or ():
+    for raw_section in section_source or ():
         if not isinstance(raw_section, Mapping):
             continue
         heading = _normalize_text(raw_section.get("heading"))
@@ -80,23 +89,25 @@ def normalize_style_contract_payload(payload: Any) -> Dict[str, Any] | None:
         if not heading and not lines:
             continue
         sections.append({"heading": heading, "lines": lines})
+    if slot and slot != STYLE_CONTRACT_SLOT:
+        return None
     content = render_style_contract_content(title=title, summary=summary, sections=sections)
     if not content or not sections:
         return None
-    metadata: Dict[str, Any] = {
+    normalized_metadata: Dict[str, Any] = {
         "memory_class": "style_contract",
         "style_contract_title": title,
         "style_contract_sections": sections,
     }
     if summary:
-        metadata["style_contract_summary"] = summary
+        normalized_metadata["style_contract_summary"] = summary
     return {
         "category": STYLE_CONTRACT_CATEGORY,
         "slot": STYLE_CONTRACT_SLOT,
         "content": content,
         "confidence": confidence,
-        "source": "tier2_llm",
-        "metadata": metadata,
+        "source": _normalize_text(payload.get("source")) or "tier2_llm",
+        "metadata": normalized_metadata,
     }
 
 

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from scripts.install_into_hermes import (
+    _patch_auxiliary_client,
     _default_compose_path,
     _default_config_path,
     _generated_compose_path,
@@ -219,6 +220,29 @@ def test_patch_config_upgrades_flush_memories_auto_to_main(tmp_path: Path):
 
     assert result["flush_memories_provider"] == "main"
     assert "provider: main" in content
+
+
+def test_patch_auxiliary_client_makes_main_provider_inherit_main_model(tmp_path: Path):
+    path = tmp_path / "auxiliary_client.py"
+    path.write_text(
+        "def _read_main_model() -> str:\n"
+        "    return \"xiaomi/mimo-v2-pro\"\n\n"
+        "def _resolve_task_provider_model(task=None, provider=None, model=None, base_url=None, api_key=None):\n"
+        "    cfg_provider = None\n"
+        "    cfg_model = None\n"
+        "    resolved_model = model or cfg_model\n"
+        "    resolved_api_mode = None\n"
+        "    return provider, resolved_model, base_url, api_key, resolved_api_mode\n",
+        encoding="utf-8",
+    )
+
+    applied = _patch_auxiliary_client(path, dry_run=False)
+    content = path.read_text(encoding="utf-8")
+
+    assert "auxiliary_client:inherit_main_model" in applied
+    assert "explicit_provider = str(provider or cfg_provider or \"\").strip().lower()" in content
+    assert "if explicit_provider == \"main\":" in content
+    assert "resolved_model = _read_main_model() or None" in content
 
 
 def test_default_config_path_returns_single_agent_config(tmp_path: Path):
