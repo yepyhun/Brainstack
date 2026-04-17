@@ -14,6 +14,10 @@ def test_generated_start_script_carries_full_purge_and_reset_actions(tmp_path: P
     script_path = _write_docker_start_script(tmp_path, dry_run=False)
     content = script_path.read_text(encoding="utf-8")
 
+    assert "normalize_runtime_ownership()" in content
+    assert "/opt/data/auth.json" in content
+    assert "/opt/data/auth.lock" in content
+    assert 'chown -R hermes:hermes "$path"' in content
     assert "purge_runtime_state()" in content
     assert "confirm_destructive_reset()" in content
     assert 'WARNING: DELETE EVERY MEMORY' in content
@@ -22,6 +26,11 @@ def test_generated_start_script_carries_full_purge_and_reset_actions(tmp_path: P
     assert "purge|clear-memory|clear-state)" in content
     assert "reset)" in content
     assert "Usage: $0 [start|rebuild|full|stop|purge|reset|status|logs]" in content
+    assert "start)\n    normalize_runtime_ownership" in content
+    assert "rebuild)\n    normalize_runtime_ownership" in content
+    assert "full|full-rebuild)\n    normalize_runtime_ownership" in content
+    assert "reset)\n    confirm_destructive_reset" in content
+    assert "purge_runtime_state\n    normalize_runtime_ownership\n    dc up -d" in content
 
 
 def test_gateway_run_patch_supports_multiline_platform_import(tmp_path: Path):

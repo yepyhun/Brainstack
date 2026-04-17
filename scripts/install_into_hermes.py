@@ -1173,6 +1173,32 @@ ACTION="${1:-start}"
 HEALTHCHECK="$REPO_ROOT/scripts/hermes-gateway-healthcheck.py"
 HERMES_HOME_DIR="$REPO_ROOT/hermes-config/bestie"
 
+normalize_runtime_ownership() {
+  FIXUP_SERVICE="$SERVICE"
+  if [ -z "$FIXUP_SERVICE" ]; then
+    return 0
+  fi
+  docker compose -f "$COMPOSE_FILE" run --rm --no-deps --entrypoint sh "$FIXUP_SERVICE" -lc '
+    for path in \
+      /opt/data/.env \
+      /opt/data/config.yaml \
+      /opt/data/auth.json \
+      /opt/data/auth.lock \
+      /opt/data/gateway_state.json \
+      /opt/data/gateway.pid \
+      /opt/data/state.db \
+      /opt/data/state.db-shm \
+      /opt/data/state.db-wal \
+      /opt/data/brainstack \
+      /opt/data/sessions \
+      /opt/data/memories
+    do
+      [ -e "$path" ] || continue
+      chown -R hermes:hermes "$path" 2>/dev/null || true
+    done
+  ' >/dev/null
+}
+
 wait_for_ready() {
   if [ ! -f "$HEALTHCHECK" ]; then
     return 0
@@ -1241,14 +1267,17 @@ purge_runtime_state() {
 
 case "$ACTION" in
   start)
+    normalize_runtime_ownership
     dc up -d
     wait_for_ready
     ;;
   rebuild)
+    normalize_runtime_ownership
     dc up -d --build
     wait_for_ready
     ;;
   full|full-rebuild)
+    normalize_runtime_ownership
     if [ -n "$SERVICE" ]; then
       docker compose -f "$COMPOSE_FILE" build --no-cache --pull "$SERVICE"
       docker compose -f "$COMPOSE_FILE" up -d "$SERVICE"
@@ -1270,6 +1299,7 @@ case "$ACTION" in
     confirm_destructive_reset
     dc stop || true
     purge_runtime_state
+    normalize_runtime_ownership
     dc up -d
     wait_for_ready
     ;;
