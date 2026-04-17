@@ -8,10 +8,11 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, TypeVar
+from typing import Any, Callable, Dict, Iterable, List, Mapping, TypeVar
 
 from .corpus_backend import CorpusBackend, create_corpus_backend
 from .graph_backend import GraphBackend, create_graph_backend
+from .logistics_contract import derive_transcript_logistics_typed_entities
 from .profile_contract import (
     COMMUNICATION_CANONICAL_SLOTS,
     derive_transcript_identity_profile_items,
@@ -34,6 +35,8 @@ PROFILE_SCOPE_DELIMITER = "::principal_scope::"
 PRINCIPAL_SCOPED_PROFILE_CATEGORIES = {"identity", "preference"}
 MIGRATION_CANONICAL_COMMUNICATION_ROWS_V1 = "canonical_communication_rows_v1"
 MIGRATION_EXPLICIT_IDENTITY_BACKFILL_V1 = "explicit_identity_backfill_v1"
+MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V1 = "stable_logistics_typed_entities_v1"
+MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V2 = "stable_logistics_typed_entities_v2"
 
 
 def utc_now_iso() -> str:
@@ -533,6 +536,10 @@ class BrainstackStore:
             self._apply_canonical_communication_rows_migration_v1()
         if not self._migration_applied(MIGRATION_EXPLICIT_IDENTITY_BACKFILL_V1):
             self._apply_explicit_identity_backfill_migration_v1()
+        if not self._migration_applied(MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V1):
+            self._apply_stable_logistics_typed_entities_migration_v1()
+        if not self._migration_applied(MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V2):
+            self._apply_stable_logistics_typed_entities_migration_v2()
 
     def _migration_applied(self, name: str) -> bool:
         row = self.conn.execute(
@@ -673,6 +680,129 @@ class BrainstackStore:
             logger.info("Backfilled %s explicit identity rows from principal-scoped transcript history", migrated)
         else:
             logger.info("Applied explicit identity compatibility migration with no eligible transcript rows")
+
+    @_locked
+    def _apply_stable_logistics_typed_entities_migration_v1(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT id, session_id, turn_number, kind, content, source, metadata_json, created_at
+            FROM transcript_entries
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        scoped_entries: Dict[str, List[Dict[str, Any]]] = {}
+        scope_payloads: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            item = _row_to_dict(row)
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            principal_scope_key = _principal_scope_key_from_metadata(metadata)
+            if not principal_scope_key:
+                continue
+            scoped_entries.setdefault(principal_scope_key, []).append(item)
+            if principal_scope_key not in scope_payloads:
+                payload = _principal_scope_payload_from_metadata(metadata)
+                if payload:
+                    scope_payloads[principal_scope_key] = payload
+
+        migrated = 0
+        for principal_scope_key, entries in scoped_entries.items():
+            candidates = derive_transcript_logistics_typed_entities(
+                entries,
+                existing_entities=[],
+                source="tier2_compat_backfill",
+            )
+            for candidate in candidates:
+                metadata: Dict[str, Any] = {
+                    "principal_scope_key": principal_scope_key,
+                    "provenance": {
+                        "source_ids": [f"migration:{MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V1}"],
+                        "tier": "migration",
+                    },
+                }
+                principal_scope = scope_payloads.get(principal_scope_key)
+                if principal_scope:
+                    metadata["principal_scope"] = principal_scope
+                if isinstance(candidate.get("temporal"), dict):
+                    metadata["temporal"] = dict(candidate["temporal"])
+                actions = self.upsert_typed_entity(
+                    entity_name=str(candidate.get("name") or "").strip(),
+                    entity_type=str(candidate.get("entity_type") or "").strip(),
+                    subject_name=str(candidate.get("subject") or "User").strip() or "User",
+                    attributes=dict(candidate.get("attributes") or {}),
+                    source=str(candidate.get("source") or "tier2_compat_backfill"),
+                    metadata=metadata,
+                )
+                if actions:
+                    migrated += 1
+
+        self._mark_migration_applied(MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V1)
+        self.conn.commit()
+        if migrated:
+            logger.info("Backfilled %s stable logistics typed entities from principal-scoped transcript history", migrated)
+        else:
+            logger.info("Applied stable logistics compatibility migration with no eligible transcript rows")
+
+    @_locked
+    def _apply_stable_logistics_typed_entities_migration_v2(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT id, session_id, turn_number, kind, content, source, metadata_json, created_at
+            FROM transcript_entries
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        scoped_entries: Dict[str, List[Dict[str, Any]]] = {}
+        scope_payloads: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            item = _row_to_dict(row)
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            principal_scope_key = _principal_scope_key_from_metadata(metadata)
+            if not principal_scope_key:
+                continue
+            scoped_entries.setdefault(principal_scope_key, []).append(item)
+            if principal_scope_key not in scope_payloads:
+                payload = _principal_scope_payload_from_metadata(metadata)
+                if payload:
+                    scope_payloads[principal_scope_key] = payload
+
+        migrated = 0
+        for principal_scope_key, entries in scoped_entries.items():
+            candidates = derive_transcript_logistics_typed_entities(
+                entries,
+                existing_entities=[],
+                source="tier2_compat_backfill",
+            )
+            for candidate in candidates:
+                metadata: Dict[str, Any] = {
+                    "principal_scope_key": principal_scope_key,
+                    "provenance": {
+                        "source_ids": [f"migration:{MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V2}"],
+                        "tier": "migration",
+                    },
+                }
+                principal_scope = scope_payloads.get(principal_scope_key)
+                if principal_scope:
+                    metadata["principal_scope"] = principal_scope
+                if isinstance(candidate.get("temporal"), dict):
+                    metadata["temporal"] = dict(candidate["temporal"])
+                actions = self.upsert_typed_entity(
+                    entity_name=str(candidate.get("name") or "").strip(),
+                    entity_type=str(candidate.get("entity_type") or "").strip(),
+                    subject_name=str(candidate.get("subject") or "User").strip() or "User",
+                    attributes=dict(candidate.get("attributes") or {}),
+                    source=str(candidate.get("source") or "tier2_compat_backfill"),
+                    metadata=metadata,
+                    supersede_existing=True,
+                )
+                if actions:
+                    migrated += 1
+
+        self._mark_migration_applied(MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V2)
+        self.conn.commit()
+        if migrated:
+            logger.info("Repaired %s stable logistics typed entities from principal-scoped transcript history", migrated)
+        else:
+            logger.info("Applied stable logistics repair migration with no eligible transcript rows")
 
     def _init_schema(self) -> None:
         self.conn.executescript(
@@ -3372,6 +3502,60 @@ class BrainstackStore:
         if self._graph_backend is not None and int(outcome.get("entity_id") or 0) > 0:
             self._publish_entity_subgraph(int(outcome["entity_id"]))
         return outcome
+
+    @_locked
+    def upsert_typed_entity(
+        self,
+        *,
+        entity_name: str,
+        entity_type: str,
+        subject_name: str,
+        attributes: Mapping[str, Any],
+        source: str,
+        metadata: Dict[str, Any] | None = None,
+        confidence: float = 0.78,
+        supersede_existing: bool = False,
+    ) -> List[Dict[str, Any]]:
+        normalized_entity_name = " ".join(str(entity_name or "").strip().split())
+        normalized_entity_type = " ".join(str(entity_type or "").strip().lower().split())
+        normalized_subject_name = " ".join(str(subject_name or "").strip().split()) or "User"
+        if not normalized_entity_name or not normalized_entity_type:
+            return []
+
+        base_metadata = dict(metadata or {})
+        base_metadata.setdefault("confidence", float(confidence))
+        actions: List[Dict[str, Any]] = []
+        state_candidates: List[tuple[str, str]] = [
+            ("entity_type", normalized_entity_type),
+            ("owner_subject", normalized_subject_name),
+        ]
+        for attribute, value in dict(attributes or {}).items():
+            normalized_attribute = " ".join(str(attribute or "").strip().lower().split())
+            normalized_value = " ".join(str(value or "").strip().split())
+            if not normalized_attribute or not normalized_value:
+                continue
+            state_candidates.append((normalized_attribute, normalized_value))
+
+        for attribute, value_text in state_candidates:
+            outcome = self.upsert_graph_state(
+                subject_name=normalized_entity_name,
+                attribute=attribute,
+                value_text=value_text,
+                source=source,
+                supersede=supersede_existing,
+                metadata=base_metadata,
+            )
+            actions.append(
+                {
+                    "kind": "typed_entity",
+                    "entity_name": normalized_entity_name,
+                    "entity_type": normalized_entity_type,
+                    "attribute": attribute,
+                    "action": "NONE" if str(outcome.get("status", "")).lower() in {"unchanged", "shadowed"} else "ADD",
+                    **outcome,
+                }
+            )
+        return actions
 
     @_locked
     def list_graph_conflicts(self, *, limit: int) -> List[Dict[str, Any]]:

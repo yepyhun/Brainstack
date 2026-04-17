@@ -242,51 +242,19 @@ def _reconcile_typed_entities(
             base_metadata=metadata,
             confidence=float(candidate.get("confidence", 0.78)),
         )
-
-        state_candidates: List[Dict[str, Any]] = [
-            {
-                "subject": entity_name,
-                "attribute": "entity_type",
-                "value": entity_type,
-                "supersede": False,
-                "confidence": float(candidate.get("confidence", 0.78)),
-                "metadata": entity_metadata,
-            },
-            {
-                "subject": entity_name,
-                "attribute": "owner_subject",
-                "value": subject_name,
-                "supersede": False,
-                "confidence": float(candidate.get("confidence", 0.78)),
-                "metadata": entity_metadata,
-            },
-        ]
         raw_attributes_value = candidate.get("attributes")
         raw_attributes: Mapping[Any, Any] = raw_attributes_value if isinstance(raw_attributes_value, Mapping) else {}
-        for attribute, value in raw_attributes.items():
-            normalized_attribute = _normalize_text(attribute).lower()
-            normalized_value = _normalize_text(value)
-            if not normalized_attribute or not normalized_value:
-                continue
-            state_candidates.append(
-                {
-                    "subject": entity_name,
-                    "attribute": normalized_attribute,
-                    "value": normalized_value,
-                    "supersede": False,
-                    "confidence": float(candidate.get("confidence", 0.78)),
-                    "metadata": entity_metadata,
-                }
+        actions.extend(
+            store.upsert_typed_entity(
+                entity_name=entity_name,
+                entity_type=entity_type,
+                subject_name=subject_name,
+                attributes=raw_attributes,
+                source=source,
+                metadata=entity_metadata,
+                confidence=float(candidate.get("confidence", 0.78)),
             )
-
-        for outcome in _reconcile_states(
-            store,
-            candidates=state_candidates,
-            metadata=metadata,
-            source=source,
-            user_name=user_name,
-        ):
-            actions.append({**outcome, "kind": "typed_entity", "entity_name": entity_name})
+        )
     return actions
 
 

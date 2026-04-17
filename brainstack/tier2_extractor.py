@@ -6,6 +6,7 @@ import logging
 import re
 from typing import Any, Callable, Dict, Iterable, List, Mapping
 
+from .logistics_contract import derive_transcript_logistics_typed_entities
 from .profile_contract import (
     derive_transcript_communication_profile_items,
     derive_transcript_identity_profile_items,
@@ -706,15 +707,22 @@ def extract_tier2_candidates(
             existing_items=profile_items,
         )
     )
+    typed_entities = _normalize_typed_entities(
+        payload.get("typed_entities"),
+        transcript_entries=entries,
+    )
+    typed_entities.extend(
+        derive_transcript_logistics_typed_entities(
+            entries,
+            existing_entities=typed_entities,
+        )
+    )
     return {
         "profile_items": profile_items[:8],
         "states": _normalize_states(payload.get("states")),
         "relations": _normalize_relations(payload.get("relations")),
         "inferred_relations": _normalize_inferred_relations(payload.get("inferred_relations")),
-        "typed_entities": _normalize_typed_entities(
-            payload.get("typed_entities"),
-            transcript_entries=entries,
-        ),
+        "typed_entities": typed_entities,
         "temporal_events": _normalize_temporal_events(
             payload.get("temporal_events"),
             transcript_entries=entries,
