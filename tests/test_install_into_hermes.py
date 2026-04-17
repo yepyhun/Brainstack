@@ -1,19 +1,34 @@
 from pathlib import Path
 
 from scripts.install_into_hermes import (
+    _default_compose_path,
     _default_config_path,
+    _generated_compose_path,
+    _patch_docker_entrypoint,
+    _patch_dockerignore,
     _patch_config,
     _patch_gateway_run,
     _patch_memory_manager,
     _patch_run_agent,
+    _write_docker_compose_file,
     _write_docker_start_script,
 )
 
 
 def test_generated_start_script_carries_full_purge_and_reset_actions(tmp_path: Path):
-    script_path = _write_docker_start_script(tmp_path, dry_run=False)
+    config_path = tmp_path / "hermes-config" / "agent-a" / "config.yaml"
+    compose_path = tmp_path / "docker-compose.agent-a.yml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("memory:\n  provider: hermes\n", encoding="utf-8")
+    compose_path.write_text("services:\n  hermes:\n    image: test\n", encoding="utf-8")
+
+    script_path = _write_docker_start_script(tmp_path, config_path, compose_path, dry_run=False)
     content = script_path.read_text(encoding="utf-8")
 
+    assert 'CONFIG_FILE="${HERMES_CONFIG_FILE:-$REPO_ROOT/hermes-config/agent-a/config.yaml}"' in content
+    assert 'COMPOSE_FILE="${HERMES_COMPOSE_FILE:-$REPO_ROOT/docker-compose.agent-a.yml}"' in content
+    assert 'HERMES_HOME_DEFAULT=$(CDPATH= cd -- "$(dirname -- "$CONFIG_FILE")" && pwd)' in content
+    assert 'HERMES_HOME_DIR="${HERMES_HOME_DIR:-$HERMES_HOME_DEFAULT}"' in content
     assert "normalize_runtime_ownership()" in content
     assert "/opt/data/auth.json" in content
     assert "/opt/data/auth.lock" in content
@@ -191,8 +206,97 @@ def test_patch_config_sets_embedded_graph_and_corpus_defaults(tmp_path: Path):
     assert "mode: balanced" in content
 
 
-def test_default_config_path_prefers_bestie_runtime_dir_even_before_config_exists(tmp_path: Path):
-    bestie_dir = tmp_path / "hermes-config" / "bestie"
-    bestie_dir.mkdir(parents=True)
+def test_default_config_path_returns_single_agent_config(tmp_path: Path):
+    config_path = tmp_path / "hermes-config" / "default" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("memory:\n  provider: hermes\n", encoding="utf-8")
 
-    assert _default_config_path(tmp_path) == bestie_dir / "config.yaml"
+    assert _default_config_path(tmp_path) == config_path
+
+
+def test_default_config_path_fails_when_multiple_agent_configs_exist(tmp_path: Path):
+    for name in ("alpha", "beta"):
+        config_path = tmp_path / "hermes-config" / name / "config.yaml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("memory:\n  provider: hermes\n", encoding="utf-8")
+
+    try:
+        _default_config_path(tmp_path)
+    except RuntimeError as exc:
+        assert "Multiple Hermes agent configs found" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError for ambiguous config selection")
+
+
+def test_default_compose_path_prefers_agent_specific_compose_when_config_is_scoped(tmp_path: Path):
+    config_path = tmp_path / "hermes-config" / "alpha" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("memory:\n  provider: hermes\n", encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    agent_compose = tmp_path / "docker-compose.alpha.yml"
+    agent_compose.write_text("services: {}\n", encoding="utf-8")
+
+    assert _default_compose_path(tmp_path, config_path) == agent_compose
+
+
+def test_generated_compose_path_is_agent_scoped(tmp_path: Path):
+    config_path = tmp_path / "hermes-config" / "Alpha Agent" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("memory:\n  provider: hermes\n", encoding="utf-8")
+
+    assert _generated_compose_path(tmp_path, config_path) == tmp_path / "docker-compose.alpha-agent.yml"
+
+
+def test_write_docker_compose_file_targets_selected_agent_home(tmp_path: Path):
+    config_path = tmp_path / "hermes-config" / "alpha" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("memory:\n  provider: hermes\n", encoding="utf-8")
+    compose_path = tmp_path / "docker-compose.alpha.yml"
+
+    written = _write_docker_compose_file(tmp_path, config_path, compose_path, dry_run=False)
+    content = written.read_text(encoding="utf-8")
+
+    assert written == compose_path
+    assert "name: hermes-alpha" in content
+    assert "container_name: hermes-alpha" in content
+    assert "- ./hermes-config/alpha:/opt/data" in content
+    assert '- ./runtime/workspace:/workspace' in content
+
+
+def test_patch_dockerignore_excludes_runtime_state(tmp_path: Path):
+    path = tmp_path / ".dockerignore"
+    path.write_text("node_modules\n.env\n*.md\n", encoding="utf-8")
+
+    applied = _patch_dockerignore(path, dry_run=False)
+    content = path.read_text(encoding="utf-8")
+
+    assert "dockerignore:exclude_runtime_state" in applied
+    assert "hermes-config/" in content
+    assert "runtime/" in content
+
+
+def test_patch_docker_entrypoint_adds_runtime_ownership_fix(tmp_path: Path):
+    path = tmp_path / "entrypoint.sh"
+    path.write_text(
+        "#!/bin/bash\n"
+        "set -e\n\n"
+        'HERMES_HOME="${HERMES_HOME:-/opt/data}"\n'
+        'INSTALL_DIR="/opt/hermes"\n\n'
+        'if [ "$(id -u)" = "0" ]; then\n'
+        '    if [ "$(stat -c %u "$HERMES_HOME" 2>/dev/null)" != "$actual_hermes_uid" ]; then\n'
+        '        chown -R hermes:hermes "$HERMES_HOME" 2>/dev/null || \\\n'
+        '            echo "Warning: chown failed (rootless container?) — continuing anyway"\n'
+        "    fi\n\n"
+        '    echo "Dropping root privileges"\n'
+        '    exec gosu hermes "$0" "$@"\n'
+        "fi\n",
+        encoding="utf-8",
+    )
+
+    applied = _patch_docker_entrypoint(path, dry_run=False)
+    content = path.read_text(encoding="utf-8")
+
+    assert "docker_entrypoint:normalize_runtime_ownership_function" in applied
+    assert "docker_entrypoint:normalize_runtime_ownership_call" in applied
+    assert "fix_critical_runtime_ownership()" in content
+    assert 'fix_critical_runtime_ownership\n\n    echo "Dropping root privileges"' in content

@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from scripts.install_into_hermes import _default_compose_path, _default_config_path
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -25,6 +27,7 @@ def _run(cmd: list[str], cwd: Path | None = None) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Update upstream Hermes and re-apply Brainstack.")
     parser.add_argument("target", help="Path to target Hermes checkout")
+    parser.add_argument("--config", type=Path, help="Path to target Hermes agent config.yaml")
     parser.add_argument("--runtime", choices=["auto", "docker", "local"], default="auto", help="Target runtime mode")
     parser.add_argument("--python", type=Path, help="Target Hermes Python interpreter for dependency install and doctor checks")
     parser.add_argument("--pull", action="store_true", help="Run git pull --ff-only in the target Hermes checkout first")
@@ -41,6 +44,7 @@ def main() -> int:
     if not (target / "run_agent.py").exists():
         print(f"FAIL target is not a Hermes checkout: {target}", file=sys.stderr)
         return 2
+    config_path = args.config.expanduser().resolve() if args.config else _default_config_path(target)
 
     if args.pull:
         _run(["git", "pull", "--ff-only"], cwd=target)
@@ -51,6 +55,8 @@ def main() -> int:
             str(REPO_ROOT / "scripts" / "install_into_hermes.py"),
             str(target),
             "--enable",
+            "--config",
+            str(config_path),
             "--runtime",
             args.runtime,
         ]
@@ -70,7 +76,7 @@ def main() -> int:
         if args.runtime == "local":
             print("FAIL --docker-rebuild cannot be used with --runtime local", file=sys.stderr)
             return 2
-        compose_file = args.compose_file or (target / "docker-compose.bestie.yml")
+        compose_file = args.compose_file.expanduser().resolve() if args.compose_file else _default_compose_path(target, config_path)
         rebuild_cmd = ["docker", "compose", "-f", str(compose_file), "build"]
         if args.compose_service:
             rebuild_cmd.append(args.compose_service)

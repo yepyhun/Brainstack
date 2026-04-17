@@ -1071,18 +1071,93 @@ def _write_yaml(path: Path, data: dict[str, Any]) -> None:
     path.write_text(yaml.safe_dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
 
+def _discover_agent_configs(target: Path) -> list[Path]:
+    candidates: list[Path] = []
+    root_config = target / "config.yaml"
+    if root_config.exists():
+        candidates.append(root_config)
+    hermes_config_root = target / "hermes-config"
+    if hermes_config_root.exists():
+        for config_path in sorted(hermes_config_root.glob("*/config.yaml")):
+            if config_path.is_file():
+                candidates.append(config_path)
+    return candidates
+
+
 def _default_config_path(target: Path) -> Path:
-    bestie_dir = target / "hermes-config" / "bestie"
-    if bestie_dir.exists():
-        return bestie_dir / "config.yaml"
-    return target / "config.yaml"
+    candidates = _discover_agent_configs(target)
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise RuntimeError(
+            "No Hermes agent config found. Create or select an agent first, then rerun the installer with "
+            "--config <path/to/config.yaml> if needed."
+        )
+    rendered = ", ".join(str(path.relative_to(target)) for path in candidates)
+    raise RuntimeError(
+        "Multiple Hermes agent configs found. Pass --config explicitly so Brainstack installs into the right agent: "
+        f"{rendered}"
+    )
 
 
-def _default_compose_path(target: Path) -> Path:
-    bestie = target / "docker-compose.bestie.yml"
-    if bestie.exists():
-        return bestie
-    return target / "docker-compose.yml"
+def _default_compose_path(target: Path, config_path: Path | None = None) -> Path:
+    candidates: list[Path] = []
+    root_compose = target / "docker-compose.yml"
+    if root_compose.exists():
+        candidates.append(root_compose)
+    for compose_path in sorted(target.glob("docker-compose*.yml")):
+        if compose_path.exists() and compose_path not in candidates:
+            candidates.append(compose_path)
+
+    if config_path:
+        try:
+            rel = config_path.relative_to(target / "hermes-config")
+        except ValueError:
+            rel = None
+        if rel and len(rel.parts) >= 2:
+            agent_name = rel.parts[0]
+            agent_compose = target / f"docker-compose.{agent_name}.yml"
+            if agent_compose.exists():
+                return agent_compose
+        if root_compose.exists():
+            return root_compose
+
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise RuntimeError(
+            "No Docker compose file found for this Hermes checkout. Pass --compose-file explicitly if you use Docker."
+        )
+    rendered = ", ".join(str(path.relative_to(target)) for path in candidates)
+    raise RuntimeError(
+        "Multiple Docker compose files found. Pass --compose-file explicitly so Brainstack patches the right runtime: "
+        f"{rendered}"
+    )
+
+
+def _docker_runtime_home_dir(target: Path, config_path: Path) -> Path:
+    try:
+        rel = config_path.relative_to(target / "hermes-config")
+    except ValueError as exc:
+        raise RuntimeError(
+            "Docker runtime requires an agent home like hermes-config/<agent>/config.yaml. "
+            "Root-level config.yaml is fine for local mode, but Docker needs a dedicated agent directory."
+        ) from exc
+    if len(rel.parts) < 2:
+        raise RuntimeError(
+            "Docker runtime requires an agent home like hermes-config/<agent>/config.yaml."
+        )
+    return target / "hermes-config" / rel.parts[0]
+
+
+def _sanitize_compose_slug(name: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in name).strip("-")
+    return cleaned or "brainstack"
+
+
+def _generated_compose_path(target: Path, config_path: Path) -> Path:
+    runtime_home = _docker_runtime_home_dir(target, config_path)
+    return target / f"docker-compose.{_sanitize_compose_slug(runtime_home.name)}.yml"
 
 
 def _patch_config(config_path: Path, dry_run: bool) -> dict[str, Any]:
@@ -1141,20 +1216,28 @@ def _write_manifest(target: Path, manifest: dict[str, Any], dry_run: bool) -> No
     path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def _write_docker_start_script(target: Path, dry_run: bool) -> Path:
+def _relative_to_target_or_absolute(target: Path, path: Path) -> str:
+    try:
+        return str(path.relative_to(target))
+    except ValueError:
+        return str(path)
+
+
+def _write_docker_start_script(target: Path, config_path: Path, compose_path: Path, dry_run: bool) -> Path:
     script_path = target / "scripts" / "hermes-brainstack-start.sh"
     legacy_path = target / "scripts" / "brainstack-start.sh"
+    config_ref = _relative_to_target_or_absolute(target, config_path)
+    compose_ref = _relative_to_target_or_absolute(target, compose_path)
     content = """#!/bin/sh
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
-if [ -f "$REPO_ROOT/docker-compose.bestie.yml" ]; then
-  COMPOSE_FILE="$REPO_ROOT/docker-compose.bestie.yml"
-else
-  COMPOSE_FILE="$REPO_ROOT/docker-compose.yml"
-fi
+CONFIG_FILE="${HERMES_CONFIG_FILE:-$REPO_ROOT/__CONFIG_REF__}"
+COMPOSE_FILE="${HERMES_COMPOSE_FILE:-$REPO_ROOT/__COMPOSE_REF__}"
+HERMES_HOME_DEFAULT=$(CDPATH= cd -- "$(dirname -- "$CONFIG_FILE")" && pwd)
+HERMES_HOME_DIR="${HERMES_HOME_DIR:-$HERMES_HOME_DEFAULT}"
 
 SERVICE="${HERMES_DOCKER_SERVICE:-}"
 if [ -z "$SERVICE" ] && [ -f "$COMPOSE_FILE" ]; then
@@ -1171,7 +1254,6 @@ dc() {
 
 ACTION="${1:-start}"
 HEALTHCHECK="$REPO_ROOT/scripts/hermes-gateway-healthcheck.py"
-HERMES_HOME_DIR="$REPO_ROOT/hermes-config/bestie"
 
 normalize_runtime_ownership() {
   FIXUP_SERVICE="$SERVICE"
@@ -1319,6 +1401,7 @@ case "$ACTION" in
     ;;
 esac
 """
+    content = content.replace("__CONFIG_REF__", config_ref).replace("__COMPOSE_REF__", compose_ref)
     if not dry_run:
         script_path.parent.mkdir(parents=True, exist_ok=True)
         script_path.write_text(content, encoding="utf-8")
@@ -1326,6 +1409,129 @@ esac
         if legacy_path.exists():
             legacy_path.unlink()
     return script_path
+
+
+def _write_docker_compose_file(target: Path, config_path: Path, compose_path: Path, dry_run: bool) -> Path:
+    runtime_home = _docker_runtime_home_dir(target, config_path)
+    runtime_ref = _relative_to_target_or_absolute(target, runtime_home)
+    workspace_ref = "runtime/workspace"
+    service_slug = _sanitize_compose_slug(runtime_home.name)
+    content = f"""name: hermes-{service_slug}
+
+services:
+  hermes-{service_slug}:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hermes-{service_slug}
+    working_dir: /opt/data
+    restart: unless-stopped
+    network_mode: host
+    command: ["gateway", "run", "--replace"]
+    environment:
+      HERMES_HOME: /opt/data
+      HERMES_ENABLE_PROJECT_PLUGINS: "true"
+    volumes:
+      - ./{runtime_ref}:/opt/data
+      - ./{workspace_ref}:/workspace
+    healthcheck:
+      test: ["CMD", "python3", "/opt/hermes/scripts/hermes-gateway-healthcheck.py", "--quiet"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+"""
+    if not dry_run:
+        compose_path.parent.mkdir(parents=True, exist_ok=True)
+        compose_path.write_text(content, encoding="utf-8")
+    return compose_path
+
+
+def _patch_dockerignore(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    if "hermes-config/\nruntime/\n" in text:
+        return []
+    block = (
+        "# Runtime data mounted into the container at /opt/data or /workspace.\n"
+        "# These must stay out of the image build context:\n"
+        "# - they are not needed for image construction\n"
+        "# - they may have restrictive ownership from the running container user\n"
+        "# - including them can break rebuilds on host-side permission checks\n"
+        "hermes-config/\n"
+        "runtime/\n\n"
+    )
+    anchor = "*.md\n"
+    if anchor not in text:
+        raise RuntimeError(f"Installer patch anchor missing for dockerignore in {path}")
+    text = text.replace(anchor, block + anchor, 1)
+    if not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return ["dockerignore:exclude_runtime_state"]
+
+
+def _patch_docker_entrypoint(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+    ownership_block = """fix_critical_runtime_ownership() {
+    target_uid=$(id -u hermes)
+    target_gid=$(id -g hermes)
+    for path in \\
+        "$HERMES_HOME/.env" \\
+        "$HERMES_HOME/config.yaml" \\
+        "$HERMES_HOME/auth.json" \\
+        "$HERMES_HOME/auth.lock" \\
+        "$HERMES_HOME/gateway_state.json" \\
+        "$HERMES_HOME/gateway.pid" \\
+        "$HERMES_HOME/state.db" \\
+        "$HERMES_HOME/state.db-shm" \\
+        "$HERMES_HOME/state.db-wal" \\
+        "$HERMES_HOME/brainstack" \\
+        "$HERMES_HOME/sessions" \\
+        "$HERMES_HOME/memories"
+    do
+        [ -e "$path" ] || continue
+        owner_uid=$(stat -c %u "$path" 2>/dev/null || echo "")
+        owner_gid=$(stat -c %g "$path" 2>/dev/null || echo "")
+        if [ "$owner_uid" != "$target_uid" ] || [ "$owner_gid" != "$target_gid" ]; then
+            chown -R hermes:hermes "$path" 2>/dev/null || \\
+                echo "Warning: failed to normalize ownership for $path"
+        fi
+    done
+}
+
+"""
+    if "fix_critical_runtime_ownership()" not in text:
+        anchor = 'INSTALL_DIR="/opt/hermes"\n\n'
+        if anchor not in text:
+            raise RuntimeError(f"Installer patch anchor missing for docker entrypoint function in {path}")
+        text = text.replace(anchor, anchor + ownership_block, 1)
+        applied.append("docker_entrypoint:normalize_runtime_ownership_function")
+
+    if "\n    fix_critical_runtime_ownership\n" not in text:
+        anchor = (
+            '        chown -R hermes:hermes "$HERMES_HOME" 2>/dev/null || \\\n'
+            '            echo "Warning: chown failed (rootless container?) — continuing anyway"\n'
+            "    fi\n\n"
+        )
+        inject = anchor + (
+            "    # Rebuild/login flows can leave a few critical files owned by root even\n"
+            "    # when the top-level volume already belongs to hermes. Normalize the\n"
+            "    # small runtime-critical surface before we drop privileges so the gateway\n"
+            "    # never boots with an unreadable auth/config state.\n"
+            "    fix_critical_runtime_ownership\n\n"
+        )
+        if anchor not in text:
+            raise RuntimeError(f"Installer patch anchor missing for docker entrypoint call in {path}")
+        text = text.replace(anchor, inject, 1)
+        applied.append("docker_entrypoint:normalize_runtime_ownership_call")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
 
 
 def _write_docker_healthcheck_script(target: Path, dry_run: bool) -> Path:
@@ -1434,14 +1640,21 @@ def _patch_compose_healthcheck(path: Path, dry_run: bool) -> list[str]:
     return applied
 
 
-def _run_doctor(target: Path, args: argparse.Namespace, planned_install: bool) -> int:
+def _run_doctor(
+    target: Path,
+    args: argparse.Namespace,
+    planned_install: bool,
+    *,
+    config_path: Path,
+    compose_path: Path | None,
+) -> int:
     doctor = REPO_ROOT / "scripts" / "brainstack_doctor.py"
     cmd = [
         sys.executable,
         str(doctor),
         str(target),
         "--config",
-        str(args.config or _default_config_path(target)),
+        str(config_path),
         "--runtime",
         args.runtime,
         "--check-docker",
@@ -1449,8 +1662,8 @@ def _run_doctor(target: Path, args: argparse.Namespace, planned_install: bool) -
     ]
     if planned_install:
         cmd.append("--planned-install")
-    if args.compose_file:
-        cmd.extend(["--compose-file", str(args.compose_file)])
+    if compose_path:
+        cmd.extend(["--compose-file", str(compose_path)])
     if args.desktop_launcher:
         cmd.extend(["--desktop-launcher", str(args.desktop_launcher)])
     doctor_python = args.python or _default_target_python(target)
@@ -1481,6 +1694,35 @@ def main() -> int:
     if not SOURCE_PLUGIN.exists():
         print(f"FAIL Brainstack payload missing: {SOURCE_PLUGIN}", file=sys.stderr)
         return 2
+    try:
+        config_path = args.config.expanduser().resolve() if args.config else _default_config_path(target)
+    except RuntimeError as exc:
+        print(f"FAIL {exc}", file=sys.stderr)
+        return 2
+    if not config_path.exists():
+        print(
+            f"FAIL config not found: {config_path}. Create or select an agent first, then rerun the installer.",
+            file=sys.stderr,
+        )
+        return 2
+
+    compose_path: Path | None = None
+    if args.runtime == "docker" or args.compose_file or args.doctor:
+        if args.compose_file:
+            compose_path = args.compose_file.expanduser().resolve()
+        else:
+            try:
+                compose_path = _default_compose_path(target, config_path)
+            except RuntimeError as exc:
+                if args.runtime == "docker":
+                    try:
+                        compose_path = _generated_compose_path(target, config_path)
+                    except RuntimeError:
+                        print(f"FAIL {exc}", file=sys.stderr)
+                        return 2
+                else:
+                    print(f"FAIL {exc}", file=sys.stderr)
+                    return 2
 
     plugin_target = target / "plugins" / "memory" / "brainstack"
     selected_python = args.python.expanduser() if args.python else _default_target_python(target)
@@ -1494,14 +1736,18 @@ def main() -> int:
 
     generated_files: list[dict[str, str]] = []
     if args.runtime == "docker":
-        docker_start = _write_docker_start_script(target, args.dry_run)
+        assert compose_path is not None
+        if not compose_path.exists():
+            generated_compose = _write_docker_compose_file(target, config_path, compose_path, args.dry_run)
+            generated_files.append({"source": "generated:docker-compose", "target": str(generated_compose)})
+        docker_start = _write_docker_start_script(target, config_path, compose_path, args.dry_run)
         generated_files.append({"source": "generated:hermes-brainstack-start.sh", "target": str(docker_start)})
         docker_healthcheck = _write_docker_healthcheck_script(target, args.dry_run)
         generated_files.append({"source": "generated:hermes-gateway-healthcheck.py", "target": str(docker_healthcheck)})
 
     config_result = None
     if args.enable:
-        config_result = _patch_config(args.config or _default_config_path(target), args.dry_run)
+        config_result = _patch_config(config_path, args.dry_run)
     deps_result = _ensure_backend_dependencies(selected_python, dry_run=args.dry_run, skip_deps=args.skip_deps)
 
     host_helper_files: list[dict[str, str]] = []
@@ -1517,8 +1763,10 @@ def main() -> int:
     host_patches.extend(_patch_gateway_status(target / "gateway" / "status.py", args.dry_run))
     host_patches.extend(_patch_discord_platform(target / "gateway" / "platforms" / "discord.py", args.dry_run))
     if args.runtime == "docker":
-        compose_path = args.compose_file or _default_compose_path(target)
+        assert compose_path is not None
         host_patches.extend(_patch_compose_healthcheck(compose_path, args.dry_run))
+        host_patches.extend(_patch_dockerignore(target / ".dockerignore", args.dry_run))
+        host_patches.extend(_patch_docker_entrypoint(target / "docker" / "entrypoint.sh", args.dry_run))
 
     manifest = {
         "installed_at": datetime.now(timezone.utc).isoformat(),
@@ -1557,7 +1805,13 @@ def main() -> int:
         print(f"Wrote manifest: {target / '.brainstack-install-manifest.json'}")
 
     if args.doctor:
-        return _run_doctor(target, args, planned_install=args.dry_run)
+        return _run_doctor(
+            target,
+            args,
+            planned_install=args.dry_run,
+            config_path=config_path,
+            compose_path=compose_path,
+        )
     return 0
 
 
