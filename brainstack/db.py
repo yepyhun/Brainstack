@@ -12,6 +12,11 @@ from typing import Any, Callable, Dict, Iterable, List, TypeVar
 
 from .corpus_backend import CorpusBackend, create_corpus_backend
 from .graph_backend import GraphBackend, create_graph_backend
+from .profile_contract import (
+    COMMUNICATION_CANONICAL_SLOTS,
+    derive_transcript_identity_profile_items,
+    expand_communication_profile_items,
+)
 from .provenance import merge_provenance
 from .temporal import merge_temporal, normalize_temporal_fields, record_is_effective_at
 from .transcript import count_overlap, tokenize_retrieval_query
@@ -27,6 +32,8 @@ logger = logging.getLogger(__name__)
 NUMERIC_TOKEN_RE = re.compile(r"\d+(?::\d+)?(?:\.\d+)?")
 PROFILE_SCOPE_DELIMITER = "::principal_scope::"
 PRINCIPAL_SCOPED_PROFILE_CATEGORIES = {"identity", "preference"}
+MIGRATION_CANONICAL_COMMUNICATION_ROWS_V1 = "canonical_communication_rows_v1"
+MIGRATION_EXPLICIT_IDENTITY_BACKFILL_V1 = "explicit_identity_backfill_v1"
 
 
 def utc_now_iso() -> str:
@@ -370,6 +377,7 @@ class BrainstackStore:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
         self._backfill_legacy_principal_scoped_profiles_if_needed()
+        self._run_compatibility_migrations_if_needed()
         self._graph_backend = create_graph_backend(self._graph_backend_name, db_path=self._graph_db_path)
         if self._graph_backend is not None:
             try:
@@ -518,6 +526,153 @@ class BrainstackStore:
         if migrated:
             self.conn.commit()
             logger.info("Backfilled %s legacy principal-scoped profile rows", migrated)
+
+    @_locked
+    def _run_compatibility_migrations_if_needed(self) -> None:
+        if not self._migration_applied(MIGRATION_CANONICAL_COMMUNICATION_ROWS_V1):
+            self._apply_canonical_communication_rows_migration_v1()
+        if not self._migration_applied(MIGRATION_EXPLICIT_IDENTITY_BACKFILL_V1):
+            self._apply_explicit_identity_backfill_migration_v1()
+
+    def _migration_applied(self, name: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM applied_migrations WHERE name = ? LIMIT 1",
+            (str(name or "").strip(),),
+        ).fetchone()
+        return row is not None
+
+    def _mark_migration_applied(self, name: str) -> None:
+        migration_name = str(name or "").strip()
+        if not migration_name:
+            return
+        self.conn.execute(
+            """
+            INSERT INTO applied_migrations(name, applied_at)
+            VALUES(?, ?)
+            ON CONFLICT(name) DO UPDATE SET applied_at = excluded.applied_at
+            """,
+            (migration_name, utc_now_iso()),
+        )
+
+    @_locked
+    def _apply_canonical_communication_rows_migration_v1(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT id, stable_key, category, content, source, confidence, metadata_json
+            FROM profile_items
+            WHERE active = 1
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        migrated = 0
+        for row in rows:
+            item = _profile_row_to_dict(row)
+            stable_key = str(item.get("stable_key") or "").strip()
+            if not stable_key.startswith("preference:"):
+                continue
+            if stable_key in COMMUNICATION_CANONICAL_SLOTS:
+                continue
+            principal_scope_key = str(item.get("principal_scope_key") or "").strip()
+            if not principal_scope_key:
+                continue
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            confidence = float(item.get("confidence") or 0.78)
+            expanded = expand_communication_profile_items(
+                category="preference",
+                content=content,
+                slot=stable_key,
+                confidence=confidence,
+                source="tier2_compat_backfill",
+            )
+            if not expanded:
+                continue
+            metadata = dict(item.get("metadata") or {})
+            metadata.setdefault("principal_scope_key", principal_scope_key)
+            for candidate in expanded:
+                self.upsert_profile_item(
+                    stable_key=str(candidate["slot"]),
+                    category=str(candidate["category"]),
+                    content=str(candidate["content"]),
+                    source=str(candidate.get("source") or row["source"] or "tier2_compat_backfill"),
+                    confidence=float(candidate.get("confidence") or confidence),
+                    metadata=metadata,
+                )
+            self.conn.execute("UPDATE profile_items SET active = 0 WHERE id = ?", (int(row["id"]),))
+            self.conn.execute("DELETE FROM profile_fts WHERE rowid = ?", (int(row["id"]),))
+            migrated += 1
+        self._mark_migration_applied(MIGRATION_CANONICAL_COMMUNICATION_ROWS_V1)
+        self.conn.commit()
+        if migrated:
+            logger.info("Backfilled %s legacy communication contract rows", migrated)
+        else:
+            logger.info("Applied canonical communication compatibility migration with no legacy rows to rewrite")
+
+    @_locked
+    def _apply_explicit_identity_backfill_migration_v1(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT id, session_id, turn_number, kind, content, source, metadata_json, created_at
+            FROM transcript_entries
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        scoped_entries: Dict[str, List[Dict[str, Any]]] = {}
+        scope_payloads: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            item = _row_to_dict(row)
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            principal_scope_key = _principal_scope_key_from_metadata(metadata)
+            if not principal_scope_key:
+                continue
+            scoped_entries.setdefault(principal_scope_key, []).append(item)
+            if principal_scope_key not in scope_payloads:
+                payload = _principal_scope_payload_from_metadata(metadata)
+                if payload:
+                    scope_payloads[principal_scope_key] = payload
+
+        migrated = 0
+        for principal_scope_key, entries in scoped_entries.items():
+            if self.get_profile_item(
+                stable_key="identity:age",
+                principal_scope_key=principal_scope_key,
+            ):
+                continue
+            candidates = derive_transcript_identity_profile_items(
+                entries,
+                existing_items=[],
+                source="tier2_compat_backfill",
+            )
+            for candidate in candidates:
+                if str(candidate.get("slot") or "").strip() != "identity:age":
+                    continue
+                metadata: Dict[str, Any] = {
+                    "principal_scope_key": principal_scope_key,
+                    "provenance": {
+                        "source_ids": [f"migration:{MIGRATION_EXPLICIT_IDENTITY_BACKFILL_V1}"],
+                        "tier": "migration",
+                    },
+                }
+                principal_scope = scope_payloads.get(principal_scope_key)
+                if principal_scope:
+                    metadata["principal_scope"] = principal_scope
+                self.upsert_profile_item(
+                    stable_key="identity:age",
+                    category=str(candidate.get("category") or "identity"),
+                    content=str(candidate.get("content") or "").strip(),
+                    source=str(candidate.get("source") or "tier2_compat_backfill"),
+                    confidence=float(candidate.get("confidence") or 0.88),
+                    metadata=metadata,
+                )
+                migrated += 1
+
+        self._mark_migration_applied(MIGRATION_EXPLICIT_IDENTITY_BACKFILL_V1)
+        self.conn.commit()
+        if migrated:
+            logger.info("Backfilled %s explicit identity rows from principal-scoped transcript history", migrated)
+        else:
+            logger.info("Applied explicit identity compatibility migration with no eligible transcript rows")
 
     def _init_schema(self) -> None:
         self.conn.executescript(
@@ -748,6 +903,11 @@ class BrainstackStore:
                 document_id UNINDEXED,
                 section_index UNINDEXED,
                 tokenize = 'unicode61'
+            );
+
+            CREATE TABLE IF NOT EXISTS applied_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
             );
             """
         )

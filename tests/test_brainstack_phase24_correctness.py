@@ -217,6 +217,108 @@ def test_open_does_not_backfill_legacy_preference_rows_when_transcript_scope_is_
         reopened.close()
 
 
+def test_open_runs_canonical_communication_migration_once_and_deactivates_legacy_rows(tmp_path):
+    store = BrainstackStore(str(tmp_path / "brainstack.db"))
+    store.open()
+
+    scope_a = _scope("discord", "user-a")
+    principal_scope_key = str(scope_a["principal_scope_key"])
+
+    store.upsert_profile_item(
+        stable_key="preference:style:humanizer",
+        category="preference",
+        content="Prefers natural tone, no emojis/hyphens, mixed sentence lengths, Hungarian language.",
+        source="tier2:test",
+        confidence=0.91,
+        metadata=scope_a,
+    )
+    store.upsert_profile_item(
+        stable_key="preference:language_preference",
+        category="preference",
+        content="Always respond in Hungarian.",
+        source="tier2:test",
+        confidence=0.94,
+        metadata=scope_a,
+    )
+    store.conn.execute(
+        "DELETE FROM applied_migrations WHERE name = ?",
+        ("canonical_communication_rows_v1",),
+    )
+    store.conn.commit()
+    store.close()
+
+    reopened = BrainstackStore(str(tmp_path / "brainstack.db"))
+    reopened.open()
+    try:
+        rows = reopened.list_profile_items(limit=20, principal_scope_key=principal_scope_key)
+        stable_keys = {row["stable_key"] for row in rows}
+        assert "preference:communication_style" in stable_keys
+        assert "preference:response_language" in stable_keys
+        assert "preference:style:humanizer" not in stable_keys
+        assert "preference:language_preference" not in stable_keys
+
+        migration_row = reopened.conn.execute(
+            "SELECT name FROM applied_migrations WHERE name = ?",
+            ("canonical_communication_rows_v1",),
+        ).fetchone()
+        assert migration_row is not None
+    finally:
+        reopened.close()
+
+    reopened_again = BrainstackStore(str(tmp_path / "brainstack.db"))
+    reopened_again.open()
+    try:
+        rows = reopened_again.list_profile_items(limit=20, principal_scope_key=principal_scope_key)
+        communication_rows = [row for row in rows if row["stable_key"] == "preference:communication_style"]
+        language_rows = [row for row in rows if row["stable_key"] == "preference:response_language"]
+        assert len(communication_rows) == 1
+        assert len(language_rows) == 1
+    finally:
+        reopened_again.close()
+
+
+def test_open_backfills_explicit_age_from_principal_scoped_transcript_history(tmp_path):
+    store = BrainstackStore(str(tmp_path / "brainstack.db"))
+    store.open()
+
+    scope_a = _scope("discord", "user-a")
+    principal_scope_key = str(scope_a["principal_scope_key"])
+
+    store.add_transcript_entry(
+        session_id="session-a",
+        turn_number=1,
+        kind="turn",
+        content="A nevem Tomi. 19 éves vagyok.",
+        source="sync_turn",
+        metadata=scope_a,
+    )
+    store.conn.execute(
+        "DELETE FROM applied_migrations WHERE name = ?",
+        ("explicit_identity_backfill_v1",),
+    )
+    store.conn.commit()
+    store.close()
+
+    reopened = BrainstackStore(str(tmp_path / "brainstack.db"))
+    reopened.open()
+    try:
+        age_row = reopened.get_profile_item(
+            stable_key="identity:age",
+            principal_scope_key=principal_scope_key,
+        )
+        assert age_row is not None
+        assert age_row["content"] == "19 years old"
+        assert age_row["principal_scope_key"] == principal_scope_key
+
+        migration_row = reopened.conn.execute(
+            "SELECT name FROM applied_migrations WHERE name = ?",
+            ("explicit_identity_backfill_v1",),
+        ).fetchone()
+        assert migration_row is not None
+    finally:
+        reopened.close()
+
+
 def test_scoped_identity_lookup_drives_user_alias_canonicalization(tmp_path):
     store = BrainstackStore(str(tmp_path / "brainstack.db"))
     store.open()

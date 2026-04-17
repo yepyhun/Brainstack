@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, List
 
 from .db import BrainstackStore
+from .profile_contract import COMMUNICATION_CANONICAL_SLOTS
 from .provenance import summarize_provenance
 from .temporal import record_is_effective_at
 from .transcript import trim_text_boundary
@@ -43,18 +44,7 @@ def _render_numbered_items(items: Iterable[str]) -> str:
     return "\n".join(f"{index}. {item}" for index, item in enumerate(rows, start=1))
 
 
-COMMUNICATION_PROFILE_SLOTS = {
-    "preference:communication_style",
-    "preference:emoji_usage",
-    "preference:dash_usage",
-    "preference:formatting",
-    "preference:message_structure",
-    "preference:pronoun_capitalization",
-    "preference:formatting_style",
-    "preference:response_language",
-    "preference:ai_name",
-    "preference:ai_nickname",
-}
+COMMUNICATION_PROFILE_SLOTS = COMMUNICATION_CANONICAL_SLOTS
 
 COMMUNICATION_GRAPH_PREDICATES = {
     "writing_style",

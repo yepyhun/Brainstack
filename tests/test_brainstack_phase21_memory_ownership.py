@@ -206,6 +206,77 @@ def test_tier2_extractor_recovers_last_json_object_after_reasoning_preamble():
     ]
 
 
+def test_tier2_extractor_derives_explicit_age_from_transcript_when_llm_omits_it():
+    def _fake_llm_caller(**kwargs):
+        return {
+            "content": json.dumps(
+                {
+                    "profile_items": [],
+                    "states": [],
+                    "relations": [],
+                    "inferred_relations": [],
+                    "typed_entities": [],
+                    "temporal_events": [],
+                    "continuity_summary": "",
+                    "decisions": [],
+                }
+            )
+        }
+
+    extracted = extract_tier2_candidates(
+        [
+            {
+                "turn_number": 1,
+                "kind": "turn",
+                "content": "A nevem Tomi. 19 éves vagyok.",
+                "created_at": "2026-04-16T00:00:00Z",
+            }
+        ],
+        llm_caller=_fake_llm_caller,
+    )
+
+    assert {
+        "category": "identity",
+        "content": "19 years old",
+        "confidence": 0.88,
+        "source": "tier2_transcript_rule",
+        "slot": "identity:age",
+    } in extracted["profile_items"]
+
+
+def test_tier2_extractor_does_not_infer_age_from_non_self_statement():
+    def _fake_llm_caller(**kwargs):
+        return {
+            "content": json.dumps(
+                {
+                    "profile_items": [],
+                    "states": [],
+                    "relations": [],
+                    "inferred_relations": [],
+                    "typed_entities": [],
+                    "temporal_events": [],
+                    "continuity_summary": "",
+                    "decisions": [],
+                }
+            )
+        }
+
+    extracted = extract_tier2_candidates(
+        [
+            {
+                "turn_number": 1,
+                "kind": "turn",
+                "content": "A bátyám 19 éves. Te is 19 éves vagy?",
+                "created_at": "2026-04-16T00:00:00Z",
+            }
+        ],
+        llm_caller=_fake_llm_caller,
+    )
+
+    slots = {str(item.get("slot") or "") for item in extracted["profile_items"]}
+    assert "identity:age" not in slots
+
+
 def test_tier2_default_llm_caller_requests_json_object(monkeypatch):
     import sys
     import types
