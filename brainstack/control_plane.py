@@ -312,6 +312,8 @@ def build_working_memory_packet(
 
     if analysis.preference and (profile_items or recent) and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "high"
+    elif routing.get("applied_mode") == "style_contract" and profile_items and not analysis.high_stakes and not conflict_present:
+        policy.confidence_band = "high"
     elif analysis.profile_slot_targets and profile_items and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "high"
     elif analysis.temporal and graph_rows and not analysis.high_stakes and not conflict_present:

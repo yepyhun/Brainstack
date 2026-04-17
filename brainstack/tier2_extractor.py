@@ -13,6 +13,7 @@ from .profile_contract import (
     expand_communication_profile_items,
     normalize_profile_slot,
 )
+from .style_contract import STYLE_CONTRACT_SLOT, normalize_style_contract_payload
 
 
 logger = logging.getLogger(__name__)
@@ -350,6 +351,8 @@ def _normalize_profile_items(items: Any) -> List[Dict[str, Any]]:
         if not content or _should_drop_profile_item(category=category, content=content):
             continue
         slot = _normalize_slot(raw.get("slot"))
+        if slot == STYLE_CONTRACT_SLOT:
+            continue
         confidence = _coerce_confidence(raw.get("confidence"), default=0.78)
         expanded = _communication_bundle_items(
             category=category,
@@ -608,6 +611,7 @@ def extract_tier2_candidates(
     if not batch:
         return {
             "profile_items": [],
+            "style_contract": None,
             "states": [],
             "relations": [],
             "inferred_relations": [],
@@ -631,6 +635,7 @@ def extract_tier2_candidates(
                 "Schema:\n"
                 "{\n"
                 '  "profile_items": [{"category":"identity|preference|shared_work","content":"...","slot":"optional-stable-slot","confidence":0.0}],\n'
+                '  "style_contract": {"title":"...","summary":"optional one-line summary","sections":[{"heading":"...","lines":["..."]}],"confidence":0.0} | null,\n'
                 '  "states": [{"subject":"...","attribute":"...","value":"...","supersede":true,"confidence":0.0}],\n'
                 '  "relations": [{"subject":"...","predicate":"...","object":"...","confidence":0.0}],\n'
                 '  "inferred_relations": [{"subject":"...","predicate":"...","object":"...","confidence":0.0,"reason":"short evidence"}],\n'
@@ -650,6 +655,9 @@ def extract_tier2_candidates(
                 "- for communication rules, prefer these stable slots when applicable: preference:response_language, preference:ai_name, preference:communication_style, preference:emoji_usage, preference:message_structure, preference:pronoun_capitalization, preference:dash_usage, preference:formatting_style\n"
                 "- prefer profile_items over states for user communication preferences and assistant naming rules\n"
                 "- do not bury communication rules inside continuity_summary or decisions when they can be emitted as separate profile_items\n"
+                "- when the user teaches a named long-form communication pack or multi-section rule set (for example Humanizer rules), emit that detailed pack in style_contract instead of trying to squeeze it into profile_items\n"
+                "- style_contract is optional; emit it only for durable multi-rule communication contracts the user wants remembered across sessions\n"
+                "- if style_contract is present, keep profile_items focused on the compact operational rules that ordinary replies should follow every turn\n"
                 "- if the user specifies capitalization conventions such as uppercase pronouns (for example Én, Te, Ő), emit that as a separate durable profile_item\n"
                 "- if the user specifies punctuation constraints such as avoiding dash or em-dash punctuation, emit that as a separate durable profile_item\n"
                 "- never emit filesystem paths, prompt-loading claims, or skill/persona file mechanics as durable memory facts or states\n"
@@ -695,6 +703,7 @@ def extract_tier2_candidates(
     raw_text = _extract_text_content(response)
     payload, parse_status = _extract_json_object_with_status(raw_text, context=parse_context)
     profile_items = _normalize_profile_items(payload.get("profile_items"))
+    style_contract = normalize_style_contract_payload(payload.get("style_contract"))
     profile_items.extend(
         derive_transcript_communication_profile_items(
             entries,
@@ -719,6 +728,7 @@ def extract_tier2_candidates(
     )
     return {
         "profile_items": profile_items[:8],
+        "style_contract": style_contract,
         "states": _normalize_states(payload.get("states")),
         "relations": _normalize_relations(payload.get("relations")),
         "inferred_relations": _normalize_inferred_relations(payload.get("inferred_relations")),

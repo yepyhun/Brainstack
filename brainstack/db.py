@@ -19,6 +19,11 @@ from .profile_contract import (
     expand_communication_profile_items,
 )
 from .provenance import merge_provenance
+from .style_contract import (
+    STYLE_CONTRACT_DOC_KIND,
+    STYLE_CONTRACT_SLOT,
+    build_style_contract_from_document,
+)
 from .temporal import merge_temporal, normalize_temporal_fields, record_is_effective_at
 from .transcript import count_overlap, tokenize_retrieval_query
 from .usefulness import (
@@ -37,6 +42,7 @@ MIGRATION_CANONICAL_COMMUNICATION_ROWS_V1 = "canonical_communication_rows_v1"
 MIGRATION_EXPLICIT_IDENTITY_BACKFILL_V1 = "explicit_identity_backfill_v1"
 MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V1 = "stable_logistics_typed_entities_v1"
 MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V2 = "stable_logistics_typed_entities_v2"
+MIGRATION_STYLE_CONTRACT_PROFILE_LANE_V1 = "style_contract_profile_lane_v1"
 
 
 def utc_now_iso() -> str:
@@ -540,6 +546,8 @@ class BrainstackStore:
             self._apply_stable_logistics_typed_entities_migration_v1()
         if not self._migration_applied(MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V2):
             self._apply_stable_logistics_typed_entities_migration_v2()
+        if not self._migration_applied(MIGRATION_STYLE_CONTRACT_PROFILE_LANE_V1):
+            self._apply_style_contract_profile_lane_migration_v1()
 
     def _migration_applied(self, name: str) -> bool:
         row = self.conn.execute(
@@ -803,6 +811,100 @@ class BrainstackStore:
             logger.info("Repaired %s stable logistics typed entities from principal-scoped transcript history", migrated)
         else:
             logger.info("Applied stable logistics repair migration with no eligible transcript rows")
+
+    @_locked
+    def _apply_style_contract_profile_lane_migration_v1(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT id, stable_key, title, metadata_json, updated_at, active
+            FROM corpus_documents
+            WHERE active = 1 AND doc_kind = ?
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (STYLE_CONTRACT_DOC_KIND,),
+        ).fetchall()
+        grouped: Dict[str, List[sqlite3.Row]] = {}
+        for row in rows:
+            metadata = _decode_json_object(row["metadata_json"])
+            principal_scope_key = _principal_scope_key_from_metadata(metadata)
+            if not principal_scope_key:
+                continue
+            grouped.setdefault(principal_scope_key, []).append(row)
+
+        migrated = 0
+        retired = 0
+        for principal_scope_key, documents in grouped.items():
+            active_profile = self.get_profile_item(
+                stable_key=STYLE_CONTRACT_SLOT,
+                principal_scope_key=principal_scope_key,
+            )
+            selected_document = documents[0] if documents else None
+            if not active_profile and selected_document is not None:
+                section_rows = self.conn.execute(
+                    """
+                    SELECT section_index, heading, content
+                    FROM corpus_sections
+                    WHERE document_id = ?
+                    ORDER BY section_index ASC
+                    """,
+                    (int(selected_document["id"]),),
+                ).fetchall()
+                metadata = _decode_json_object(selected_document["metadata_json"])
+                principal_scope = _principal_scope_payload_from_metadata(metadata)
+                candidate = build_style_contract_from_document(
+                    title=selected_document["title"],
+                    sections=[dict(section) for section in section_rows],
+                    source="tier2_compat_backfill",
+                    confidence=0.9,
+                )
+                if candidate is not None:
+                    merged_metadata: Dict[str, Any] = {
+                        "principal_scope_key": principal_scope_key,
+                        "provenance": {
+                            "source_ids": [
+                                f"migration:{MIGRATION_STYLE_CONTRACT_PROFILE_LANE_V1}",
+                                f"corpus_document:{selected_document['stable_key']}",
+                            ],
+                            "tier": "migration",
+                        },
+                    }
+                    if principal_scope:
+                        merged_metadata["principal_scope"] = principal_scope
+                    merged_metadata.update(dict(candidate.get("metadata") or {}))
+                    self.upsert_profile_item(
+                        stable_key=STYLE_CONTRACT_SLOT,
+                        category=str(candidate.get("category") or "preference"),
+                        content=str(candidate.get("content") or "").strip(),
+                        source=str(candidate.get("source") or "tier2_compat_backfill"),
+                        confidence=float(candidate.get("confidence") or 0.9),
+                        metadata=merged_metadata,
+                    )
+                    migrated += 1
+                    active_profile = self.get_profile_item(
+                        stable_key=STYLE_CONTRACT_SLOT,
+                        principal_scope_key=principal_scope_key,
+                    )
+            if not active_profile:
+                continue
+            for document in documents:
+                if not bool(document["active"]):
+                    continue
+                self.conn.execute(
+                    "UPDATE corpus_documents SET active = 0, updated_at = ? WHERE id = ?",
+                    (utc_now_iso(), int(document["id"])),
+                )
+                retired += 1
+
+        self._mark_migration_applied(MIGRATION_STYLE_CONTRACT_PROFILE_LANE_V1)
+        self.conn.commit()
+        if migrated or retired:
+            logger.info(
+                "Migrated %s style contracts into canonical profile lane and retired %s corpus documents",
+                migrated,
+                retired,
+            )
+        else:
+            logger.info("Applied style-contract profile-lane migration with no eligible corpus documents")
 
     def _init_schema(self) -> None:
         self.conn.executescript(
@@ -2329,12 +2431,14 @@ class BrainstackStore:
         limit: int,
         principal_scope_key: str = "",
         target_slots: Iterable[str] | None = None,
+        excluded_slots: Iterable[str] | None = None,
     ) -> List[Dict[str, Any]]:
         fts_query = build_fts_query(query)
         rows: List[sqlite3.Row]
         candidate_limit = max(limit * 8, 16)
         targeted: List[Dict[str, Any]] = []
         seen_storage_keys: set[str] = set()
+        excluded = {str(slot or "").strip() for slot in (excluded_slots or ()) if str(slot or "").strip()}
         for stable_key in target_slots or ():
             normalized_key = str(stable_key or "").strip()
             if not normalized_key:
@@ -2398,8 +2502,10 @@ class BrainstackStore:
         scored: List[Dict[str, Any]] = []
         scored.extend(targeted)
         for row in rows:
-            item = _row_to_dict(row)
+            item = _profile_row_to_dict(row)
             if not _annotate_principal_scope(item, principal_scope_key=principal_scope_key):
+                continue
+            if str(item.get("stable_key") or "").strip() in excluded:
                 continue
             storage_key = str(item.get("storage_key") or "")
             if storage_key and storage_key in seen_storage_keys:

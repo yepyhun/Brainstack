@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List
 
 from .db import BrainstackStore
+from .style_contract import STYLE_CONTRACT_SLOT
 from .tier2_extractor import _default_llm_caller, _extract_json_object, _extract_text_content
 from .transcript import has_meaningful_transcript_evidence, tokenize_match_text
 from .usefulness import graph_priority_adjustment, profile_priority_adjustment
@@ -14,8 +15,7 @@ RRF_K = 60
 ROUTE_FACT = "fact"
 ROUTE_TEMPORAL = "temporal"
 ROUTE_AGGREGATE = "aggregate"
-ROUTING_HINT_MIN_TOKENS = 5
-ROUTING_HINT_MIN_CHARS = 28
+ROUTE_STYLE_CONTRACT = "style_contract"
 TEMPORAL_CONTINUITY_CAP = 3
 TEMPORAL_RECENT_CAP = 3
 TEMPORAL_TRANSCRIPT_CAP = 3
@@ -153,32 +153,16 @@ def _candidate_priority_bonus(candidate: EvidenceCandidate) -> float:
     return bonus
 
 
-def _should_attempt_route_hint(query: str) -> bool:
-    normalized = _normalize_text(query)
-    if len(normalized) < ROUTING_HINT_MIN_CHARS:
-        return False
-    tokens = tokenize_match_text(normalized)
-    if len(tokens) < ROUTING_HINT_MIN_TOKENS:
-        return False
-    structural_markers = sum(1 for marker in (",", ":", ";", "/", "=") if marker in normalized)
-    if structural_markers >= 2:
-        return True
-    if structural_markers >= 1 and any(char.isdigit() for char in normalized):
-        return True
-    if len(tokens) >= 8 and len(normalized) >= 45:
-        return True
-    return normalized.endswith("?") and len(tokens) >= 6 and len(normalized) >= 38
-
-
 def _llm_route_resolver(query: str) -> Dict[str, Any]:
     messages = [
         {
             "role": "system",
             "content": (
-                "You classify Brainstack memory retrieval questions into one of three modes.\n"
-                "Return JSON only with the schema {\"mode\": \"fact|temporal|aggregate\", \"reason\": \"...\"}.\n"
+                "You classify Brainstack memory retrieval questions into one of four modes.\n"
+                "Return JSON only with the schema {\"mode\": \"fact|temporal|aggregate|style_contract\", \"reason\": \"...\"}.\n"
                 "Use temporal when the user needs ordering, before/after comparison, date difference, or change over time.\n"
                 "Use aggregate when the user needs totals, counts across multiple events, or exhaustive collection.\n"
+                "Use style_contract when the user is explicitly asking about their detailed communication rules, Humanizer pack, rule list, or the full style contract itself.\n"
                 "Use fact for ordinary fact lookup or if uncertain."
             ),
         },
@@ -241,18 +225,30 @@ def _resolve_route(
     query: str,
     *,
     route_resolver: Callable[[str], Dict[str, Any] | str] | None,
+    style_contract_available: bool = False,
 ) -> RetrievalRoute:
     normalized = _normalize_text(query)
     route = RetrievalRoute(reason="fact route default")
     if not normalized:
         return route
 
+    deterministic = _default_route_resolver(normalized)
+    deterministic_mode = _normalize_text(deterministic.get("mode")).lower()
+    if deterministic_mode in {ROUTE_TEMPORAL, ROUTE_AGGREGATE}:
+        route.requested_mode = deterministic_mode
+        route.applied_mode = deterministic_mode
+        route.source = str(deterministic.get("source") or "deterministic_route_hint")
+        route.reason = str(deterministic.get("reason") or "")
+        return route
+
     resolver = route_resolver
     source = "injected"
-    if resolver is None and _should_attempt_route_hint(normalized):
-        resolver = _default_route_resolver
-        source = "deterministic_route_hint"
+    if resolver is None and style_contract_available:
+        resolver = _llm_route_resolver
+        source = "llm_route_hint"
     if resolver is None:
+        route.source = str(deterministic.get("source") or "deterministic_route_hint")
+        route.reason = str(deterministic.get("reason") or route.reason)
         return route
 
     try:
@@ -273,7 +269,7 @@ def _resolve_route(
     else:
         return route
 
-    if mode not in {ROUTE_FACT, ROUTE_TEMPORAL, ROUTE_AGGREGATE}:
+    if mode not in {ROUTE_FACT, ROUTE_TEMPORAL, ROUTE_AGGREGATE, ROUTE_STYLE_CONTRACT}:
         return route
     route.requested_mode = mode
     route.applied_mode = mode
@@ -772,6 +768,14 @@ def _route_limits(
             "transcript": limits["transcript_limit"],
             "graph": limits["graph_limit"],
         }
+    elif route.applied_mode == ROUTE_STYLE_CONTRACT:
+        limits["profile_limit"] = max(1, min(limits["profile_limit"], 1))
+        limits["continuity_match_limit"] = 0
+        limits["continuity_recent_limit"] = 0
+        limits["transcript_limit"] = 0
+        limits["graph_limit"] = 0
+        limits["corpus_limit"] = 0
+        route.bounds = {"kind": "slot_target", "profile": limits["profile_limit"]}
     return limits
 
 
@@ -792,6 +796,8 @@ def _route_has_support(route: RetrievalRoute, selected: Dict[str, List[Dict[str,
             if _temporal_anchor_key(row)
         }
         return len(anchors) >= 2
+    if route.applied_mode == ROUTE_STYLE_CONTRACT:
+        return any(str(row.get("stable_key") or "").strip() == STYLE_CONTRACT_SLOT for row in selected.get("profile_items", ()))
     return True
 
 
@@ -1174,7 +1180,18 @@ def retrieve_executive_context(
     transcript_limit = max(int(policy.get("transcript_limit", 0)), 0)
     graph_limit = max(int(policy.get("graph_limit", 0)), 0)
     corpus_limit = max(int(policy.get("corpus_limit", 0)), 0)
-    route = _resolve_route(query, route_resolver=route_resolver)
+    style_contract_available = (
+        store.get_profile_item(
+            stable_key=STYLE_CONTRACT_SLOT,
+            principal_scope_key=principal_scope_key,
+        )
+        is not None
+    )
+    route = _resolve_route(
+        query,
+        route_resolver=route_resolver,
+        style_contract_available=style_contract_available,
+    )
     limits = _route_limits(
         route=route,
         profile_limit=profile_limit,
@@ -1192,13 +1209,19 @@ def retrieve_executive_context(
     graph_limit = limits["graph_limit"]
     corpus_limit = limits["corpus_limit"]
 
+    profile_target_slots = tuple(str(slot) for slot in analysis.get("profile_slot_targets") or ())
+    if route.applied_mode == ROUTE_STYLE_CONTRACT:
+        profile_target_slots = tuple({*profile_target_slots, STYLE_CONTRACT_SLOT})
+    excluded_profile_slots = () if route.applied_mode == ROUTE_STYLE_CONTRACT else (STYLE_CONTRACT_SLOT,)
+
     keyword_profile_rows = (
         _profile_keyword_rows(
             store.search_profile(
                 query=query,
                 limit=max(profile_limit * 4, 8),
                 principal_scope_key=principal_scope_key,
-                target_slots=tuple(str(slot) for slot in analysis.get("profile_slot_targets") or ()),
+                target_slots=profile_target_slots,
+                excluded_slots=excluded_profile_slots,
             ),
             limit=max(profile_limit * 2, 6),
         )

@@ -4,6 +4,7 @@ from typing import Any, Dict, Iterable, List, Mapping
 
 from .db import BrainstackStore
 from .provenance import merge_provenance
+from .style_contract import STYLE_CONTRACT_SLOT, normalize_style_contract_payload
 from .tier1_extractor import build_profile_stable_key
 
 
@@ -115,6 +116,46 @@ def _reconcile_profile_items(
             }
         )
     return actions
+
+
+def _reconcile_style_contract(
+    store: BrainstackStore,
+    *,
+    candidate: Mapping[str, Any] | None,
+    source: str,
+    metadata: Mapping[str, Any],
+) -> List[Dict[str, Any]]:
+    normalized = normalize_style_contract_payload(candidate)
+    if not normalized:
+        return []
+    principal_scope_key = str(metadata.get("principal_scope_key") or "").strip()
+    existing = store.get_profile_item(
+        stable_key=STYLE_CONTRACT_SLOT,
+        principal_scope_key=principal_scope_key,
+    )
+    content = _normalize_text(normalized.get("content"))
+    if existing and _normalize_text(existing.get("content")) == content:
+        return [{"kind": "style_contract", "action": "NONE", "stable_key": STYLE_CONTRACT_SLOT}]
+    row_id = store.upsert_profile_item(
+        stable_key=STYLE_CONTRACT_SLOT,
+        category=str(normalized.get("category") or "preference"),
+        content=content,
+        source=str(normalized.get("source") or source),
+        confidence=float(normalized.get("confidence") or 0.9),
+        metadata=_candidate_metadata(
+            normalized,
+            base_metadata=metadata,
+            confidence=float(normalized.get("confidence") or 0.9),
+        ),
+    )
+    return [
+        {
+            "kind": "style_contract",
+            "action": "UPDATE" if existing else "ADD",
+            "stable_key": STYLE_CONTRACT_SLOT,
+            "row_id": row_id,
+        }
+    ]
 
 
 def _reconcile_states(
@@ -343,6 +384,14 @@ def reconcile_tier2_candidates(
     payload = dict(metadata or {})
     payload.update({"session_id": session_id, "turn_number": turn_number, "tier": "tier2"})
     actions: List[Dict[str, Any]] = []
+    actions.extend(
+        _reconcile_style_contract(
+            store,
+            candidate=extracted.get("style_contract"),
+            source=source,
+            metadata=payload,
+        )
+    )
     actions.extend(
         _reconcile_profile_items(
             store,

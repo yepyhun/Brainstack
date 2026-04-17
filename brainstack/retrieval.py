@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, List
 from .db import BrainstackStore
 from .profile_contract import COMMUNICATION_CANONICAL_SLOTS
 from .provenance import summarize_provenance
+from .style_contract import STYLE_CONTRACT_SLOT
 from .temporal import record_is_effective_at
 from .transcript import trim_text_boundary
 
@@ -228,6 +229,8 @@ def _is_current_communication_state(row: Dict[str, Any], *, allowed_subjects: se
 
 def _is_communication_profile_item(row: Dict[str, Any]) -> bool:
     stable_key = str(row.get("stable_key") or "").strip()
+    if stable_key == STYLE_CONTRACT_SLOT:
+        return False
     if stable_key in COMMUNICATION_PROFILE_SLOTS:
         return True
     if not stable_key.startswith("preference:"):
@@ -618,6 +621,7 @@ def build_system_prompt_block(
         graph_rows=graph_rows,
     )
     filtered_items = [item for item in items if str(item.get("stable_key") or "").strip() not in hidden_profile_keys]
+    filtered_items = [item for item in filtered_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT]
 
     if not contract_lines and not filtered_items:
         return ""
@@ -694,6 +698,10 @@ def render_working_memory_block(
     filtered_profile_items = [
         item for item in profile_items if str(item.get("stable_key") or "").strip() not in hidden_profile_keys
     ]
+    if route_mode != "style_contract":
+        filtered_profile_items = [
+            item for item in filtered_profile_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT
+        ]
     if filtered_profile_items:
         lines = [
             _with_provenance(
