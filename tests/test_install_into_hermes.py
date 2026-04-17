@@ -200,10 +200,25 @@ def test_patch_config_sets_embedded_graph_and_corpus_defaults(tmp_path: Path):
     assert "graph_db_path: $HERMES_HOME/brainstack/brainstack.kuzu" in content
     assert "corpus_backend: chroma" in content
     assert "corpus_db_path: $HERMES_HOME/brainstack/brainstack.chroma" in content
+    assert result["flush_memories_provider"] == "main"
+    assert "auxiliary:" in content
+    assert "flush_memories:" in content
+    assert "provider: main" in content
     assert "sidecars:" in content
     assert "rtk:" in content
     assert "enabled: true" in content
     assert "mode: balanced" in content
+
+
+def test_patch_config_upgrades_flush_memories_auto_to_main(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("auxiliary:\n  flush_memories:\n    provider: auto\n", encoding="utf-8")
+
+    result = _patch_config(config_path, dry_run=False)
+    content = config_path.read_text(encoding="utf-8")
+
+    assert result["flush_memories_provider"] == "main"
+    assert "provider: main" in content
 
 
 def test_default_config_path_returns_single_agent_config(tmp_path: Path):

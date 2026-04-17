@@ -1189,6 +1189,16 @@ def _patch_config(config_path: Path, dry_run: bool) -> dict[str, Any]:
     brainstack.setdefault("graph_match_limit", 6)
     brainstack.setdefault("corpus_match_limit", 4)
     brainstack.setdefault("corpus_char_budget", 700)
+    config.setdefault("auxiliary", {})
+    if not isinstance(config["auxiliary"], dict):
+        raise RuntimeError("config.yaml has non-object `auxiliary` section")
+    flush_memories = config["auxiliary"].setdefault("flush_memories", {})
+    if not isinstance(flush_memories, dict):
+        flush_memories = {}
+        config["auxiliary"]["flush_memories"] = flush_memories
+    flush_provider = str(flush_memories.get("provider") or "").strip().lower()
+    if not flush_provider or flush_provider == "auto":
+        flush_memories["provider"] = "main"
     config.setdefault("sidecars", {})
     if not isinstance(config["sidecars"], dict):
         raise RuntimeError("config.yaml has non-object `sidecars` section")
@@ -1205,6 +1215,7 @@ def _patch_config(config_path: Path, dry_run: bool) -> dict[str, Any]:
         "memory_provider": "brainstack",
         "memory_enabled": False,
         "user_profile_enabled": False,
+        "flush_memories_provider": str(flush_memories.get("provider") or ""),
         "rtk_sidecar_enabled": bool(rtk.get("enabled", False)),
     }
 

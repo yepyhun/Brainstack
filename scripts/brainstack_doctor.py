@@ -493,6 +493,16 @@ def _check_config(
     else:
         checks.append(Check("corpus_backend_target", "fail", f"plugins.brainstack.corpus_backend is {corpus_backend!r}, expected 'chroma'"))
 
+    auxiliary = config.get("auxiliary", {}) if isinstance(config.get("auxiliary", {}), dict) else {}
+    flush_memories = auxiliary.get("flush_memories", {}) if isinstance(auxiliary.get("flush_memories", {}), dict) else {}
+    flush_provider = str(flush_memories.get("provider") or "").strip().lower()
+    if flush_provider == "main":
+        checks.append(Check("flush_memories_provider", "pass", "auxiliary.flush_memories.provider uses the main agent provider"))
+    elif planned_install:
+        checks.append(Check("flush_memories_provider", "pass", "auxiliary.flush_memories.provider is not 'main' yet, but installer will patch it"))
+    else:
+        checks.append(Check("flush_memories_provider", "fail", "auxiliary.flush_memories.provider must be 'main' for reliable Brainstack Tier-2 writes"))
+
     sidecars = config.get("sidecars", {}) if isinstance(config.get("sidecars", {}), dict) else {}
     rtk = sidecars.get("rtk", {}) if isinstance(sidecars.get("rtk", {}), dict) else {}
     if rtk.get("enabled") is True:
