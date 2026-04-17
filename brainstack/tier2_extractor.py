@@ -728,7 +728,7 @@ def _default_llm_caller(*, task: str, messages: list, timeout: float, max_tokens
         messages=messages,
         temperature=0.0,
         max_tokens=max_tokens,
-        response_format=_TIER2_RESPONSE_FORMAT,
+        extra_body={"response_format": _TIER2_RESPONSE_FORMAT},
         timeout=timeout,
     )
 

@@ -219,6 +219,15 @@ def _principal_scope_key_from_metadata(metadata: Dict[str, Any] | None) -> str:
     return "|".join(parts)
 
 
+def _principal_scope_payload_from_metadata(metadata: Dict[str, Any] | None) -> Dict[str, Any]:
+    if not isinstance(metadata, dict):
+        return {}
+    nested = metadata.get("principal_scope")
+    if isinstance(nested, dict):
+        return dict(nested)
+    return {}
+
+
 def _annotate_principal_scope(
     item: Dict[str, Any],
     *,
@@ -360,6 +369,7 @@ class BrainstackStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
+        self._backfill_legacy_principal_scoped_profiles_if_needed()
         self._graph_backend = create_graph_backend(self._graph_backend_name, db_path=self._graph_db_path)
         if self._graph_backend is not None:
             try:
@@ -393,6 +403,121 @@ class BrainstackStore:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+
+    def _resolve_session_principal_scope(
+        self,
+        *,
+        session_id: str,
+    ) -> tuple[str, Dict[str, Any]]:
+        session_key = str(session_id or "").strip()
+        if not session_key:
+            return "", {}
+        rows = self.conn.execute(
+            """
+            SELECT metadata_json
+            FROM transcript_entries
+            WHERE session_id = ?
+            ORDER BY id ASC
+            LIMIT 64
+            """,
+            (session_key,),
+        ).fetchall()
+        scope_key = ""
+        scope_payload: Dict[str, Any] = {}
+        for row in rows:
+            metadata = _decode_json_object(row["metadata_json"])
+            candidate_scope_key = _principal_scope_key_from_metadata(metadata)
+            if not candidate_scope_key:
+                continue
+            if not scope_key:
+                scope_key = candidate_scope_key
+                scope_payload = _principal_scope_payload_from_metadata(metadata)
+                continue
+            if candidate_scope_key != scope_key:
+                return "", {}
+            if not scope_payload:
+                scope_payload = _principal_scope_payload_from_metadata(metadata)
+        return scope_key, scope_payload
+
+    @_locked
+    def _backfill_legacy_principal_scoped_profiles_if_needed(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT id, stable_key, category, source, metadata_json
+            FROM profile_items
+            WHERE active = 1
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        migrated = 0
+        for row in rows:
+            item = _profile_row_to_dict(row)
+            stable_key = str(item.get("stable_key") or "").strip()
+            category = str(item.get("category") or "").strip()
+            if not _is_principal_scoped_profile(stable_key=stable_key, category=category):
+                continue
+            if str(item.get("principal_scope_key") or "").strip():
+                continue
+            metadata = dict(item.get("metadata") or {})
+            provenance = metadata.get("provenance") if isinstance(metadata.get("provenance"), dict) else {}
+            session_id = str(provenance.get("session_id") or "").strip()
+            if not session_id:
+                continue
+            principal_scope_key, principal_scope = self._resolve_session_principal_scope(session_id=session_id)
+            if not principal_scope_key:
+                continue
+            storage_key = str(item.get("storage_key") or row["stable_key"] or "").strip()
+            scoped_storage_key = _profile_storage_key(
+                stable_key=stable_key,
+                category=category,
+                principal_scope_key=principal_scope_key,
+            )
+            if not scoped_storage_key or scoped_storage_key == storage_key:
+                continue
+            migrated_metadata = dict(metadata)
+            migrated_metadata.setdefault("principal_scope_key", principal_scope_key)
+            if principal_scope:
+                migrated_metadata.setdefault("principal_scope", dict(principal_scope))
+            existing = self.conn.execute(
+                "SELECT id, metadata_json FROM profile_items WHERE stable_key = ?",
+                (scoped_storage_key,),
+            ).fetchone()
+            if existing:
+                merged_metadata = _merge_record_metadata(
+                    existing["metadata_json"],
+                    migrated_metadata,
+                    source=str(row["source"] or ""),
+                )
+                self.conn.execute(
+                    "UPDATE profile_items SET metadata_json = ? WHERE id = ?",
+                    (
+                        json.dumps(merged_metadata, ensure_ascii=True, sort_keys=True),
+                        int(existing["id"]),
+                    ),
+                )
+                self.conn.execute(
+                    "UPDATE profile_items SET active = 0 WHERE id = ?",
+                    (int(row["id"]),),
+                )
+                self.conn.execute("DELETE FROM profile_fts WHERE rowid = ?", (int(row["id"]),))
+            else:
+                merged_metadata = _merge_record_metadata(
+                    row["metadata_json"],
+                    migrated_metadata,
+                    source=str(row["source"] or ""),
+                )
+                self.conn.execute(
+                    "UPDATE profile_items SET stable_key = ?, metadata_json = ? WHERE id = ?",
+                    (
+                        scoped_storage_key,
+                        json.dumps(merged_metadata, ensure_ascii=True, sort_keys=True),
+                        int(row["id"]),
+                    ),
+                )
+            migrated += 1
+        if migrated:
+            self.conn.commit()
+            logger.info("Backfilled %s legacy principal-scoped profile rows", migrated)
 
     def _init_schema(self) -> None:
         self.conn.executescript(

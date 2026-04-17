@@ -18,6 +18,7 @@ install_host_import_shims(hermes_home=REPO_ROOT)
 
 from brainstack.db import BrainstackStore
 from brainstack.control_plane import build_working_memory_packet
+from brainstack.retrieval import build_system_prompt_block
 from brainstack.reconciler import reconcile_tier2_candidates
 
 
@@ -111,6 +112,109 @@ def test_tier2_profile_reconcile_isolates_personal_rows_by_principal(tmp_path):
     assert {row["stable_key"] for row in rows_a} == {"preference:response_language", "preference:ai_name"}
     assert rows_b == []
     assert all(row["principal_scope_key"] == scope_a["principal_scope_key"] for row in rows_a)
+
+
+def test_open_backfills_legacy_unscoped_preference_rows_from_unique_transcript_scope(tmp_path):
+    store = BrainstackStore(str(tmp_path / "brainstack.db"))
+    store.open()
+
+    scope_a = _scope("discord", "user-a")
+    principal_scope_key = str(scope_a["principal_scope_key"])
+    session_id = "legacy-session-a"
+
+    store.add_transcript_entry(
+        session_id=session_id,
+        turn_number=1,
+        kind="turn",
+        content="User asked for Humanizer style and Hungarian replies.",
+        source="sync_turn",
+        metadata=scope_a,
+    )
+    store.upsert_profile_item(
+        stable_key="preference:response_language",
+        category="preference",
+        content="Always respond in Hungarian.",
+        source="tier2:test",
+        confidence=0.95,
+        metadata={"provenance": {"session_id": session_id}},
+    )
+    store.upsert_profile_item(
+        stable_key="preference:formatting_style",
+        category="preference",
+        content="Capitalize pronouns 'Én', 'Te', and 'Ő' regardless of grammar rules.",
+        source="tier2:test",
+        confidence=0.94,
+        metadata={"provenance": {"session_id": session_id}},
+    )
+    store.close()
+
+    reopened = BrainstackStore(str(tmp_path / "brainstack.db"))
+    reopened.open()
+    try:
+        rows = reopened.list_profile_items(limit=10, principal_scope_key=principal_scope_key)
+        stable_keys = {row["stable_key"] for row in rows}
+        assert "preference:response_language" in stable_keys
+        assert "preference:formatting_style" in stable_keys
+        assert all(row["principal_scope_key"] == principal_scope_key for row in rows)
+
+        block = build_system_prompt_block(
+            reopened,
+            profile_limit=10,
+            principal_scope_key=principal_scope_key,
+        )
+        assert "Always respond in Hungarian." in block
+        assert "Capitalize Én, Te, and Ő when you use them." in block
+    finally:
+        reopened.close()
+
+
+def test_open_does_not_backfill_legacy_preference_rows_when_transcript_scope_is_ambiguous(tmp_path):
+    store = BrainstackStore(str(tmp_path / "brainstack.db"))
+    store.open()
+
+    session_id = "ambiguous-session"
+    scope_a = _scope("discord", "user-a")
+    scope_b = _scope("discord", "user-b")
+
+    store.add_transcript_entry(
+        session_id=session_id,
+        turn_number=1,
+        kind="turn",
+        content="First principal",
+        source="sync_turn",
+        metadata=scope_a,
+    )
+    store.add_transcript_entry(
+        session_id=session_id,
+        turn_number=2,
+        kind="turn",
+        content="Second principal",
+        source="sync_turn",
+        metadata=scope_b,
+    )
+    store.upsert_profile_item(
+        stable_key="preference:response_language",
+        category="preference",
+        content="Always respond in Hungarian.",
+        source="tier2:test",
+        confidence=0.95,
+        metadata={"provenance": {"session_id": session_id}},
+    )
+    store.close()
+
+    reopened = BrainstackStore(str(tmp_path / "brainstack.db"))
+    reopened.open()
+    try:
+        rows_a = reopened.list_profile_items(limit=10, principal_scope_key=str(scope_a["principal_scope_key"]))
+        rows_b = reopened.list_profile_items(limit=10, principal_scope_key=str(scope_b["principal_scope_key"]))
+        assert rows_a == []
+        assert rows_b == []
+
+        unscoped = reopened.list_profile_items(limit=10)
+        assert any(row["stable_key"] == "preference:response_language" for row in unscoped)
+        assert any(str(row.get("principal_scope_key") or "") == "" for row in unscoped)
+    finally:
+        reopened.close()
 
 
 def test_scoped_identity_lookup_drives_user_alias_canonicalization(tmp_path):

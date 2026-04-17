@@ -207,13 +207,27 @@ def test_tier2_extractor_recovers_last_json_object_after_reasoning_preamble():
 
 
 def test_tier2_default_llm_caller_requests_json_object(monkeypatch):
+    import sys
+    import types
+
     captured: dict[str, object] = {}
 
-    def _fake_call_llm(**kwargs):
-        captured.update(kwargs)
+    def _fake_call_llm(*, task, messages, temperature, max_tokens, timeout, extra_body=None):
+        captured.update(
+            {
+                "task": task,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "timeout": timeout,
+                "extra_body": extra_body,
+            }
+        )
         return {"content": "{\"profile_items\": [], \"states\": []}"}
 
-    monkeypatch.setattr("agent.auxiliary_client.call_llm", _fake_call_llm)
+    fake_module = types.ModuleType("agent.auxiliary_client")
+    fake_module.call_llm = _fake_call_llm
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", fake_module)
 
     _default_llm_caller(
         task="flush_memories",
@@ -223,7 +237,7 @@ def test_tier2_default_llm_caller_requests_json_object(monkeypatch):
     )
 
     assert captured["task"] == "flush_memories"
-    assert captured["response_format"] == {"type": "json_object"}
+    assert captured["extra_body"] == {"response_format": {"type": "json_object"}}
 
 
 def test_tier2_prompt_requests_separate_communication_profile_slots():
