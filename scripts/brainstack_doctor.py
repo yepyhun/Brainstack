@@ -553,6 +553,12 @@ def _check_compose(compose_path: Path, planned_install: bool) -> list[Check]:
         checks.append(Check("docker_hermes_home", "pass", "Docker compose mounts/configures HERMES_HOME"))
     else:
         checks.append(Check("docker_hermes_home", "warn", "Docker HERMES_HOME mapping is not obvious"))
+    if "HERMES_UID" in text and "HERMES_GID" in text:
+        checks.append(Check("docker_runtime_identity", "pass", "Docker compose maps Hermes runtime identity to host-configurable UID/GID"))
+    elif planned_install:
+        checks.append(Check("docker_runtime_identity", "pass", "Docker compose runtime identity mapping will be patched by installer"))
+    else:
+        checks.append(Check("docker_runtime_identity", "warn", "Docker compose lacks explicit Hermes UID/GID mapping"))
     if "hermes-gateway-healthcheck.py" in text:
         checks.append(Check("docker_readiness_healthcheck", "pass", "Docker compose uses readiness-aware gateway healthcheck"))
     elif planned_install:

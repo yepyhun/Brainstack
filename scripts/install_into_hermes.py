@@ -1236,8 +1236,11 @@ REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
 CONFIG_FILE="${HERMES_CONFIG_FILE:-$REPO_ROOT/__CONFIG_REF__}"
 COMPOSE_FILE="${HERMES_COMPOSE_FILE:-$REPO_ROOT/__COMPOSE_REF__}"
-HERMES_HOME_DEFAULT=$(CDPATH= cd -- "$(dirname -- "$CONFIG_FILE")" && pwd)
+HERMES_HOME_DEFAULT=$(dirname -- "$CONFIG_FILE")
 HERMES_HOME_DIR="${HERMES_HOME_DIR:-$HERMES_HOME_DEFAULT}"
+HERMES_UID="${HERMES_UID:-$(id -u)}"
+HERMES_GID="${HERMES_GID:-$(id -g)}"
+export HERMES_UID HERMES_GID
 
 SERVICE="${HERMES_DOCKER_SERVICE:-}"
 if [ -z "$SERVICE" ] && [ -f "$COMPOSE_FILE" ]; then
@@ -1254,32 +1257,6 @@ dc() {
 
 ACTION="${1:-start}"
 HEALTHCHECK="$REPO_ROOT/scripts/hermes-gateway-healthcheck.py"
-
-normalize_runtime_ownership() {
-  FIXUP_SERVICE="$SERVICE"
-  if [ -z "$FIXUP_SERVICE" ]; then
-    return 0
-  fi
-  docker compose -f "$COMPOSE_FILE" run --rm --no-deps --entrypoint sh "$FIXUP_SERVICE" -lc '
-    for path in \
-      /opt/data/.env \
-      /opt/data/config.yaml \
-      /opt/data/auth.json \
-      /opt/data/auth.lock \
-      /opt/data/gateway_state.json \
-      /opt/data/gateway.pid \
-      /opt/data/state.db \
-      /opt/data/state.db-shm \
-      /opt/data/state.db-wal \
-      /opt/data/brainstack \
-      /opt/data/sessions \
-      /opt/data/memories
-    do
-      [ -e "$path" ] || continue
-      chown -R hermes:hermes "$path" 2>/dev/null || true
-    done
-  ' >/dev/null
-}
 
 wait_for_ready() {
   if [ ! -f "$HEALTHCHECK" ]; then
@@ -1349,17 +1326,14 @@ purge_runtime_state() {
 
 case "$ACTION" in
   start)
-    normalize_runtime_ownership
     dc up -d
     wait_for_ready
     ;;
   rebuild)
-    normalize_runtime_ownership
     dc up -d --build
     wait_for_ready
     ;;
   full|full-rebuild)
-    normalize_runtime_ownership
     if [ -n "$SERVICE" ]; then
       docker compose -f "$COMPOSE_FILE" build --no-cache --pull "$SERVICE"
       docker compose -f "$COMPOSE_FILE" up -d "$SERVICE"
@@ -1381,7 +1355,6 @@ case "$ACTION" in
     confirm_destructive_reset
     dc stop || true
     purge_runtime_state
-    normalize_runtime_ownership
     dc up -d
     wait_for_ready
     ;;
@@ -1431,6 +1404,8 @@ services:
     environment:
       HERMES_HOME: /opt/data
       HERMES_ENABLE_PROJECT_PLUGINS: "true"
+      HERMES_UID: "${{HERMES_UID:-1000}}"
+      HERMES_GID: "${{HERMES_GID:-1000}}"
     volumes:
       - ./{runtime_ref}:/opt/data
       - ./{workspace_ref}:/workspace
@@ -1445,6 +1420,34 @@ services:
         compose_path.parent.mkdir(parents=True, exist_ok=True)
         compose_path.write_text(content, encoding="utf-8")
     return compose_path
+
+
+def _patch_compose_runtime_identity(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+    if 'HERMES_UID:' in text and 'HERMES_GID:' in text:
+        return applied
+    anchors = [
+        '      HERMES_ENABLE_PROJECT_PLUGINS: "true"\n',
+        "      HERMES_ENABLE_PROJECT_PLUGINS: 'true'\n",
+    ]
+    inject = (
+        '      HERMES_ENABLE_PROJECT_PLUGINS: "true"\n'
+        '      HERMES_UID: "${HERMES_UID:-1000}"\n'
+        '      HERMES_GID: "${HERMES_GID:-1000}"\n'
+    )
+    for anchor in anchors:
+        if anchor in text:
+            text = text.replace(anchor, inject, 1)
+            applied.append("compose:runtime_identity_mapping")
+            break
+    if not applied:
+        raise RuntimeError(f"Installer patch anchor missing for compose runtime identity in {path}")
+    if not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
 
 
 def _patch_dockerignore(path: Path, dry_run: bool) -> list[str]:
@@ -1765,6 +1768,7 @@ def main() -> int:
     if args.runtime == "docker":
         assert compose_path is not None
         host_patches.extend(_patch_compose_healthcheck(compose_path, args.dry_run))
+        host_patches.extend(_patch_compose_runtime_identity(compose_path, args.dry_run))
         host_patches.extend(_patch_dockerignore(target / ".dockerignore", args.dry_run))
         host_patches.extend(_patch_docker_entrypoint(target / "docker" / "entrypoint.sh", args.dry_run))
 

@@ -4,6 +4,7 @@ from scripts.install_into_hermes import (
     _default_compose_path,
     _default_config_path,
     _generated_compose_path,
+    _patch_compose_runtime_identity,
     _patch_docker_entrypoint,
     _patch_dockerignore,
     _patch_config,
@@ -27,12 +28,11 @@ def test_generated_start_script_carries_full_purge_and_reset_actions(tmp_path: P
 
     assert 'CONFIG_FILE="${HERMES_CONFIG_FILE:-$REPO_ROOT/hermes-config/agent-a/config.yaml}"' in content
     assert 'COMPOSE_FILE="${HERMES_COMPOSE_FILE:-$REPO_ROOT/docker-compose.agent-a.yml}"' in content
-    assert 'HERMES_HOME_DEFAULT=$(CDPATH= cd -- "$(dirname -- "$CONFIG_FILE")" && pwd)' in content
+    assert 'HERMES_HOME_DEFAULT=$(dirname -- "$CONFIG_FILE")' in content
     assert 'HERMES_HOME_DIR="${HERMES_HOME_DIR:-$HERMES_HOME_DEFAULT}"' in content
-    assert "normalize_runtime_ownership()" in content
-    assert "/opt/data/auth.json" in content
-    assert "/opt/data/auth.lock" in content
-    assert 'chown -R hermes:hermes "$path"' in content
+    assert 'HERMES_UID="${HERMES_UID:-$(id -u)}"' in content
+    assert 'HERMES_GID="${HERMES_GID:-$(id -g)}"' in content
+    assert 'export HERMES_UID HERMES_GID' in content
     assert "purge_runtime_state()" in content
     assert "confirm_destructive_reset()" in content
     assert 'WARNING: DELETE EVERY MEMORY' in content
@@ -41,11 +41,11 @@ def test_generated_start_script_carries_full_purge_and_reset_actions(tmp_path: P
     assert "purge|clear-memory|clear-state)" in content
     assert "reset)" in content
     assert "Usage: $0 [start|rebuild|full|stop|purge|reset|status|logs]" in content
-    assert "start)\n    normalize_runtime_ownership" in content
-    assert "rebuild)\n    normalize_runtime_ownership" in content
-    assert "full|full-rebuild)\n    normalize_runtime_ownership" in content
+    assert "start)\n    dc up -d" in content
+    assert "rebuild)\n    dc up -d --build" in content
+    assert "full|full-rebuild)\n    if [ -n \"$SERVICE\" ]; then" in content
     assert "reset)\n    confirm_destructive_reset" in content
-    assert "purge_runtime_state\n    normalize_runtime_ownership\n    dc up -d" in content
+    assert "purge_runtime_state\n    dc up -d" in content
 
 
 def test_gateway_run_patch_supports_multiline_platform_import(tmp_path: Path):
@@ -259,8 +259,29 @@ def test_write_docker_compose_file_targets_selected_agent_home(tmp_path: Path):
     assert written == compose_path
     assert "name: hermes-alpha" in content
     assert "container_name: hermes-alpha" in content
+    assert 'HERMES_UID: "${HERMES_UID:-1000}"' in content
+    assert 'HERMES_GID: "${HERMES_GID:-1000}"' in content
     assert "- ./hermes-config/alpha:/opt/data" in content
     assert '- ./runtime/workspace:/workspace' in content
+
+
+def test_patch_compose_runtime_identity_adds_uid_gid_mapping(tmp_path: Path):
+    path = tmp_path / "docker-compose.yml"
+    path.write_text(
+        "services:\n"
+        "  hermes:\n"
+        "    environment:\n"
+        '      HERMES_HOME: /opt/data\n'
+        '      HERMES_ENABLE_PROJECT_PLUGINS: "true"\n',
+        encoding="utf-8",
+    )
+
+    applied = _patch_compose_runtime_identity(path, dry_run=False)
+    content = path.read_text(encoding="utf-8")
+
+    assert "compose:runtime_identity_mapping" in applied
+    assert 'HERMES_UID: "${HERMES_UID:-1000}"' in content
+    assert 'HERMES_GID: "${HERMES_GID:-1000}"' in content
 
 
 def test_patch_dockerignore_excludes_runtime_state(tmp_path: Path):
