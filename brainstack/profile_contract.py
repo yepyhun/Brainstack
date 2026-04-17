@@ -82,6 +82,15 @@ _EXPLICIT_AGE_PATTERNS = (
     re.compile(r"\bvagyok\s+(\d{1,3})\s*éves\b", re.IGNORECASE),
 )
 
+_DIRECT_AGE_QUERY_PATTERNS = (
+    re.compile(r"\bhow old am i\b", re.IGNORECASE),
+    re.compile(r"\bwhat(?:'s| is)? my age\b", re.IGNORECASE),
+    re.compile(r"\bremind me how old i am\b", re.IGNORECASE),
+    re.compile(r"\bh[aá]ny\s+éves\s+vagyok\b", re.IGNORECASE),
+    re.compile(r"\bmennyi\s+id[őo]s\s+vagyok\b", re.IGNORECASE),
+    re.compile(r"\bmi\s+az\s+életkorom\b", re.IGNORECASE),
+)
+
 
 def normalize_compare_text(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().split())
@@ -91,6 +100,15 @@ def normalize_profile_slot(value: Any) -> str:
     normalized = normalize_compare_text(value).replace(" ", "_")
     normalized = re.sub(r"[^a-z0-9:_-]+", "_", normalized).strip("_")
     return PROFILE_SLOT_ALIASES.get(normalized, normalized)
+
+
+def resolve_direct_identity_profile_slots(query: str) -> tuple[str, ...]:
+    text = normalize_compare_text(query)
+    if not text:
+        return ()
+    if any(pattern.search(text) for pattern in _DIRECT_AGE_QUERY_PATTERNS):
+        return ("identity:age",)
+    return ()
 
 
 def expand_communication_profile_items(

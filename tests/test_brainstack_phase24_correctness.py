@@ -17,7 +17,7 @@ install_host_import_shims = _host_shims.install_host_import_shims
 install_host_import_shims(hermes_home=REPO_ROOT)
 
 from brainstack.db import BrainstackStore
-from brainstack.control_plane import build_working_memory_packet
+from brainstack.control_plane import analyze_query, build_working_memory_packet
 from brainstack.retrieval import build_system_prompt_block
 from brainstack.reconciler import reconcile_tier2_candidates
 
@@ -317,6 +317,81 @@ def test_open_backfills_explicit_age_from_principal_scoped_transcript_history(tm
         assert migration_row is not None
     finally:
         reopened.close()
+
+
+def test_direct_age_query_targets_durable_identity_slot(tmp_path):
+    store = BrainstackStore(str(tmp_path / "brainstack.db"))
+    store.open()
+
+    scope_a = _scope("discord", "user-a")
+    principal_scope_key = str(scope_a["principal_scope_key"])
+    store.upsert_profile_item(
+        stable_key="identity:age",
+        category="identity",
+        content="19 years old",
+        source="test",
+        confidence=0.96,
+        metadata=scope_a,
+    )
+
+    hits = store.search_profile(
+        query="Hány éves vagyok?",
+        limit=5,
+        principal_scope_key=principal_scope_key,
+        target_slots=("identity:age",),
+    )
+
+    assert hits
+    assert hits[0]["stable_key"] == "identity:age"
+    assert hits[0]["content"] == "19 years old"
+    assert hits[0]["_direct_slot_match"] is True
+
+
+def test_build_working_memory_packet_prefers_durable_age_row_for_direct_age_query(tmp_path):
+    store = BrainstackStore(str(tmp_path / "brainstack.db"))
+    store.open()
+
+    scope_a = _scope("discord", "user-a")
+    principal_scope_key = str(scope_a["principal_scope_key"])
+
+    store.upsert_profile_item(
+        stable_key="identity:age",
+        category="identity",
+        content="19 years old",
+        source="test",
+        confidence=0.96,
+        metadata=scope_a,
+    )
+    store.add_transcript_entry(
+        session_id="session-a",
+        turn_number=1,
+        kind="turn",
+        content="A nevem Tomi. 19 éves vagyok.",
+        source="sync_turn",
+        metadata=scope_a,
+    )
+
+    packet = build_working_memory_packet(
+        store,
+        query="Hány éves vagyok?",
+        session_id="session-a",
+        principal_scope_key=principal_scope_key,
+        profile_match_limit=3,
+        continuity_recent_limit=2,
+        continuity_match_limit=2,
+        transcript_match_limit=2,
+        transcript_char_budget=640,
+        graph_limit=2,
+        corpus_limit=2,
+        corpus_char_budget=480,
+    )
+
+    assert tuple(packet["analysis"]["profile_slot_targets"]) == ("identity:age",)
+    assert packet["profile_items"]
+    assert packet["profile_items"][0]["stable_key"] == "identity:age"
+    assert packet["profile_items"][0]["content"] == "19 years old"
+    assert packet["policy"]["confidence_band"] == "high"
+    assert analyze_query("Mi a mai napi teendőm?").profile_slot_targets == ()
 
 
 def test_scoped_identity_lookup_drives_user_alias_canonicalization(tmp_path):

@@ -934,6 +934,8 @@ def _profile_keyword_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dic
     ranked = list(enumerate(rows))
     ranked.sort(
         key=lambda item: (
+            1 if bool(item[1].get("_direct_slot_match")) else 0,
+            int(item[1].get("overlap_count") or 0),
             profile_priority_adjustment(item[1]),
             float(item[1].get("confidence") or 0.0),
             str(item[1].get("updated_at") or ""),
@@ -1196,6 +1198,7 @@ def retrieve_executive_context(
                 query=query,
                 limit=max(profile_limit * 4, 8),
                 principal_scope_key=principal_scope_key,
+                target_slots=tuple(str(slot) for slot in analysis.get("profile_slot_targets") or ()),
             ),
             limit=max(profile_limit * 2, 6),
         )

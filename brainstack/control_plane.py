@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict
 
 from .db import BrainstackStore
 from .executive_retrieval import retrieve_executive_context
+from .profile_contract import resolve_direct_identity_profile_slots
 from .retrieval import render_working_memory_block
 
 HIGH_STAKES_TERMS = (
@@ -100,6 +101,7 @@ class QueryAnalysis:
     temporal: bool
     preference: bool
     continuation: bool
+    profile_slot_targets: tuple[str, ...]
 
 
 @dataclass
@@ -125,12 +127,14 @@ class WorkingMemoryPolicy:
 
 
 def analyze_query(query: str) -> QueryAnalysis:
+    profile_slot_targets = resolve_direct_identity_profile_slots(query)
     return QueryAnalysis(
         high_stakes=_contains_any(query, HIGH_STAKES_TERMS),
         explanatory=_contains_any(query, EXPLANATION_TERMS),
         temporal=_contains_any(query, TEMPORAL_TERMS),
         preference=_contains_any(query, PREFERENCE_TERMS),
         continuation=_contains_any(query, CONTINUATION_TERMS),
+        profile_slot_targets=profile_slot_targets,
     )
 
 
@@ -176,6 +180,18 @@ def _initial_policy(
         policy.transcript_limit = 0
         policy.transcript_char_budget = 0
         policy.graph_limit = 1
+        policy.corpus_limit = 0
+        policy.corpus_char_budget = 0
+
+    if analysis.profile_slot_targets and not analysis.high_stakes:
+        policy.mode = "compact"
+        policy.collapse_mode = "aggressive"
+        policy.profile_limit = max(policy.profile_limit, min(profile_match_limit, 4))
+        policy.continuity_match_limit = min(policy.continuity_match_limit, min(continuity_match_limit, 1))
+        policy.continuity_recent_limit = max(1, min(continuity_recent_limit, 1))
+        policy.transcript_limit = min(policy.transcript_limit, min(transcript_match_limit, 1))
+        policy.transcript_char_budget = min(policy.transcript_char_budget, min(transcript_char_budget, 240))
+        policy.graph_limit = 0
         policy.corpus_limit = 0
         policy.corpus_char_budget = 0
 
@@ -295,6 +311,8 @@ def build_working_memory_packet(
         policy.show_policy = True
 
     if analysis.preference and (profile_items or recent) and not analysis.high_stakes and not conflict_present:
+        policy.confidence_band = "high"
+    elif analysis.profile_slot_targets and profile_items and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "high"
     elif analysis.temporal and graph_rows and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "high" if support_channels >= 2 else "medium"

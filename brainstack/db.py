@@ -2322,10 +2322,42 @@ class BrainstackStore:
         return updated
 
     @_locked
-    def search_profile(self, *, query: str, limit: int, principal_scope_key: str = "") -> List[Dict[str, Any]]:
+    def search_profile(
+        self,
+        *,
+        query: str,
+        limit: int,
+        principal_scope_key: str = "",
+        target_slots: Iterable[str] | None = None,
+    ) -> List[Dict[str, Any]]:
         fts_query = build_fts_query(query)
         rows: List[sqlite3.Row]
         candidate_limit = max(limit * 8, 16)
+        targeted: List[Dict[str, Any]] = []
+        seen_storage_keys: set[str] = set()
+        for stable_key in target_slots or ():
+            normalized_key = str(stable_key or "").strip()
+            if not normalized_key:
+                continue
+            item = self.get_profile_item(
+                stable_key=normalized_key,
+                principal_scope_key=principal_scope_key,
+            )
+            if not item or not bool(item.get("active", True)):
+                continue
+            storage_key = str(item.get("storage_key") or "")
+            if storage_key and storage_key in seen_storage_keys:
+                continue
+            seen_storage_keys.add(storage_key)
+            match_text = " ".join(
+                (
+                    str(item.get("stable_key") or "").replace("_", " "),
+                    str(item.get("content") or ""),
+                )
+            )
+            item["overlap_count"] = max(1, count_overlap(query, match_text))
+            item["_direct_slot_match"] = True
+            targeted.append(item)
         if not fts_query:
             rows = self.conn.execute(
                 """
@@ -2364,9 +2396,13 @@ class BrainstackStore:
                 ).fetchall()
 
         scored: List[Dict[str, Any]] = []
+        scored.extend(targeted)
         for row in rows:
             item = _row_to_dict(row)
             if not _annotate_principal_scope(item, principal_scope_key=principal_scope_key):
+                continue
+            storage_key = str(item.get("storage_key") or "")
+            if storage_key and storage_key in seen_storage_keys:
                 continue
             match_text = " ".join(
                 (
@@ -2375,10 +2411,12 @@ class BrainstackStore:
                 )
             )
             item["overlap_count"] = count_overlap(query, match_text)
+            item["_direct_slot_match"] = False
             scored.append(item)
 
         scored.sort(
             key=lambda item: (
+                1 if bool(item.get("_direct_slot_match")) else 0,
                 int(item.get("overlap_count") or 0),
                 profile_priority_adjustment(item),
                 float(item.get("confidence") or 0.0),
