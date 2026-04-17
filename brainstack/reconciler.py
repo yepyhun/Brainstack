@@ -4,6 +4,7 @@ from typing import Any, Dict, Iterable, List, Mapping
 
 from .db import BrainstackStore
 from .provenance import merge_provenance
+from .style_contract import build_style_contract_document
 from .tier1_extractor import build_profile_stable_key
 
 
@@ -258,6 +259,58 @@ def _reconcile_typed_entities(
     return actions
 
 
+def _reconcile_style_contract_artifact(
+    store: BrainstackStore,
+    *,
+    artifact: Mapping[str, Any] | None,
+    metadata: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    if not isinstance(artifact, Mapping):
+        return []
+    principal_scope_key = str(metadata.get("principal_scope_key") or "").strip()
+    if not principal_scope_key:
+        return []
+    raw_content = str(artifact.get("content") or "").strip()
+    if not raw_content:
+        return []
+
+    document = build_style_contract_document(
+        principal_scope_key=principal_scope_key,
+        principal_scope=metadata.get("principal_scope") if isinstance(metadata.get("principal_scope"), Mapping) else None,
+        content=raw_content,
+        source=str(artifact.get("source") or "tier2_llm"),
+    )
+    existing = store.get_corpus_document(stable_key=str(document["stable_key"]))
+    existing_content = ""
+    if existing:
+        existing_content = "\n\n".join(
+            str(section.get("content") or "").strip()
+            for section in list(existing.get("sections") or [])
+            if str(section.get("content") or "").strip()
+        )
+    if _normalize_text(existing_content) == _normalize_text(raw_content):
+        return [{"kind": "corpus", "action": "NONE", "doc_kind": str(document["doc_kind"]), "stable_key": str(document["stable_key"])}]
+
+    ingest_result = store.ingest_corpus_document(
+        stable_key=str(document["stable_key"]),
+        title=str(document["title"]),
+        doc_kind=str(document["doc_kind"]),
+        source=str(document["source"]),
+        sections=list(document["sections"]),
+        metadata=dict(document["metadata"]),
+    )
+    return [
+        {
+            "kind": "corpus",
+            "action": "UPDATE" if existing else "ADD",
+            "doc_kind": str(document["doc_kind"]),
+            "stable_key": str(document["stable_key"]),
+            "document_id": int(ingest_result.get("document_id") or 0),
+            "section_count": int(ingest_result.get("section_count") or 0),
+        }
+    ]
+
+
 def _reconcile_continuity(
     store: BrainstackStore,
     *,
@@ -390,6 +443,13 @@ def reconcile_tier2_candidates(
             metadata=payload,
             source=source,
             user_name=user_name,
+        )
+    )
+    actions.extend(
+        _reconcile_style_contract_artifact(
+            store,
+            artifact=extracted.get("style_contract_artifact"),
+            metadata=payload,
         )
     )
     actions.extend(

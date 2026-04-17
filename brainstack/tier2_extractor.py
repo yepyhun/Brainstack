@@ -13,6 +13,7 @@ from .profile_contract import (
     expand_communication_profile_items,
     normalize_profile_slot,
 )
+from .style_contract import derive_transcript_style_contract_artifact
 
 
 logger = logging.getLogger(__name__)
@@ -611,6 +612,7 @@ def extract_tier2_candidates(
             "states": [],
             "relations": [],
             "inferred_relations": [],
+            "style_contract_artifact": None,
             "typed_entities": [],
             "temporal_events": [],
             "continuity_summary": "",
@@ -717,11 +719,13 @@ def extract_tier2_candidates(
             existing_entities=typed_entities,
         )
     )
+    style_contract_artifact = derive_transcript_style_contract_artifact(entries)
     return {
         "profile_items": profile_items[:8],
         "states": _normalize_states(payload.get("states")),
         "relations": _normalize_relations(payload.get("relations")),
         "inferred_relations": _normalize_inferred_relations(payload.get("inferred_relations")),
+        "style_contract_artifact": style_contract_artifact,
         "typed_entities": typed_entities,
         "temporal_events": _normalize_temporal_events(
             payload.get("temporal_events"),
