@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List
 
 from .db import BrainstackStore
-from .style_contract import STYLE_CONTRACT_DOC_KIND, build_style_contract_stable_key
 from .tier2_extractor import _default_llm_caller, _extract_json_object, _extract_text_content
 from .transcript import has_meaningful_transcript_evidence, tokenize_match_text
 from .usefulness import graph_priority_adjustment, profile_priority_adjustment
@@ -931,40 +930,6 @@ def _annotate_query_flags(rows: Iterable[Dict[str, Any]], *, query: str) -> List
     return annotated
 
 
-def _direct_style_contract_rows(
-    *,
-    store: BrainstackStore,
-    principal_scope_key: str,
-    style_contract_targets: Iterable[str],
-) -> List[Dict[str, Any]]:
-    if not principal_scope_key or not tuple(style_contract_targets):
-        return []
-    stable_key = build_style_contract_stable_key(principal_scope_key=principal_scope_key)
-    snapshot = store.get_corpus_document(stable_key=stable_key)
-    if not snapshot:
-        return []
-    document = dict(snapshot.get("document") or {})
-    rows: List[Dict[str, Any]] = []
-    for section in list(snapshot.get("sections") or []):
-        rows.append(
-            {
-                "document_id": int(document.get("id") or 0),
-                "title": str(document.get("title") or ""),
-                "doc_kind": str(document.get("doc_kind") or ""),
-                "source": str(document.get("source") or ""),
-                "section_id": int(section.get("section_id") or 0),
-                "section_index": int(section.get("section_index") or 0),
-                "heading": str(section.get("heading") or ""),
-                "content": str(section.get("content") or ""),
-                "token_estimate": int(section.get("token_estimate") or 0),
-                "retrieval_source": "corpus.direct_style_contract",
-                "match_mode": "direct",
-                "overlap_count": 999,
-            }
-        )
-    return rows
-
-
 def _profile_keyword_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
     ranked = list(enumerate(rows))
     ranked.sort(
@@ -1026,7 +991,6 @@ def _corpus_channel_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict
     ranked = list(enumerate(_dedupe_rows(rows)))
     ranked.sort(
         key=lambda item: (
-            1 if str(item[1].get("match_mode") or "").strip() == "direct" else 0,
             float(item[1].get("semantic_score") or 0.0),
             int(item[1].get("overlap_count") or 0),
             1 if "semantic" in str(item[1].get("retrieval_source") or "") else 0,
@@ -1290,11 +1254,6 @@ def retrieve_executive_context(
         keyword_transcript_session_rows,
         keyword_transcript_global_rows,
     )
-    direct_style_contract_rows = _direct_style_contract_rows(
-        store=store,
-        principal_scope_key=principal_scope_key,
-        style_contract_targets=analysis.get("style_contract_targets") or (),
-    )
     keyword_corpus_rows = (
         _collect_query_rows(
             shelf="corpus",
@@ -1307,16 +1266,7 @@ def retrieve_executive_context(
         if corpus_limit > 0
         else []
     )
-    if not tuple(analysis.get("style_contract_targets") or ()):
-        keyword_corpus_rows = [
-            row
-            for row in keyword_corpus_rows
-            if str(row.get("doc_kind") or "").strip() != STYLE_CONTRACT_DOC_KIND
-        ]
-    keyword_corpus_rows = _annotate_query_flags(
-        _round_robin(direct_style_contract_rows, keyword_corpus_rows),
-        query=query,
-    )
+    keyword_corpus_rows = _annotate_query_flags(keyword_corpus_rows, query=query)
     semantic_conversation_rows = (
         _collect_query_rows(
                 shelf="transcript",
@@ -1344,12 +1294,6 @@ def retrieve_executive_context(
         if corpus_limit > 0
         else []
     )
-    if not tuple(analysis.get("style_contract_targets") or ()):
-        semantic_corpus_rows = [
-            row
-            for row in semantic_corpus_rows
-            if str(row.get("doc_kind") or "").strip() != STYLE_CONTRACT_DOC_KIND
-        ]
     semantic_corpus_rows = _annotate_query_flags(semantic_corpus_rows, query=query)
     keyword_rows = _round_robin(
         keyword_profile_rows,

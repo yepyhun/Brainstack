@@ -634,7 +634,6 @@ class BrainstackMemoryProvider(MemoryProvider):
             "states": len(list(extracted.get("states", []) or [])),
             "relations": len(list(extracted.get("relations", []) or [])),
             "inferred_relations": len(list(extracted.get("inferred_relations", []) or [])),
-            "style_contract_artifact_present": 1 if isinstance(extracted.get("style_contract_artifact"), dict) else 0,
             "typed_entities": len(list(extracted.get("typed_entities", []) or [])),
             "temporal_events": len(list(extracted.get("temporal_events", []) or [])),
             "decisions": len(list(extracted.get("decisions", []) or [])),

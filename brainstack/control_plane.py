@@ -7,7 +7,6 @@ from .db import BrainstackStore
 from .executive_retrieval import retrieve_executive_context
 from .profile_contract import resolve_direct_identity_profile_slots
 from .retrieval import render_working_memory_block
-from .style_contract import resolve_direct_style_contract_targets
 
 HIGH_STAKES_TERMS = (
     "safe",
@@ -103,7 +102,6 @@ class QueryAnalysis:
     preference: bool
     continuation: bool
     profile_slot_targets: tuple[str, ...]
-    style_contract_targets: tuple[str, ...]
 
 
 @dataclass
@@ -130,7 +128,6 @@ class WorkingMemoryPolicy:
 
 def analyze_query(query: str) -> QueryAnalysis:
     profile_slot_targets = resolve_direct_identity_profile_slots(query)
-    style_contract_targets = resolve_direct_style_contract_targets(query)
     return QueryAnalysis(
         high_stakes=_contains_any(query, HIGH_STAKES_TERMS),
         explanatory=_contains_any(query, EXPLANATION_TERMS),
@@ -138,7 +135,6 @@ def analyze_query(query: str) -> QueryAnalysis:
         preference=_contains_any(query, PREFERENCE_TERMS),
         continuation=_contains_any(query, CONTINUATION_TERMS),
         profile_slot_targets=profile_slot_targets,
-        style_contract_targets=style_contract_targets,
     )
 
 
@@ -198,18 +194,6 @@ def _initial_policy(
         policy.graph_limit = 0
         policy.corpus_limit = 0
         policy.corpus_char_budget = 0
-
-    if analysis.style_contract_targets and not analysis.high_stakes:
-        policy.mode = "compact"
-        policy.collapse_mode = "aggressive"
-        policy.profile_limit = max(policy.profile_limit, min(profile_match_limit, 4))
-        policy.continuity_match_limit = min(policy.continuity_match_limit, min(continuity_match_limit, 1))
-        policy.continuity_recent_limit = min(policy.continuity_recent_limit, min(continuity_recent_limit, 1))
-        policy.transcript_limit = min(max(policy.transcript_limit, 1), min(transcript_match_limit, 1))
-        policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 260))
-        policy.graph_limit = 0
-        policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 2))
-        policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 2200))
 
     if analysis.explanatory:
         policy.mode = "balanced"
@@ -327,8 +311,6 @@ def build_working_memory_packet(
         policy.show_policy = True
 
     if analysis.preference and (profile_items or recent) and not analysis.high_stakes and not conflict_present:
-        policy.confidence_band = "high"
-    elif analysis.style_contract_targets and corpus_rows and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "high"
     elif analysis.profile_slot_targets and profile_items and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "high"
