@@ -189,6 +189,7 @@ def test_reconcile_tier2_candidates_accepts_extractor_normalized_style_contract(
     assert row is not None
     assert "27 Communication Rules" in row["content"]
     assert "tartalmi minták (1-5):" in row["content"]
+    assert "\n\n" in row["content"]
     assert any(action["kind"] == "style_contract" and action["action"] == "ADD" for action in result["actions"])
 
 

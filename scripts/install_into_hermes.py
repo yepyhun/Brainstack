@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -1517,6 +1518,24 @@ def _patch_dockerignore(path: Path, dry_run: bool) -> list[str]:
     return ["dockerignore:exclude_runtime_state"]
 
 
+def _patch_dockerfile_backend_dependencies(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    backend_packages = " ".join(sorted(set(BACKEND_DEPENDENCIES.values())))
+    install_line = f'uv pip install --no-cache-dir {backend_packages}'
+    if install_line in text:
+        return []
+    anchor = '    uv pip install --no-cache-dir -e ".[all]"\n'
+    if anchor not in text:
+        raise RuntimeError(f"Installer patch anchor missing for docker backend deps in {path}")
+    replacement = anchor + f"RUN {install_line}\n"
+    text = text.replace(anchor, replacement, 1)
+    if not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return ["dockerfile:install_backend_dependencies"]
+
+
 def _patch_docker_entrypoint(path: Path, dry_run: bool) -> list[str]:
     if not path.exists():
         return []
@@ -1694,29 +1713,32 @@ def _run_doctor(
     config_path: Path,
     compose_path: Path | None,
 ) -> int:
-    doctor = REPO_ROOT / "scripts" / "brainstack_doctor.py"
-    cmd = [
-        sys.executable,
-        str(doctor),
-        str(target),
-        "--config",
-        str(config_path),
-        "--runtime",
-        args.runtime,
-        "--check-docker",
-        "--check-desktop-launcher",
-    ]
-    if planned_install:
-        cmd.append("--planned-install")
-    if compose_path:
-        cmd.extend(["--compose-file", str(compose_path)])
-    if args.desktop_launcher:
-        cmd.extend(["--desktop-launcher", str(args.desktop_launcher)])
-    doctor_python = args.python or _default_target_python(target)
-    if doctor_python:
-        cmd.extend(["--python", str(doctor_python)])
-    proc = subprocess.run(cmd, text=True)
-    return proc.returncode
+    doctor_path = REPO_ROOT / "scripts" / "brainstack_doctor.py"
+    spec = importlib.util.spec_from_file_location("brainstack_doctor_runtime", doctor_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load doctor module from {doctor_path}")
+    doctor_mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = doctor_mod
+    spec.loader.exec_module(doctor_mod)
+
+    doctor_args = argparse.Namespace(
+        target=str(target),
+        config=str(config_path),
+        compose_file=str(compose_path) if compose_path else None,
+        desktop_launcher=str(args.desktop_launcher) if args.desktop_launcher else None,
+        python=str(args.python or _default_target_python(target)) if (args.python or _default_target_python(target)) else None,
+        runtime=args.runtime,
+        planned_install=planned_install,
+        check_docker=True,
+        check_desktop_launcher=True,
+        json=False,
+    )
+    code, checks = doctor_mod.run_doctor(doctor_args)
+    for check in checks:
+        marker = {"pass": "PASS", "warn": "WARN", "fail": "FAIL"}[check.status]
+        stream = sys.stderr if check.status == "fail" else sys.stdout
+        print(f"{marker} {check.name}: {check.message}", file=stream)
+    return code
 
 
 def main() -> int:
@@ -1814,6 +1836,7 @@ def main() -> int:
         host_patches.extend(_patch_compose_healthcheck(compose_path, args.dry_run))
         host_patches.extend(_patch_compose_runtime_identity(compose_path, args.dry_run))
         host_patches.extend(_patch_dockerignore(target / ".dockerignore", args.dry_run))
+        host_patches.extend(_patch_dockerfile_backend_dependencies(target / "Dockerfile", args.dry_run))
         host_patches.extend(_patch_docker_entrypoint(target / "docker" / "entrypoint.sh", args.dry_run))
 
     manifest = {

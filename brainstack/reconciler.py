@@ -133,8 +133,8 @@ def _reconcile_style_contract(
         stable_key=STYLE_CONTRACT_SLOT,
         principal_scope_key=principal_scope_key,
     )
-    content = _normalize_text(normalized.get("content"))
-    if existing and _normalize_text(existing.get("content")) == content:
+    content = str(normalized.get("content") or "").strip()
+    if existing and str(existing.get("content") or "").strip() == content:
         return [{"kind": "style_contract", "action": "NONE", "stable_key": STYLE_CONTRACT_SLOT}]
     row_id = store.upsert_profile_item(
         stable_key=STYLE_CONTRACT_SLOT,

@@ -88,6 +88,27 @@ def _default_compose_service(compose_path: Path) -> str | None:
     return None
 
 
+def _default_container_name(compose_path: Path, *, service: str | None = None) -> str | None:
+    text = _read(compose_path)
+    resolved_service = service or _default_compose_service(compose_path)
+    if not resolved_service:
+        return None
+    in_service = False
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if raw_line.startswith("  ") and not raw_line.startswith("    ") and stripped == f"{resolved_service}:":
+            in_service = True
+            continue
+        if in_service:
+            if not stripped:
+                continue
+            if not raw_line.startswith("    "):
+                break
+            if stripped.startswith("container_name:"):
+                return stripped.split(":", 1)[1].strip().strip("'\"")
+    return None
+
+
 def _load_docker_runtime_yaml(compose_path: Path, *, service: str | None = None, container_path: str = "/opt/data/config.yaml") -> dict[str, Any]:
     resolved_service = service or _default_compose_service(compose_path)
     if not resolved_service:
@@ -412,6 +433,11 @@ def _check_config(
     checks: list[Check] = []
     config: dict[str, Any] = {}
     loaded_from = str(config_path)
+    dependency_import_ok = (
+        lambda module_name: _docker_python_can_import(module_name, compose_path)
+        if runtime == "docker" and compose_path and not planned_install
+        else _python_can_import(module_name, python_bin)
+    )
 
     if config_path.exists():
         config = _load_yaml(config_path)
@@ -467,10 +493,10 @@ def _check_config(
             checks.append(Check("graph_backend_path", "pass", "plugins.brainstack.graph_db_path will be added by installer"))
         else:
             checks.append(Check("graph_backend_path", "warn", "plugins.brainstack.graph_db_path is absent; provider defaults will be used"))
-        if _python_can_import("kuzu", python_bin):
+        if dependency_import_ok("kuzu"):
             checks.append(Check("graph_backend_dependency", "pass", "Python kuzu package is importable"))
         else:
-            checks.append(Check("graph_backend_dependency", "fail", "Python kuzu package is missing for graph_backend='kuzu'"))
+            checks.append(Check("graph_backend_dependency", "fail", "Python kuzu package is missing for graph_backend='kuzu' in the active runtime"))
     elif planned_install:
         checks.append(Check("graph_backend_target", "pass", "graph backend is not Kuzu yet, but installer will set it"))
     else:
@@ -484,10 +510,10 @@ def _check_config(
             checks.append(Check("corpus_backend_path", "pass", "plugins.brainstack.corpus_db_path will be added by installer"))
         else:
             checks.append(Check("corpus_backend_path", "warn", "plugins.brainstack.corpus_db_path is absent; provider defaults will be used"))
-        if _python_can_import("chromadb", python_bin):
+        if dependency_import_ok("chromadb"):
             checks.append(Check("corpus_backend_dependency", "pass", "Python chromadb package is importable"))
         else:
-            checks.append(Check("corpus_backend_dependency", "fail", "Python chromadb package is missing for corpus_backend='chroma'"))
+            checks.append(Check("corpus_backend_dependency", "fail", "Python chromadb package is missing for corpus_backend='chroma' in the active runtime"))
     elif planned_install:
         checks.append(Check("corpus_backend_target", "pass", "corpus backend is not Chroma yet, but installer will set it"))
     else:
@@ -546,6 +572,50 @@ def _python_can_import(module_name: str, python_bin: Path | None) -> bool:
         return proc.returncode == 0
     except Exception:
         return False
+
+
+def _docker_python_can_import(module_name: str, compose_path: Path | None, *, service: str | None = None) -> bool:
+    if compose_path is None or not compose_path.exists():
+        return False
+    resolved_service = service or _default_compose_service(compose_path)
+    if not resolved_service:
+        return False
+    probe = (
+        "import importlib.util, sys; "
+        f"sys.exit(0 if importlib.util.find_spec({module_name!r}) else 1)"
+    )
+    python_commands = [
+        "/opt/hermes/.venv/bin/python",
+        "python3",
+    ]
+    container_name = _default_container_name(compose_path, service=resolved_service)
+    commands: list[list[str]] = []
+    if container_name:
+        for python_cmd in python_commands:
+            commands.append(["docker", "exec", container_name, python_cmd, "-c", probe])
+    for python_cmd in python_commands:
+        commands.append(
+            [
+                "docker",
+                "compose",
+                "-f",
+                str(compose_path),
+                "exec",
+                "-T",
+                resolved_service,
+                python_cmd,
+                "-c",
+                probe,
+            ]
+        )
+    for cmd in commands:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+            if proc.returncode == 0:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _check_compose(compose_path: Path, planned_install: bool) -> list[Check]:

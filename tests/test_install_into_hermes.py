@@ -6,6 +6,7 @@ from scripts.install_into_hermes import (
     _default_config_path,
     _generated_compose_path,
     _patch_compose_runtime_identity,
+    _patch_dockerfile_backend_dependencies,
     _patch_docker_entrypoint,
     _patch_dockerignore,
     _patch_config,
@@ -333,6 +334,25 @@ def test_patch_dockerignore_excludes_runtime_state(tmp_path: Path):
     assert "dockerignore:exclude_runtime_state" in applied
     assert "hermes-config/" in content
     assert "runtime/" in content
+
+
+def test_patch_dockerfile_backend_dependencies_installs_kuzu_and_chromadb(tmp_path: Path):
+    path = tmp_path / "Dockerfile"
+    path.write_text(
+        "FROM debian:13.4\n"
+        "RUN apt-get update && apt-get install -y python3\n"
+        "USER hermes\n"
+        'RUN uv venv && \\\n'
+        '    uv pip install --no-cache-dir -e ".[all]"\n',
+        encoding="utf-8",
+    )
+
+    applied = _patch_dockerfile_backend_dependencies(path, dry_run=False)
+    content = path.read_text(encoding="utf-8")
+
+    assert "dockerfile:install_backend_dependencies" in applied
+    assert 'uv pip install --no-cache-dir -e ".[all]"' in content
+    assert "RUN uv pip install --no-cache-dir chromadb kuzu" in content
 
 
 def test_patch_docker_entrypoint_adds_runtime_ownership_fix(tmp_path: Path):
