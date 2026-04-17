@@ -30,8 +30,9 @@ Brainstack 1.0 marks the first stable release of the Hermes-native memory kernel
 - Select or create a Hermes agent config first
 - Run the Brainstack installer against that explicit config
 - In Docker mode, if no compose file exists for that agent, the installer can generate one
+- If you hit an edge case or want to improve the installer path, feel free to open a ticket or PR
 
 ## Release target
 
 - Tag: `v1.0.0`
-- Commit: `5bfe590`
+- Commit: this release tag
