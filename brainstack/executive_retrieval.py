@@ -8,7 +8,6 @@ from typing import Any, Callable, Dict, Iterable, List
 from .db import BrainstackStore
 from .style_contract import STYLE_CONTRACT_SLOT
 from .tier2_extractor import _default_llm_caller, _extract_json_object, _extract_text_content
-from .transcript import has_meaningful_transcript_evidence, tokenize_match_text
 from .usefulness import graph_priority_adjustment, profile_priority_adjustment
 
 RRF_K = 60
@@ -99,6 +98,21 @@ def _looks_user_led(text: str) -> bool:
     return _normalize_text(text).lower().startswith("user:")
 
 
+def _has_meaningful_transcript_signal(rows: Iterable[Dict[str, Any]]) -> bool:
+    for row in rows:
+        if float(row.get("keyword_score") or 0.0) > 0.0:
+            return True
+        if str(row.get("match_mode") or "").strip() == "semantic" and float(row.get("semantic_score") or 0.0) > 0.0:
+            return True
+        if (
+            str(row.get("match_mode") or "").strip() == "support"
+            and str(row.get("retrieval_source") or "").strip() == "transcript.session_support"
+            and bool(row.get("same_principal"))
+        ):
+            return True
+    return False
+
+
 def _candidate_text(candidate: EvidenceCandidate) -> str:
     row = candidate.row
     if candidate.shelf == "graph":
@@ -130,9 +144,9 @@ def _candidate_priority_bonus(candidate: EvidenceCandidate) -> float:
     if '"' in text or "'" in text:
         bonus += 0.02
 
-    overlap = int(row.get("overlap_count") or 0)
-    if overlap > 0:
-        bonus += min(0.06, 0.015 * overlap)
+    keyword_score = float(row.get("keyword_score") or 0.0)
+    if keyword_score > 0.0:
+        bonus += min(0.06, keyword_score * 0.06)
 
     semantic_score = float(row.get("semantic_score") or 0.0)
     if semantic_score > 0.0:
@@ -347,7 +361,7 @@ def _same_principal_session_support_rows(
         for row in ranked_session_rows:
             row.setdefault("same_principal", True)
             row.setdefault("same_session", False)
-            row.setdefault("overlap_count", 0)
+            row.setdefault("keyword_score", 0.0)
             row.setdefault("retrieval_source", "transcript.session_support")
             row.setdefault("match_mode", "support")
             key = _row_unique_key(row)
@@ -494,7 +508,7 @@ def _aggregate_row_priority(row: Dict[str, Any]) -> tuple[Any, ...]:
     return (
         1 if bool(row.get("same_session")) else 0,
         float(row.get("semantic_score") or 0.0),
-        int(row.get("overlap_count") or 0),
+        float(row.get("keyword_score") or 0.0),
         _row_time_value(row),
         int(row.get("turn_number") or 0),
         int(row.get("id") or 0),
@@ -592,7 +606,7 @@ def _native_aggregate_rows(
             "content": content,
             "source": "graph.kuzu:native_sum",
             "same_session": False,
-            "overlap_count": 0,
+            "keyword_score": 0.0,
             "semantic_score": 0.0,
             "created_at": "",
             "metadata": {
@@ -611,20 +625,17 @@ def _native_aggregate_rows(
 
 def _fact_transcript_row_priority(row: Dict[str, Any]) -> tuple[Any, ...]:
     content = _normalize_text(row.get("content") or row.get("content_excerpt"))
-    token_count = len(tokenize_match_text(content))
-    overlap = int(row.get("overlap_count") or 0)
+    keyword_score = float(row.get("keyword_score") or 0.0)
     retrieval_source = str(row.get("retrieval_source") or "")
     match_mode = str(row.get("match_mode") or "")
-    density = float(overlap) / float(token_count or 1)
     return (
-        1 if overlap > 0 else 0,
-        overlap,
+        1 if keyword_score > 0.0 else 0,
+        keyword_score,
         1 if match_mode == "keyword" or "keyword" in retrieval_source else 0,
-        density,
         1 if _looks_user_led(content) else 0,
         1 if bool(row.get("same_session")) else 0,
         float(row.get("semantic_score") or 0.0),
-        -token_count,
+        -len(content),
         str(row.get("created_at") or ""),
         int(row.get("turn_number") or 0),
         int(row.get("id") or 0),
@@ -801,7 +812,7 @@ def _route_has_support(route: RetrievalRoute, selected: Dict[str, List[Dict[str,
     return True
 
 
-def _keep_low_overlap_temporal_transcript_rows(selected: Dict[str, List[Dict[str, Any]]]) -> bool:
+def _keep_temporal_transcript_rows_with_anchor_support(selected: Dict[str, List[Dict[str, Any]]]) -> bool:
     transcript_rows = list(selected.get("transcript_rows", ()))
     if not transcript_rows:
         return False
@@ -941,7 +952,7 @@ def _profile_keyword_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dic
     ranked.sort(
         key=lambda item: (
             1 if bool(item[1].get("_direct_slot_match")) else 0,
-            int(item[1].get("overlap_count") or 0),
+            float(item[1].get("keyword_score") or 0.0),
             profile_priority_adjustment(item[1]),
             float(item[1].get("confidence") or 0.0),
             str(item[1].get("updated_at") or ""),
@@ -984,7 +995,7 @@ def _graph_channel_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[
     ranked.sort(
         key=lambda item: (
             graph_priority_adjustment(item[1]),
-            item[1].get("overlap_count") or 0,
+            float(item[1].get("keyword_score") or 0.0),
             str(item[1].get("happened_at") or ""),
             -0.05 * item[0],
         ),
@@ -998,7 +1009,7 @@ def _corpus_channel_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict
     ranked.sort(
         key=lambda item: (
             float(item[1].get("semantic_score") or 0.0),
-            int(item[1].get("overlap_count") or 0),
+            float(item[1].get("keyword_score") or 0.0),
             1 if "semantic" in str(item[1].get("retrieval_source") or "") else 0,
             1 if bool(item[1].get("same_session")) else 0,
             -0.05 * item[0],
@@ -1470,8 +1481,8 @@ def retrieve_executive_context(
         )
 
     transcript_rows = selected["transcript_rows"]
-    if transcript_rows and not has_meaningful_transcript_evidence(query, transcript_rows):
-        if route.applied_mode == ROUTE_TEMPORAL and _keep_low_overlap_temporal_transcript_rows(selected):
+    if transcript_rows and not _has_meaningful_transcript_signal(transcript_rows):
+        if route.applied_mode == ROUTE_TEMPORAL and _keep_temporal_transcript_rows_with_anchor_support(selected):
             pass
         else:
             selected["transcript_rows"] = []
@@ -1514,7 +1525,7 @@ def retrieve_executive_context(
                 "document_id": int(candidate.row.get("document_id") or 0),
                 "section_index": int(candidate.row.get("section_index") or 0),
                 "created_at": str(candidate.row.get("created_at") or ""),
-                "overlap_count": int(candidate.row.get("overlap_count") or 0),
+                "keyword_score": float(candidate.row.get("keyword_score") or 0.0),
                 "semantic_score": float(candidate.row.get("semantic_score") or 0.0),
                 "same_session": bool(candidate.row.get("same_session")),
                 "content_excerpt": _candidate_text(candidate)[:220],

@@ -25,7 +25,6 @@ from .style_contract import (
     build_style_contract_from_document,
 )
 from .temporal import merge_temporal, normalize_temporal_fields, record_is_effective_at
-from .transcript import count_overlap, tokenize_retrieval_query
 from .usefulness import (
     apply_retrieval_telemetry,
     graph_priority_adjustment,
@@ -36,6 +35,7 @@ from .usefulness import (
 F = TypeVar("F", bound=Callable[..., Any])
 logger = logging.getLogger(__name__)
 NUMERIC_TOKEN_RE = re.compile(r"\d+(?::\d+)?(?:\.\d+)?")
+QUERY_TOKEN_RE = re.compile(r"[^\W_]+(?:[-_][^\W_]+)*", re.UNICODE)
 PROFILE_SCOPE_DELIMITER = "::principal_scope::"
 PRINCIPAL_SCOPED_PROFILE_CATEGORIES = {"identity", "preference"}
 MIGRATION_CANONICAL_COMMUNICATION_ROWS_V1 = "canonical_communication_rows_v1"
@@ -49,20 +49,41 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _query_tokens(query: str, *, limit: int) -> List[str]:
-    tokens = tokenize_retrieval_query(query)
-    return tokens[:limit]
+def _extract_query_terms(query: str, *, limit: int) -> List[str]:
+    output: List[str] = []
+    seen: set[str] = set()
+    for token in QUERY_TOKEN_RE.findall(str(query or "").casefold()):
+        if len(token) < 2 or token in seen:
+            continue
+        seen.add(token)
+        output.append(token)
+        if len(output) >= limit:
+            break
+    return output
+
+
+def _keyword_score_for_rank(rank: int) -> float:
+    return 1.0 / float(max(1, rank))
+
+
+def _attach_keyword_scores(rows: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    annotated: List[Dict[str, Any]] = []
+    for rank, row in enumerate(rows, start=1):
+        payload = dict(row)
+        payload["keyword_score"] = max(float(payload.get("keyword_score") or 0.0), _keyword_score_for_rank(rank))
+        annotated.append(payload)
+    return annotated
 
 
 def build_fts_query(query: str) -> str:
-    tokens = _query_tokens(query, limit=12)
+    tokens = _extract_query_terms(query, limit=12)
     if not tokens:
         return ""
     return " OR ".join(f'"{token}"' for token in tokens)
 
 
 def build_like_tokens(query: str, *, limit: int = 8) -> List[str]:
-    return [f"%{token.lower()}%" for token in _query_tokens(query, limit=limit)]
+    return [f"%{token.lower()}%" for token in _extract_query_terms(query, limit=limit)]
 
 
 def _decode_json_object(value: Any) -> Dict[str, Any]:
@@ -317,21 +338,17 @@ def _graph_fact_priority(row: Dict[str, Any]) -> int:
     return priorities.get(fact_class, 0)
 
 
-def _graph_sort_key(row: Dict[str, Any], *, query: str) -> tuple[int, int, int, int, str]:
+def _graph_sort_key(row: Dict[str, Any]) -> tuple[int, float, int, int, str]:
     metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
     if str(row.get("row_type") or "") == "conflict" and isinstance(row.get("conflict_metadata"), dict):
         metadata = row.get("conflict_metadata") or metadata
-    overlap_count = count_overlap(query, _graph_match_text(row))
-    raw_query = str(query or "").strip().lower()
-    if overlap_count <= 0 and raw_query and raw_query in _graph_match_text(row).lower():
-        overlap_count = 1
-    row["overlap_count"] = overlap_count
     row["fact_class"] = _graph_fact_class(row)
+    keyword_score = float(row.get("keyword_score") or 0.0)
     confidence_score = int(round(_graph_metadata_confidence(metadata) * 100))
     telemetry_score = int(round(graph_priority_adjustment(row) * 100))
     return (
         _graph_fact_priority(row),
-        overlap_count,
+        keyword_score,
         confidence_score,
         telemetry_score,
         str(row.get("happened_at") or ""),
@@ -1922,6 +1939,7 @@ class BrainstackStore:
                 rows = []
         else:
             rows = []
+        keyword_rows = _attach_keyword_scores(_row_to_dict(row) for row in rows) if rows else []
         if not rows:
             rows = self.conn.execute(
                 """
@@ -1933,9 +1951,10 @@ class BrainstackStore:
                 """,
                 (row_limit,),
             ).fetchall()
+        fallback_rows = [_row_to_dict(row) for row in rows] if not keyword_rows else []
         scored: List[Dict[str, Any]] = []
-        for row in rows:
-            item = _row_to_dict(row)
+        for row in keyword_rows or fallback_rows:
+            item = dict(row)
             if not _annotate_principal_scope(
                 item,
                 principal_scope_key=current_principal_scope_key,
@@ -1946,8 +1965,10 @@ class BrainstackStore:
             temporal_payload = metadata.get("temporal")
             temporal = temporal_payload if isinstance(temporal_payload, dict) else {}
             item["same_session"] = item["session_id"] == session_id
-            item["overlap_count"] = count_overlap(query, item["content"])
+            item.setdefault("keyword_score", 0.0)
             item["semantic_score"] = 0.0
+            item["retrieval_source"] = "continuity.temporal_keyword" if keyword_rows else "continuity.temporal_recent"
+            item["match_mode"] = "keyword" if keyword_rows else "recent"
             item["_temporal_observed_at"] = str(
                 temporal.get("observed_at")
                 or temporal.get("valid_at")
@@ -1975,8 +1996,7 @@ class BrainstackStore:
             key=lambda item: (
                 1 if float(item.get("semantic_score") or 0.0) > 0.0 else 0,
                 float(item.get("semantic_score") or 0.0),
-                1 if int(item.get("overlap_count") or 0) > 0 else 0,
-                int(item.get("overlap_count") or 0),
+                float(item.get("keyword_score") or 0.0),
                 1 if item.get("same_session") else 0,
                 1 if item.get("same_principal") else 0,
                 str(item.get("_temporal_observed_at") or ""),
@@ -2030,24 +2050,22 @@ class BrainstackStore:
             ).fetchall()
 
         scored: List[Dict[str, Any]] = []
-        for row in rows:
-            item = _row_to_dict(row)
+        for row in _attach_keyword_scores(_row_to_dict(item) for item in rows):
+            item = dict(row)
             if not _annotate_principal_scope(
                 item,
                 principal_scope_key=current_principal_scope_key,
                 session_id=session_id,
             ):
                 continue
-            overlap_count = count_overlap(query, item["content"])
-            if overlap_count <= 0:
-                continue
-            item["overlap_count"] = overlap_count
             item["same_session"] = item["session_id"] == session_id
+            item["retrieval_source"] = "continuity.keyword"
+            item["match_mode"] = "keyword"
             scored.append(item)
 
         scored.sort(
             key=lambda item: (
-                int(item["overlap_count"]),
+                float(item.get("keyword_score") or 0.0),
                 1 if item["same_session"] else 0,
                 1 if item.get("same_principal") else 0,
                 str(item.get("created_at") or ""),
@@ -2074,7 +2092,7 @@ class BrainstackStore:
 
     @_locked
     def search_transcript(self, *, query: str, session_id: str, limit: int) -> List[Dict[str, Any]]:
-        tokens = tokenize_retrieval_query(query)
+        tokens = _extract_query_terms(query, limit=8)
         if not tokens:
             return []
 
@@ -2112,19 +2130,17 @@ class BrainstackStore:
             ).fetchall()
 
         scored: List[Dict[str, Any]] = []
-        for row in rows:
-            item = _row_to_dict(row)
-            overlap_count = count_overlap(query, item["content"])
-            if overlap_count <= 0:
-                continue
-            item["overlap_count"] = overlap_count
+        for row in _attach_keyword_scores(_row_to_dict(item) for item in rows):
+            item = dict(row)
             item["same_session"] = item["session_id"] == session_id
+            item["retrieval_source"] = "transcript.keyword"
+            item["match_mode"] = "keyword"
             scored.append(item)
 
         scored.sort(
             key=lambda item: (
                 1 if item["same_session"] else 0,
-                int(item["overlap_count"]),
+                float(item.get("keyword_score") or 0.0),
                 int(item["turn_number"]),
                 int(item["id"]),
             ),
@@ -2141,7 +2157,7 @@ class BrainstackStore:
         limit: int,
         principal_scope_key: str = "",
     ) -> List[Dict[str, Any]]:
-        tokens = tokenize_retrieval_query(query)
+        tokens = _extract_query_terms(query, limit=8)
         if not tokens:
             return []
 
@@ -2180,24 +2196,22 @@ class BrainstackStore:
             ).fetchall()
 
         scored: List[Dict[str, Any]] = []
-        for row in rows:
-            item = _row_to_dict(row)
+        for row in _attach_keyword_scores(_row_to_dict(item) for item in rows):
+            item = dict(row)
             if not _annotate_principal_scope(
                 item,
                 principal_scope_key=current_principal_scope_key,
                 session_id=session_id,
             ):
                 continue
-            overlap_count = count_overlap(query, item["content"])
-            if overlap_count <= 0:
-                continue
-            item["overlap_count"] = overlap_count
             item["same_session"] = item["session_id"] == session_id
+            item["retrieval_source"] = "transcript.keyword"
+            item["match_mode"] = "keyword"
             scored.append(item)
 
         scored.sort(
             key=lambda item: (
-                int(item["overlap_count"]),
+                float(item.get("keyword_score") or 0.0),
                 1 if item["same_session"] else 0,
                 1 if item.get("same_principal") else 0,
                 str(item.get("created_at") or ""),
@@ -2453,13 +2467,9 @@ class BrainstackStore:
             if storage_key and storage_key in seen_storage_keys:
                 continue
             seen_storage_keys.add(storage_key)
-            match_text = " ".join(
-                (
-                    str(item.get("stable_key") or "").replace("_", " "),
-                    str(item.get("content") or ""),
-                )
-            )
-            item["overlap_count"] = max(1, count_overlap(query, match_text))
+            item["keyword_score"] = 2.0
+            item["retrieval_source"] = "profile.slot_target"
+            item["match_mode"] = "slot"
             item["_direct_slot_match"] = True
             targeted.append(item)
         if not fts_query:
@@ -2501,8 +2511,8 @@ class BrainstackStore:
 
         scored: List[Dict[str, Any]] = []
         scored.extend(targeted)
-        for row in rows:
-            item = _profile_row_to_dict(row)
+        for row in _attach_keyword_scores(_profile_row_to_dict(item) for item in rows):
+            item = dict(row)
             if not _annotate_principal_scope(item, principal_scope_key=principal_scope_key):
                 continue
             if str(item.get("stable_key") or "").strip() in excluded:
@@ -2510,20 +2520,15 @@ class BrainstackStore:
             storage_key = str(item.get("storage_key") or "")
             if storage_key and storage_key in seen_storage_keys:
                 continue
-            match_text = " ".join(
-                (
-                    str(item.get("stable_key") or "").replace("_", " "),
-                    str(item.get("content") or ""),
-                )
-            )
-            item["overlap_count"] = count_overlap(query, match_text)
+            item["retrieval_source"] = "profile.keyword"
+            item["match_mode"] = "keyword"
             item["_direct_slot_match"] = False
             scored.append(item)
 
         scored.sort(
             key=lambda item: (
                 1 if bool(item.get("_direct_slot_match")) else 0,
-                int(item.get("overlap_count") or 0),
+                float(item.get("keyword_score") or 0.0),
                 profile_priority_adjustment(item),
                 float(item.get("confidence") or 0.0),
                 str(item.get("updated_at") or ""),
@@ -2784,7 +2789,7 @@ class BrainstackStore:
                 "created_at": created_at,
                 "same_session": str(document_meta.get("session_id") or "") == session_id,
                 "semantic_score": float(row.get("semantic_score") or 0.0),
-                "overlap_count": count_overlap(query, str(row.get("content") or "")),
+                "keyword_score": 0.0,
                 "retrieval_source": "conversation.semantic",
                 "match_mode": "semantic",
             }
@@ -2797,7 +2802,6 @@ class BrainstackStore:
             output.append(item)
         output.sort(
             key=lambda item: (
-                int(item.get("overlap_count") or 0),
                 float(item.get("semantic_score") or 0.0),
                 1 if item["same_session"] else 0,
                 str(item.get("created_at") or ""),
@@ -3547,9 +3551,9 @@ class BrainstackStore:
             """,
             tuple(params + [candidate_limit]),
         ).fetchall()
-        parsed = [_row_to_dict(row) for row in rows]
-        parsed = [item for item in parsed if _graph_sort_key(item, query=query)[0] > 0]
-        parsed.sort(key=lambda item: _graph_sort_key(item, query=query), reverse=True)
+        parsed = _attach_keyword_scores(_row_to_dict(row) for row in rows)
+        parsed = [item for item in parsed if _graph_sort_key(item)[0] > 0]
+        parsed.sort(key=_graph_sort_key, reverse=True)
         return parsed[:limit]
 
     @_locked
@@ -3727,15 +3731,18 @@ class BrainstackStore:
                 rows = self._sqlite_search_graph(query=query, limit=limit)
             else:
                 self._graph_backend_error = ""
+        keyword_rows = _attach_keyword_scores(rows)
         scored: List[Dict[str, Any]] = []
-        for row in rows:
+        for row in keyword_rows:
             item = dict(row)
             if not _annotate_principal_scope(item, principal_scope_key=principal_scope_key):
                 continue
-            if _graph_sort_key(item, query=query)[0] <= 0:
+            item.setdefault("retrieval_source", "graph.keyword")
+            item.setdefault("match_mode", "keyword")
+            if _graph_sort_key(item)[0] <= 0:
                 continue
             scored.append(item)
-        scored.sort(key=lambda item: _graph_sort_key(item, query=query), reverse=True)
+        scored.sort(key=_graph_sort_key, reverse=True)
         return scored[:limit]
 
     @_locked

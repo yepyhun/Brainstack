@@ -18,7 +18,6 @@ from brainstack.db import BrainstackStore
 from brainstack.executive_retrieval import (
     _default_route_resolver,
     _parse_time_value,
-    _should_attempt_route_hint,
     retrieve_executive_context,
 )
 
@@ -379,8 +378,8 @@ def test_phase20_3_fact_route_does_not_inherit_legacy_decomposition_gate(monkeyp
 
         assert packet["decomposition"]["used"] is False
         assert packet["decomposition"]["legacy_disabled"] is True
-        assert packet["routing"]["requested_mode"] == "fact"
-        assert packet["routing"]["applied_mode"] == "fact"
+        assert packet["routing"]["requested_mode"] == "temporal"
+        assert packet["routing"]["applied_mode"] == "temporal"
         assert "## Brainstack Transcript Evidence" in packet["block"]
         recovered = [
             item
@@ -632,13 +631,13 @@ def test_phase20_3_temporal_route_falls_back_when_only_one_distinct_temporal_anc
         store.close()
 
 
-def test_phase20_3_routing_hint_gate_does_not_trigger_on_plain_question_mark_only():
-    assert _should_attempt_route_hint("What are we working on right now?") is False
-    assert _should_attempt_route_hint("What are my running shoes?") is False
-    assert _should_attempt_route_hint("How much money did I raise for charity in total?") is True
-    assert _should_attempt_route_hint("Which book did I finish reading first?") is True
-    assert _should_attempt_route_hint("What is the order of the three trips I took?") is True
-    assert _should_attempt_route_hint("Order these events: ShopRite, Walmart coupon, Ibotta") is True
+def test_phase20_3_default_route_resolver_matches_current_bounded_cues():
+    assert _default_route_resolver("What are we working on right now?")["mode"] == "fact"
+    assert _default_route_resolver("What are my running shoes?")["mode"] == "fact"
+    assert _default_route_resolver("How much money did I raise for charity in total?")["mode"] == "aggregate"
+    assert _default_route_resolver("Which book did I finish reading first?")["mode"] == "temporal"
+    assert _default_route_resolver("What is the order of the three trips I took?")["mode"] == "temporal"
+    assert _default_route_resolver("Order these events: ShopRite, Walmart coupon, Ibotta")["mode"] == "fact"
 
 
 def test_phase20_8_default_route_resolver_uses_bounded_deterministic_modes():
@@ -689,13 +688,13 @@ def test_phase20_2_exact_numeric_value_change_auto_supersedes_current_graph_stat
 
 
 def test_phase20_2_tokenization_stays_unicode_safe_without_language_stopword_lists():
-    from brainstack.transcript import tokenize_match_text
+    from brainstack.db import build_fts_query
 
-    tokens = tokenize_match_text("Mi történt a ShopRite és Ibotta eseményekkel?")
+    query = build_fts_query("Mi történt a ShopRite és Ibotta eseményekkel?")
 
-    assert "shoprite" in tokens
-    assert "ibotta" in tokens
-    assert "assistant" not in tokenize_match_text("Assistant: ShopRite update")
+    assert '"shoprite"' in query
+    assert '"ibotta"' in query
+    assert '"történt"' in query
 
 
 def test_cross_store_publish_journal_tracks_graph_and_corpus_targets(monkeypatch, tmp_path):
@@ -1007,7 +1006,7 @@ def test_phase20_11_fact_route_keeps_semantic_transcript_evidence(tmp_path, monk
             "source": "test",
             "metadata": {},
             "created_at": "2023-05-22T10:00:00+00:00",
-            "overlap_count": 1,
+            "keyword_score": 1,
             "same_session": False,
             "retrieval_source": "transcript.keyword",
             "match_mode": "keyword",
@@ -1021,7 +1020,7 @@ def test_phase20_11_fact_route_keeps_semantic_transcript_evidence(tmp_path, monk
             "source": "test",
             "metadata": {"semantic_class": "conversation"},
             "created_at": "2023-04-03T08:30:00+00:00",
-            "overlap_count": 0,
+            "keyword_score": 0,
             "same_session": False,
             "semantic_score": 0.93,
             "retrieval_source": "conversation.semantic",
@@ -1131,7 +1130,7 @@ def test_phase20_11_fact_route_transcript_block_can_use_fused_transcript_rank(tm
             "source": "test",
             "metadata": {},
             "created_at": "2023-05-28T18:05:00+00:00",
-            "overlap_count": 1,
+            "keyword_score": 1,
             "same_session": True,
             "retrieval_source": "transcript.keyword",
             "match_mode": "keyword",
@@ -1145,7 +1144,7 @@ def test_phase20_11_fact_route_transcript_block_can_use_fused_transcript_rank(tm
             "source": "test",
             "metadata": {},
             "created_at": "2023-05-24T23:58:00+00:00",
-            "overlap_count": 1,
+            "keyword_score": 1,
             "same_session": True,
             "retrieval_source": "transcript.keyword",
             "match_mode": "keyword",
@@ -1159,7 +1158,7 @@ def test_phase20_11_fact_route_transcript_block_can_use_fused_transcript_rank(tm
             "source": "test",
             "metadata": {"semantic_class": "conversation"},
             "created_at": "2023-05-22T10:00:00+00:00",
-            "overlap_count": 1,
+            "keyword_score": 1,
             "same_session": True,
             "semantic_score": 0.91,
             "retrieval_source": "conversation.semantic",
@@ -1206,7 +1205,7 @@ def test_phase20_11_fact_transcript_rows_prioritize_higher_overlap(tmp_path, mon
             "source": "test",
             "metadata": {"semantic_class": "conversation"},
             "created_at": "2023-05-21T17:19:00+00:00",
-            "overlap_count": 6,
+            "keyword_score": 6,
             "same_session": True,
             "semantic_score": 0.73,
             "retrieval_source": "conversation.semantic",
@@ -1221,7 +1220,7 @@ def test_phase20_11_fact_transcript_rows_prioritize_higher_overlap(tmp_path, mon
             "source": "test",
             "metadata": {},
             "created_at": "2023-05-21T17:20:00+00:00",
-            "overlap_count": 10,
+            "keyword_score": 10,
             "same_session": True,
             "retrieval_source": "transcript.keyword",
             "match_mode": "keyword",
@@ -1300,7 +1299,7 @@ def test_phase20_11_fact_transcript_rows_carry_selected_continuity_ids(tmp_path,
                 "content": "User: Harvest Market planning and soap sales.",
                 "source": "test",
                 "created_at": "2023-05-23T14:15:00+00:00",
-                "overlap_count": 1,
+                "keyword_score": 1,
                 "retrieval_source": "transcript.keyword",
                 "match_mode": "keyword",
             },
@@ -1312,7 +1311,7 @@ def test_phase20_11_fact_transcript_rows_carry_selected_continuity_ids(tmp_path,
                 "content": "User: Hex color processing request.",
                 "source": "test",
                 "created_at": "2023-05-28T18:05:00+00:00",
-                "overlap_count": 1,
+                "keyword_score": 1,
                 "retrieval_source": "transcript.keyword",
                 "match_mode": "keyword",
             },
@@ -1324,7 +1323,7 @@ def test_phase20_11_fact_transcript_rows_carry_selected_continuity_ids(tmp_path,
                 "content": "User: Comma-delimited color formatting request.",
                 "source": "test",
                 "created_at": "2023-05-28T18:05:00+00:00",
-                "overlap_count": 1,
+                "keyword_score": 1,
                 "retrieval_source": "transcript.keyword",
                 "match_mode": "keyword",
             },
@@ -1339,7 +1338,7 @@ def test_phase20_11_fact_transcript_rows_carry_selected_continuity_ids(tmp_path,
                 ),
                 "source": "test",
                 "created_at": "2023-05-24T23:58:00+00:00",
-                "overlap_count": 1,
+                "keyword_score": 1,
                 "retrieval_source": "transcript.keyword",
                 "match_mode": "keyword",
             },
@@ -1404,7 +1403,7 @@ def test_phase20_11_search_continuity_filters_zero_overlap_rows(tmp_path):
 
         ids = [int(row.get("id") or 0) for row in rows]
         assert ids
-        assert all(int(row.get("overlap_count") or 0) > 0 for row in rows)
+        assert all(float(row.get("keyword_score") or 0) > 0 for row in rows)
     finally:
         store.close()
 
@@ -1421,7 +1420,7 @@ def test_phase20_11_fact_transcript_rows_only_carry_transcript_competitive_match
                 "content": "User: Harvest Market planning and previous vendor notes.",
                 "source": "test",
                 "created_at": "2023-05-23T14:15:00+00:00",
-                "overlap_count": 1,
+                "keyword_score": 1,
                 "same_session": True,
             },
             {
@@ -1432,7 +1431,7 @@ def test_phase20_11_fact_transcript_rows_only_carry_transcript_competitive_match
                 "content": "User: Occupation certificate process for residential work.",
                 "source": "test",
                 "created_at": "2023-05-22T17:30:00+00:00",
-                "overlap_count": 1,
+                "keyword_score": 1,
                 "same_session": True,
             },
             {
@@ -1446,7 +1445,7 @@ def test_phase20_11_fact_transcript_rows_only_carry_transcript_competitive_match
                 ),
                 "source": "test",
                 "created_at": "2023-05-24T23:57:30+00:00",
-                "overlap_count": 2,
+                "keyword_score": 2,
                 "same_session": True,
             },
         ]
@@ -1459,7 +1458,7 @@ def test_phase20_11_fact_transcript_rows_only_carry_transcript_competitive_match
                 "content": "User: Harvest Market planning and previous vendor notes.",
                 "source": "test",
                 "created_at": "2023-05-23T14:15:00+00:00",
-                "overlap_count": 1,
+                "keyword_score": 1,
                 "retrieval_source": "transcript.keyword",
                 "match_mode": "keyword",
                 "same_session": True,
@@ -1472,7 +1471,7 @@ def test_phase20_11_fact_transcript_rows_only_carry_transcript_competitive_match
                 "content": "User: Occupation certificate process for residential work.",
                 "source": "test",
                 "created_at": "2023-05-22T17:30:00+00:00",
-                "overlap_count": 1,
+                "keyword_score": 1,
                 "retrieval_source": "transcript.keyword",
                 "match_mode": "keyword",
                 "same_session": True,
@@ -1488,7 +1487,7 @@ def test_phase20_11_fact_transcript_rows_only_carry_transcript_competitive_match
                 ),
                 "source": "test",
                 "created_at": "2023-05-24T23:57:00+00:00",
-                "overlap_count": 2,
+                "keyword_score": 2,
                 "retrieval_source": "transcript.keyword",
                 "match_mode": "keyword",
                 "same_session": True,
@@ -1501,7 +1500,7 @@ def test_phase20_11_fact_transcript_rows_only_carry_transcript_competitive_match
                 "content": "User: Comma-delimited color formatting request from previous export.",
                 "source": "test",
                 "created_at": "2023-05-28T18:05:00+00:00",
-                "overlap_count": 1,
+                "keyword_score": 1,
                 "retrieval_source": "transcript.keyword",
                 "match_mode": "keyword",
                 "same_session": True,
@@ -1514,7 +1513,7 @@ def test_phase20_11_fact_transcript_rows_only_carry_transcript_competitive_match
                 "content": "User: Previous export format for color processing request.",
                 "source": "test",
                 "created_at": "2023-05-28T18:06:00+00:00",
-                "overlap_count": 1,
+                "keyword_score": 1,
                 "retrieval_source": "transcript.keyword",
                 "match_mode": "keyword",
                 "same_session": True,
@@ -1527,7 +1526,7 @@ def test_phase20_11_fact_transcript_rows_only_carry_transcript_competitive_match
                 "content": "User: Previous report export requested for vendor dashboard.",
                 "source": "test",
                 "created_at": "2023-05-28T18:07:00+00:00",
-                "overlap_count": 1,
+                "keyword_score": 1,
                 "retrieval_source": "transcript.keyword",
                 "match_mode": "keyword",
                 "same_session": True,
@@ -1543,7 +1542,7 @@ def test_phase20_11_fact_transcript_rows_only_carry_transcript_competitive_match
                 ),
                 "source": "test",
                 "created_at": "2023-05-24T23:58:00+00:00",
-                "overlap_count": 1,
+                "keyword_score": 1,
                 "retrieval_source": "transcript.keyword",
                 "match_mode": "keyword",
                 "same_session": True,
@@ -1627,7 +1626,7 @@ def test_phase20_11_fact_block_keeps_relevant_third_transcript_row(tmp_path, mon
                 ),
                 "source": "test",
                 "created_at": "2023/05/23 (Tue) 14:15",
-                "overlap_count": 1,
+                "keyword_score": 1,
                 "retrieval_source": "transcript.keyword",
                 "match_mode": "keyword",
             },
@@ -1642,7 +1641,7 @@ def test_phase20_11_fact_block_keeps_relevant_third_transcript_row(tmp_path, mon
                 ),
                 "source": "test",
                 "created_at": "2023/05/22 (Mon) 17:30",
-                "overlap_count": 1,
+                "keyword_score": 1,
                 "retrieval_source": "transcript.keyword",
                 "match_mode": "keyword",
             },
@@ -1657,7 +1656,7 @@ def test_phase20_11_fact_block_keeps_relevant_third_transcript_row(tmp_path, mon
                 ),
                 "source": "test",
                 "created_at": "2023/05/24 (Wed) 23:58",
-                "overlap_count": 1,
+                "keyword_score": 1,
                 "retrieval_source": "transcript.keyword",
                 "match_mode": "keyword",
             },
@@ -1702,7 +1701,7 @@ def test_phase20_11_temporal_sort_handles_slash_and_iso_timestamps(tmp_path, mon
             "content": "User: I took a day hike to Muir Woods with my family.",
             "source": "test",
             "created_at": "2023/02/15 (Wed) 01:17",
-            "overlap_count": 4,
+            "keyword_score": 4,
             "semantic_score": 0.61,
             "retrieval_source": "transcript.keyword",
             "match_mode": "keyword",
@@ -1715,7 +1714,7 @@ def test_phase20_11_temporal_sort_handles_slash_and_iso_timestamps(tmp_path, mon
             "content": "User: During my road trip to Yosemite National Park, I also thought about Big Sur and Monterey.",
             "source": "test",
             "created_at": "2023/02/20 (Mon) 05:52",
-            "overlap_count": 2,
+            "keyword_score": 2,
             "semantic_score": 0.58,
             "retrieval_source": "conversation.semantic",
             "match_mode": "semantic",
@@ -1728,7 +1727,7 @@ def test_phase20_11_temporal_sort_handles_slash_and_iso_timestamps(tmp_path, mon
             "content": "session summary | user: I've been collecting stamps for three months now...",
             "source": "test",
             "created_at": "2026-04-14T10:24:28.816720+00:00",
-            "overlap_count": 4,
+            "keyword_score": 4,
             "semantic_score": 0.0,
             "retrieval_source": "transcript.keyword",
             "match_mode": "keyword",
@@ -1832,7 +1831,7 @@ def test_phase20_18_fact_packet_carries_same_principal_session_support_rows(tmp_
                 "content": "My usual cafe order is an oat flat white.",
                 "source": "test",
                 "created_at": "2026-04-15T09:02:00Z",
-                "overlap_count": 2,
+                "keyword_score": 2,
                 "retrieval_source": "transcript.keyword",
                 "match_mode": "keyword",
                 "same_session": True,

@@ -6,6 +6,7 @@ import sys
 import types
 from datetime import timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 
 SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "run_brainstack_longmemeval_subset.py"
@@ -91,7 +92,7 @@ def test_provider_candidate_debug_snapshot_extracts_fused_and_selected_rows():
                     "id": 17,
                     "turn_number": 9,
                     "created_at": "2023-04-03T08:30:00+00:00",
-                    "overlap_count": 2,
+                    "keyword_score": 0.5,
                     "semantic_score": 0.91,
                     "same_session": False,
                     "content_excerpt": "I used to work as a marketing specialist at a small startup.",
@@ -104,7 +105,7 @@ def test_provider_candidate_debug_snapshot_extracts_fused_and_selected_rows():
                         "session_id": "other-session",
                         "turn_number": 9,
                         "created_at": "2023-04-03T08:30:00+00:00",
-                        "overlap_count": 2,
+                        "keyword_score": 0.5,
                         "semantic_score": 0.91,
                         "channels": ["keyword", "semantic"],
                         "channel_ranks": {"keyword": 1, "semantic": 3},
@@ -120,7 +121,7 @@ def test_provider_candidate_debug_snapshot_extracts_fused_and_selected_rows():
     assert snapshot["fused_candidates"][0]["shelf"] == "transcript"
     assert snapshot["fused_candidates"][0]["channel_ranks"] == {"keyword": 1, "semantic": 3}
     assert snapshot["fused_candidates"][0]["turn_number"] == 9
-    assert snapshot["fused_candidates"][0]["overlap_count"] == 2
+    assert snapshot["fused_candidates"][0]["keyword_score"] == 0.5
     assert "marketing specialist" in snapshot["fused_candidates"][0]["content_excerpt"]
     assert snapshot["selected_rows"]["transcript_rows"][0]["session_id"] == "other-session"
     assert "marketing specialist" in snapshot["selected_rows"]["transcript_rows"][0]["content_excerpt"]
@@ -491,6 +492,217 @@ def test_build_memory_context_prompt_wraps_prefetch_block():
     assert "<memory-context>" in prompt
     assert "## Brainstack Transcript Evidence" in prompt
     assert prompt.rstrip().endswith("</memory-context>")
+
+
+def test_load_runtime_config_template_prefers_profile_config_with_model(tmp_path):
+    module = _load_script_module()
+    hermes_root = tmp_path / "hermes"
+    (hermes_root / "hermes-config" / "agent-a").mkdir(parents=True)
+    (hermes_root / "config.yaml").write_text("plugins:\n  brainstack:\n    graph_backend: kuzu\n", encoding="utf-8")
+    (hermes_root / "hermes-config" / "agent-a" / "config.yaml").write_text(
+        (
+            "model:\n"
+            "  default: xiaomi/mimo-v2-pro\n"
+            "  provider: nous\n"
+            "auxiliary:\n"
+            "  flush_memories:\n"
+            "    provider: main\n"
+            "plugins:\n"
+            "  brainstack:\n"
+            "    transcript_match_limit: 2\n"
+        ),
+        encoding="utf-8",
+    )
+
+    config = module._load_runtime_config_template(hermes_root)
+
+    assert config["model"]["default"] == "xiaomi/mimo-v2-pro"
+    assert config["auxiliary"]["flush_memories"]["provider"] == "main"
+    assert config["plugins"]["brainstack"]["transcript_match_limit"] == 2
+
+
+def test_resolve_runtime_home_context_returns_profile_home(tmp_path):
+    module = _load_script_module()
+    hermes_root = tmp_path / "hermes"
+    profile_home = hermes_root / "hermes-config" / "agent-a"
+    profile_home.mkdir(parents=True)
+    (profile_home / "config.yaml").write_text(
+        "model:\n  default: xiaomi/mimo-v2-pro\n  provider: nous\n",
+        encoding="utf-8",
+    )
+
+    config, source_home = module._resolve_runtime_home_context(hermes_root)
+
+    assert config["model"]["provider"] == "nous"
+    assert source_home == profile_home
+
+
+def test_build_config_from_runtime_preserves_main_provider_flush_and_home_paths(tmp_path):
+    module = _load_script_module()
+    home = tmp_path / "home"
+    runtime_config = {
+        "model": {"default": "xiaomi/mimo-v2-pro", "provider": "nous"},
+        "auxiliary": {"flush_memories": {"provider": "auto", "timeout": 45}},
+        "plugins": {"brainstack": {"transcript_match_limit": 2, "graph_backend": "kuzu"}},
+    }
+
+    config = module._build_config_from_runtime(home, runtime_config)
+
+    assert config["model"]["default"] == "xiaomi/mimo-v2-pro"
+    assert config["auxiliary"]["flush_memories"]["provider"] == "main"
+    assert config["auxiliary"]["flush_memories"]["timeout"] == 45
+    assert config["plugins"]["brainstack"]["db_path"].endswith("brainstack/brainstack.db")
+    assert config["plugins"]["brainstack"]["transcript_match_limit"] == 2
+
+
+def test_copy_runtime_auth_artifacts_copies_auth_and_env(tmp_path):
+    module = _load_script_module()
+    source_home = tmp_path / "source"
+    target_home = tmp_path / "target"
+    source_home.mkdir()
+    target_home.mkdir()
+    (source_home / "auth.json").write_text("{\"providers\":{}}", encoding="utf-8")
+    (source_home / ".env").write_text("FOO=bar\n", encoding="utf-8")
+
+    module._copy_runtime_auth_artifacts(source_home, target_home)
+
+    assert (target_home / "auth.json").read_text(encoding="utf-8") == "{\"providers\":{}}"
+    assert (target_home / ".env").read_text(encoding="utf-8") == "FOO=bar\n"
+
+
+def test_assert_runtime_backend_dependencies_rejects_missing_modules(monkeypatch):
+    module = _load_script_module()
+    monkeypatch.setattr(
+        module.importlib.util,
+        "find_spec",
+        lambda name: None if name in {"kuzu", "chromadb"} else object(),
+    )
+
+    try:
+        module._assert_runtime_backend_dependencies(
+            {"plugins": {"brainstack": {"graph_backend": "kuzu", "corpus_backend": "chroma"}}}
+        )
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert "kuzu" in str(exc)
+        assert "chromadb" in str(exc)
+
+
+def test_seed_brainstack_kernel_can_skip_direct_tier2_override(monkeypatch, tmp_path):
+    module = _load_script_module()
+
+    class DummyProvider:
+        def __init__(self):
+            self._config = {}
+            self._tier2_transcript_limit = 8
+            self._turn_counter = 0
+
+        def initialize(self, session_id, hermes_home, platform):
+            self.session_id = session_id
+            self.hermes_home = hermes_home
+            self.platform = platform
+
+        def on_session_end(self, messages):
+            self.messages = list(messages)
+
+        def sync_turn(self, user_message, assistant_response, *, session_id, event_time):
+            del user_message, assistant_response, session_id, event_time
+            self._turn_counter += 1
+
+        def shutdown(self):
+            return None
+
+        def _run_tier2_batch(self, *, session_id, turn_number, trigger_reason):
+            return {"status": "ok", "json_parse_status": "json_object", "writes_performed": 1}
+
+    fake_plugins_memory = types.ModuleType("plugins.memory")
+    fake_plugins_memory.load_memory_provider = lambda name: DummyProvider() if name == "brainstack" else None
+    monkeypatch.setitem(sys.modules, "plugins.memory", fake_plugins_memory)
+
+    called = {"direct": False}
+
+    def _boom(**kwargs):
+        called["direct"] = True
+        raise AssertionError("direct tier2 override should not be built")
+
+    monkeypatch.setattr(module, "_build_direct_tier2_extractor", _boom)
+    monkeypatch.setattr(module, "_iter_entry_sessions", lambda entry, oracle_only: [(1, "s", "2026-04-18", [{"role": "user", "content": "hello"}])])
+    monkeypatch.setattr(module, "_iter_session_exchange_pairs", lambda session: [("hello", "world")])
+    monkeypatch.setattr(module, "_backend_population_snapshot", lambda provider: {"graph_counts": {"entity_count": 1}})
+
+    result = module._seed_brainstack_kernel(
+        hermes_root=tmp_path / "hermes",
+        home=tmp_path / "home",
+        entry={"question_id": "q1"},
+        oracle_only=True,
+        model="unused",
+        base_url="unused",
+        api_key="",
+        use_direct_tier2_override=False,
+    )
+
+    assert called["direct"] is False
+    assert result["seeded_sessions"] == 1
+    assert result["seeded_turns"] == 1
+
+
+def test_main_allows_retrieval_only_without_api_key(monkeypatch, tmp_path):
+    module = _load_script_module()
+    dataset_path = tmp_path / "dataset.json"
+    report_path = tmp_path / "report.json"
+    hermes_root = tmp_path / "hermes"
+    core2_root = tmp_path / "core2"
+    dataset_path.write_text(json.dumps([{"question_id": "q1"}]), encoding="utf-8")
+    hermes_root.mkdir()
+    core2_root.mkdir()
+
+    donor_module = SimpleNamespace(
+        DEFAULT_DATASET=str(dataset_path),
+        DEFAULT_BENCHMARK_MODEL="bench-model",
+        DEFAULT_BENCHMARK_BASE_URL="https://example.invalid/v1",
+        DEFAULT_BENCHMARK_PROVIDER="custom",
+        DEFAULT_JUDGE_MODEL="judge-model",
+    )
+
+    monkeypatch.setattr(module, "_load_module", lambda *args, **kwargs: donor_module)
+    monkeypatch.setattr(
+        module,
+        "_verify_runtime_sync",
+        lambda root: {"ok": True, "compared_files": 0, "mismatch_count": 0, "mismatches": []},
+    )
+    monkeypatch.setattr(module, "_select_entries", lambda entries, **kwargs: list(entries))
+    monkeypatch.setattr(
+        module,
+        "_run_brainstack_retrieval_harness",
+        lambda **kwargs: {
+            "question_id": kwargs["entry"]["question_id"],
+            "passed": True,
+            "api_key_used": kwargs["api_key"],
+        },
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_brainstack_longmemeval_subset.py",
+            "--hermes-root",
+            str(hermes_root),
+            "--core2-root",
+            str(core2_root),
+            "--sample-size",
+            "1",
+            "--retrieval-only",
+            "--report-path",
+            str(report_path),
+        ],
+    )
+
+    module.main()
+
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["results"][0]["question_id"] == "q1"
+    assert payload["results"][0]["api_key_used"] == ""
 
 
 def test_direct_tier2_extractor_falls_back_on_non_json(monkeypatch, capsys):

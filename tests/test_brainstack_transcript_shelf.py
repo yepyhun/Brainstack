@@ -62,6 +62,31 @@ class TestBrainstackTranscriptShelf:
         finally:
             provider.shutdown()
 
+    def test_sync_turn_preserves_multiline_user_structure_in_transcript_entries(self, tmp_path):
+        provider = _make_provider(tmp_path, "session-transcript-multiline")
+        try:
+            provider.sync_turn(
+                (
+                    "tartalmi minták (1-5):\n"
+                    "konkrét tények nem jelentőségfelfújás\n"
+                    "egy konkrét forrás nem homályos hivatkozások\n\n"
+                    "nyelvi minták (6-18):\n"
+                    "vessző pont zárójel em dash helyett\n"
+                    "emoji tilos kivéve ha nagyon vicces"
+                ),
+                "Megvan.",
+                session_id="session-transcript-multiline",
+            )
+
+            transcript_rows = provider._store.recent_transcript(session_id="session-transcript-multiline", limit=10)
+            turn_row = next(row for row in transcript_rows if row["kind"] == "turn")
+
+            assert "tartalmi minták (1-5):\nkonkrét tények nem jelentőségfelfújás" in turn_row["content"]
+            assert "\nnyelvi minták (6-18):\n" in turn_row["content"]
+            assert "konkrét tények nem jelentőségfelfújás egy konkrét forrás" not in turn_row["content"]
+        finally:
+            provider.shutdown()
+
     def test_prefetch_uses_bounded_transcript_evidence_for_continuity_only_queries(self, tmp_path):
         provider = _make_provider(
             tmp_path,

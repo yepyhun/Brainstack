@@ -1,60 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable, List, Set
-
-
-STRUCTURAL_TOKENS = {
-    "assistant",
-    "system",
-    "tool",
-    "user",
-}
-RETRIEVAL_QUERY_STOPWORDS = {
-    "and",
-    "about",
-    "am",
-    "are",
-    "can",
-    "could",
-    "did",
-    "do",
-    "does",
-    "for",
-    "from",
-    "give",
-    "had",
-    "has",
-    "have",
-    "how",
-    "into",
-    "is",
-    "know",
-    "past",
-    "please",
-    "that",
-    "the",
-    "their",
-    "them",
-    "these",
-    "this",
-    "tell",
-    "then",
-    "through",
-    "to",
-    "took",
-    "with",
-    "was",
-    "were",
-    "what",
-    "when",
-    "where",
-    "which",
-    "who",
-    "why",
-    "would",
-}
-TOKEN_RE = re.compile(r"[^\W_]+(?:[-_][^\W_]+)*", re.UNICODE)
+from typing import Any, Dict, List
 
 ROLE_PREFIX_RE = re.compile(r"^\s*(user|assistant|system|tool)\s*:\s*", re.IGNORECASE)
 
@@ -95,8 +42,16 @@ def trim_text_boundary(text: Any, *, max_len: int = 220, soft_overshoot: int = 2
 
 
 def format_turn_content(user_content: str, assistant_content: str) -> str:
-    user = " ".join(str(user_content or "").split())
-    assistant = " ".join(str(assistant_content or "").split())
+    def _normalize_multiline(value: Any) -> str:
+        lines = []
+        for raw_line in str(value or "").splitlines():
+            cleaned = " ".join(raw_line.split())
+            if cleaned:
+                lines.append(cleaned)
+        return "\n".join(lines).strip()
+
+    user = _normalize_multiline(user_content)
+    assistant = _normalize_multiline(assistant_content)
     return f"User: {user}\nAssistant: {assistant}".strip()
 
 
@@ -128,54 +83,3 @@ def looks_like_role_transcript_dump(text: str) -> bool:
     if len(lines) < 3:
         return False
     return count_role_prefixed_lines(text) >= 2
-
-
-def tokenize_match_text(text: str) -> List[str]:
-    tokens = TOKEN_RE.findall(str(text or "").casefold())
-    seen: Set[str] = set()
-    cleaned: List[str] = []
-    for token in tokens:
-        if len(token) < 3 or token in STRUCTURAL_TOKENS or token in seen:
-            continue
-        seen.add(token)
-        cleaned.append(token)
-    return cleaned
-
-
-def tokenize_retrieval_query(text: str) -> List[str]:
-    cleaned = [token for token in tokenize_match_text(text) if token not in RETRIEVAL_QUERY_STOPWORDS]
-    expanded: List[str] = []
-    seen: Set[str] = set()
-    for token in cleaned:
-        variants = [token]
-        if len(token) > 4 and token.endswith("s") and not token.endswith("ss"):
-            variants.append(token[:-1])
-        for variant in variants:
-            if variant in seen:
-                continue
-            seen.add(variant)
-            expanded.append(variant)
-    return expanded
-
-
-def count_overlap(query: str, content: str) -> int:
-    query_tokens = tokenize_retrieval_query(query)
-    if not query_tokens:
-        return 0
-    content_tokens = set(tokenize_match_text(content))
-    return sum(1 for token in query_tokens if token in content_tokens)
-
-
-def has_meaningful_transcript_evidence(query: str, rows: Iterable[Dict[str, Any]]) -> bool:
-    for row in rows:
-        if int(row.get("overlap_count", 0)) > 0:
-            return True
-        if str(row.get("match_mode") or "").strip() == "semantic" and float(row.get("semantic_score") or 0.0) > 0.0:
-            return True
-        if (
-            str(row.get("match_mode") or "").strip() == "support"
-            and str(row.get("retrieval_source") or "").strip() == "transcript.session_support"
-            and bool(row.get("same_principal"))
-        ):
-            return True
-    return False

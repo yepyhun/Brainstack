@@ -67,7 +67,7 @@ def _debug_row_snapshot(row: Dict[str, Any]) -> Dict[str, Any]:
         "document_id": int(row.get("document_id") or 0),
         "section_index": int(row.get("section_index") or 0),
         "created_at": str(row.get("created_at") or ""),
-        "overlap_count": int(row.get("overlap_count") or 0),
+        "keyword_score": float(row.get("keyword_score") or 0.0),
         "semantic_score": float(row.get("semantic_score") or 0.0),
         "channels": list(row.get("_brainstack_channels") or []),
         "channel_ranks": dict(row.get("_brainstack_channel_ranks") or {}),

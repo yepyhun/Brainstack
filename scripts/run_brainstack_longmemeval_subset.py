@@ -8,6 +8,7 @@ import json
 import os
 import random
 import re
+import shutil
 import sys
 import time
 from contextlib import AbstractContextManager, ExitStack
@@ -15,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
-from typing import Any, Callable, Dict, Iterable, List, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Tuple
 from unittest.mock import patch
 
 import openai
@@ -478,7 +479,7 @@ def _provider_candidate_debug_snapshot(provider: Any) -> Dict[str, Any]:
                 "document_id": int(item.get("document_id") or 0),
                 "section_index": int(item.get("section_index") or 0),
                 "created_at": str(item.get("created_at") or ""),
-                "overlap_count": int(item.get("overlap_count") or 0),
+                "keyword_score": float(item.get("keyword_score") or 0.0),
                 "semantic_score": float(item.get("semantic_score") or 0.0),
                 "same_session": bool(item.get("same_session")),
                 "content_excerpt": str(item.get("content_excerpt") or ""),
@@ -500,7 +501,7 @@ def _provider_candidate_debug_snapshot(provider: Any) -> Dict[str, Any]:
                     "document_id": int(row.get("document_id") or 0),
                     "section_index": int(row.get("section_index") or 0),
                     "created_at": str(row.get("created_at") or ""),
-                    "overlap_count": int(row.get("overlap_count") or 0),
+                    "keyword_score": float(row.get("keyword_score") or 0.0),
                     "semantic_score": float(row.get("semantic_score") or 0.0),
                     "channels": list(row.get("channels") or []),
                     "channel_ranks": dict(row.get("channel_ranks") or {}),
@@ -723,26 +724,109 @@ def _iter_session_exchange_pairs(session: List[Dict[str, Any]]) -> Iterable[Tupl
 
 
 def _build_config(home: Path) -> Dict[str, Any]:
-    return {
-        "model": "benchmark-placeholder",
-        "providers": {},
-        "toolsets": [],
+    return _build_config_from_runtime(home, {})
+
+
+def _resolve_runtime_home_context(hermes_root: Path) -> Tuple[Dict[str, Any], Path | None]:
+    candidates = [hermes_root / "config.yaml"]
+    hermes_config_root = hermes_root / "hermes-config"
+    if hermes_config_root.exists():
+        candidates.extend(sorted(hermes_config_root.glob("*/config.yaml")))
+
+    fallback: Tuple[Dict[str, Any], Path | None] | None = None
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            parsed = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        source_home = path.parent
+        if fallback is None:
+            fallback = (parsed, source_home)
+        model_cfg = parsed.get("model")
+        if isinstance(model_cfg, str) and model_cfg.strip():
+            return parsed, source_home
+        if isinstance(model_cfg, dict) and (
+            str(model_cfg.get("default") or "").strip() or str(model_cfg.get("provider") or "").strip()
+        ):
+            return parsed, source_home
+    return fallback or ({}, None)
+
+
+def _load_runtime_config_template(hermes_root: Path) -> Dict[str, Any]:
+    config, _ = _resolve_runtime_home_context(hermes_root)
+    return config
+
+
+def _build_config_from_runtime(home: Path, runtime_config: Mapping[str, Any] | None) -> Dict[str, Any]:
+    runtime = dict(runtime_config or {})
+    memory_cfg = dict(runtime.get("memory") or {}) if isinstance(runtime.get("memory"), dict) else {}
+    plugin_cfg = dict((runtime.get("plugins") or {}).get("brainstack") or {}) if isinstance(runtime.get("plugins"), dict) else {}
+    auxiliary_cfg = dict((runtime.get("auxiliary") or {}).get("flush_memories") or {}) if isinstance(runtime.get("auxiliary"), dict) else {}
+
+    flush_cfg = {
+        "provider": "main",
+        "model": str(auxiliary_cfg.get("model") or "").strip(),
+        "base_url": str(auxiliary_cfg.get("base_url") or "").strip(),
+        "api_key": str(auxiliary_cfg.get("api_key") or "").strip(),
+        "timeout": int(auxiliary_cfg.get("timeout") or 30),
+    }
+
+    config: Dict[str, Any] = {
+        "model": runtime.get("model") or "benchmark-placeholder",
+        "providers": dict(runtime.get("providers") or {}) if isinstance(runtime.get("providers"), dict) else {},
+        "toolsets": list(runtime.get("toolsets") or []) if isinstance(runtime.get("toolsets"), list) else [],
         "agent": {"max_turns": 4},
         "memory": {
-            "provider": "brainstack",
+            "provider": str(memory_cfg.get("provider") or "brainstack"),
             "memory_enabled": False,
             "user_profile_enabled": False,
         },
+        "auxiliary": {
+            "flush_memories": flush_cfg,
+        },
         "plugins": {
             "brainstack": {
+                **plugin_cfg,
                 "db_path": str(home / "brainstack" / "brainstack.db"),
-                "graph_backend": "kuzu",
-                "corpus_backend": "chroma",
-                "tier2_timeout_seconds": 60,
-                "tier2_max_tokens": 900,
+                "graph_backend": str(plugin_cfg.get("graph_backend") or "kuzu"),
+                "corpus_backend": str(plugin_cfg.get("corpus_backend") or "chroma"),
+                "tier2_timeout_seconds": int(plugin_cfg.get("tier2_timeout_seconds") or 60),
+                "tier2_max_tokens": int(plugin_cfg.get("tier2_max_tokens") or 900),
             }
         },
     }
+    return config
+
+
+def _copy_runtime_auth_artifacts(source_home: Path | None, target_home: Path) -> None:
+    if source_home is None:
+        return
+    for name in ("auth.json", ".env"):
+        source = source_home / name
+        if not source.exists() or not source.is_file():
+            continue
+        shutil.copy2(source, target_home / name)
+
+
+def _assert_runtime_backend_dependencies(runtime_config: Mapping[str, Any] | None) -> None:
+    plugin_cfg = dict((runtime_config or {}).get("plugins", {}).get("brainstack", {}) or {}) if isinstance((runtime_config or {}).get("plugins"), dict) else {}
+    graph_backend = str(plugin_cfg.get("graph_backend") or "").strip().lower()
+    corpus_backend = str(plugin_cfg.get("corpus_backend") or "").strip().lower()
+    missing: List[str] = []
+    if graph_backend == "kuzu" and importlib.util.find_spec("kuzu") is None:
+        missing.append("kuzu")
+    if corpus_backend == "chroma" and importlib.util.find_spec("chromadb") is None:
+        missing.append("chromadb")
+    if missing:
+        joined = ", ".join(missing)
+        raise RuntimeError(
+            "Bounded oracle runner interpreter is missing configured Brainstack backend dependencies: "
+            f"{joined}. Install them into the benchmark interpreter or use an interpreter that matches the target runtime."
+        )
 
 
 def _build_direct_tier2_extractor(*, model: str, base_url: str, api_key: str):
@@ -895,6 +979,7 @@ def _seed_brainstack_kernel(
     model: str,
     base_url: str,
     api_key: str,
+    use_direct_tier2_override: bool = True,
     benchmark_tier2_transcript_limit: int = BENCHMARK_TIER2_TRANSCRIPT_LIMIT,
     benchmark_tier2_flush_turn_interval: int = BENCHMARK_TIER2_FLUSH_TURN_INTERVAL,
     benchmark_tier2_max_tokens: int = 400,
@@ -909,13 +994,15 @@ def _seed_brainstack_kernel(
         raise RuntimeError("Brainstack memory provider is unavailable in target Hermes checkout.")
     session_id = f"seed-{entry.get('question_id')}"
     provider.initialize(session_id, hermes_home=str(home), platform="cli")
-    direct_tier2_extractor, direct_tier2_client = _build_direct_tier2_extractor(
-        model=model,
-        base_url=base_url,
-        api_key=api_key,
-    )
-    if hasattr(provider, "_config") and isinstance(getattr(provider, "_config"), dict):
-        provider._config["_tier2_extractor"] = direct_tier2_extractor
+    direct_tier2_client = None
+    if use_direct_tier2_override:
+        direct_tier2_extractor, direct_tier2_client = _build_direct_tier2_extractor(
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+        )
+        if hasattr(provider, "_config") and isinstance(getattr(provider, "_config"), dict):
+            provider._config["_tier2_extractor"] = direct_tier2_extractor
     if hasattr(provider, "_tier2_batch_turn_limit"):
         provider._tier2_batch_turn_limit = 1000000
     if hasattr(provider, "_tier2_idle_window_seconds"):
@@ -1049,21 +1136,15 @@ def _run_brainstack_retrieval_harness(
             )
         home = Path(tmp_dir)
         (home / "brainstack").mkdir(parents=True, exist_ok=True)
-        config = _build_config(home)
+        runtime_config, source_home = _resolve_runtime_home_context(hermes_root)
+        _assert_runtime_backend_dependencies(runtime_config)
+        config = _build_config_from_runtime(home, runtime_config)
         (home / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
-        auxiliary_env = {
-            "AUXILIARY_FLUSH_MEMORIES_BASE_URL": base_url,
-            "AUXILIARY_FLUSH_MEMORIES_API_KEY": api_key,
-            "AUXILIARY_FLUSH_MEMORIES_PROVIDER": "custom",
-            "AUXILIARY_FLUSH_MEMORIES_MODEL": model,
-            "CONTEXT_FLUSH_MEMORIES_BASE_URL": base_url,
-            "CONTEXT_FLUSH_MEMORIES_API_KEY": api_key,
-            "CONTEXT_FLUSH_MEMORIES_PROVIDER": "custom",
-            "CONTEXT_FLUSH_MEMORIES_MODEL": model,
-        }
+        _copy_runtime_auth_artifacts(source_home, home)
+        harness_env = {"HERMES_HOME": str(home)}
 
         seed_started = time.perf_counter()
-        with patch.dict(os.environ, auxiliary_env, clear=False):
+        with patch.dict(os.environ, harness_env, clear=False):
             seed_counts = _seed_brainstack_kernel(
                 hermes_root,
                 home,
@@ -1072,6 +1153,7 @@ def _run_brainstack_retrieval_harness(
                 model=model,
                 base_url=base_url,
                 api_key=api_key,
+                use_direct_tier2_override=False,
                 benchmark_tier2_transcript_limit=benchmark_tier2_transcript_limit,
                 benchmark_tier2_flush_turn_interval=benchmark_tier2_flush_turn_interval,
                 benchmark_tier2_max_tokens=benchmark_tier2_max_tokens,
@@ -1079,11 +1161,12 @@ def _run_brainstack_retrieval_harness(
             )
         seed_seconds = time.perf_counter() - seed_started
 
-        provider = _load_initialized_brainstack_provider(
-            hermes_root,
-            home,
-            session_id=f"brainstack-retrieval-harness-{entry.get('question_id')}",
-        )
+        with patch.dict(os.environ, harness_env, clear=False):
+            provider = _load_initialized_brainstack_provider(
+                hermes_root,
+                home,
+                session_id=f"brainstack-retrieval-harness-{entry.get('question_id')}",
+            )
         if candidate_debug:
             setattr(provider, "_capture_candidate_debug", True)
         direct_route_client = None
@@ -1588,7 +1671,10 @@ def main() -> None:
         inserted_paths.clear()
         _purge_module_prefixes("agent")
     api_key = str(args.api_key or os.getenv("COMET_API_KEY") or os.getenv("COMETAPI_API_KEY") or "").strip()
-    if not api_key:
+    requires_api_key = not bool(args.retrieval_only)
+    if args.inject_direct_route_resolver:
+        requires_api_key = True
+    if requires_api_key and not api_key:
         parser.error("an API key is required via --api-key or COMET_API_KEY / COMETAPI_API_KEY")
 
     runtime_sync = _verify_runtime_sync(args.hermes_root)

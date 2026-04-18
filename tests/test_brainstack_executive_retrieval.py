@@ -14,7 +14,6 @@ from brainstack import BrainstackMemoryProvider
 from brainstack.control_plane import build_working_memory_packet
 from brainstack.db import BrainstackStore
 from brainstack.executive_retrieval import _graph_match_text, _select_temporal_rows, retrieve_executive_context
-from brainstack.transcript import count_overlap
 
 
 def test_build_working_memory_packet_marks_semantic_channel_degraded(tmp_path):
@@ -71,6 +70,9 @@ def test_sync_turn_no_longer_turns_handwritten_tier1_matches_into_profile_rows(t
 
 def test_temporal_route_uses_temporal_graph_rows_for_selection():
     class DummyStore:
+        def get_profile_item(self, stable_key, principal_scope_key=""):
+            return None
+
         def search_profile(self, query, limit):
             return []
 
@@ -100,7 +102,7 @@ def test_temporal_route_uses_temporal_graph_rows_for_selection():
                     "subject": "User",
                     "predicate": "mentioned",
                     "object_value": "generic travel chatter",
-                    "overlap_count": 10,
+                    "keyword_score": 10,
                     "happened_at": "2026-04-01T10:00:00Z",
                 },
                 {
@@ -109,7 +111,7 @@ def test_temporal_route_uses_temporal_graph_rows_for_selection():
                     "attribute": "trip_order",
                     "value": "Muir Woods before Big Sur before Yosemite",
                     "is_current": True,
-                    "overlap_count": 0,
+                    "keyword_score": 0,
                     "happened_at": "2026-04-05T10:00:00Z",
                 },
             ]
@@ -163,6 +165,9 @@ def test_temporal_route_uses_temporal_graph_rows_for_selection():
 
 def test_temporal_route_prioritizes_temporal_continuity_before_generic_recent_rows():
     class DummyStore:
+        def get_profile_item(self, stable_key, principal_scope_key=""):
+            return None
+
         def search_profile(self, query, limit):
             return []
 
@@ -175,7 +180,7 @@ def test_temporal_route_prioritizes_temporal_continuity_before_generic_recent_ro
                     "kind": "turn",
                     "created_at": "2026-04-14T16:18:48.248641+00:00",
                     "content": "User requested reminder to order Luna's grain-free wet food in blue packets",
-                    "overlap_count": 1,
+                    "keyword_score": 1,
                 },
                 {
                     "id": 2,
@@ -184,7 +189,7 @@ def test_temporal_route_prioritizes_temporal_continuity_before_generic_recent_ro
                     "kind": "turn",
                     "created_at": "2026-04-14T16:19:06.981994+00:00",
                     "content": "User finished The Seven Husbands of Evelyn Hugo audiobook",
-                    "overlap_count": 1,
+                    "keyword_score": 1,
                 },
             ]
 
@@ -215,7 +220,7 @@ def test_temporal_route_prioritizes_temporal_continuity_before_generic_recent_ro
                     "kind": "turn",
                     "created_at": "2026-04-14T16:18:48.248641+00:00",
                     "content": "User requested reminder to order Luna's grain-free wet food in blue packets",
-                    "overlap_count": 1,
+                    "keyword_score": 1,
                 },
                 {
                     "id": 2,
@@ -224,7 +229,7 @@ def test_temporal_route_prioritizes_temporal_continuity_before_generic_recent_ro
                     "kind": "turn",
                     "created_at": "2026-04-14T16:19:06.981994+00:00",
                     "content": "User finished The Seven Husbands of Evelyn Hugo audiobook",
-                    "overlap_count": 1,
+                    "keyword_score": 1,
                 },
             ]
 
@@ -237,7 +242,7 @@ def test_temporal_route_prioritizes_temporal_continuity_before_generic_recent_ro
                     "kind": "temporal_event",
                     "created_at": "2026-04-14T16:21:09.833893+00:00",
                     "content": "User returned from solo Yosemite camping, started planning Eastern Sierra trip",
-                    "overlap_count": 1,
+                    "keyword_score": 1,
                     "metadata": {"temporal": {"observed_at": "2023-05-15T09:00:00Z"}},
                 },
                 {
@@ -247,7 +252,7 @@ def test_temporal_route_prioritizes_temporal_continuity_before_generic_recent_ro
                     "kind": "temporal_event",
                     "created_at": "2026-04-14T16:21:09.834047+00:00",
                     "content": "User requested off-the-beaten-path car-accessible campsites",
-                    "overlap_count": 0,
+                    "keyword_score": 0,
                     "metadata": {"temporal": {"observed_at": "2023-05-15T09:05:00Z"}},
                 },
             ]
@@ -370,13 +375,78 @@ def test_graph_match_text_includes_state_attribute_and_value():
     assert "Muir Woods before Big Sur before Yosemite" in text
 
 
-def test_count_overlap_ignores_generic_function_words_in_temporal_queries():
-    query = "What is the order of the three trips I took in the past three months, from earliest to latest?"
-    assert count_overlap(
-        query,
-        "User finished The Seven Husbands of Evelyn Hugo, requested similar book recs",
-    ) == 0
-    assert count_overlap(
-        query,
-        "User asked about androgynous hairstyles and mentioned confidence from consistent work outfit",
-    ) == 0
+def test_temporal_route_prefers_temporal_graph_rows_without_lexical_overlap_scoring():
+    class DummyStore:
+        def get_profile_item(self, stable_key, principal_scope_key=""):
+            return None
+
+        def search_profile(self, query, limit):
+            return []
+
+        def search_continuity(self, query, session_id, limit, principal_scope_key=None):
+            return []
+
+        def recent_continuity(self, session_id, limit):
+            return []
+
+        def search_transcript(self, query, session_id, limit):
+            return []
+
+        def search_transcript_global(self, query, session_id, limit, principal_scope_key=None):
+            return []
+
+        def search_corpus(self, query, limit):
+            return []
+
+        def search_conversation_semantic(self, query, session_id, limit, principal_scope_key=None):
+            return []
+
+        def search_corpus_semantic(self, query, limit, principal_scope_key=None):
+            return []
+
+        def search_graph(self, query, limit, principal_scope_key=None):
+            return [
+                {
+                    "row_type": "state",
+                    "row_id": 2,
+                    "attribute": "trip_order",
+                    "value": "Muir Woods before Big Sur before Yosemite",
+                    "is_current": True,
+                    "keyword_score": 0.2,
+                    "happened_at": "2026-04-05T10:00:00Z",
+                },
+                {
+                    "row_type": "state",
+                    "row_id": 3,
+                    "attribute": "trip_order",
+                    "value": "Big Sur before Yosemite",
+                    "is_current": False,
+                    "keyword_score": 0.1,
+                    "happened_at": "2026-04-04T10:00:00Z",
+                },
+            ]
+
+        def graph_backend_channel_status(self):
+            return {"status": "active", "reason": "ok"}
+
+        def corpus_semantic_channel_status(self):
+            return {"status": "active", "reason": "ok"}
+
+    retrieval = retrieve_executive_context(
+        DummyStore(),
+        query="What is the order of the trips from earliest to latest?",
+        session_id="session-1",
+        analysis={"temporal": True, "preference": False},
+        policy={
+            "profile_limit": 0,
+            "continuity_match_limit": 0,
+            "continuity_recent_limit": 0,
+            "transcript_limit": 0,
+            "graph_limit": 2,
+            "corpus_limit": 0,
+        },
+        route_resolver=lambda query: {"mode": "temporal", "reason": "test"},
+    )
+
+    assert retrieval["routing"]["applied_mode"] == "temporal"
+    assert retrieval["graph_rows"][0]["row_type"] == "state"

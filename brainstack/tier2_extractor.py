@@ -635,7 +635,7 @@ def extract_tier2_candidates(
                 "Schema:\n"
                 "{\n"
                 '  "profile_items": [{"category":"identity|preference|shared_work","content":"...","slot":"optional-stable-slot","confidence":0.0}],\n'
-                '  "style_contract": {"title":"...","summary":"optional one-line summary","sections":[{"heading":"...","lines":["..."]}],"confidence":0.0} | null,\n'
+                '  "style_contract": {"title":"optional explicit pack name or empty string","sections":[{"heading":"...","lines":["..."]}],"confidence":0.0} | null,\n'
                 '  "states": [{"subject":"...","attribute":"...","value":"...","supersede":true,"confidence":0.0}],\n'
                 '  "relations": [{"subject":"...","predicate":"...","object":"...","confidence":0.0}],\n'
                 '  "inferred_relations": [{"subject":"...","predicate":"...","object":"...","confidence":0.0,"reason":"short evidence"}],\n'
@@ -657,9 +657,11 @@ def extract_tier2_candidates(
                 "- do not bury communication rules inside continuity_summary or decisions when they can be emitted as separate profile_items\n"
                 "- when the user teaches a named long-form communication pack or multi-section rule set (for example Humanizer rules), emit that detailed pack in style_contract instead of trying to squeeze it into profile_items\n"
                 "- style_contract is optional; emit it only for durable multi-rule communication contracts the user wants remembered across sessions\n"
-                "- if style_contract is present, keep profile_items focused on the compact operational rules that ordinary replies should follow every turn\n"
-                "- when emitting style_contract, preserve the user's own section headings and rule lines as literally as possible; keep the original language, wording, and polarity unless the transcript itself later corrects them\n"
+                "- if style_contract is present, it must contain the full detailed rule pack, even if some compact operational rules are also emitted in profile_items\n"
+                "- when emitting style_contract, preserve the user's own section headings and rule lines as literally as possible; keep the original language, wording, numbering markers, and polarity unless the transcript itself later corrects them\n"
                 "- do not paraphrase, translate, merge, soften, invent, or normalize style_contract rules into generic summaries; only clean whitespace and place lines under the right section headings\n"
+                "- do not use a section heading as the style_contract title; set title only if the transcript explicitly names the pack, otherwise return an empty string\n"
+                "- do not split one user rule into a heading plus a suffix line; if the transcript says 'konkrét tények nem jelentőségfelfújás', keep it as one rule line under the correct section heading\n"
                 "- if the transcript contains later corrections to an earlier rule, keep the latest corrected wording in style_contract and discard the superseded wording\n"
                 "- if the user specifies capitalization conventions such as uppercase pronouns (for example Én, Te, Ő), emit that as a separate durable profile_item\n"
                 "- if the user specifies punctuation constraints such as avoiding dash or em-dash punctuation, emit that as a separate durable profile_item\n"

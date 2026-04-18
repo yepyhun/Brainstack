@@ -433,11 +433,11 @@ def _check_config(
     checks: list[Check] = []
     config: dict[str, Any] = {}
     loaded_from = str(config_path)
-    dependency_import_ok = (
-        lambda module_name: _docker_python_can_import(module_name, compose_path)
-        if runtime == "docker" and compose_path and not planned_install
-        else _python_can_import(module_name, python_bin)
-    )
+
+    def dependency_import_ok(module_name: str) -> bool:
+        if runtime == "docker" and compose_path and not planned_install:
+            return _docker_python_can_import(module_name, compose_path)
+        return _python_can_import(module_name, python_bin)
 
     if config_path.exists():
         config = _load_yaml(config_path)

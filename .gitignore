@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.venv
+.venv/
 logs/
 auth.lock
 SOUL.md

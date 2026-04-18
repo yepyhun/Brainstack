@@ -23,6 +23,7 @@ from brainstack.reconciler import reconcile_tier2_candidates
 from brainstack.retrieval import build_system_prompt_block
 from brainstack.style_contract import STYLE_CONTRACT_DOC_KIND, STYLE_CONTRACT_SLOT
 from brainstack.tier2_extractor import extract_tier2_candidates
+from brainstack import BrainstackMemoryProvider
 
 
 def _scope(platform: str, user_id: str) -> dict[str, object]:
@@ -191,6 +192,56 @@ def test_reconcile_tier2_candidates_accepts_extractor_normalized_style_contract(
     assert "tartalmi minták (1-5):" in row["content"]
     assert "\n\n" in row["content"]
     assert any(action["kind"] == "style_contract" and action["action"] == "ADD" for action in result["actions"])
+
+
+def test_tier2_batch_receives_multiline_style_contract_transcript_without_flattening(tmp_path):
+    base = Path(tmp_path)
+    seen_rows = []
+
+    def _fake_extractor(rows, **kwargs):
+        seen_rows.extend(rows)
+        return {
+            "profile_items": [],
+            "style_contract": None,
+            "states": [],
+            "relations": [],
+            "inferred_relations": [],
+            "typed_entities": [],
+            "temporal_events": [],
+            "continuity_summary": "",
+            "decisions": [],
+        }
+
+    provider = BrainstackMemoryProvider(
+        config={
+            "db_path": str(base / "brainstack.db"),
+            "tier2_batch_turn_limit": 1,
+            "_tier2_extractor": _fake_extractor,
+        }
+    )
+    provider.initialize("session-style-batch", hermes_home=str(base), user_id="user-1", platform="discord")
+
+    try:
+        provider.sync_turn(
+            (
+                "tartalmi minták (1-5):\n"
+                "konkrét tények nem jelentőségfelfújás\n"
+                "egy konkrét forrás nem homályos hivatkozások\n\n"
+                "kommunikációs minták (18-20):\n"
+                "chatbot maradványok tilos\n"
+                "knowledge cutoff disclaimer tilos"
+            ),
+            "Megvan.",
+            session_id="session-style-batch",
+        )
+        assert provider._wait_for_tier2_worker(timeout=1.0) is True
+        assert seen_rows
+        content = str(seen_rows[-1].get("content") or "")
+        assert "tartalmi minták (1-5):\nkonkrét tények nem jelentőségfelfújás" in content
+        assert "\nkommunikációs minták (18-20):\n" in content
+        assert "konkrét tények nem jelentőségfelfújás egy konkrét forrás" not in content
+    finally:
+        provider.shutdown()
 
 
 def test_style_contract_explicit_recall_uses_canonical_profile_slot_without_leaking_into_ordinary_turns(tmp_path):

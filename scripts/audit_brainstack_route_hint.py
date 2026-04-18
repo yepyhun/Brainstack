@@ -27,10 +27,9 @@ try:
     from brainstack.executive_retrieval import (  # noqa: E402
         _default_route_resolver,
         _llm_route_resolver,
-        _should_attempt_route_hint,
     )
 except ModuleNotFoundError as exc:  # pragma: no cover - exercised by script sanity path
-    if exc.name != "agent.memory_provider":
+    if exc.name not in {"agent", "agent.memory_provider"}:
         raise
     sys.modules.setdefault("agent", types.ModuleType("agent"))
     fake_memory_provider = cast(Any, types.ModuleType("agent.memory_provider"))
@@ -39,7 +38,6 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised by script san
     from brainstack.executive_retrieval import (  # noqa: E402
         _default_route_resolver,
         _llm_route_resolver,
-        _should_attempt_route_hint,
     )
 
 
@@ -170,8 +168,8 @@ def main() -> None:
 
     for entry in entries:
         question = str(entry["question"] or "")
-        should_attempt = _should_attempt_route_hint(question)
         deterministic = _default_route_resolver(question)
+        should_attempt = str(deterministic.get("mode") or "") in {"temporal", "aggregate"}
         if str(deterministic.get("mode") or "") in {"temporal", "aggregate"}:
             deterministic_non_fact += 1
         row = {
