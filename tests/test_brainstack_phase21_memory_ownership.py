@@ -143,7 +143,7 @@ def test_tier2_extractor_drops_internal_persona_and_skill_mechanics_but_keeps_re
     assert extracted["profile_items"] == [
         {
             "category": "preference",
-            "content": "Use humanizer style.",
+            "content": "Use the configured communication style: direct, concrete, natural, and low-fluff.",
             "confidence": 0.9,
             "source": "tier2_llm",
             "slot": "preference:communication_style",
@@ -512,7 +512,7 @@ def test_system_prompt_contract_promotes_broader_behavior_rules_and_filters_inte
     block = build_system_prompt_block(store, profile_limit=10)
 
     assert "# Brainstack Active Communication Contract" in block
-    assert "Use Humanizer style: direct, concrete, natural, and low-fluff." in block
+    assert "Use the configured communication style: direct, concrete, natural, and low-fluff." in block
     assert "Always respond in Hungarian." in block
     assert "Put each new thought on its own line." in block
     assert "Capitalize Én, Te, and Ő when you use them." in block
@@ -655,7 +655,7 @@ def test_phase21_end_to_end_prefetch_uses_clean_contract_without_side_memory_noi
         assert "Put each new thought on its own line." in prompt_block
         assert "Capitalize Én, Te, and Ő when you use them." in prompt_block
         assert "Do not use dash punctuation in replies." in prompt_block
-        assert "Use Humanizer style: direct, concrete, natural, and low-fluff." in prompt_block
+        assert "Use the configured communication style: direct, concrete, natural, and low-fluff." in prompt_block
         assert "persona.md" not in prompt_block
         assert "SKILL.md" not in prompt_block
         assert "persona.md" not in block

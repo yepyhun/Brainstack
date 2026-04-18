@@ -91,6 +91,18 @@ _DIRECT_AGE_QUERY_PATTERNS = (
     re.compile(r"\bmi\s+az\s+életkorom\b", re.IGNORECASE),
 )
 
+_ASSISTANT_NAME_PATTERNS = (
+    re.compile(r"\bassistant(?:'s)? name is\s+([A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű0-9_-]{2,40})\b", re.IGNORECASE),
+    re.compile(r"\byour name is\s+([A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű0-9_-]{2,40})\b", re.IGNORECASE),
+    re.compile(r"\brefer to yourself as\s+([A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű0-9_-]{2,40})\b", re.IGNORECASE),
+    re.compile(r"\bcall yourself\s+([A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű0-9_-]{2,40})\b", re.IGNORECASE),
+    re.compile(r"\bcalls?\s+the\s+ai\s+([A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű0-9_-]{2,40})\b", re.IGNORECASE),
+    re.compile(r"\bcall\s+the\s+ai\s+([A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű0-9_-]{2,40})\b", re.IGNORECASE),
+    re.compile(r"\ba te neved\s+([A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű0-9_-]{2,40})\b", re.IGNORECASE),
+    re.compile(r"\basszisztens neve\s+([A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű0-9_-]{2,40})\b", re.IGNORECASE),
+    re.compile(r"\bhívj\s+([A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű0-9_-]{2,40})(?:-?(?:nak|nek))?\b", re.IGNORECASE),
+)
+
 
 def normalize_compare_text(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().split())
@@ -111,6 +123,20 @@ def resolve_direct_identity_profile_slots(query: str) -> tuple[str, ...]:
     return ()
 
 
+def _extract_assistant_name(value: Any) -> str:
+    text = " ".join(str(value or "").strip().split())
+    if not text:
+        return ""
+    for pattern in _ASSISTANT_NAME_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        candidate = match.group(1).strip(" .,:;!?\"'`()[]{}")
+        if candidate:
+            return candidate
+    return ""
+
+
 def expand_communication_profile_items(
     *,
     category: str,
@@ -127,10 +153,11 @@ def expand_communication_profile_items(
     candidates: List[tuple[str, str]] = []
     if slot == "preference:response_language" or any(token in lowered for token in ("magyar", "hungarian")):
         candidates.append(("preference:response_language", "Always respond in Hungarian."))
-    if slot in {"preference:ai_name", "preference:ai_nickname"} or "bestie" in lowered:
-        candidates.append(("preference:ai_name", "Assistant's name is Bestie."))
-    if slot == "preference:communication_style" or "humanizer" in lowered:
-        candidates.append(("preference:communication_style", "Use humanizer style."))
+    assistant_name = _extract_assistant_name(content)
+    if slot in {"preference:ai_name", "preference:ai_nickname"} and assistant_name:
+        candidates.append(("preference:ai_name", f"Assistant's name is {assistant_name}."))
+    if slot == "preference:communication_style":
+        candidates.append(("preference:communication_style", "Use the configured communication style: direct, concrete, natural, and low-fluff."))
     if slot == "preference:emoji_usage" or "emoji" in lowered or "emoj" in lowered:
         candidates.append(("preference:emoji_usage", "Do not use emojis."))
     if slot == "preference:message_structure" or any(
@@ -183,12 +210,10 @@ def derive_transcript_communication_profile_items(
         token in text for token in ("magyarul válaszolj", "always respond in hungarian", "respond in hungarian")
     ):
         candidates.append(("preference:response_language", "Always respond in Hungarian."))
-    if "preference:ai_name" not in existing_slots and (
-        "bestie" in text and any(token in text for token in ("te neved", "assistant", "asszisztens neve", "hívj"))
-    ):
-        candidates.append(("preference:ai_name", "Assistant's name is Bestie."))
-    if "preference:communication_style" not in existing_slots and "humanizer" in text:
-        candidates.append(("preference:communication_style", "Use humanizer style."))
+    if "preference:ai_name" not in existing_slots:
+        assistant_name = _extract_assistant_name(text)
+        if assistant_name:
+            candidates.append(("preference:ai_name", f"Assistant's name is {assistant_name}."))
     if "preference:emoji_usage" not in existing_slots and any(
         token in text for token in ("ne használj emoj", "do not use emoji", "no emoji")
     ):

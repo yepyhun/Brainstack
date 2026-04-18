@@ -156,12 +156,12 @@ def extract_profile_candidates(text: str) -> List[Dict[str, Any]]:
                 )
             )
 
-        if "humanizer" in lowered or "em dash" in lowered or "dash jele" in lowered or "—" in sentence:
+        if "em dash" in lowered or "dash jele" in lowered or "—" in sentence:
             candidates.append(
                 _slotted_candidate(
                     category="preference",
-                    slot="preference:formatting",
-                    content="Follow the 'humanizer' format: no em dashes, no marketing fluff, no repetitive triplets, no filler phrases, and no excessive validation/nodding.",
+                    slot="preference:dash_usage",
+                    content="Do not use dash punctuation in replies.",
                     confidence=0.9,
                     source="heuristic_preference",
                 )

@@ -8,19 +8,6 @@ STYLE_CONTRACT_SLOT = "preference:style_contract"
 STYLE_CONTRACT_DOC_KIND = "style_contract"
 STYLE_CONTRACT_CATEGORY = "preference"
 STYLE_CONTRACT_DEFAULT_TITLE = "User style contract"
-_STYLE_CONTRACT_HINTS = (
-    "style contract",
-    "communication rules",
-    "27 rules",
-    "tartalmi minták",
-    "nyelvi minták",
-    "kommunikációs minták",
-    "stílus minták",
-    "stilus minták",
-    "töltelék",
-    "szabály",
-    "rules",
-)
 _RULE_BULLET_RE = re.compile(r"^(?:[-*•]|\d{1,3}\s*[.)-])\s+(?P<content>.+)$")
 _STYLE_CONTRACT_SOURCE_RANKS = (
     ("behavior_policy_correction", 400),
@@ -69,11 +56,6 @@ def _slug(value: Any) -> str:
     while "--" in output:
         output = output.replace("--", "-")
     return output.strip("-") or "rules"
-
-
-def _contains_hint(text: str, hints: Iterable[str]) -> bool:
-    lowered = _normalize_text(text).casefold()
-    return any(hint in lowered for hint in hints)
 
 
 def _extract_rule_bullet(line: str) -> str | None:
@@ -406,24 +388,31 @@ def looks_like_style_contract_teaching(raw_text: Any) -> bool:
     if parsed is None:
         return False
 
-    total_rules = sum(
-        len(section.get("lines") or [])
-        for section in parsed.get("sections") or ()
-        if isinstance(section, Mapping)
+    normalized_lines = [_normalize_text(line) for line in str(raw_text or "").splitlines() if _normalize_text(line)]
+    has_leading_title = bool(
+        normalized_lines
+        and not _is_heading_line(normalized_lines[0])
+        and _extract_rule_bullet(normalized_lines[0]) is None
     )
-    title = _normalize_text(parsed.get("title"))
-    if _contains_hint(title, _STYLE_CONTRACT_HINTS):
-        return True
-
-    headings = [
-        _normalize_text(section.get("heading"))
+    sections = [
+        section
         for section in parsed.get("sections") or ()
         if isinstance(section, Mapping)
     ]
-    matched_headings = sum(1 for heading in headings if _contains_hint(heading, _STYLE_CONTRACT_HINTS))
-    if matched_headings >= 2:
+    total_rules = sum(
+        len(section.get("lines") or [])
+        for section in sections
+    )
+    section_count = len(sections)
+    headed_section_count = sum(1 for section in sections if _normalize_text(section.get("heading")))
+
+    if total_rules >= 10:
         return True
-    return matched_headings >= 1 and total_rules >= 5
+    if section_count >= 2 and total_rules >= 3:
+        return True
+    if has_leading_title and total_rules >= 3:
+        return True
+    return headed_section_count >= 1 and total_rules >= 5
 
 
 def build_style_contract_from_text(

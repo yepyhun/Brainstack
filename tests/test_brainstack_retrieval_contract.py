@@ -19,8 +19,8 @@ install_host_import_shims = _host_shims.install_host_import_shims
 
 install_host_import_shims(hermes_home=REPO_ROOT)
 
-from plugins.memory.brainstack.db import BrainstackStore
-from plugins.memory.brainstack.retrieval import build_system_prompt_block, render_working_memory_block
+from brainstack.db import BrainstackStore
+from brainstack.retrieval import build_system_prompt_block, render_working_memory_block
 
 
 def test_system_prompt_projects_active_communication_contract(tmp_path):

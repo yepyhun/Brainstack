@@ -655,7 +655,7 @@ def extract_tier2_candidates(
                 "- for communication rules, prefer these stable slots when applicable: preference:response_language, preference:ai_name, preference:communication_style, preference:emoji_usage, preference:message_structure, preference:pronoun_capitalization, preference:dash_usage, preference:formatting_style\n"
                 "- prefer profile_items over states for user communication preferences and assistant naming rules\n"
                 "- do not bury communication rules inside continuity_summary or decisions when they can be emitted as separate profile_items\n"
-                "- when the user teaches a named long-form communication pack or multi-section rule set (for example Humanizer rules), emit that detailed pack in style_contract instead of trying to squeeze it into profile_items\n"
+                "- when the user teaches a named long-form communication pack or multi-section rule set, emit that detailed pack in style_contract instead of trying to squeeze it into profile_items\n"
                 "- style_contract is optional; emit it only for durable multi-rule communication contracts the user wants remembered across sessions\n"
                 "- if style_contract is present, it must contain the full detailed rule pack, even if some compact operational rules are also emitted in profile_items\n"
                 "- when emitting style_contract, preserve the user's own section headings and rule lines as literally as possible; keep the original language, wording, numbering markers, and polarity unless the transcript itself later corrects them\n"

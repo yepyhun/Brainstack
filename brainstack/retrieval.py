@@ -95,28 +95,6 @@ _INTERNAL_CONTRACT_MARKERS = (
     "source_ai",
 )
 
-_COMMUNICATION_PROFILE_HINTS = (
-    "humanizer",
-    "emoji",
-    "em dash",
-    "dash",
-    "new line",
-    "new lines",
-    "line break",
-    "paragraph",
-    "capitalize pronouns",
-    "én",
-    " te ",
-    " ő ",
-    "respond in hungarian",
-    "prefer hungarian",
-    "magyar",
-    "assistant alias",
-    "call the ai",
-    "call me",
-)
-
-
 def _normalize_compare_text(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().split())
 
@@ -135,9 +113,20 @@ def _extract_identity_name_hint(value: Any) -> str:
 def _extract_ai_name_hint(value: Any) -> str:
     text = " ".join(str(value or "").strip().split())
     lowered = text.lower()
-    for prefix in ("assistant's name is ", "assistant name is ", "asszisztens neve "):
+    for prefix in (
+        "assistant's name is ",
+        "assistant name is ",
+        "asszisztens neve ",
+        "the user calls the ai ",
+        "user calls the ai ",
+        "call the ai ",
+        "hívj ",
+    ):
         if lowered.startswith(prefix):
-            return text[len(prefix) :].strip(" .")
+            candidate = text[len(prefix) :].strip(" .")
+            if prefix == "hívj ":
+                candidate = candidate.removesuffix("nak").removesuffix("nek").rstrip("- ")
+            return candidate
     return ""
 
 
@@ -155,8 +144,7 @@ def _render_communication_profile_contract_line(row: Dict[str, Any]) -> str:
         if ai_name:
             return f"Refer to yourself as {ai_name} when naming yourself."
     if stable_key == "preference:communication_style":
-        if "humanizer" in lowered:
-            return "Use the configured communication style: direct, concrete, natural, and low-fluff."
+        return "Use the configured communication style: direct, concrete, natural, and low-fluff."
     if stable_key == "preference:emoji_usage":
         return "Do not use emojis."
     if stable_key == "preference:message_structure":
@@ -235,14 +223,7 @@ def _is_communication_profile_item(row: Dict[str, Any]) -> bool:
     stable_key = str(row.get("stable_key") or "").strip()
     if stable_key == STYLE_CONTRACT_SLOT:
         return False
-    if stable_key in COMMUNICATION_PROFILE_SLOTS:
-        return True
-    if not stable_key.startswith("preference:"):
-        return False
-    text = _normalize_compare_text(row.get("content"))
-    if not text or _looks_like_internal_contract_text(text):
-        return False
-    return any(marker in text for marker in _COMMUNICATION_PROFILE_HINTS)
+    return stable_key in COMMUNICATION_PROFILE_SLOTS
 
 
 def _build_active_communication_contract(
@@ -318,7 +299,7 @@ def _render_communication_state_contract_line(row: Dict[str, Any]) -> str:
         return ""
     if predicate == "response_language" and ("hungarian" in lowered or "magyar" in lowered):
         return "Always respond in Hungarian."
-    if predicate == "communication_style" and "humanizer" in lowered:
+    if predicate == "communication_style":
         return "Use the configured communication style: direct, concrete, natural, and low-fluff."
     if predicate == "emoji_usage":
         return "Do not use emojis."

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 from .db import BrainstackStore
-from .style_contract import STYLE_CONTRACT_SLOT
+from .style_contract import STYLE_CONTRACT_SLOT, extract_style_contract_parts
 from .task_memory import parse_task_lookup_query
 from .tier2_extractor import _default_llm_caller, _extract_json_object, _extract_text_content
 from .usefulness import graph_priority_adjustment, profile_priority_adjustment
@@ -36,13 +36,10 @@ AGGREGATE_ROUTE_CUES = (
     "sum",
 )
 STYLE_CONTRACT_STRONG_CUES = (
-    "humanizer",
     "style contract",
     "communication rules",
-    "kommunikációs szabály",
-    "kommunikációs szabályok",
-    "27 szabály",
-    "29 szabály",
+    "rule list",
+    "communication contract",
 )
 STYLE_CONTRACT_RECALL_CUES = (
     "tell me",
@@ -51,10 +48,6 @@ STYLE_CONTRACT_RECALL_CUES = (
     "do you know",
     "exact",
     "full",
-    "mondd",
-    "mondani",
-    "sorold",
-    "pontosan",
 )
 TEMPORAL_STRONG_CUES = (
     "order of",
@@ -342,18 +335,60 @@ def _contains_cue(normalized: str, cue: str) -> bool:
     return cue in normalized
 
 
-def _looks_like_style_contract_recall(query: str) -> bool:
-    normalized = f" {_normalize_text(query).lower()} "
+def _extract_style_contract_route_signals(style_contract_parts: Mapping[str, Any] | None) -> Dict[str, Any]:
+    if not isinstance(style_contract_parts, Mapping):
+        return {"title": "", "headings": [], "rule_count": 0}
+    title = _normalize_text(style_contract_parts.get("title"))
+    headings: List[str] = []
+    rule_count = 0
+    for section in style_contract_parts.get("sections") or ():
+        if not isinstance(section, Mapping):
+            continue
+        heading = _normalize_text(section.get("heading"))
+        if heading:
+            headings.append(heading)
+        rule_count += len(section.get("lines") or [])
+    return {"title": title, "headings": headings, "rule_count": rule_count}
+
+
+def _looks_like_style_contract_recall(
+    query: str,
+    *,
+    style_contract_parts: Mapping[str, Any] | None = None,
+) -> bool:
+    normalized_query = _normalize_text(query)
+    normalized = f" {normalized_query.lower()} "
     strong_hits = [cue for cue in STYLE_CONTRACT_STRONG_CUES if _contains_cue(normalized, cue)]
     if strong_hits:
         return True
 
-    has_rule_term = any(
-        _contains_cue(normalized, cue)
-        for cue in (" szabály ", " szabályt ", " szabályok ", " rules ", " rule list ")
-    )
     has_recall_term = any(_contains_cue(normalized, cue) for cue in STYLE_CONTRACT_RECALL_CUES)
-    return has_rule_term and has_recall_term
+    if has_recall_term and "rules" in normalized:
+        return True
+
+    signals = _extract_style_contract_route_signals(style_contract_parts)
+    title = str(signals.get("title") or "").casefold()
+    if title and len(title) >= 8 and f" {title} " in normalized:
+        return True
+
+    for heading in signals.get("headings") or ():
+        normalized_heading = _normalize_text(heading).casefold()
+        if len(normalized_heading) >= 8 and f" {normalized_heading} " in normalized:
+            return True
+
+    rule_count = int(signals.get("rule_count") or 0)
+    if rule_count > 0 and len(normalized_query.split()) <= 18:
+        number_token = f" {rule_count} "
+        if number_token in normalized and any(char in query for char in (".", "?", "!")):
+            return True
+    if len(normalized_query.split()) <= 18 and any(char in query for char in (".", "?", "!")):
+        for token in normalized_query.split():
+            stripped = token.strip("()[]{}<>:;,.!?")
+            if stripped.isdigit():
+                value = int(stripped)
+                if 5 <= value <= 99:
+                    return True
+    return False
 
 
 def _default_route_resolver(query: str) -> Dict[str, Any]:
@@ -394,6 +429,7 @@ def _resolve_route(
     *,
     route_resolver: Callable[[str], Dict[str, Any] | str] | None,
     style_contract_available: bool = False,
+    style_contract_parts: Mapping[str, Any] | None = None,
 ) -> RetrievalRoute:
     normalized = _normalize_text(query)
     route = RetrievalRoute(reason="fact route default")
@@ -409,7 +445,10 @@ def _resolve_route(
         route.reason = str(deterministic.get("reason") or "")
         return route
 
-    if style_contract_available and _looks_like_style_contract_recall(normalized):
+    if style_contract_available and _looks_like_style_contract_recall(
+        normalized,
+        style_contract_parts=style_contract_parts,
+    ):
         route.requested_mode = ROUTE_STYLE_CONTRACT
         route.applied_mode = ROUTE_STYLE_CONTRACT
         route.source = "deterministic_style_contract_hint"
@@ -1353,17 +1392,24 @@ def retrieve_executive_context(
     transcript_limit = max(int(policy.get("transcript_limit", 0)), 0)
     graph_limit = max(int(policy.get("graph_limit", 0)), 0)
     corpus_limit = max(int(policy.get("corpus_limit", 0)), 0)
-    style_contract_available = (
-        store.get_profile_item(
-            stable_key=STYLE_CONTRACT_SLOT,
-            principal_scope_key=principal_scope_key,
+    style_contract_row = store.get_profile_item(
+        stable_key=STYLE_CONTRACT_SLOT,
+        principal_scope_key=principal_scope_key,
+    )
+    style_contract_available = style_contract_row is not None
+    style_contract_parts = (
+        extract_style_contract_parts(
+            style_contract_row.get("content"),
+            metadata=style_contract_row.get("metadata"),
         )
-        is not None
+        if isinstance(style_contract_row, Mapping)
+        else None
     )
     route = _resolve_route(
         query,
         route_resolver=route_resolver,
         style_contract_available=style_contract_available,
+        style_contract_parts=style_contract_parts,
     )
     limits = _route_limits(
         route=route,
