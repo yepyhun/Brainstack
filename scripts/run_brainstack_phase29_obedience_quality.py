@@ -45,6 +45,10 @@ DEFAULT_DOCKER_CONTAINER = os.environ.get("BRAINSTACK_DOCKER_CONTAINER", "").str
 STYLE_CONTRACT_DEFAULT_TITLE = "User style contract"
 
 _HUNGARIAN_MARKERS = (
+    " szia ",
+    " szervusz ",
+    " helló ",
+    " hello ",
     " vagy ",
     " vagyok",
     " most ",
@@ -127,6 +131,8 @@ def _is_hungarianish(answer: str) -> bool:
     text = str(answer or "")
     normalized = f" {_normalize_text(text)} "
     if any(ch in text for ch in "áéíóöőúüűÁÉÍÓÖŐÚÜŰ"):
+        return True
+    if normalized.strip(" !?.") in {"szia", "szervusz", "helló", "hello"}:
         return True
     hits = sum(1 for token in _HUNGARIAN_MARKERS if token in normalized)
     return hits >= 2

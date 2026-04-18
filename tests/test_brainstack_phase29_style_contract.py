@@ -131,6 +131,7 @@ def test_compile_behavior_policy_emits_first_class_kinds_and_no_silent_drop():
             "- Boldface tilos\n"
             "- Emoji tilos\n\n"
             "Kommunikációs minták:\n"
+            "- Köszönésre ne válts át generikus follow-up kérdésre\n"
             "- Szervilis hangnem kötelező\n\n"
             "Töltelék:\n"
             "- Töltelékszövegek röviden\n"
@@ -140,13 +141,14 @@ def test_compile_behavior_policy_emits_first_class_kinds_and_no_silent_drop():
 
     assert compiled is not None
     assert compiled["compiler_version"] == BEHAVIOR_POLICY_COMPILER_VERSION
-    assert compiled["raw_rule_count"] == 7
+    assert compiled["raw_rule_count"] == 8
     assert compiled["no_silent_drop"] is True
     assert len(compiled["coverage"]) == compiled["raw_rule_count"]
     assert all(entry["status"] == "compiled_active" for entry in compiled["coverage"])
 
     kinds = {clause["kind"] for clause in compiled["clauses"]}
     assert "content_policy" in kinds
+    assert "question_policy" in kinds
     assert "punctuation_policy" in kinds
     assert "formatting_policy" in kinds
     assert "forbidden_surface_form" in kinds
@@ -154,7 +156,9 @@ def test_compile_behavior_policy_emits_first_class_kinds_and_no_silent_drop():
     assert "verbosity_policy" in kinds
 
     assert "Content discipline:" in compiled["projection_text"]
+    assert "Follow-up behavior:" in compiled["projection_text"]
     assert "Forbidden surface forms:" in compiled["projection_text"]
+    assert '"Miben segíthetek?"' in compiled["projection_text"]
     assert "- Emoji tilos" in compiled["projection_text"]
 
 
@@ -220,6 +224,52 @@ def test_on_memory_write_structured_style_contract_activates_before_next_answer(
         assert "# Brainstack Active Communication Contract" in prompt_block
         assert "User style contract" in prompt_block
         assert "Konkrét tények, nem jelentőségfelfújás" in prompt_block
+    finally:
+        provider.shutdown()
+
+
+def test_sync_turn_structured_style_contract_activates_before_next_turn(tmp_path):
+    provider = BrainstackMemoryProvider(config={"db_path": str(tmp_path / "brainstack.db")})
+    provider.initialize(
+        "session-style-sync",
+        hermes_home=str(tmp_path),
+        user_id="user-1",
+        platform="discord",
+        agent_identity="assistant-main",
+        agent_workspace="discord-main",
+    )
+
+    try:
+        provider.sync_turn(
+            (
+                "User style contract\n\n"
+                "Nyelvi minták:\n"
+                "- Mindig magyarul válaszolj\n"
+                "- Ne használj emojikat\n\n"
+                "Kommunikációs minták:\n"
+                "- Köszönésre ne válts át generikus follow-up kérdésre\n"
+            ),
+            "Megértettem, tartom a szerződést.",
+            session_id="session-style-sync",
+        )
+
+        store = provider._store
+        assert store is not None
+        row = store.get_profile_item(
+            stable_key=STYLE_CONTRACT_SLOT,
+            principal_scope_key=provider._principal_scope_key,
+        )
+        compiled = store.get_compiled_behavior_policy(principal_scope_key=provider._principal_scope_key)
+
+        assert row is not None
+        assert compiled is not None
+        assert compiled["policy"]["status"] == "active"
+        assert "Follow-up behavior:" in compiled["projection_text"]
+        assert '"Miben segíthetek?"' in compiled["projection_text"]
+
+        prompt_block = provider.system_prompt_block()
+        assert "# Brainstack Active Communication Contract" in prompt_block
+        assert "User style contract" in prompt_block
     finally:
         provider.shutdown()
 

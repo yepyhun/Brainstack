@@ -45,6 +45,19 @@ def test_startup_smalltalk_checker_accepts_compact_hungarian_acknowledgement():
     }
 
 
+def test_startup_smalltalk_checker_accepts_bare_hungarian_greeting():
+    module = _load_script()
+    scenario = next(item for item in module.SCENARIOS if item.name == "startup_smalltalk_after_reset")
+
+    evaluation = module._evaluate_answer(scenario, "Szia!")
+
+    assert evaluation == {
+        "passed": True,
+        "quality_class": "strong_pass",
+        "missing": [],
+    }
+
+
 def test_ordinary_help_checker_requires_multiline_and_mechanical_cleanliness():
     module = _load_script()
     scenario = next(item for item in module.SCENARIOS if item.name == "ordinary_help_after_reset")

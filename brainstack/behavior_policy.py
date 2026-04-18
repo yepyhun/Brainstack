@@ -15,6 +15,7 @@ DEFAULT_BEHAVIOR_POLICY_CHAR_BUDGET = 2400
 
 _KIND_LABELS = {
     "language_policy": "Language and locale",
+    "question_policy": "Follow-up behavior",
     "addressing_policy": "Naming and addressing",
     "tone_policy": "Tone and relationship",
     "content_policy": "Content discipline",
@@ -24,11 +25,23 @@ _KIND_LABELS = {
     "punctuation_policy": "Punctuation and symbols",
     "forbidden_surface_form": "Forbidden surface forms",
     "uncertainty_policy": "Uncertainty handling",
-    "question_policy": "Follow-up behavior",
     "custom_clause": "Additional explicit rules",
 }
 
-_KIND_ORDER = tuple(_KIND_LABELS.keys())
+_KIND_ORDER = (
+    "language_policy",
+    "question_policy",
+    "addressing_policy",
+    "tone_policy",
+    "content_policy",
+    "verbosity_policy",
+    "structure_policy",
+    "formatting_policy",
+    "punctuation_policy",
+    "forbidden_surface_form",
+    "uncertainty_policy",
+    "custom_clause",
+)
 _SECTION_FALLBACK_KIND = {
     "tartalmi": "content_policy",
     "kommunikációs": "tone_policy",
@@ -173,6 +186,34 @@ def _classify_rule(section: str, text: str) -> tuple[str, str]:
         if marker in section_lower:
             return kind, "section_fallback"
     return "custom_clause", "explicit_rule_fallback"
+
+
+def _compile_short_form(*, kind: str, text: str) -> str:
+    normalized = _normalize_text(text)
+    lowered = normalized.casefold()
+    if kind != "question_policy":
+        return normalized
+
+    if _contains_any(lowered, ("köszönés", "koszones", "greeting", "hello", "hi")) and _contains_any(
+        lowered,
+        ("follow-up", "kérdés", "kerdes", "visszakér", "visszaker", "ask"),
+    ):
+        if _contains_any(lowered, ("köszönés", "koszones", "kérdés", "kerdes", "visszakér", "visszaker")):
+            return (
+                "Egyszerű köszönésre közvetlenül válaszolj, és ne tegyél hozzá "
+                'generikus visszakérdezést vagy "Miben segíthetek?" jellegű kérdést.'
+            )
+        return (
+            "Answer a simple greeting directly, without adding a generic follow-up question "
+            'such as "How can I help?".'
+        )
+
+    if _contains_any(lowered, ("feleslegesen", "szükség", "szukseg", "unnecessary", "clarification")):
+        if _contains_any(lowered, ("feleslegesen", "szükség", "szukseg")):
+            return "Csak akkor kérdezz vissza, ha a helyes válaszhoz valódi tisztázás kell."
+        return "Ask a follow-up question only when clarification is genuinely required."
+
+    return normalized
 
 
 def _build_raw_rules(sections: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
@@ -321,7 +362,7 @@ def compile_behavior_policy(
             "hardness": "hard",
             "applies_to": ["text_reply"],
             "status": BEHAVIOR_POLICY_STATUS_ACTIVE,
-            "compiled_short_form": str(raw_rule["text"]),
+            "compiled_short_form": _compile_short_form(kind=kind, text=str(raw_rule["text"])),
         }
         clauses.append(clause)
         kind_counts[kind] = kind_counts.get(kind, 0) + 1

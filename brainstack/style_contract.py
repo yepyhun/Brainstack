@@ -7,6 +7,19 @@ STYLE_CONTRACT_SLOT = "preference:style_contract"
 STYLE_CONTRACT_DOC_KIND = "style_contract"
 STYLE_CONTRACT_CATEGORY = "preference"
 STYLE_CONTRACT_DEFAULT_TITLE = "User style contract"
+_STYLE_CONTRACT_HINTS = (
+    "style contract",
+    "communication rules",
+    "27 rules",
+    "tartalmi minták",
+    "nyelvi minták",
+    "kommunikációs minták",
+    "stílus minták",
+    "stilus minták",
+    "töltelék",
+    "szabály",
+    "rules",
+)
 
 
 def _normalize_text(value: Any) -> str:
@@ -47,6 +60,11 @@ def _slug(value: Any) -> str:
     while "--" in output:
         output = output.replace("--", "-")
     return output.strip("-") or "rules"
+
+
+def _contains_hint(text: str, hints: Iterable[str]) -> bool:
+    lowered = _normalize_text(text).casefold()
+    return any(hint in lowered for hint in hints)
 
 
 def _sections_from_metadata(metadata: Mapping[str, Any] | None) -> tuple[str, str, List[Dict[str, Any]]]:
@@ -346,6 +364,24 @@ def parse_style_contract_text(raw_text: Any) -> Dict[str, Any] | None:
         "summary": "",
         "sections": sections,
     }
+
+
+def looks_like_style_contract_teaching(raw_text: Any) -> bool:
+    parsed = parse_style_contract_text(raw_text)
+    if parsed is None:
+        return False
+
+    title = _normalize_text(parsed.get("title"))
+    if _contains_hint(title, _STYLE_CONTRACT_HINTS):
+        return True
+
+    headings = [
+        _normalize_text(section.get("heading"))
+        for section in parsed.get("sections") or ()
+        if isinstance(section, Mapping)
+    ]
+    matched_headings = sum(1 for heading in headings if _contains_hint(heading, _STYLE_CONTRACT_HINTS))
+    return matched_headings >= 2
 
 
 def build_style_contract_from_text(

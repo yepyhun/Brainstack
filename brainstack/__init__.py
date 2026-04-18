@@ -30,7 +30,7 @@ from .retrieval import (
     build_compression_hint,
     build_system_prompt_block,
 )
-from .style_contract import build_style_contract_from_text
+from .style_contract import build_style_contract_from_text, looks_like_style_contract_teaching
 from .tier1_extractor import build_profile_stable_key
 from .tier2_extractor import extract_tier2_candidates
 
@@ -254,6 +254,37 @@ class BrainstackMemoryProvider(MemoryProvider):
             payload.setdefault("principal_scope", dict(self._principal_scope))
         return payload or None
 
+    def _upsert_style_contract_candidate(
+        self,
+        *,
+        content: str,
+        source: str,
+        confidence: float = 0.9,
+        metadata: Dict[str, Any] | None = None,
+        require_explicit_signal: bool = False,
+    ) -> bool:
+        if not self._store or not content:
+            return False
+        if require_explicit_signal and not looks_like_style_contract_teaching(content):
+            return False
+        style_contract = build_style_contract_from_text(
+            raw_text=content,
+            source=source,
+            confidence=confidence,
+            metadata=self._scoped_metadata(metadata),
+        )
+        if style_contract is None:
+            return False
+        self._store.upsert_profile_item(
+            stable_key=style_contract["slot"],
+            category=style_contract["category"],
+            content=style_contract["content"],
+            source=style_contract["source"],
+            confidence=float(style_contract["confidence"]),
+            metadata=style_contract["metadata"],
+        )
+        return True
+
     def system_prompt_block(self) -> str:
         if not self._store:
             return ""
@@ -369,6 +400,13 @@ class BrainstackMemoryProvider(MemoryProvider):
             assistant_content=assistant_content,
             created_at=event_time,
             metadata=self._scoped_metadata(),
+        )
+        self._upsert_style_contract_candidate(
+            content=user_content,
+            source="sync_turn:user_style_contract",
+            confidence=0.9,
+            metadata={"session_id": sid, "turn_number": self._turn_counter},
+            require_explicit_signal=True,
         )
         plan = build_turn_ingest_plan(
             user_content=user_content,
@@ -537,23 +575,14 @@ class BrainstackMemoryProvider(MemoryProvider):
         if not self._store or not content or action == "remove":
             return
         if target == "user":
-            scoped_metadata = self._scoped_metadata({"target": target})
-            style_contract = build_style_contract_from_text(
-                raw_text=content,
+            if self._upsert_style_contract_candidate(
+                content=content,
                 source=f"builtin_{action}:style_contract",
                 confidence=0.9,
-                metadata=scoped_metadata,
-            )
-            if style_contract is not None:
-                self._store.upsert_profile_item(
-                    stable_key=style_contract["slot"],
-                    category=style_contract["category"],
-                    content=style_contract["content"],
-                    source=style_contract["source"],
-                    confidence=float(style_contract["confidence"]),
-                    metadata=style_contract["metadata"],
-                )
+                metadata={"target": target},
+            ):
                 return
+            scoped_metadata = self._scoped_metadata({"target": target})
             category = "preference"
             stable_key = build_profile_stable_key(category, content)
             self._store.upsert_profile_item(
