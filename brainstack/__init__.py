@@ -11,12 +11,13 @@ Current provider slice:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
 import threading
 import time
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 from agent.memory_provider import MemoryProvider
 
@@ -25,12 +26,14 @@ from .db import BrainstackStore
 from .donors import continuity_adapter, corpus_adapter, graph_adapter
 from .donors.registry import get_donor_registry
 from .extraction_pipeline import build_session_message_ingest_plan, build_turn_ingest_plan
+from .output_contract import validate_output_against_contract
 from .reconciler import reconcile_tier2_candidates
 from .retrieval import (
     build_compression_hint,
     build_system_prompt_block,
 )
 from .style_contract import build_style_contract_from_text, looks_like_style_contract_teaching
+from .task_memory import build_task_stable_key, parse_task_capture, resolve_user_timezone
 from .tier1_extractor import build_profile_stable_key
 from .tier2_extractor import extract_tier2_candidates
 
@@ -85,6 +88,7 @@ def _build_principal_scope(**kwargs: Any) -> Dict[str, str]:
     platform = str(kwargs.get("platform") or "").strip()
     agent_identity = str(kwargs.get("agent_identity") or "").strip()
     agent_workspace = str(kwargs.get("agent_workspace") or "").strip()
+    timezone_name = resolve_user_timezone(kwargs.get("timezone"))
     scope: Dict[str, str] = {"user_id": user_id}
     if platform:
         scope["platform"] = platform
@@ -92,6 +96,8 @@ def _build_principal_scope(**kwargs: Any) -> Dict[str, str]:
         scope["agent_identity"] = agent_identity
     if agent_workspace:
         scope["agent_workspace"] = agent_workspace
+    if timezone_name and timezone_name != "UTC":
+        scope["timezone"] = timezone_name
     key_parts: List[str] = []
     for key in ("platform", "user_id", "agent_identity", "agent_workspace"):
         value = str(scope.get(key) or "").strip()
@@ -131,11 +137,16 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._last_prefetch_debug: Dict[str, Any] | None = None
         self._last_behavior_policy_trace: Dict[str, Any] | None = None
         self._last_operating_context_trace: Dict[str, Any] | None = None
+        self._last_memory_operation_trace: Dict[str, Any] | None = None
+        self._last_write_receipt: Dict[str, Any] | None = None
         self._last_tier2_schedule: Dict[str, Any] | None = None
         self._last_tier2_batch_result: Dict[str, Any] | None = None
         self._tier2_batch_history: List[Dict[str, Any]] = []
         self._pending_tier2_turns = 0
+        self._pending_explicit_write_count = 0
+        self._write_receipt_counter = 0
         self._last_turn_monotonic: float | None = None
+        self._user_timezone = resolve_user_timezone(self._config.get("user_timezone"))
         self._tier2_lock = threading.RLock()
         self._tier2_thread: threading.Thread | None = None
         self._tier2_running = False
@@ -175,6 +186,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             {"key": "corpus_match_limit", "description": "How many corpus sections to consider per turn", "default": "4"},
             {"key": "corpus_char_budget", "description": "Approximate character budget for packed corpus recall", "default": "700"},
             {"key": "corpus_section_max_chars", "description": "Maximum size of an ingested corpus section", "default": "900"},
+            {"key": "user_timezone", "description": "Default timezone for relative task and commitment dates", "default": "UTC"},
             {"key": "tier2_idle_window_seconds", "description": "Idle window before the future Tier-2 batch may be queued", "default": "30"},
             {"key": "tier2_batch_turn_limit", "description": "How many turns may accumulate before the future Tier-2 batch is queued", "default": "5"},
             {"key": "tier2_transcript_limit", "description": "How many recent transcript turns Tier-2 may read per batch", "default": "8"},
@@ -207,10 +219,14 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._last_prefetch_debug = None
         self._last_behavior_policy_trace = None
         self._last_operating_context_trace = None
+        self._last_memory_operation_trace = None
+        self._last_write_receipt = None
         self._last_tier2_schedule = None
         self._last_tier2_batch_result = None
         self._tier2_batch_history = []
         self._pending_tier2_turns = 0
+        self._pending_explicit_write_count = 0
+        self._write_receipt_counter = 0
         self._last_turn_monotonic = None
         self._tier2_followup_requested = False
         self._tier2_running = False
@@ -238,6 +254,11 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._session_id = session_id
         self._principal_scope = _build_principal_scope(**kwargs)
         self._principal_scope_key = str(self._principal_scope.get("principal_scope_key") or "").strip()
+        self._user_timezone = resolve_user_timezone(
+            kwargs.get("timezone")
+            or self._principal_scope.get("timezone")
+            or self._config.get("user_timezone")
+        )
         self._store = BrainstackStore(
             db_path,
             graph_backend=graph_backend,
@@ -249,10 +270,125 @@ class BrainstackMemoryProvider(MemoryProvider):
 
     def _scoped_metadata(self, metadata: Dict[str, Any] | None = None) -> Dict[str, Any] | None:
         payload = dict(metadata or {})
+        if self._user_timezone:
+            payload.setdefault("timezone", self._user_timezone)
         if self._principal_scope_key:
             payload.setdefault("principal_scope_key", self._principal_scope_key)
             payload.setdefault("principal_scope", dict(self._principal_scope))
         return payload or None
+
+    def _next_write_receipt_id(self) -> str:
+        self._write_receipt_counter += 1
+        session_label = self._session_id or "session"
+        return f"{session_label}:write:{self._write_receipt_counter}"
+
+    def _memory_operation_state(
+        self,
+        *,
+        surface: str = "",
+        note: str = "",
+    ) -> Dict[str, Any]:
+        state = {
+            "pending_explicit_write_count": int(self._pending_explicit_write_count),
+            "barrier_clear": self._pending_explicit_write_count == 0,
+            "last_write_receipt": dict(self._last_write_receipt or {}),
+        }
+        if surface:
+            state["surface"] = surface
+        if note:
+            state["note"] = note
+        return state
+
+    def _set_memory_operation_trace(
+        self,
+        *,
+        surface: str,
+        note: str = "",
+    ) -> Dict[str, Any]:
+        trace = self._memory_operation_state(surface=surface, note=note)
+        self._last_memory_operation_trace = trace
+        return trace
+
+    def _commit_explicit_write(
+        self,
+        *,
+        owner: str,
+        write_class: str,
+        source: str,
+        target: str,
+        stable_key: str,
+        category: str,
+        content: str,
+        commit: Callable[[], None],
+        extra: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        receipt = {
+            "receipt_id": self._next_write_receipt_id(),
+            "status": "pending",
+            "owner": owner,
+            "write_class": write_class,
+            "target": target,
+            "stable_key": stable_key,
+            "category": category,
+            "source": source,
+            "session_id": self._session_id,
+            "turn_number": int(self._turn_counter),
+            "principal_scope_key": self._principal_scope_key,
+            "content_hash": hashlib.sha256(str(content or "").encode("utf-8")).hexdigest()
+            if str(content or "")
+            else "",
+        }
+        if isinstance(extra, dict):
+            receipt.update(extra)
+
+        self._pending_explicit_write_count += 1
+        self._last_write_receipt = dict(receipt)
+        self._set_memory_operation_trace(surface="explicit_write_pending")
+        try:
+            commit()
+        except Exception as exc:
+            failed = dict(receipt)
+            failed["status"] = "failed"
+            failed["error"] = str(exc)
+            self._last_write_receipt = failed
+            raise
+        finally:
+            self._pending_explicit_write_count = max(0, self._pending_explicit_write_count - 1)
+
+        committed = dict(receipt)
+        committed["status"] = "committed"
+        self._last_write_receipt = committed
+        self._set_memory_operation_trace(surface="explicit_write_committed")
+        return committed
+
+    def _ensure_explicit_write_barrier_clear(self, *, surface: str) -> bool:
+        clear = self._pending_explicit_write_count == 0
+        note = "" if clear else "Explicit durable write is still pending; refusing teardown."
+        self._set_memory_operation_trace(surface=surface, note=note)
+        if not clear:
+            logger.error(note)
+        return clear
+
+    def _render_memory_operation_receipt_block(self, receipt: Dict[str, Any] | None) -> str:
+        if not isinstance(receipt, dict):
+            return ""
+        if str(receipt.get("status") or "").strip() != "committed":
+            return ""
+        lines = [
+            f"Committed durable write for this session: {receipt.get('write_class', 'write')}.",
+            f"Owner: {receipt.get('owner', 'brainstack')}.",
+            "This is committed evidence, not a plan or an optimistic promise.",
+        ]
+        source = str(receipt.get("source") or "").strip()
+        if source:
+            lines.append(f"Write source: {source}.")
+        item_count = int(receipt.get("item_count") or 0)
+        if item_count > 0:
+            lines.append(f"Committed items: {item_count}.")
+        due_date = str(receipt.get("due_date") or "").strip()
+        if due_date:
+            lines.append(f"Due date: {due_date}.")
+        return "## Brainstack Memory Operation Receipt\n" + "\n".join(f"- {line}" for line in lines)
 
     def _upsert_style_contract_candidate(
         self,
@@ -262,11 +398,11 @@ class BrainstackMemoryProvider(MemoryProvider):
         confidence: float = 0.9,
         metadata: Dict[str, Any] | None = None,
         require_explicit_signal: bool = False,
-    ) -> bool:
+    ) -> Dict[str, Any] | None:
         if not self._store or not content:
-            return False
+            return None
         if require_explicit_signal and not looks_like_style_contract_teaching(content):
-            return False
+            return None
         style_contract = build_style_contract_from_text(
             raw_text=content,
             source=source,
@@ -274,16 +410,116 @@ class BrainstackMemoryProvider(MemoryProvider):
             metadata=self._scoped_metadata(metadata),
         )
         if style_contract is None:
-            return False
-        self._store.upsert_profile_item(
-            stable_key=style_contract["slot"],
-            category=style_contract["category"],
-            content=style_contract["content"],
-            source=style_contract["source"],
-            confidence=float(style_contract["confidence"]),
-            metadata=style_contract["metadata"],
+            return None
+
+        receipt = self._commit_explicit_write(
+            owner="brainstack.behavior_contract",
+            write_class="style_contract",
+            source=str(style_contract["source"]),
+            target="user",
+            stable_key=str(style_contract["slot"]),
+            category=str(style_contract["category"]),
+            content=str(style_contract["content"]),
+            commit=lambda: self._store.upsert_profile_item(
+                stable_key=style_contract["slot"],
+                category=style_contract["category"],
+                content=style_contract["content"],
+                source=style_contract["source"],
+                confidence=float(style_contract["confidence"]),
+                metadata=style_contract["metadata"],
+            ),
+            extra={
+                "rule_count": len(list(style_contract.get("metadata", {}).get("style_contract_rules") or [])),
+            },
         )
-        return True
+        snapshot = self._store.get_behavior_policy_snapshot(principal_scope_key=self._principal_scope_key)
+        compiled_policy = dict(snapshot.get("compiled_policy") or {})
+        receipt["compiled_policy_active"] = bool(compiled_policy.get("active"))
+        receipt["compiled_policy_status"] = str(compiled_policy.get("status") or "")
+        self._last_write_receipt = receipt
+        self._set_memory_operation_trace(surface="style_contract_upsert")
+        return receipt
+
+    def _upsert_task_capture_candidate(
+        self,
+        *,
+        content: str,
+        source: str,
+        metadata: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any] | None:
+        if not self._store or not content:
+            return None
+        capture = parse_task_capture(content, timezone_name=self._user_timezone)
+        if capture is None:
+            return None
+
+        items = list(capture.get("items") or [])
+        if not items:
+            return None
+        item_type = str(capture.get("item_type") or "task").strip() or "task"
+        due_date = str(capture.get("due_date") or "").strip()
+        date_scope = str(capture.get("date_scope") or "").strip()
+        batch_stable_key = build_task_stable_key(
+            principal_scope_key=self._principal_scope_key,
+            item_type=item_type,
+            due_date=due_date,
+            title=" | ".join(str(item.get("title") or "").strip() for item in items),
+        )
+
+        def commit() -> None:
+            scoped_metadata = self._scoped_metadata(metadata)
+            for item in items:
+                title = str(item.get("title") or "").strip()
+                item_due_date = str(item.get("due_date") or due_date).strip()
+                item_date_scope = str(item.get("date_scope") or date_scope).strip()
+                stable_key = build_task_stable_key(
+                    principal_scope_key=self._principal_scope_key,
+                    item_type=str(item.get("item_type") or item_type).strip() or item_type,
+                    due_date=item_due_date,
+                    title=title,
+                )
+                self._store.upsert_task_item(
+                    stable_key=stable_key,
+                    principal_scope_key=self._principal_scope_key,
+                    item_type=str(item.get("item_type") or item_type).strip() or item_type,
+                    title=title,
+                    due_date=item_due_date,
+                    date_scope=item_date_scope,
+                    optional=bool(item.get("optional")),
+                    status=str(item.get("status") or "open").strip() or "open",
+                    owner="brainstack.task_memory",
+                    source=source,
+                    source_session_id=str((metadata or {}).get("session_id") or self._session_id or "").strip(),
+                    source_turn_number=int((metadata or {}).get("turn_number") or self._turn_counter or 0),
+                    metadata=scoped_metadata,
+                )
+
+        receipt = self._commit_explicit_write(
+            owner="brainstack.task_memory",
+            write_class="task_memory",
+            source=source,
+            target="user",
+            stable_key=batch_stable_key,
+            category=item_type,
+            content=content,
+            commit=commit,
+            extra={
+                "item_count": len(items),
+                "due_date": due_date,
+                "date_scope": date_scope,
+                "items": [
+                    {
+                        "title": str(item.get("title") or "").strip(),
+                        "optional": bool(item.get("optional")),
+                        "due_date": str(item.get("due_date") or due_date).strip(),
+                    }
+                    for item in items
+                ],
+            },
+        )
+        self._last_write_receipt = receipt
+        self._set_memory_operation_trace(surface="task_capture_upsert")
+        return receipt
 
     def system_prompt_block(self) -> str:
         if not self._store:
@@ -324,11 +560,25 @@ class BrainstackMemoryProvider(MemoryProvider):
         if not self._store:
             return ""
         sid = session_id or self._session_id
+        style_contract_receipt = self._upsert_style_contract_candidate(
+            content=query,
+            source="prefetch:style_contract",
+            confidence=0.9,
+            metadata={"session_id": sid},
+            require_explicit_signal=True,
+        )
+        style_contract_activated = style_contract_receipt is not None
+        task_capture_receipt = self._upsert_task_capture_candidate(
+            content=query,
+            source="prefetch:task_memory",
+            metadata={"session_id": sid},
+        )
         packet = build_working_memory_packet(
             self._store,
             query=query,
             session_id=sid,
             principal_scope_key=self._principal_scope_key,
+            timezone_name=self._user_timezone,
             profile_match_limit=self._profile_match_limit,
             continuity_recent_limit=self._continuity_recent_limit,
             continuity_match_limit=self._continuity_match_limit,
@@ -356,6 +606,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                     "transcript_rows": [_debug_row_snapshot(row) for row in list(packet.get("transcript_rows") or [])],
                     "graph_rows": [_debug_row_snapshot(row) for row in list(packet.get("graph_rows") or [])],
                     "corpus_rows": [_debug_row_snapshot(row) for row in list(packet.get("corpus_rows") or [])],
+                    "task_rows": [dict(row) for row in list(packet.get("task_rows") or [])],
                 },
             }
         else:
@@ -366,15 +617,38 @@ class BrainstackMemoryProvider(MemoryProvider):
         projection_text = ""
         if isinstance(compiled_policy, dict):
             projection_text = str(compiled_policy.get("projection_text") or "").strip()
+        reinforcement = packet.get("policy", {}).get("behavior_policy_reinforcement")
+        output_block = str(packet.get("block") or "")
+        receipt_blocks = [
+            self._render_memory_operation_receipt_block(receipt)
+            for receipt in (style_contract_receipt, task_capture_receipt)
+            if isinstance(receipt, dict)
+        ]
+        if receipt_blocks:
+            output_block = "\n\n".join(
+                part for part in (output_block, *receipt_blocks) if str(part).strip()
+            )
         trace["prefetch"] = {
             "surface": "prefetch",
             "route_mode": str(packet.get("routing", {}).get("applied_mode") or "fact"),
+            "style_contract_activated_before_prefetch": style_contract_activated,
+            "task_capture_activated_before_prefetch": bool(task_capture_receipt),
+            "write_receipt_present": bool(style_contract_receipt or task_capture_receipt),
+            "write_receipt_status": str(
+                (task_capture_receipt or style_contract_receipt or {}).get("status") or ""
+            ),
             "compiled_policy_present_in_packet": bool(isinstance(compiled_policy, dict) and projection_text),
-            "projection_present_in_block": bool(projection_text and projection_text in packet["block"]),
+            "projection_present_in_block": bool(projection_text and projection_text in output_block),
+            "correction_reinforcement_present": bool(
+                isinstance(reinforcement, dict) and str(reinforcement.get("text") or "").strip()
+            ),
+            "correction_reinforcement_mode": str(reinforcement.get("mode") or "")
+            if isinstance(reinforcement, dict)
+            else "",
             "snapshot": snapshot,
         }
         self._last_behavior_policy_trace = trace
-        return packet["block"]
+        return output_block
 
     def sync_turn(
         self,
@@ -515,6 +789,8 @@ class BrainstackMemoryProvider(MemoryProvider):
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         if not self._store:
             return
+        if not self._ensure_explicit_write_barrier_clear(surface="on_session_end"):
+            return
         worker_finished = self._wait_for_tier2_worker(timeout=self._tier2_timeout_seconds + 2.0)
         if worker_finished and (self._pending_tier2_turns > 0 or self._tier2_followup_requested):
             try:
@@ -582,16 +858,31 @@ class BrainstackMemoryProvider(MemoryProvider):
                 metadata={"target": target},
             ):
                 return
+            if self._upsert_task_capture_candidate(
+                content=content,
+                source=f"builtin_{action}:task_memory",
+                metadata={"target": target},
+            ):
+                return
             scoped_metadata = self._scoped_metadata({"target": target})
             category = "preference"
             stable_key = build_profile_stable_key(category, content)
-            self._store.upsert_profile_item(
+            self._commit_explicit_write(
+                owner="brainstack.profile_items",
+                write_class="profile_item",
+                source=f"builtin_{action}",
+                target=target,
                 stable_key=stable_key,
                 category=category,
                 content=content,
-                source=f"builtin_{action}",
-                confidence=0.88,
-                metadata=scoped_metadata,
+                commit=lambda: self._store.upsert_profile_item(
+                    stable_key=stable_key,
+                    category=category,
+                    content=content,
+                    source=f"builtin_{action}",
+                    confidence=0.88,
+                    metadata=scoped_metadata,
+                ),
             )
             return
 
@@ -627,6 +918,11 @@ class BrainstackMemoryProvider(MemoryProvider):
             return None
         return json.loads(json.dumps(self._last_operating_context_trace, ensure_ascii=True))
 
+    def memory_operation_trace(self) -> Dict[str, Any] | None:
+        if self._last_memory_operation_trace is None:
+            return None
+        return json.loads(json.dumps(self._last_memory_operation_trace, ensure_ascii=True))
+
     def apply_behavior_policy_correction(self, *, rule_id: str, replacement_text: str) -> Dict[str, Any] | None:
         if not self._store:
             return None
@@ -637,10 +933,37 @@ class BrainstackMemoryProvider(MemoryProvider):
             source="provider_behavior_policy_correction",
         )
 
+    def validate_assistant_output(self, content: str) -> Dict[str, Any] | None:
+        if not self._store:
+            return None
+        compiled_policy_record = self._store.get_compiled_behavior_policy(principal_scope_key=self._principal_scope_key)
+        compiled_policy = (
+            dict(compiled_policy_record.get("policy") or {})
+            if isinstance(compiled_policy_record, dict)
+            else None
+        )
+        result = validate_output_against_contract(
+            content=content,
+            compiled_policy=compiled_policy,
+        )
+        trace = dict(self._last_behavior_policy_trace or {})
+        trace["final_output_validation"] = {
+            "surface": "final_output_validation",
+            "applied": bool(result.get("applied")),
+            "changed": bool(result.get("changed")),
+            "repair_count": len(list(result.get("repairs") or [])),
+            "remaining_violation_count": len(list(result.get("remaining_violations") or [])),
+            "contract": dict(result.get("contract") or {}),
+        }
+        self._last_behavior_policy_trace = trace
+        return result
+
     def shutdown(self) -> None:
         worker_finished = self._wait_for_tier2_worker(timeout=self._tier2_timeout_seconds + 2.0)
         if not worker_finished:
             logger.error("Refusing to reset Brainstack runtime state while the Tier-2 worker is still running.")
+            return
+        if not self._ensure_explicit_write_barrier_clear(surface="shutdown"):
             return
         if self._store:
             self._store.close()

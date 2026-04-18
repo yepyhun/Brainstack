@@ -7,7 +7,10 @@ not become shadow memory stores.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Iterable
+
+logger = logging.getLogger(__name__)
 
 LEGACY_MEMORY_TOOL_NAMES = frozenset({"memory"})
 PERSONAL_MEMORY_FILE_TOOL_NAMES = frozenset({"read_file", "write_file", "patch"})
@@ -25,7 +28,6 @@ PERSONAL_MEMORY_SKILL_MARKERS = (
     "communication_style",
     "identity",
     "persona",
-    "humanizer",
     "emoji",
     "em dash",
     "jargon",
@@ -58,12 +60,9 @@ PERSONAL_MEMORY_AUTONOMY_MARKERS = (
     "preference",
     "preferences",
     "persona",
-    "humanizer",
     "style",
     "communication",
     "identity",
-    "bestie",
-    "tomi",
     "assistant name",
     "store user",
 )
@@ -217,3 +216,34 @@ def blocked_brainstack_only_tool_error(function_name: str, function_args: dict[s
             "or communication style while Brainstack owns personal memory."
         )
     return None
+
+
+def _find_brainstack_provider(memory_manager: Any) -> Any | None:
+    providers = getattr(memory_manager, "providers", None)
+    if not isinstance(providers, list):
+        return None
+    for provider in providers:
+        if getattr(provider, "name", "") == "brainstack":
+            return provider
+    return None
+
+
+def apply_brainstack_output_validation(memory_manager: Any, content: str) -> str:
+    text = str(content or "")
+    if not text or memory_manager is None:
+        return text
+    provider = _find_brainstack_provider(memory_manager)
+    if provider is None:
+        return text
+    validator = getattr(provider, "validate_assistant_output", None)
+    if not callable(validator):
+        return text
+    try:
+        result = validator(text)
+    except Exception:
+        logger.warning("Brainstack final-output validation failed", exc_info=True)
+        return text
+    if not isinstance(result, dict):
+        return text
+    validated = str(result.get("content") or text)
+    return validated or text

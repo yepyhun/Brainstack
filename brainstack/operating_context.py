@@ -128,7 +128,7 @@ def build_operating_context_snapshot(
     if session_state["active"] and (active_work_summary or open_decisions):
         proactive_guidance = (
             "If the user re-engages vaguely, resume the active work or open decisions below before falling back to generic small talk. "
-            "Do not invent reminders or take ownership of scheduling."
+            "Do not invent reminders or scheduling state that is not grounded in the committed records."
         )
 
     return {
@@ -148,7 +148,7 @@ def build_operating_context_snapshot(
         "external_owner_pointers": external_owner_pointers,
         "external_owner_pointer_count": len(external_owner_pointers),
         "proactive_guidance": proactive_guidance,
-        "owner_boundary": "Reminders, scheduling, and task truth stay with native owners; Brainstack carries context only.",
+        "owner_boundary": "Brainstack owns bounded task and commitment truth recorded in its structured task memory. Reminders and broader scheduling authority stay with dedicated owners.",
     }
 
 

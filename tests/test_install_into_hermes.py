@@ -121,6 +121,19 @@ def test_run_agent_patch_supports_multiline_memory_manager_import(tmp_path: Path
         "                env=get_active_env(effective_task_id),\n"
         "            )\n"
         "            enforce_turn_budget(messages[-num_tools_seq:], env=get_active_env(effective_task_id))\n"
+        "            if final_response:\n"
+        "                if \"<think>\" in final_response:\n"
+        "                    final_response = re.sub(r'<think>.*?</think>\\s*', '', final_response, flags=re.DOTALL).strip()\n"
+        "                if final_response:\n"
+        "                    messages.append({\"role\": \"assistant\", \"content\": final_response})\n"
+        "                else:\n"
+        "                    final_response = \"I reached the iteration limit and couldn't generate a summary.\"\n"
+        "            else:\n"
+        "                final_response = \"fallback\"\n"
+        "                    # Strip <think> blocks from user-facing response (keep raw in messages for trajectory)\n"
+        "                    final_response = self._strip_think_blocks(final_response).strip()\n"
+        "                    \n"
+        "                    final_msg = self._build_assistant_message(assistant_message, finish_reason)\n"
         "            if function_name == \"todo\":\n",
         encoding="utf-8",
     )
@@ -129,16 +142,25 @@ def test_run_agent_patch_supports_multiline_memory_manager_import(tmp_path: Path
     content = path.read_text(encoding="utf-8")
 
     assert "run_agent:import_brainstack_mode" in applied
+    assert (
+        "run_agent:import_output_validator" in applied
+        or "run_agent:import_brainstack_mode" in applied
+    )
     assert "run_agent:import_rtk_sidecar" in applied
     assert "run_agent:init_rtk_sidecar" in applied
     assert "run_agent:rtk_preprocess_path" in applied
+    assert "run_agent:validate_summary_output" in applied
+    assert "run_agent:validate_final_output" in applied
     assert "from agent.brainstack_mode import (" in content
+    assert "apply_brainstack_output_validation" in content
     assert "from agent.rtk_sidecar import build_rtk_sidecar_config, RTKSidecarStats, maybe_preprocess_tool_result" in content
     assert "self._rtk_sidecar = build_rtk_sidecar_config(_agent_cfg)" in content
     assert "self._rtk_sidecar_stats = RTKSidecarStats()" in content
     assert "preprocessed_result = maybe_preprocess_tool_result(function_result, self._rtk_sidecar)" in content
     assert "config=self._rtk_sidecar.budget" in content
     assert "record_turn_budget_effect(before_budget_total, after_budget_total)" in content
+    assert "final_response = apply_brainstack_output_validation(self._memory_manager, final_response)" in content
+    assert 'final_msg["content"] = final_response' in content
     assert "Brainstack owns personal memory in this mode." in content
     assert "persona.md, or side skill files" in content
     assert "secondary memory APIs from ad hoc code" in content

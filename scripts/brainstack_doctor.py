@@ -23,6 +23,7 @@ from typing import Any
 REQUIRED_PLUGIN_FILES = [
     "__init__.py",
     "behavior_policy.py",
+    "output_contract.py",
     "operating_context.py",
     "plugin.yaml",
     "db.py",
@@ -323,6 +324,11 @@ def _check_host_surfaces(target: Path) -> list[Check]:
     else:
         checks.append(Check("brainstack_only_helper", "fail", "agent/brainstack_mode.py is missing or incomplete"))
 
+    if "apply_brainstack_output_validation" in brainstack_mode and "apply_brainstack_output_validation(" in run_agent:
+        checks.append(Check("final_output_validation", "pass", "run_agent routes final answers through the Brainstack output validator"))
+    else:
+        checks.append(Check("final_output_validation", "fail", "run_agent does not route final answers through the Brainstack output validator"))
+
     if "PERSONAL_MEMORY_FILE_TOOL_NAMES" in brainstack_mode and "side-memory files" in brainstack_mode:
         checks.append(Check("personal_memory_file_boundary", "pass", "Brainstack-only helper blocks Hermes side-memory file detours"))
     else:
@@ -407,9 +413,11 @@ def _check_plugin(target: Path, planned_install: bool) -> list[Check]:
         "assert p.is_available(); "
         "assert hasattr(p, 'behavior_policy_snapshot'); "
         "assert hasattr(p, 'behavior_policy_trace'); "
+        "assert hasattr(p, 'memory_operation_trace'); "
         "assert hasattr(p, 'operating_context_snapshot'); "
         "assert hasattr(p, 'operating_context_trace'); "
         "assert hasattr(p, 'apply_behavior_policy_correction'); "
+        "assert hasattr(p, 'validate_assistant_output'); "
         "print(p.name)"
     )
     proc = subprocess.run(
@@ -441,7 +449,7 @@ def _check_config(
     config: dict[str, Any] = {}
     loaded_from = str(config_path)
 
-    def dependency_import_ok(module_name: str) -> bool:
+    def dependency_import_ok(module_name: str) -> bool | None:
         if runtime == "docker" and compose_path and not planned_install:
             return _docker_python_can_import(module_name, compose_path)
         return _python_can_import(module_name, python_bin)
@@ -500,8 +508,17 @@ def _check_config(
             checks.append(Check("graph_backend_path", "pass", "plugins.brainstack.graph_db_path will be added by installer"))
         else:
             checks.append(Check("graph_backend_path", "warn", "plugins.brainstack.graph_db_path is absent; provider defaults will be used"))
-        if dependency_import_ok("kuzu"):
+        dependency_state = dependency_import_ok("kuzu")
+        if dependency_state is True:
             checks.append(Check("graph_backend_dependency", "pass", "Python kuzu package is importable"))
+        elif dependency_state is None:
+            checks.append(
+                Check(
+                    "graph_backend_dependency",
+                    "warn",
+                    "Could not verify Python kuzu package importability from this exec surface because Docker API access is unavailable",
+                )
+            )
         else:
             checks.append(Check("graph_backend_dependency", "fail", "Python kuzu package is missing for graph_backend='kuzu' in the active runtime"))
     elif planned_install:
@@ -517,8 +534,17 @@ def _check_config(
             checks.append(Check("corpus_backend_path", "pass", "plugins.brainstack.corpus_db_path will be added by installer"))
         else:
             checks.append(Check("corpus_backend_path", "warn", "plugins.brainstack.corpus_db_path is absent; provider defaults will be used"))
-        if dependency_import_ok("chromadb"):
+        dependency_state = dependency_import_ok("chromadb")
+        if dependency_state is True:
             checks.append(Check("corpus_backend_dependency", "pass", "Python chromadb package is importable"))
+        elif dependency_state is None:
+            checks.append(
+                Check(
+                    "corpus_backend_dependency",
+                    "warn",
+                    "Could not verify Python chromadb package importability from this exec surface because Docker API access is unavailable",
+                )
+            )
         else:
             checks.append(Check("corpus_backend_dependency", "fail", "Python chromadb package is missing for corpus_backend='chroma' in the active runtime"))
     elif planned_install:
@@ -526,8 +552,17 @@ def _check_config(
     else:
         checks.append(Check("corpus_backend_target", "fail", f"plugins.brainstack.corpus_backend is {corpus_backend!r}, expected 'chroma'"))
 
-    if dependency_import_ok("openai"):
+    dependency_state = dependency_import_ok("openai")
+    if dependency_state is True:
         checks.append(Check("route_hint_dependency", "pass", "Python openai package is importable for Brainstack route-hint LLM calls"))
+    elif dependency_state is None:
+        checks.append(
+            Check(
+                "route_hint_dependency",
+                "warn",
+                "Could not verify Python openai package importability from this exec surface because Docker API access is unavailable",
+            )
+        )
     elif planned_install:
         checks.append(Check("route_hint_dependency", "pass", "Python openai package is not present yet, but installer will add it"))
     else:
@@ -588,7 +623,7 @@ def _python_can_import(module_name: str, python_bin: Path | None) -> bool:
         return False
 
 
-def _docker_python_can_import(module_name: str, compose_path: Path | None, *, service: str | None = None) -> bool:
+def _docker_python_can_import(module_name: str, compose_path: Path | None, *, service: str | None = None) -> bool | None:
     if compose_path is None or not compose_path.exists():
         return False
     resolved_service = service or _default_compose_service(compose_path)
@@ -623,13 +658,23 @@ def _docker_python_can_import(module_name: str, compose_path: Path | None, *, se
                 probe,
             ]
         )
+    docker_api_unavailable = False
     for cmd in commands:
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
             if proc.returncode == 0:
                 return True
+            stderr = f"{proc.stderr}\n{proc.stdout}".casefold()
+            if (
+                "permission denied while trying to connect to the docker api" in stderr
+                or "cannot connect to the docker daemon" in stderr
+                or "error while dialing dial unix /var/run/docker.sock" in stderr
+            ):
+                docker_api_unavailable = True
         except Exception:
             continue
+    if docker_api_unavailable:
+        return None
     return False
 
 

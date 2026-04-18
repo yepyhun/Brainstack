@@ -178,6 +178,8 @@ def test_compile_behavior_policy_projection_stays_bounded_with_coverage_for_larg
     assert compiled is not None
     assert compiled["raw_rule_count"] == 89
     assert len(compiled["coverage"]) == 89
+    assert compiled["status"] == "degraded"
+    assert compiled["no_projection_drop"] is False
     assert compiled["projection_char_count"] <= 380
     assert compiled["truncated"] is True
     assert compiled["projection_text"].rstrip().endswith("omitted)")
@@ -380,7 +382,7 @@ def test_updating_style_contract_recompiles_policy_with_new_hash_and_coverage(tm
     assert second["policy"]["no_silent_drop"] is True
     assert len(second["policy"]["coverage"]) == second["policy"]["raw_rule_count"]
     assert "Emoji tilos" not in second["projection_text"]
-    assert "Vessző, pont, zárójel, em dash helyett" in second["projection_text"]
+    assert "U+2014 EM DASH" in second["projection_text"]
 
 
 def test_reconcile_tier2_candidates_upserts_canonical_style_contract_profile_row(tmp_path):

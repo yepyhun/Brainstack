@@ -144,7 +144,7 @@ def test_kuzu_bootstrap_replays_sqlite_graph_and_handles_inflected_query(tmp_pat
         sqlite_store.add_graph_relation(
             subject_name="Brainstack",
             predicate="integrates_with",
-            object_name="Hermes Bestie",
+            object_name="Hermes Agent",
             source="test",
         )
     finally:
@@ -159,7 +159,7 @@ def test_kuzu_bootstrap_replays_sqlite_graph_and_handles_inflected_query(tmp_pat
             if row["row_type"] == "relation"
         }
         assert ("Tomi", "works_on", "Brainstack") in relation_pairs
-        assert ("Brainstack", "integrates_with", "Hermes Bestie") in relation_pairs
+        assert ("Brainstack", "integrates_with", "Hermes Agent") in relation_pairs
 
         journal_rows = store.list_publish_journal(target_name="graph.kuzu", status="published", limit=10)
         assert {row["object_key"] for row in journal_rows} >= {"1", "2", "3"}

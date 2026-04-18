@@ -3,10 +3,11 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Iterable, List
+from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 from .db import BrainstackStore
 from .style_contract import STYLE_CONTRACT_SLOT
+from .task_memory import parse_task_lookup_query
 from .tier2_extractor import _default_llm_caller, _extract_json_object, _extract_text_content
 from .usefulness import graph_priority_adjustment, profile_priority_adjustment
 
@@ -78,6 +79,20 @@ TEMPORAL_WEAK_CUES = (
     "changed",
     "between",
 )
+TASK_QUERY_CUES = (
+    "task",
+    "tasks",
+    "todo",
+    "to do",
+    "agenda",
+    "feladat",
+    "feladataim",
+    "teendő",
+    "teendo",
+)
+TODAY_TASK_CUES = ("today", "ma", "mai")
+YESTERDAY_TASK_CUES = ("yesterday", "tegnap")
+DAY_BEFORE_TASK_CUES = ("day before yesterday", "tegnapelőtt", "tegnapelott")
 
 @dataclass
 class RetrievalChannelStatus:
@@ -113,6 +128,110 @@ class RetrievalRoute:
 
 def _normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
+
+
+def _contains_any_cue(normalized: str, cues: Iterable[str]) -> bool:
+    return any(cue in normalized for cue in cues)
+
+
+def _build_cross_session_search_queries(query: str) -> List[str]:
+    normalized = _normalize_text(query)
+    lowered = f" {normalized.casefold()} "
+    queries = [normalized] if normalized else []
+    if not normalized or not _contains_any_cue(lowered, TASK_QUERY_CUES):
+        return queries
+
+    variants: List[str] = []
+    if _contains_any_cue(lowered, TODAY_TASK_CUES):
+        variants.extend(
+            [
+                "tasks for today",
+                "today task list",
+                "today todo list",
+                "mai feladatok",
+                "mai teendők",
+            ]
+        )
+    elif _contains_any_cue(lowered, YESTERDAY_TASK_CUES):
+        variants.extend(
+            [
+                "tasks for yesterday",
+                "yesterday task list",
+                "tegnapi feladatok",
+                "tegnapi teendők",
+            ]
+        )
+    elif _contains_any_cue(lowered, DAY_BEFORE_TASK_CUES):
+        variants.extend(
+            [
+                "tasks for the day before yesterday",
+                "day before yesterday task list",
+                "tegnapelőtti feladatok",
+                "tegnapelőtti teendők",
+            ]
+        )
+    else:
+        variants.extend(
+            [
+                "task list",
+                "todo list",
+                "feladatok",
+                "teendők",
+            ]
+        )
+
+    deduped: List[str] = []
+    seen: set[str] = set()
+    for candidate in [*queries, *variants]:
+        normalized_candidate = _normalize_text(candidate)
+        lowered_candidate = normalized_candidate.casefold()
+        if not normalized_candidate or lowered_candidate in seen:
+            continue
+        seen.add(lowered_candidate)
+        deduped.append(normalized_candidate)
+    return deduped
+
+
+def _build_lookup_semantics(
+    *,
+    query: str,
+    task_lookup: Mapping[str, Any] | None,
+    task_rows: List[Dict[str, Any]],
+    selected: Mapping[str, Any],
+) -> Dict[str, Any] | None:
+    if not isinstance(task_lookup, Mapping):
+        return None
+
+    fallback_sources: List[str] = []
+    if list(selected.get("matched") or []):
+        fallback_sources.append("continuity_match")
+    if list(selected.get("recent") or []):
+        fallback_sources.append("continuity_recent")
+    if list(selected.get("transcript_rows") or []):
+        fallback_sources.append("transcript")
+    if list(selected.get("graph_rows") or []):
+        fallback_sources.append("graph")
+
+    if task_rows:
+        result_status = "committed_records"
+    elif fallback_sources:
+        result_status = "structured_miss_with_fallback"
+    else:
+        result_status = "structured_miss"
+
+    return {
+        "active": True,
+        "domain": "task_like",
+        "structured_owner_status": "brainstack.task_memory",
+        "structured_lookup_performed": True,
+        "structured_record_count": len(task_rows),
+        "item_type": str(task_lookup.get("item_type") or "").strip(),
+        "due_date": str(task_lookup.get("due_date") or "").strip(),
+        "date_scope": str(task_lookup.get("date_scope") or "").strip(),
+        "followup_only": bool(task_lookup.get("followup_only")),
+        "fallback_sources": fallback_sources,
+        "result_status": result_status,
+    }
 
 
 def _looks_user_led(text: str) -> bool:
@@ -1226,6 +1345,7 @@ def retrieve_executive_context(
     analysis: Dict[str, Any],
     policy: Dict[str, Any],
     route_resolver: Callable[[str], Dict[str, Any] | str] | None = None,
+    timezone_name: str = "UTC",
 ) -> Dict[str, Any]:
     profile_limit = max(int(policy.get("profile_limit", 0)), 0)
     continuity_match_limit = max(int(policy.get("continuity_match_limit", 0)), 0)
@@ -1255,6 +1375,19 @@ def retrieve_executive_context(
         corpus_limit=corpus_limit,
     )
     search_queries = [_normalize_text(query)]
+    continuity_queries = _build_cross_session_search_queries(query)
+    task_lookup = parse_task_lookup_query(query, timezone_name=timezone_name)
+    task_rows = (
+        store.list_task_items(
+            principal_scope_key=principal_scope_key,
+            due_date=str(task_lookup.get("due_date") or "").strip(),
+            item_type=str(task_lookup.get("item_type") or "").strip(),
+            statuses=("open",),
+            limit=24,
+        )
+        if isinstance(task_lookup, Mapping)
+        else []
+    )
     profile_limit = limits["profile_limit"]
     continuity_match_limit = limits["continuity_match_limit"]
     continuity_recent_limit = limits["continuity_recent_limit"]
@@ -1285,7 +1418,7 @@ def retrieve_executive_context(
     keyword_continuity_rows = (
         _collect_query_rows(
             shelf="continuity_match",
-            queries=search_queries,
+            queries=continuity_queries,
             searcher=lambda variant: store.search_continuity(
                 query=variant,
                 session_id=session_id,
@@ -1300,7 +1433,7 @@ def retrieve_executive_context(
     keyword_transcript_session_rows = (
         _collect_query_rows(
             shelf="transcript",
-            queries=search_queries,
+            queries=continuity_queries,
             searcher=lambda variant: store.search_transcript(
                 query=variant,
                 session_id=session_id,
@@ -1314,7 +1447,7 @@ def retrieve_executive_context(
     keyword_transcript_global_rows = (
         _collect_query_rows(
             shelf="transcript",
-            queries=search_queries,
+            queries=continuity_queries,
             searcher=lambda variant: store.search_transcript_global(
                 query=variant,
                 session_id=session_id,
@@ -1533,8 +1666,21 @@ def retrieve_executive_context(
         route.applied_mode = ROUTE_FACT
         selected = fact_selected
 
-    semantic_status = store.corpus_semantic_channel_status()
+    semantic_status = (
+        store.corpus_semantic_channel_status()
+        if corpus_limit > 0 or keyword_corpus_rows or semantic_corpus_rows
+        else {
+            "status": "idle",
+            "reason": "Corpus semantic retrieval was intentionally skipped for this query shape.",
+        }
+    )
     channels = [
+        _channel_status(
+            "task_memory",
+            task_rows,
+            reason="structured task truth",
+            status="active" if task_lookup is not None else "idle",
+        ),
         _channel_status(
             "semantic",
             semantic_conversation_rows + semantic_corpus_rows,
@@ -1550,9 +1696,16 @@ def retrieve_executive_context(
         ),
         _channel_status("temporal", temporal_rows),
     ]
+    lookup_semantics = _build_lookup_semantics(
+        query=query,
+        task_lookup=task_lookup,
+        task_rows=task_rows,
+        selected=selected,
+    )
 
     return {
         **selected,
+        "task_rows": task_rows,
         "channels": channels,
         "fused_candidates": [
             {
@@ -1579,5 +1732,6 @@ def retrieve_executive_context(
             "queries": list(search_queries),
             "legacy_disabled": True,
         },
+        "lookup_semantics": lookup_semantics,
         "routing": asdict(route),
     }

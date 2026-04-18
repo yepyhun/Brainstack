@@ -2,7 +2,7 @@
 """Broader deployed-live conversational quality validation for Phase 23.
 
 This script runs a broader product-shaped scenario matrix against the real
-deployed Bestie provider path while isolating memory writes inside a temporary
+deployed Hermes provider path while isolating memory writes inside a temporary
 HERMES_HOME. It stages only the deployed prompt/auth/config subset, keeps
 Brainstack as the durable memory owner, and records packet/state evidence for
 important anomalies.
@@ -37,7 +37,7 @@ def _env_path(*names: str) -> Path | None:
     return None
 
 
-DEFAULT_BESTIE_ROOT = _env_path("BRAINSTACK_BESTIE_ROOT", "BRAINSTACK_HERMES_ROOT", "HERMES_ROOT")
+DEFAULT_HERMES_ROOT = _env_path("BRAINSTACK_HERMES_ROOT", "HERMES_ROOT")
 DEFAULT_REPORT = REPO_ROOT / "reports" / "phase23" / "brainstack-23-broader-deployed-live-eval.json"
 DEFAULT_MATRIX = REPO_ROOT / "reports" / "phase23" / "brainstack-23-scenario-matrix.json"
 DEFAULT_DOCKER_CONTAINER = os.environ.get("BRAINSTACK_DOCKER_CONTAINER", "").strip() or None
@@ -124,7 +124,7 @@ def _extract_provider_auth(auth_payload: Any, provider_name: str) -> Dict[str, s
     }
 
 
-def _extract_runtime_settings(home: Path, bestie_root: Path) -> Dict[str, Any]:
+def _extract_runtime_settings(home: Path, hermes_root: Path) -> Dict[str, Any]:
     raw_config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
     config: Dict[str, Any] = raw_config if isinstance(raw_config, dict) else {}
     raw_auth = json.loads((home / "auth.json").read_text(encoding="utf-8"))
@@ -146,8 +146,8 @@ def _extract_runtime_settings(home: Path, bestie_root: Path) -> Dict[str, Any]:
     raw_provider_cfg = providers.get(provider)
     provider_cfg: Dict[str, Any] = raw_provider_cfg if isinstance(raw_provider_cfg, dict) else {}
     auth_cfg = _extract_provider_auth(auth, provider)
-    if str(bestie_root) not in sys.path:
-        sys.path.insert(0, str(bestie_root))
+    if str(hermes_root) not in sys.path:
+        sys.path.insert(0, str(hermes_root))
     from hermes_cli.runtime_provider import resolve_runtime_provider  # type: ignore
 
     runtime = resolve_runtime_provider(requested=provider or None)
@@ -273,13 +273,13 @@ SCENARIOS: List[Scenario] = [
         use_reset=True,
         seed_messages=(
             "Call me Tomi.",
-            "Your name is Bestie when You talk to me.",
+            "Use the configured assistant name when You refer to Yourself.",
             "Always answer me in Hungarian.",
-            "Use a direct Humanizer style and avoid emoji.",
+            "Use a direct, concrete style and avoid emoji.",
         ),
         final_question="Briefly tell me what name I use for You, what name I asked You to use for me, and what general style I prefer.",
         evaluator="style_identity",
-        expected="Bestie, Tomi, Hungarian, direct Humanizer, no emoji",
+        expected="assistant name, user name, Hungarian, direct style, no emoji",
     ),
     Scenario(
         name="proactive_continuity_after_reset",
@@ -389,10 +389,10 @@ def _evaluate_answer(scenario: Scenario, answer: str) -> Dict[str, Any]:
         strong = _contains_any(answer, ("guest", "dish", "brunch", "vendeg", "etel"))
     elif scenario.evaluator == "style_identity":
         required = {
-            "assistant_name": ("bestie",),
+            "assistant_name": ("assistant", "companion"),
             "user_name": ("tomi",),
             "language": ("hungarian", "magyar"),
-            "style": ("humanizer", "direct", "direkt", "kozvetlen", "termeszetes", "lenyegretoro"),
+            "style": ("direct", "direkt", "kozvetlen", "termeszetes", "lenyegretoro"),
         }
         strong = _contains_any(answer, ("style", "stilus", "communication", "kommunikacio"))
     elif scenario.evaluator == "proactive_continuity":
@@ -466,9 +466,9 @@ def _evaluate_answer(scenario: Scenario, answer: str) -> Dict[str, Any]:
     return {"passed": passed, "quality_class": quality_class, "missing": missing}
 
 
-def _load_run_agent(bestie_root: Path) -> Any:
-    if str(bestie_root) not in sys.path:
-        sys.path.insert(0, str(bestie_root))
+def _load_run_agent(hermes_root: Path) -> Any:
+    if str(hermes_root) not in sys.path:
+        sys.path.insert(0, str(hermes_root))
     import run_agent  # type: ignore
 
     return run_agent
@@ -549,9 +549,9 @@ def _make_agent(run_agent: Any, runtime: Dict[str, str], *, session_id: str, use
     return agent
 
 
-def _run_single_scenario(bestie_root: Path, temp_home: Path, runtime: Dict[str, str], scenario: Scenario) -> Dict[str, Any]:
+def _run_single_scenario(hermes_root: Path, temp_home: Path, runtime: Dict[str, str], scenario: Scenario) -> Dict[str, Any]:
     os.environ["HERMES_HOME"] = str(temp_home)
-    run_agent = _load_run_agent(bestie_root)
+    run_agent = _load_run_agent(hermes_root)
     user_id = f"phase23:{scenario.name}"
 
     seed_agent = _make_agent(run_agent, runtime, session_id=f"phase23-{scenario.name}-seed", user_id=user_id)
@@ -722,7 +722,7 @@ def _write_json(path: Path, payload: Dict[str, Any] | List[Dict[str, Any]]) -> N
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--hermes-root", type=Path, default=DEFAULT_BESTIE_ROOT)
+    parser.add_argument("--hermes-root", type=Path, default=DEFAULT_HERMES_ROOT)
     parser.add_argument("--deployed-home", type=Path, default=None)
     parser.add_argument("--docker-container", default=DEFAULT_DOCKER_CONTAINER)
     parser.add_argument("--output", type=Path, default=DEFAULT_REPORT)
@@ -730,7 +730,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.hermes_root is None:
-        raise SystemExit("--hermes-root is required (or set BRAINSTACK_BESTIE_ROOT / BRAINSTACK_HERMES_ROOT / HERMES_ROOT).")
+        raise SystemExit("--hermes-root is required (or set BRAINSTACK_HERMES_ROOT / HERMES_ROOT).")
 
     with tempfile.TemporaryDirectory(prefix="brainstack-phase23-home-") as tmp_dir:
         temp_home = Path(tmp_dir)

@@ -1,4 +1,4 @@
-"""Minimal import shims for Brainstack source tests that import Bestie host code."""
+"""Minimal import shims for Brainstack source tests that import Hermes host code."""
 
 from __future__ import annotations
 
@@ -19,10 +19,22 @@ def _module_stub(name: str, **attrs: object) -> types.ModuleType:
 
 def _locate_hermes_checkout() -> Path | None:
     repo_root = Path(__file__).resolve().parents[1]
-    candidates = [
-        repo_root.parent.parent / "memory-repo-bakeoff" / "hermes-agent-latest",
-        repo_root.parent.parent / "hermes-final",
-    ]
+
+    env_candidates = []
+    for key in ("BRAINSTACK_HERMES_ROOT", "HERMES_ROOT"):
+        value = str(__import__("os").environ.get(key, "")).strip()
+        if value:
+            env_candidates.append(Path(value).expanduser())
+
+    candidates = list(env_candidates)
+    search_roots = [repo_root.parent, repo_root.parent.parent]
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for pattern in ("*", "*/*"):
+            for candidate in root.glob(pattern):
+                if candidate.is_dir():
+                    candidates.append(candidate)
     for candidate in candidates:
         if (candidate / "run_agent.py").exists() and (candidate / "hermes_constants.py").exists():
             return candidate

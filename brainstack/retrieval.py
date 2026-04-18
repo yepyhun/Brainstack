@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Mapping
 
 from .behavior_policy import render_compiled_behavior_policy_section
 from .db import BrainstackStore
@@ -359,6 +359,84 @@ def _render_evidence_priority_section(title: str) -> str:
     return f"{title}\n{preface}"
 
 
+def _render_truthful_memory_operations_section(title: str) -> str:
+    lines = [
+        "Claim a durable Brainstack save only when the current turn includes a committed write receipt or a successful memory-tool result.",
+        "If a domain has no structured owner in this runtime, say that explicitly instead of implying a committed record exists.",
+        "For task and commitment lookups, committed Brainstack task records are authoritative when present; continuity or transcript recall is supporting evidence only after a structured miss.",
+    ]
+    return f"{title}\n{_render_items(lines)}"
+
+
+def _render_lookup_semantics_section(payload: Mapping[str, Any] | None) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+    if not bool(payload.get("active")):
+        return ""
+    lines: List[str] = []
+    domain = str(payload.get("domain") or "").strip()
+    if domain == "task_like":
+        owner_status = str(payload.get("structured_owner_status") or "").strip()
+        result_status = str(payload.get("result_status") or "").strip()
+        fallback_sources = list(payload.get("fallback_sources") or [])
+        structured_record_count = int(payload.get("structured_record_count") or 0)
+        due_date = str(payload.get("due_date") or "").strip()
+        if owner_status == "brainstack.task_memory":
+            lines.append("Brainstack task memory is the structured owner for this lookup in this runtime.")
+            if due_date:
+                lines.append(f"Structured lookup due date: {due_date}.")
+        elif owner_status == "absent":
+            lines.append("No structured task owner is attached to Brainstack in this runtime.")
+        if result_status == "committed_records":
+            lines.append(
+                f"Use the committed Brainstack task records below as authoritative for this date scope ({structured_record_count} record(s))."
+            )
+        elif result_status == "structured_miss_with_fallback":
+            lines.append(
+                "No committed Brainstack task record matched this lookup. Any task-like lines recalled below are continuity evidence only."
+            )
+        elif result_status == "structured_miss":
+            lines.append(
+                "No committed Brainstack task record matched this lookup, and no supporting continuity or transcript evidence was recalled."
+            )
+        if fallback_sources:
+            prefix = (
+                "Lookup also considered supporting shelves: "
+                if result_status == "committed_records"
+                else "Lookup path used supporting shelves only: "
+            )
+            lines.append(prefix + ", ".join(str(source) for source in fallback_sources) + ".")
+    return f"## Brainstack Lookup Semantics\n{_render_items(lines)}" if lines else ""
+
+
+def _render_task_memory_section(
+    rows: Iterable[Dict[str, Any]],
+    *,
+    provenance_mode: str,
+) -> str:
+    task_lines: List[str] = []
+    for row in rows:
+        title = " ".join(str(row.get("title") or "").strip().split())
+        if not title:
+            continue
+        prefix = "optional" if bool(row.get("optional")) else "open"
+        due_date = str(row.get("due_date") or "").strip()
+        text = f"[{prefix}] {title}"
+        extra = f"due_date={due_date}" if due_date else ""
+        task_lines.append(
+            _with_provenance(
+                text,
+                source=str(row.get("source") or ""),
+                extra=extra,
+                provenance_mode=provenance_mode,
+                metadata=row.get("metadata"),
+            )
+        )
+    if not task_lines:
+        return ""
+    return "## Brainstack Task Memory\n" + _render_items(task_lines)
+
+
 def _graph_fact_class(row: Dict[str, Any]) -> str:
     value = str(row.get("fact_class") or "").strip()
     if value:
@@ -690,6 +768,8 @@ def build_system_prompt_block(
     if operating_context_section:
         sections.append(operating_context_section)
 
+    sections.append(_render_truthful_memory_operations_section("# Brainstack Truthful Memory Operations"))
+
     lines = []
     for item in filtered_items[:profile_limit]:
         label = item["category"].replace("_", " ")
@@ -709,6 +789,7 @@ def render_working_memory_block(
     policy: Dict[str, Any],
     route_mode: str = "fact",
     profile_items: List[Dict[str, Any]],
+    task_rows: List[Dict[str, Any]],
     matched: List[Dict[str, Any]],
     recent: List[Dict[str, Any]],
     transcript_rows: List[Dict[str, Any]],
@@ -757,6 +838,14 @@ def render_working_memory_block(
 
     sections.append(_render_evidence_priority_section("## Brainstack Evidence Priority"))
 
+    lookup_semantics_section = _render_lookup_semantics_section(policy.get("lookup_semantics"))
+    if lookup_semantics_section:
+        sections.append(lookup_semantics_section)
+
+    task_memory_section = _render_task_memory_section(task_rows, provenance_mode=provenance_mode)
+    if task_memory_section:
+        sections.append(task_memory_section)
+
     if policy.get("continuation_emphasis"):
         sections.append(
             "## Brainstack Continuation Guidance\n"
@@ -767,6 +856,12 @@ def render_working_memory_block(
                 ]
             )
         )
+
+    reinforcement = policy.get("behavior_policy_reinforcement") if isinstance(policy, dict) else None
+    if isinstance(reinforcement, dict):
+        reinforcement_text = str(reinforcement.get("text") or "").strip()
+        if reinforcement_text:
+            sections.append("## Brainstack Current Correction Reinforcement\n" + reinforcement_text)
 
     if contract_section:
         sections.append(contract_section)

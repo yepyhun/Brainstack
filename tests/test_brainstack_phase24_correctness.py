@@ -26,7 +26,7 @@ def _scope(platform: str, user_id: str) -> dict[str, object]:
     principal_scope = {
         "platform": platform,
         "user_id": user_id,
-        "agent_identity": "bestie",
+        "agent_identity": "assistant-main",
         "agent_workspace": "discord-main",
     }
     principal_scope_key = "|".join(f"{key}:{value}" for key, value in principal_scope.items())
@@ -99,7 +99,7 @@ def test_tier2_profile_reconcile_isolates_personal_rows_by_principal(tmp_path):
                 {
                     "category": "preference",
                     "slot": "preference:ai_name",
-                    "content": "Refer to yourself as Bestie.",
+                    "content": "Refer to yourself as Companion.",
                     "confidence": 0.93,
                 },
             ]
@@ -126,7 +126,7 @@ def test_open_backfills_legacy_unscoped_preference_rows_from_unique_transcript_s
         session_id=session_id,
         turn_number=1,
         kind="turn",
-        content="User asked for Humanizer style and Hungarian replies.",
+        content="User asked for a direct style and Hungarian replies.",
         source="sync_turn",
         metadata=scope_a,
     )
@@ -225,7 +225,7 @@ def test_open_runs_canonical_communication_migration_once_and_deactivates_legacy
     principal_scope_key = str(scope_a["principal_scope_key"])
 
     store.upsert_profile_item(
-        stable_key="preference:style:humanizer",
+        stable_key="preference:style:direct",
         category="preference",
         content="Prefers natural tone, no emojis/hyphens, mixed sentence lengths, Hungarian language.",
         source="tier2:test",
@@ -252,9 +252,11 @@ def test_open_runs_canonical_communication_migration_once_and_deactivates_legacy
     try:
         rows = reopened.list_profile_items(limit=20, principal_scope_key=principal_scope_key)
         stable_keys = {row["stable_key"] for row in rows}
-        assert "preference:communication_style" in stable_keys
+        assert "preference:communication_style" not in stable_keys
         assert "preference:response_language" in stable_keys
-        assert "preference:style:humanizer" not in stable_keys
+        assert "preference:emoji_usage" in stable_keys
+        assert "preference:dash_usage" in stable_keys
+        assert "preference:style:direct" not in stable_keys
         assert "preference:language_preference" not in stable_keys
 
         migration_row = reopened.conn.execute(
@@ -271,8 +273,12 @@ def test_open_runs_canonical_communication_migration_once_and_deactivates_legacy
         rows = reopened_again.list_profile_items(limit=20, principal_scope_key=principal_scope_key)
         communication_rows = [row for row in rows if row["stable_key"] == "preference:communication_style"]
         language_rows = [row for row in rows if row["stable_key"] == "preference:response_language"]
-        assert len(communication_rows) == 1
+        emoji_rows = [row for row in rows if row["stable_key"] == "preference:emoji_usage"]
+        dash_rows = [row for row in rows if row["stable_key"] == "preference:dash_usage"]
+        assert len(communication_rows) == 0
         assert len(language_rows) == 1
+        assert len(emoji_rows) == 1
+        assert len(dash_rows) == 1
     finally:
         reopened_again.close()
 
@@ -443,6 +449,9 @@ def test_scoped_identity_lookup_drives_user_alias_canonicalization(tmp_path):
 
 
 class _NoopStore:
+    def get_compiled_behavior_policy(self, *, principal_scope_key=""):
+        return None
+
     def record_profile_retrievals(self, *, rows):
         return len(list(rows))
 

@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Dict
 
+from .behavior_policy import build_behavior_policy_reinforcement
 from .db import BrainstackStore
 from .executive_retrieval import retrieve_executive_context
 from .profile_contract import resolve_direct_identity_profile_slots
 from .retrieval import render_working_memory_block
+from .task_memory import TASK_FOLLOWUP_DATE_CUES, TASK_LOOKUP_CUES
 
 HIGH_STAKES_TERMS = (
     "safe",
@@ -101,6 +103,7 @@ class QueryAnalysis:
     temporal: bool
     preference: bool
     continuation: bool
+    task_like: bool
     profile_slot_targets: tuple[str, ...]
 
 
@@ -135,6 +138,7 @@ def analyze_query(query: str) -> QueryAnalysis:
         temporal=_contains_any(query, TEMPORAL_TERMS),
         preference=_contains_any(query, PREFERENCE_TERMS),
         continuation=_contains_any(query, CONTINUATION_TERMS),
+        task_like=_contains_any(query, TASK_LOOKUP_CUES + TASK_FOLLOWUP_DATE_CUES),
         profile_slot_targets=profile_slot_targets,
     )
 
@@ -240,6 +244,19 @@ def _initial_policy(
         policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 4))
         policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 900))
 
+    if analysis.task_like:
+        policy.mode = "compact"
+        policy.collapse_mode = "aggressive"
+        policy.profile_limit = min(policy.profile_limit, 1)
+        policy.continuity_match_limit = max(1, min(continuity_match_limit, 2))
+        policy.continuity_recent_limit = max(1, min(continuity_recent_limit, 1))
+        policy.transcript_limit = max(1, min(transcript_match_limit, 1))
+        policy.transcript_char_budget = min(max(policy.transcript_char_budget, 220), 320)
+        policy.graph_limit = 0
+        policy.corpus_limit = 0
+        policy.corpus_char_budget = 0
+        policy.show_graph_history = False
+
     return policy
 
 
@@ -258,6 +275,7 @@ def build_working_memory_packet(
     corpus_limit: int,
     corpus_char_budget: int,
     route_resolver: Callable[[str], Dict[str, Any] | str] | None = None,
+    timezone_name: str = "UTC",
 ) -> Dict[str, Any]:
     analysis = analyze_query(query)
     policy = _initial_policy(
@@ -277,6 +295,7 @@ def build_working_memory_packet(
         query=query,
         session_id=session_id,
         principal_scope_key=principal_scope_key,
+        timezone_name=timezone_name,
         analysis=asdict(analysis),
         policy=asdict(policy),
         route_resolver=route_resolver,
@@ -288,6 +307,7 @@ def build_working_memory_packet(
     transcript_rows = retrieval["transcript_rows"]
     graph_rows = retrieval["graph_rows"]
     corpus_rows = retrieval["corpus_rows"]
+    task_rows = retrieval.get("task_rows") or []
     channels = retrieval["channels"]
     routing = retrieval.get("routing", {"requested_mode": "fact", "applied_mode": "fact"})
 
@@ -352,11 +372,21 @@ def build_working_memory_packet(
     compiled_behavior_policy = store.get_compiled_behavior_policy(principal_scope_key=principal_scope_key)
     if compiled_behavior_policy is not None:
         policy_payload["compiled_behavior_policy"] = dict(compiled_behavior_policy.get("policy") or {})
+        reinforcement = build_behavior_policy_reinforcement(
+            query=query,
+            compiled_policy=policy_payload["compiled_behavior_policy"],
+        )
+        if reinforcement is not None:
+            policy_payload["behavior_policy_reinforcement"] = reinforcement
+    lookup_semantics = retrieval.get("lookup_semantics")
+    if isinstance(lookup_semantics, dict):
+        policy_payload["lookup_semantics"] = lookup_semantics
 
     block = render_working_memory_block(
         policy=policy_payload,
         route_mode=str(routing.get("applied_mode") or "fact"),
         profile_items=profile_items,
+        task_rows=task_rows,
         matched=matched,
         recent=recent,
         transcript_rows=transcript_rows,
@@ -392,6 +422,7 @@ def build_working_memory_packet(
         "policy": policy_payload,
         "channels": channels,
         "profile_items": profile_items,
+        "task_rows": task_rows,
         "matched": matched,
         "recent": recent,
         "transcript_rows": transcript_rows,

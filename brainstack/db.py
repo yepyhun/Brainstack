@@ -33,7 +33,9 @@ from .style_contract import (
     apply_style_contract_rule_correction,
     build_style_contract_from_document,
     list_style_contract_rules,
+    style_contract_source_rank,
 )
+from .task_memory import STATUS_OPEN
 from .temporal import merge_temporal, normalize_temporal_fields, record_is_effective_at
 from .usefulness import (
     apply_retrieval_telemetry,
@@ -175,6 +177,27 @@ def _cursor_lastrowid(cur: sqlite3.Cursor) -> int:
     return int(row_id)
 
 
+def _task_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "stable_key": str(row["stable_key"] or ""),
+        "principal_scope_key": str(row["principal_scope_key"] or ""),
+        "item_type": str(row["item_type"] or ""),
+        "title": str(row["title"] or ""),
+        "due_date": str(row["due_date"] or ""),
+        "date_scope": str(row["date_scope"] or ""),
+        "optional": bool(int(row["optional"] or 0)),
+        "status": str(row["status"] or ""),
+        "owner": str(row["owner"] or ""),
+        "source": str(row["source"] or ""),
+        "source_session_id": str(row["source_session_id"] or ""),
+        "source_turn_number": int(row["source_turn_number"] or 0),
+        "metadata": _decode_json_object(row["metadata_json"]),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+    }
+
+
 def _merge_record_metadata(
     existing_metadata_json: Any,
     incoming_metadata: Dict[str, Any] | None,
@@ -198,6 +221,10 @@ def _merge_record_metadata(
     if provenance:
         merged["provenance"] = provenance
     return merged
+
+
+def _should_preserve_existing_style_contract(*, existing_source: Any, incoming_source: Any) -> bool:
+    return style_contract_source_rank(existing_source) > style_contract_source_rank(incoming_source)
 
 
 def _is_principal_scoped_profile(*, stable_key: str = "", category: str = "") -> bool:
@@ -1149,6 +1176,28 @@ class BrainstackStore:
                 status TEXT NOT NULL DEFAULT 'active',
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS task_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stable_key TEXT NOT NULL UNIQUE,
+                principal_scope_key TEXT NOT NULL DEFAULT '',
+                item_type TEXT NOT NULL DEFAULT 'task',
+                title TEXT NOT NULL,
+                due_date TEXT NOT NULL DEFAULT '',
+                date_scope TEXT NOT NULL DEFAULT 'none',
+                optional INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'open',
+                owner TEXT NOT NULL DEFAULT 'brainstack.task_memory',
+                source TEXT NOT NULL,
+                source_session_id TEXT NOT NULL DEFAULT '',
+                source_turn_number INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_task_items_scope_due_status
+            ON task_items(principal_scope_key, due_date, status, optional, updated_at DESC);
 
             CREATE VIRTUAL TABLE IF NOT EXISTS profile_fts USING fts5(
                 content,
@@ -2390,9 +2439,19 @@ class BrainstackStore:
             principal_scope_key=principal_scope_key,
         )
         existing = self.conn.execute(
-            "SELECT id, metadata_json FROM profile_items WHERE stable_key = ?",
+            "SELECT id, content, source, metadata_json FROM profile_items WHERE stable_key = ?",
             (storage_key,),
         ).fetchone()
+        if (
+            str(stable_key or "").strip() == STYLE_CONTRACT_SLOT
+            and existing
+            and _should_preserve_existing_style_contract(
+                existing_source=existing["source"],
+                incoming_source=source,
+            )
+            and str(existing["content"] or "").strip() != str(content or "").strip()
+        ):
+            return int(existing["id"])
         normalized_metadata = _merge_record_metadata(
             existing["metadata_json"] if existing else None,
             metadata,
@@ -2564,6 +2623,134 @@ class BrainstackStore:
             metadata=metadata,
         )
         return self.get_behavior_policy_snapshot(principal_scope_key=principal_scope_key)
+
+    @_locked
+    def upsert_task_item(
+        self,
+        *,
+        stable_key: str,
+        principal_scope_key: str,
+        item_type: str,
+        title: str,
+        due_date: str,
+        date_scope: str,
+        optional: bool,
+        status: str,
+        owner: str,
+        source: str,
+        source_session_id: str = "",
+        source_turn_number: int = 0,
+        metadata: Dict[str, Any] | None = None,
+    ) -> int:
+        now = utc_now_iso()
+        existing = self.conn.execute(
+            "SELECT id, metadata_json FROM task_items WHERE stable_key = ?",
+            (str(stable_key or "").strip(),),
+        ).fetchone()
+        meta_json = json.dumps(
+            _merge_record_metadata(
+                existing["metadata_json"] if existing else None,
+                metadata,
+                source=source,
+            ),
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+        if existing:
+            row_id = int(existing["id"])
+            self.conn.execute(
+                """
+                UPDATE task_items
+                SET principal_scope_key = ?, item_type = ?, title = ?, due_date = ?, date_scope = ?,
+                    optional = ?, status = ?, owner = ?, source = ?, source_session_id = ?,
+                    source_turn_number = ?, metadata_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    str(principal_scope_key or "").strip(),
+                    str(item_type or "").strip(),
+                    str(title or "").strip(),
+                    str(due_date or "").strip(),
+                    str(date_scope or "").strip(),
+                    1 if optional else 0,
+                    str(status or STATUS_OPEN).strip() or STATUS_OPEN,
+                    str(owner or "brainstack.task_memory").strip() or "brainstack.task_memory",
+                    str(source or "").strip(),
+                    str(source_session_id or "").strip(),
+                    int(source_turn_number or 0),
+                    meta_json,
+                    now,
+                    row_id,
+                ),
+            )
+            self.conn.commit()
+            return row_id
+
+        cur = self.conn.execute(
+            """
+            INSERT INTO task_items (
+                stable_key, principal_scope_key, item_type, title, due_date, date_scope,
+                optional, status, owner, source, source_session_id, source_turn_number,
+                metadata_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(stable_key or "").strip(),
+                str(principal_scope_key or "").strip(),
+                str(item_type or "").strip(),
+                str(title or "").strip(),
+                str(due_date or "").strip(),
+                str(date_scope or "").strip(),
+                1 if optional else 0,
+                str(status or STATUS_OPEN).strip() or STATUS_OPEN,
+                str(owner or "brainstack.task_memory").strip() or "brainstack.task_memory",
+                str(source or "").strip(),
+                str(source_session_id or "").strip(),
+                int(source_turn_number or 0),
+                meta_json,
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+        return _cursor_lastrowid(cur)
+
+    @_locked
+    def list_task_items(
+        self,
+        *,
+        principal_scope_key: str,
+        due_date: str = "",
+        item_type: str = "",
+        statuses: Iterable[str] | None = None,
+        limit: int = 24,
+    ) -> List[Dict[str, Any]]:
+        scope_key = str(principal_scope_key or "").strip()
+        params: list[Any] = [scope_key]
+        sql = """
+            SELECT
+                id, stable_key, principal_scope_key, item_type, title, due_date, date_scope,
+                optional, status, owner, source, source_session_id, source_turn_number,
+                metadata_json, created_at, updated_at
+            FROM task_items
+            WHERE principal_scope_key = ?
+        """
+        normalized_due_date = str(due_date or "").strip()
+        if normalized_due_date:
+            sql += " AND due_date = ?"
+            params.append(normalized_due_date)
+        normalized_item_type = str(item_type or "").strip()
+        if normalized_item_type:
+            sql += " AND item_type = ?"
+            params.append(normalized_item_type)
+        status_values = [str(value or "").strip() for value in (statuses or ()) if str(value or "").strip()]
+        if status_values:
+            sql += f" AND status IN ({','.join('?' for _ in status_values)})"
+            params.extend(status_values)
+        sql += " ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, due_date ASC, optional ASC, updated_at DESC, id DESC LIMIT ?"
+        params.append(max(int(limit or 0), 1))
+        rows = self.conn.execute(sql, tuple(params)).fetchall()
+        return [_task_row_to_dict(row) for row in rows]
 
     @_locked
     def list_profile_items(

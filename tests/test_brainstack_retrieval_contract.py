@@ -111,6 +111,7 @@ def test_working_memory_block_hides_contract_rows_from_profile_match(tmp_path):
             "corpus_char_budget": 0,
         },
         profile_items=store.list_profile_items(limit=10),
+        task_rows=[],
         matched=[],
         recent=[],
         transcript_rows=[],

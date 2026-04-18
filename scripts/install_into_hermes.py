@@ -180,6 +180,7 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
                     "from agent.memory_manager import build_memory_context_block\n"
                     "from agent.brainstack_mode import (\n"
                     "    LEGACY_MEMORY_TOOL_NAMES,\n"
+                    "    apply_brainstack_output_validation,\n"
                     "    blocked_brainstack_only_tool_error,\n"
                     "    filter_legacy_memory_tool_defs,\n"
                     "    is_brainstack_only_mode,\n"
@@ -194,6 +195,7 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
                     ")\n"
                     "from agent.brainstack_mode import (\n"
                     "    LEGACY_MEMORY_TOOL_NAMES,\n"
+                    "    apply_brainstack_output_validation,\n"
                     "    blocked_brainstack_only_tool_error,\n"
                     "    filter_legacy_memory_tool_defs,\n"
                     "    is_brainstack_only_mode,\n"
@@ -204,6 +206,7 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
                     "from agent.memory_manager import build_memory_context_block, sanitize_context\n"
                     "from agent.brainstack_mode import (\n"
                     "    LEGACY_MEMORY_TOOL_NAMES,\n"
+                    "    apply_brainstack_output_validation,\n"
                     "    blocked_brainstack_only_tool_error,\n"
                     "    filter_legacy_memory_tool_defs,\n"
                     "    is_brainstack_only_mode,\n"
@@ -214,6 +217,31 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
             path=path,
         )
         applied.append("run_agent:import_brainstack_mode")
+
+    if "apply_brainstack_output_validation" not in text and "from agent.brainstack_mode import (" in text:
+        text = _replace_once_any(
+            text,
+            [
+                (
+                    "from agent.brainstack_mode import (\n"
+                    "    LEGACY_MEMORY_TOOL_NAMES,\n"
+                    "    blocked_brainstack_only_tool_error,\n"
+                    "    filter_legacy_memory_tool_defs,\n"
+                    "    is_brainstack_only_mode,\n"
+                    ")\n",
+                    "from agent.brainstack_mode import (\n"
+                    "    LEGACY_MEMORY_TOOL_NAMES,\n"
+                    "    apply_brainstack_output_validation,\n"
+                    "    blocked_brainstack_only_tool_error,\n"
+                    "    filter_legacy_memory_tool_defs,\n"
+                    "    is_brainstack_only_mode,\n"
+                    ")\n",
+                ),
+            ],
+            label="run_agent import brainstack output validator",
+            path=path,
+        )
+        applied.append("run_agent:import_output_validator")
 
     if "self._rtk_sidecar = build_rtk_sidecar_config(_agent_cfg)" not in text:
         text = _replace_once_any(
@@ -543,6 +571,61 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
             path=path,
         )
         applied.append("run_agent:rtk_turn_budget")
+
+    summary_validation_anchor = (
+        "            if final_response:\n"
+        "                if \"<think>\" in final_response:\n"
+        "                    final_response = re.sub(r'<think>.*?</think>\\s*', '', final_response, flags=re.DOTALL).strip()\n"
+        "                if final_response:\n"
+        "                    messages.append({\"role\": \"assistant\", \"content\": final_response})\n"
+        "                else:\n"
+        "                    final_response = \"I reached the iteration limit and couldn't generate a summary.\"\n"
+        "            else:\n"
+    )
+    summary_validation_inject = (
+        "            if final_response:\n"
+        "                if \"<think>\" in final_response:\n"
+        "                    final_response = re.sub(r'<think>.*?</think>\\s*', '', final_response, flags=re.DOTALL).strip()\n"
+        "                final_response = apply_brainstack_output_validation(self._memory_manager, final_response)\n"
+        "                if final_response:\n"
+        "                    messages.append({\"role\": \"assistant\", \"content\": final_response})\n"
+        "                else:\n"
+        "                    final_response = \"I reached the iteration limit and couldn't generate a summary.\"\n"
+        "            else:\n"
+    )
+    if "final_response = apply_brainstack_output_validation(self._memory_manager, final_response)" not in text:
+        text = _replace_once(
+            text,
+            summary_validation_anchor,
+            summary_validation_inject,
+            label="run_agent summary output validation",
+            path=path,
+        )
+        applied.append("run_agent:validate_summary_output")
+
+    final_validation_anchor = (
+        "                    # Strip <think> blocks from user-facing response (keep raw in messages for trajectory)\n"
+        "                    final_response = self._strip_think_blocks(final_response).strip()\n"
+        "                    \n"
+        "                    final_msg = self._build_assistant_message(assistant_message, finish_reason)\n"
+    )
+    final_validation_inject = (
+        "                    # Strip <think> blocks from user-facing response (keep raw in messages for trajectory)\n"
+        "                    final_response = self._strip_think_blocks(final_response).strip()\n"
+        "                    final_response = apply_brainstack_output_validation(self._memory_manager, final_response)\n"
+        "                    \n"
+        "                    final_msg = self._build_assistant_message(assistant_message, finish_reason)\n"
+        "                    final_msg[\"content\"] = final_response\n"
+    )
+    if "final_msg[\"content\"] = final_response" not in text:
+        text = _replace_once(
+            text,
+            final_validation_anchor,
+            final_validation_inject,
+            label="run_agent final output validation",
+            path=path,
+        )
+        applied.append("run_agent:validate_final_output")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")

@@ -2,16 +2,63 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any, Dict, Iterable, List, Mapping
 
-from .style_contract import STYLE_CONTRACT_DEFAULT_TITLE, list_style_contract_rules
+from .style_contract import (
+    STYLE_CONTRACT_DEFAULT_TITLE,
+    extract_style_contract_parts,
+    list_style_contract_rules,
+    style_contract_source_rank,
+)
 
 
 BEHAVIOR_POLICY_SCHEMA_VERSION = 2
 BEHAVIOR_POLICY_COMPILER_VERSION = "behavior_policy_v2"
 BEHAVIOR_POLICY_STATUS_ACTIVE = "active"
+BEHAVIOR_POLICY_STATUS_DEGRADED = "degraded"
 BEHAVIOR_POLICY_COVERAGE_STATUS_COMPILED_ACTIVE = "compiled_active"
+BEHAVIOR_POLICY_PROJECTION_STATUS_INJECTED = "injected"
+BEHAVIOR_POLICY_PROJECTION_STATUS_OMITTED_DUE_BUDGET = "omitted_due_budget"
 DEFAULT_BEHAVIOR_POLICY_CHAR_BUDGET = 2400
+_POLICY_TOKEN_RE = re.compile(r"[0-9A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű]{3,}", re.UNICODE)
+_CORRECTION_CUES = (
+    "nem ",
+    "nem az",
+    "most is",
+    "még mindig",
+    "megint",
+    "miért",
+    "hiba",
+    "rossz",
+    "megszeg",
+    "megszegted",
+    "javítsd",
+    "javitsd",
+    "isn't",
+    "isnt",
+    "still",
+    "again",
+    "wrong",
+    "you wrote",
+    "used",
+)
+_TOKEN_STOPWORDS = {
+    "hogy",
+    "mert",
+    "mint",
+    "with",
+    "this",
+    "that",
+    "your",
+    "have",
+    "just",
+    "reply",
+    "should",
+    "most",
+    "majd",
+    "igen",
+}
 
 _KIND_LABELS = {
     "language_policy": "Language and locale",
@@ -89,49 +136,26 @@ def _contains_any(text: str, needles: Iterable[str]) -> bool:
     return any(needle in lowered for needle in needles)
 
 
+def _sanitize_policy_surface(text: Any) -> str:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return ""
+    return normalized.replace("—", "U+2014 EM DASH").replace("–", "U+2013 EN DASH")
+
+
 def _extract_sections_from_raw_contract(raw_text: str) -> tuple[str, List[Dict[str, Any]]]:
-    title = ""
-    sections: List[Dict[str, Any]] = []
-    current_heading = ""
-    current_lines: List[str] = []
-
-    def flush() -> None:
-        nonlocal current_heading, current_lines
-        lines = _normalize_rule_lines(current_lines)
-        if current_heading or lines:
-            sections.append({"heading": current_heading, "lines": lines})
-        current_heading = ""
-        current_lines = []
-
-    for raw_line in str(raw_text or "").splitlines():
-        text = raw_line.strip()
-        if not text:
-            continue
-        normalized = _normalize_text(text)
-        if not title:
-            title = normalized
-            continue
-        if normalized.endswith(":") and not normalized.startswith("-"):
-            flush()
-            current_heading = normalized[:-1].strip()
-            continue
-        if normalized.startswith("-"):
-            current_lines.append(normalized[1:].strip())
-        else:
-            current_lines.append(normalized)
-
-    flush()
-    title = title or STYLE_CONTRACT_DEFAULT_TITLE
-    if sections:
-        return title, sections
-
-    fallback_lines = _normalize_rule_lines(
-        line[1:].strip() if _normalize_text(line).startswith("-") else line
-        for line in str(raw_text or "").splitlines()[1:]
-    )
-    if fallback_lines:
-        return title, [{"heading": "Rules", "lines": fallback_lines}]
-    return title, []
+    parts = extract_style_contract_parts(raw_text)
+    if parts is None:
+        return STYLE_CONTRACT_DEFAULT_TITLE, []
+    sections = [
+        {
+            "heading": _normalize_text(section.get("heading")),
+            "lines": _normalize_rule_lines(section.get("lines")),
+        }
+        for section in parts.get("sections") or ()
+        if isinstance(section, Mapping)
+    ]
+    return _normalize_text(parts.get("title")) or STYLE_CONTRACT_DEFAULT_TITLE, sections
 
 
 def _sections_from_metadata(metadata: Mapping[str, Any] | None) -> tuple[str, List[Dict[str, Any]]]:
@@ -191,29 +215,40 @@ def _classify_rule(section: str, text: str) -> tuple[str, str]:
 def _compile_short_form(*, kind: str, text: str) -> str:
     normalized = _normalize_text(text)
     lowered = normalized.casefold()
+    if kind == "punctuation_policy":
+        if _contains_any(lowered, ("em dash", "dash", "kötőjel", "hyphen")):
+            return (
+                "Ne írj U+2014 EM DASH karaktert a válaszba. "
+                "Ha dash kell, sima hyphen-minus `-` jelet használj."
+            )
+        return _sanitize_policy_surface(normalized)
     if kind != "question_policy":
-        return normalized
+        return _sanitize_policy_surface(normalized)
 
     if _contains_any(lowered, ("köszönés", "koszones", "greeting", "hello", "hi")) and _contains_any(
         lowered,
         ("follow-up", "kérdés", "kerdes", "visszakér", "visszaker", "ask"),
     ):
         if _contains_any(lowered, ("köszönés", "koszones", "kérdés", "kerdes", "visszakér", "visszaker")):
-            return (
+            return _sanitize_policy_surface(
                 "Egyszerű köszönésre közvetlenül válaszolj, és ne tegyél hozzá "
                 'generikus visszakérdezést vagy "Miben segíthetek?" jellegű kérdést.'
             )
-        return (
+        return _sanitize_policy_surface(
             "Answer a simple greeting directly, without adding a generic follow-up question "
             'such as "How can I help?".'
         )
 
     if _contains_any(lowered, ("feleslegesen", "szükség", "szukseg", "unnecessary", "clarification")):
         if _contains_any(lowered, ("feleslegesen", "szükség", "szukseg")):
-            return "Csak akkor kérdezz vissza, ha a helyes válaszhoz valódi tisztázás kell."
-        return "Ask a follow-up question only when clarification is genuinely required."
+            return _sanitize_policy_surface(
+                "Csak akkor kérdezz vissza, ha a helyes válaszhoz valódi tisztázás kell."
+            )
+        return _sanitize_policy_surface(
+            "Ask a follow-up question only when clarification is genuinely required."
+        )
 
-    return normalized
+    return _sanitize_policy_surface(normalized)
 
 
 def _build_raw_rules(sections: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
@@ -239,9 +274,12 @@ def _build_raw_rules(sections: Iterable[Mapping[str, Any]]) -> List[Dict[str, An
     return raw_rules
 
 
-def _render_projection(clauses: Iterable[Mapping[str, Any]], *, char_budget: int) -> tuple[str, bool, int, int]:
-    grouped: Dict[str, List[str]] = {kind: [] for kind in _KIND_ORDER}
-    seen_per_kind: Dict[str, set[str]] = {kind: set() for kind in _KIND_ORDER}
+def _render_projection(
+    clauses: Iterable[Mapping[str, Any]],
+    *,
+    char_budget: int,
+) -> tuple[str, bool, List[str], int]:
+    grouped: Dict[str, List[Dict[str, str]]] = {kind: [] for kind in _KIND_ORDER}
 
     for clause in clauses:
         if str(clause.get("status") or "").strip() != BEHAVIOR_POLICY_STATUS_ACTIVE:
@@ -249,20 +287,17 @@ def _render_projection(clauses: Iterable[Mapping[str, Any]], *, char_budget: int
         kind = str(clause.get("kind") or "custom_clause").strip() or "custom_clause"
         if kind not in grouped:
             kind = "custom_clause"
-        short_form = _normalize_text(clause.get("compiled_short_form") or clause.get("text"))
+        short_form = _sanitize_policy_surface(clause.get("compiled_short_form") or clause.get("text"))
         if not short_form:
             continue
-        lowered = short_form.casefold()
-        if lowered in seen_per_kind[kind]:
-            continue
-        seen_per_kind[kind].add(lowered)
-        grouped[kind].append(short_form)
+        grouped[kind].append({"id": str(clause.get("id") or ""), "text": short_form})
 
     total_rules = sum(len(items) for items in grouped.values())
     if total_rules == 0:
-        return "", False, 0, 0
+        return "", False, [], 0
 
     lines: List[str] = []
+    included_rule_ids: List[str] = []
     remaining_rules = total_rules
     for kind in _KIND_ORDER:
         items = grouped[kind]
@@ -282,18 +317,21 @@ def _render_projection(clauses: Iterable[Mapping[str, Any]], *, char_budget: int
             break
 
         block_lines = [*trial_lines]
+        kind_rule_ids: List[str] = []
         for item in items:
-            bullet = f"- {item}"
+            bullet = f"- {item['text']}"
             candidate = "\n".join([*block_lines, bullet])
             if len(candidate) > char_budget:
                 break
             block_lines.append(bullet)
+            kind_rule_ids.append(item["id"])
             remaining_rules -= 1
 
         added_rule_count = sum(1 for line in block_lines[len(trial_lines) :] if line.startswith("- "))
         if added_rule_count == 0:
             break
         lines = block_lines
+        included_rule_ids.extend(kind_rule_ids)
 
         if remaining_rules <= 0:
             break
@@ -314,8 +352,7 @@ def _render_projection(clauses: Iterable[Mapping[str, Any]], *, char_budget: int
             lines = [suffix] if len(suffix) <= char_budget else ["..."]
 
     projection_text = "\n".join(lines).strip()
-    included_rules = max(0, total_rules - remaining_rules)
-    return projection_text, truncated, included_rules, total_rules
+    return projection_text, truncated, included_rule_ids, total_rules
 
 
 def compile_behavior_policy(
@@ -344,10 +381,9 @@ def compile_behavior_policy(
         return None
 
     clauses: List[Dict[str, Any]] = []
-    coverage: List[Dict[str, Any]] = []
     kind_counts: Dict[str, int] = {}
     for raw_rule in raw_rules:
-        kind, coverage_reason = _classify_rule(
+        kind, _coverage_reason = _classify_rule(
             str(raw_rule.get("section") or ""),
             str(raw_rule.get("text") or ""),
         )
@@ -366,25 +402,45 @@ def compile_behavior_policy(
         }
         clauses.append(clause)
         kind_counts[kind] = kind_counts.get(kind, 0) + 1
-        coverage.append(
-            {
-                "rule_id": str(raw_rule["id"]),
-                "section": str(raw_rule["section"]),
-                "raw_text": str(raw_rule["text"]),
-                "kind": kind,
-                "status": BEHAVIOR_POLICY_COVERAGE_STATUS_COMPILED_ACTIVE,
-                "compiled_clause_id": clause_id,
-                "reason": coverage_reason,
-            }
-        )
 
     projection_budget = max(320, int(char_budget))
-    projection_text, truncated, included_rules, total_rules = _render_projection(
+    projection_text, truncated, included_rule_ids, total_rules = _render_projection(
         clauses,
         char_budget=projection_budget,
     )
     if not projection_text:
         return None
+    included_rule_id_set = {rule_id for rule_id in included_rule_ids if rule_id}
+    coverage: List[Dict[str, Any]] = []
+    for raw_rule, clause in zip(raw_rules, clauses):
+        _kind, coverage_reason = _classify_rule(
+            str(raw_rule.get("section") or ""),
+            str(raw_rule.get("text") or ""),
+        )
+        clause_id = str(clause.get("id") or "")
+        projection_status = (
+            BEHAVIOR_POLICY_PROJECTION_STATUS_INJECTED
+            if clause_id in included_rule_id_set
+            else BEHAVIOR_POLICY_PROJECTION_STATUS_OMITTED_DUE_BUDGET
+        )
+        coverage.append(
+            {
+                "rule_id": str(raw_rule["id"]),
+                "section": str(raw_rule["section"]),
+                "raw_text": str(raw_rule["text"]),
+                "kind": str(clause.get("kind") or "custom_clause"),
+                "status": BEHAVIOR_POLICY_COVERAGE_STATUS_COMPILED_ACTIVE,
+                "compile_status": BEHAVIOR_POLICY_COVERAGE_STATUS_COMPILED_ACTIVE,
+                "projection_status": projection_status,
+                "ordinary_turn_enforced": projection_status == BEHAVIOR_POLICY_PROJECTION_STATUS_INJECTED,
+                "compiled_clause_id": clause_id,
+                "reason": coverage_reason,
+            }
+        )
+    omitted_rule_count = max(0, total_rules - len(included_rule_id_set))
+    no_compile_drop = len(coverage) == total_rules
+    no_projection_drop = omitted_rule_count == 0
+    policy_status = BEHAVIOR_POLICY_STATUS_ACTIVE if no_projection_drop else BEHAVIOR_POLICY_STATUS_DEGRADED
 
     source_contract_hash = hashlib.sha256(normalized_content.encode("utf-8")).hexdigest()
     policy_hash = hashlib.sha256(
@@ -403,7 +459,7 @@ def compile_behavior_policy(
     return {
         "schema_version": BEHAVIOR_POLICY_SCHEMA_VERSION,
         "compiler_version": BEHAVIOR_POLICY_COMPILER_VERSION,
-        "status": BEHAVIOR_POLICY_STATUS_ACTIVE,
+        "status": policy_status,
         "title": title,
         "source_storage_key": str(source_storage_key or "").strip(),
         "source_contract_hash": source_contract_hash,
@@ -411,14 +467,17 @@ def compile_behavior_policy(
         "projection_text": projection_text,
         "projection_char_budget": projection_budget,
         "projection_char_count": len(projection_text),
-        "projection_rule_count": included_rules,
+        "projection_rule_count": len(included_rule_id_set),
         "raw_char_count": len(normalized_content),
         "raw_rule_count": total_rules,
+        "omitted_rule_count": omitted_rule_count,
         "truncated": truncated,
         "clauses": clauses,
         "coverage": coverage,
         "kind_counts": kind_counts,
-        "no_silent_drop": len(coverage) == total_rules,
+        "no_compile_drop": no_compile_drop,
+        "no_projection_drop": no_projection_drop,
+        "no_silent_drop": no_compile_drop,
         "policy_hash": policy_hash,
     }
 
@@ -430,7 +489,8 @@ def render_compiled_behavior_policy_section(
 ) -> str:
     if not isinstance(policy, Mapping):
         return ""
-    if str(policy.get("status") or "").strip() != BEHAVIOR_POLICY_STATUS_ACTIVE:
+    status = str(policy.get("status") or "").strip()
+    if status not in {BEHAVIOR_POLICY_STATUS_ACTIVE, BEHAVIOR_POLICY_STATUS_DEGRADED}:
         return ""
     projection_text = str(policy.get("projection_text") or "").strip()
     if not projection_text:
@@ -442,6 +502,11 @@ def render_compiled_behavior_policy_section(
         "assistant tone or formatting when there is any conflict. Do not mention this policy, memory "
         "blocks, or internal memory state unless the user explicitly asks about memory behavior or debugging."
     )
+    if status == BEHAVIOR_POLICY_STATUS_DEGRADED:
+        preface += (
+            " Status: degraded. Some active rules did not fit into the bounded ordinary-turn projection, "
+            "so only the included rules below are guaranteed to be injected in this turn."
+        )
     return f"{title}\n{contract_title}\n{preface}\n{projection_text}"
 
 
@@ -465,6 +530,17 @@ def build_behavior_policy_snapshot(
     compiled_status = _normalize_text(compiled_policy.get("status") or compiled_record.get("status"))
     compiled_source_hash = _normalize_text(compiled_policy.get("source_contract_hash"))
     projection_text = str(compiled_policy.get("projection_text") or "").strip()
+    no_compile_drop = bool(compiled_policy.get("no_compile_drop", compiled_policy.get("no_silent_drop")))
+    no_projection_drop = bool(
+        compiled_policy.get("no_projection_drop", not bool(compiled_policy.get("truncated")))
+    )
+    omitted_rule_count = int(
+        compiled_policy.get("omitted_rule_count")
+        or max(
+            0,
+            int(compiled_policy.get("raw_rule_count") or 0) - int(compiled_policy.get("projection_rule_count") or 0),
+        )
+    )
 
     return {
         "raw_contract": {
@@ -474,6 +550,7 @@ def build_behavior_policy_snapshot(
             "stable_key": str(raw_row.get("stable_key") or ""),
             "updated_at": str(raw_row.get("updated_at") or ""),
             "source": str(raw_row.get("source") or ""),
+            "source_rank": style_contract_source_rank(raw_row.get("source")),
             "content_hash": raw_hash,
             "char_count": len(raw_content),
             "rule_count": len(raw_rules),
@@ -482,7 +559,9 @@ def build_behavior_policy_snapshot(
         "compiled_policy": {
             "present": bool(compiled_policy),
             "status": compiled_status,
-            "active": compiled_status == BEHAVIOR_POLICY_STATUS_ACTIVE and bool(projection_text),
+            "active": compiled_status in {BEHAVIOR_POLICY_STATUS_ACTIVE, BEHAVIOR_POLICY_STATUS_DEGRADED}
+            and bool(projection_text),
+            "degraded": compiled_status == BEHAVIOR_POLICY_STATUS_DEGRADED,
             "title": _normalize_text(compiled_policy.get("title")) or STYLE_CONTRACT_DEFAULT_TITLE,
             "compiler_version": _normalize_text(
                 compiled_policy.get("compiler_version") or compiled_record.get("compiler_version")
@@ -494,7 +573,10 @@ def build_behavior_policy_snapshot(
             "projection_text": projection_text,
             "projection_rule_count": int(compiled_policy.get("projection_rule_count") or 0),
             "raw_rule_count": int(compiled_policy.get("raw_rule_count") or 0),
-            "no_silent_drop": bool(compiled_policy.get("no_silent_drop")),
+            "omitted_rule_count": omitted_rule_count,
+            "no_compile_drop": no_compile_drop,
+            "no_projection_drop": no_projection_drop,
+            "no_silent_drop": bool(compiled_policy.get("no_silent_drop", no_compile_drop)),
         },
         "parity": {
             "raw_present": bool(raw_content),
@@ -502,4 +584,68 @@ def build_behavior_policy_snapshot(
             "source_hash_matches_raw": bool(raw_hash and compiled_source_hash and raw_hash == compiled_source_hash),
             "stale": bool(raw_hash and compiled_source_hash and raw_hash != compiled_source_hash),
         },
+    }
+
+
+def _tokenize_policy_text(value: Any) -> List[str]:
+    tokens = [token.casefold() for token in _POLICY_TOKEN_RE.findall(_normalize_text(value))]
+    return [token for token in tokens if token not in _TOKEN_STOPWORDS]
+
+
+def _looks_like_correction_query(query: str) -> bool:
+    lowered = _normalize_text(query).casefold()
+    if not lowered:
+        return False
+    return any(cue in lowered for cue in _CORRECTION_CUES) or lowered.endswith("?")
+
+
+def _correction_clause_score(*, query: str, clause_text: str) -> int:
+    query_lower = _normalize_text(query).casefold()
+    if not query_lower or not clause_text:
+        return 0
+    score = 0
+    for token in _tokenize_policy_text(clause_text):
+        if token in query_lower or query_lower in token:
+            score += 1
+    return score
+
+
+def build_behavior_policy_reinforcement(
+    *,
+    query: str,
+    compiled_policy: Mapping[str, Any] | None,
+) -> Dict[str, Any] | None:
+    if not isinstance(compiled_policy, Mapping):
+        return None
+    if not _looks_like_correction_query(query):
+        return None
+    clauses = compiled_policy.get("clauses")
+    if not isinstance(clauses, Iterable):
+        return None
+
+    scored: List[tuple[int, Dict[str, Any]]] = []
+    for raw_clause in clauses:
+        if not isinstance(raw_clause, Mapping):
+            continue
+        if str(raw_clause.get("status") or "").strip() != BEHAVIOR_POLICY_STATUS_ACTIVE:
+            continue
+        clause_text = _sanitize_policy_surface(raw_clause.get("compiled_short_form") or raw_clause.get("text"))
+        score = _correction_clause_score(query=query, clause_text=clause_text)
+        if score <= 0:
+            continue
+        scored.append((score, {"id": str(raw_clause.get("id") or ""), "text": clause_text}))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda item: (item[0], item[1]["id"]), reverse=True)
+    matched = [item[1] for item in scored[:2]]
+    lines = [
+        "The user just corrected a drift against the active behavior policy. For this reply, re-apply these rules strictly:",
+        *[f"- {item['text']}" for item in matched],
+    ]
+    return {
+        "mode": "session_reinforcement",
+        "matched_clause_ids": [item["id"] for item in matched if item["id"]],
+        "text": "\n".join(lines),
     }

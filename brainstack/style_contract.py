@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Iterable, List, Mapping
 
 
@@ -19,6 +20,14 @@ _STYLE_CONTRACT_HINTS = (
     "töltelék",
     "szabály",
     "rules",
+)
+_RULE_BULLET_RE = re.compile(r"^(?:[-*•]|\d{1,3}\s*[.)-])\s+(?P<content>.+)$")
+_STYLE_CONTRACT_SOURCE_RANKS = (
+    ("behavior_policy_correction", 400),
+    ("prefetch:style_contract", 300),
+    ("memory_write:style_contract", 300),
+    ("sync_turn:user_style_contract", 300),
+    ("tier2_llm", 100),
 )
 
 
@@ -65,6 +74,31 @@ def _slug(value: Any) -> str:
 def _contains_hint(text: str, hints: Iterable[str]) -> bool:
     lowered = _normalize_text(text).casefold()
     return any(hint in lowered for hint in hints)
+
+
+def _extract_rule_bullet(line: str) -> str | None:
+    match = _RULE_BULLET_RE.match(_normalize_text(line))
+    if not match:
+        return None
+    content = _normalize_text(match.group("content"))
+    return content or None
+
+
+def _is_heading_line(line: str) -> bool:
+    normalized = _normalize_text(line)
+    return bool(normalized) and normalized.endswith(":") and _extract_rule_bullet(normalized) is None
+
+
+def style_contract_source_rank(source: Any) -> int:
+    normalized = _normalize_text(source).casefold()
+    if not normalized:
+        return 0
+    for marker, rank in _STYLE_CONTRACT_SOURCE_RANKS:
+        if normalized.startswith(marker):
+            return rank
+    if "tier2" in normalized:
+        return 100
+    return 200
 
 
 def _sections_from_metadata(metadata: Mapping[str, Any] | None) -> tuple[str, str, List[Dict[str, Any]]]:
@@ -314,7 +348,7 @@ def parse_style_contract_text(raw_text: Any) -> Dict[str, Any] | None:
     title = STYLE_CONTRACT_DEFAULT_TITLE
     index = 0
     first_line = normalized_lines[0]
-    if not first_line.endswith(":") and not first_line.startswith("-"):
+    if not _is_heading_line(first_line) and _extract_rule_bullet(first_line) is None:
         title = first_line
         index = 1
 
@@ -333,14 +367,15 @@ def parse_style_contract_text(raw_text: Any) -> Dict[str, Any] | None:
         current_lines = []
 
     for line in normalized_lines[index:]:
-        if line.endswith(":") and not line.startswith("-"):
+        if _is_heading_line(line):
             saw_heading = True
             _flush()
             current_heading = line[:-1].strip()
             continue
-        if line.startswith("-"):
+        bullet = _extract_rule_bullet(line)
+        if bullet is not None:
             bullet_line_count += 1
-            current_lines.append(line[1:].strip())
+            current_lines.append(bullet)
         else:
             current_lines.append(line)
 
@@ -371,6 +406,11 @@ def looks_like_style_contract_teaching(raw_text: Any) -> bool:
     if parsed is None:
         return False
 
+    total_rules = sum(
+        len(section.get("lines") or [])
+        for section in parsed.get("sections") or ()
+        if isinstance(section, Mapping)
+    )
     title = _normalize_text(parsed.get("title"))
     if _contains_hint(title, _STYLE_CONTRACT_HINTS):
         return True
@@ -381,7 +421,9 @@ def looks_like_style_contract_teaching(raw_text: Any) -> bool:
         if isinstance(section, Mapping)
     ]
     matched_headings = sum(1 for heading in headings if _contains_hint(heading, _STYLE_CONTRACT_HINTS))
-    return matched_headings >= 2
+    if matched_headings >= 2:
+        return True
+    return matched_headings >= 1 and total_rules >= 5
 
 
 def build_style_contract_from_text(

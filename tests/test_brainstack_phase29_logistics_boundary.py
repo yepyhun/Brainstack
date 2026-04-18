@@ -25,7 +25,7 @@ def _scope(platform: str, user_id: str) -> dict[str, object]:
     principal_scope = {
         "platform": platform,
         "user_id": user_id,
-        "agent_identity": "bestie",
+        "agent_identity": "assistant-main",
         "agent_workspace": "discord-main",
     }
     principal_scope_key = "|".join(f"{key}:{value}" for key, value in principal_scope.items())

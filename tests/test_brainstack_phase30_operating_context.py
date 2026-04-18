@@ -70,7 +70,7 @@ def _seed_operating_context(store: BrainstackStore, *, principal_scope_key: str,
         session_id=session_id,
         turn_number=4,
         kind="decision",
-        content="Brainstack remains context-only for tasks and reminders.",
+        content="Brainstack owns bounded task and commitment truth; reminders stay with dedicated owners.",
         source="test",
         metadata=scope,
     )
@@ -100,7 +100,7 @@ def test_operating_context_snapshot_derives_existing_work_decisions_and_boundari
 
     assert snapshot["behavior_policy"]["active"] is True
     assert snapshot["active_work_summary"] == "Current work focuses on the always-on Brainstack operating-context slice."
-    assert snapshot["open_decisions"] == ["Brainstack remains context-only for tasks and reminders."]
+    assert snapshot["open_decisions"] == ["Brainstack owns bounded task and commitment truth; reminders stay with dedicated owners."]
     assert snapshot["session_state"]["active"] is True
     assert snapshot["external_owner_pointers"] == []
     assert snapshot["stable_profile_entries"][0]["category"] == "shared_work"
@@ -125,8 +125,8 @@ def test_system_prompt_block_includes_bounded_operating_context_without_behavior
     assert "# Brainstack Active Communication Contract" in block
     assert "# Brainstack Operating Context" in block
     assert "Current work focuses on the always-on Brainstack operating-context slice." in block
-    assert "Brainstack remains context-only for tasks and reminders." in block
-    assert "Reminders, scheduling, and task truth stay with native owners" in block
+    assert "Brainstack owns bounded task and commitment truth; reminders stay with dedicated owners." in block
+    assert "Brainstack owns bounded task and commitment truth recorded in its structured task memory" in block
     assert block.count("# Brainstack Active Communication Contract") == 1
 
 
@@ -157,7 +157,7 @@ def test_provider_exposes_operating_context_snapshot_and_trace(tmp_path):
         snapshot = provider.operating_context_snapshot()
         assert snapshot is not None
         assert snapshot["session_state"]["active"] is True
-        assert snapshot["open_decisions"] == ["Brainstack remains context-only for tasks and reminders."]
+        assert snapshot["open_decisions"] == ["Brainstack owns bounded task and commitment truth; reminders stay with dedicated owners."]
 
         trace = provider.operating_context_trace()
         assert trace is not None

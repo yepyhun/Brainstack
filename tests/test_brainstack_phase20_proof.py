@@ -96,7 +96,7 @@ def _seed_shared_facts(store: BrainstackStore) -> None:
     store.add_graph_relation(
         subject_name="Project Atlas",
         predicate="integrates_with",
-        object_name="Hermes Bestie",
+        object_name="Hermes Agent",
         source="test",
     )
     store.ingest_corpus_document(
@@ -190,7 +190,7 @@ def test_stream_b_proves_graph_delta_above_l1_baseline(monkeypatch, tmp_path):
         )
         assert "## Brainstack Graph Truth" not in baseline["block"]
         assert "## Brainstack Graph Truth" in graph_enabled["block"]
-        assert "Project Atlas integrates_with Hermes Bestie" in graph_enabled["block"]
+        assert "Project Atlas integrates_with Hermes Agent" in graph_enabled["block"]
         assert _channel(graph_enabled, "graph")["candidate_count"] > 0
     finally:
         store.close()
@@ -1113,7 +1113,8 @@ def test_phase20_11_temporal_route_surfaces_cross_session_temporal_events(tmp_pa
             "Family trip to Muir Woods National Monument",
             "Solo camping trip to Yosemite National Park",
         ]
-        assert result["channels"][3]["candidate_count"] >= 2
+        temporal_channel = next(channel for channel in result["channels"] if channel["name"] == "temporal")
+        assert temporal_channel["candidate_count"] >= 2
     finally:
         store.close()
 

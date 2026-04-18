@@ -38,7 +38,7 @@ def _env_path(*names: str) -> Path | None:
     return None
 
 
-DEFAULT_HERMES_ROOT = _env_path("BRAINSTACK_BESTIE_ROOT", "BRAINSTACK_HERMES_ROOT", "HERMES_ROOT")
+DEFAULT_HERMES_ROOT = _env_path("BRAINSTACK_HERMES_ROOT", "HERMES_ROOT")
 DEFAULT_REPORT = REPO_ROOT / "reports" / "phase29" / "brainstack-29-behavior-obedience-live-eval.json"
 DEFAULT_MATRIX = REPO_ROOT / "reports" / "phase29" / "brainstack-29-behavior-obedience-scenarios.json"
 DEFAULT_DOCKER_CONTAINER = os.environ.get("BRAINSTACK_DOCKER_CONTAINER", "").strip() or None
@@ -634,7 +634,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.hermes_root is None:
-        raise SystemExit("--hermes-root is required (or set BRAINSTACK_BESTIE_ROOT / BRAINSTACK_HERMES_ROOT / HERMES_ROOT).")
+        raise SystemExit("--hermes-root is required (or set BRAINSTACK_HERMES_ROOT / HERMES_ROOT).")
 
     with tempfile.TemporaryDirectory(prefix="brainstack-phase29-home-") as tmp_dir:
         temp_home = Path(tmp_dir)
