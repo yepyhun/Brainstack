@@ -22,6 +22,8 @@ from typing import Any
 
 REQUIRED_PLUGIN_FILES = [
     "__init__.py",
+    "behavior_policy.py",
+    "operating_context.py",
     "plugin.yaml",
     "db.py",
     "corpus_backend.py",
@@ -403,6 +405,11 @@ def _check_plugin(target: Path, planned_install: bool) -> list[Check]:
         "assert p is not None, 'provider not loaded'; "
         "assert p.name == 'brainstack', p.name; "
         "assert p.is_available(); "
+        "assert hasattr(p, 'behavior_policy_snapshot'); "
+        "assert hasattr(p, 'behavior_policy_trace'); "
+        "assert hasattr(p, 'operating_context_snapshot'); "
+        "assert hasattr(p, 'operating_context_trace'); "
+        "assert hasattr(p, 'apply_behavior_policy_correction'); "
         "print(p.name)"
     )
     proc = subprocess.run(
@@ -519,6 +526,13 @@ def _check_config(
     else:
         checks.append(Check("corpus_backend_target", "fail", f"plugins.brainstack.corpus_backend is {corpus_backend!r}, expected 'chroma'"))
 
+    if dependency_import_ok("openai"):
+        checks.append(Check("route_hint_dependency", "pass", "Python openai package is importable for Brainstack route-hint LLM calls"))
+    elif planned_install:
+        checks.append(Check("route_hint_dependency", "pass", "Python openai package is not present yet, but installer will add it"))
+    else:
+        checks.append(Check("route_hint_dependency", "fail", "Python openai package is missing for Brainstack route-hint LLM calls in the active runtime"))
+
     auxiliary = config.get("auxiliary", {}) if isinstance(config.get("auxiliary", {}), dict) else {}
     flush_memories = auxiliary.get("flush_memories", {}) if isinstance(auxiliary.get("flush_memories", {}), dict) else {}
     flush_provider = str(flush_memories.get("provider") or "").strip().lower()
@@ -585,6 +599,7 @@ def _docker_python_can_import(module_name: str, compose_path: Path | None, *, se
         f"sys.exit(0 if importlib.util.find_spec({module_name!r}) else 1)"
     )
     python_commands = [
+        "/opt/hermes/.venv/bin/python3",
         "/opt/hermes/.venv/bin/python",
         "python3",
     ]

@@ -1,3 +1,24 @@
+# ruff: noqa: E402
+import importlib.util
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+_host_shims_path = REPO_ROOT / "tests" / "_host_import_shims.py"
+_host_shims_spec = importlib.util.spec_from_file_location(
+    "retrieval_contract_host_import_shims",
+    _host_shims_path,
+)
+assert _host_shims_spec and _host_shims_spec.loader
+_host_shims = importlib.util.module_from_spec(_host_shims_spec)
+_host_shims_spec.loader.exec_module(_host_shims)
+install_host_import_shims = _host_shims.install_host_import_shims
+
+install_host_import_shims(hermes_home=REPO_ROOT)
+
 from plugins.memory.brainstack.db import BrainstackStore
 from plugins.memory.brainstack.retrieval import build_system_prompt_block, render_working_memory_block
 
@@ -37,7 +58,8 @@ def test_system_prompt_projects_active_communication_contract(tmp_path):
     block = build_system_prompt_block(store, profile_limit=6)
 
     assert "# Brainstack Active Communication Contract" in block
-    assert "Apply these rules silently in every reply." in block
+    assert "These are non-optional user-specific behavior rules." in block
+    assert "Apply them silently in every reply" in block
     assert "rarely use emoji" in block
     assert "[identity] Tomi" in block
     assert "[preference] Minimize emoji usage" not in block

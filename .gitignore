@@ -8,3 +8,6 @@ auth.lock
 SOUL.md
 reports/longmemeval/*.json
 reports/phase20/*.json
+reports/phase29/*.json
+brainstack.chroma/
+brainstack.kuzu

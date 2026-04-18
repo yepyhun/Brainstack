@@ -34,6 +34,27 @@ AGGREGATE_ROUTE_CUES = (
     "combined",
     "sum",
 )
+STYLE_CONTRACT_STRONG_CUES = (
+    "humanizer",
+    "style contract",
+    "communication rules",
+    "kommunikációs szabály",
+    "kommunikációs szabályok",
+    "27 szabály",
+    "29 szabály",
+)
+STYLE_CONTRACT_RECALL_CUES = (
+    "tell me",
+    "list",
+    "what are",
+    "do you know",
+    "exact",
+    "full",
+    "mondd",
+    "mondani",
+    "sorold",
+    "pontosan",
+)
 TEMPORAL_STRONG_CUES = (
     "order of",
     "earliest",
@@ -176,7 +197,7 @@ def _llm_route_resolver(query: str) -> Dict[str, Any]:
                 "Return JSON only with the schema {\"mode\": \"fact|temporal|aggregate|style_contract\", \"reason\": \"...\"}.\n"
                 "Use temporal when the user needs ordering, before/after comparison, date difference, or change over time.\n"
                 "Use aggregate when the user needs totals, counts across multiple events, or exhaustive collection.\n"
-                "Use style_contract when the user is explicitly asking about their detailed communication rules, Humanizer pack, rule list, or the full style contract itself.\n"
+                "Use style_contract when the user is explicitly asking about their detailed communication rules, named style pack, rule list, or the full style contract itself.\n"
                 "Use fact for ordinary fact lookup or if uncertain."
             ),
         },
@@ -200,6 +221,20 @@ def _llm_route_resolver(query: str) -> Dict[str, Any]:
 
 def _contains_cue(normalized: str, cue: str) -> bool:
     return cue in normalized
+
+
+def _looks_like_style_contract_recall(query: str) -> bool:
+    normalized = f" {_normalize_text(query).lower()} "
+    strong_hits = [cue for cue in STYLE_CONTRACT_STRONG_CUES if _contains_cue(normalized, cue)]
+    if strong_hits:
+        return True
+
+    has_rule_term = any(
+        _contains_cue(normalized, cue)
+        for cue in (" szabály ", " szabályt ", " szabályok ", " rules ", " rule list ")
+    )
+    has_recall_term = any(_contains_cue(normalized, cue) for cue in STYLE_CONTRACT_RECALL_CUES)
+    return has_rule_term and has_recall_term
 
 
 def _default_route_resolver(query: str) -> Dict[str, Any]:
@@ -253,6 +288,13 @@ def _resolve_route(
         route.applied_mode = deterministic_mode
         route.source = str(deterministic.get("source") or "deterministic_route_hint")
         route.reason = str(deterministic.get("reason") or "")
+        return route
+
+    if style_contract_available and _looks_like_style_contract_recall(normalized):
+        route.requested_mode = ROUTE_STYLE_CONTRACT
+        route.applied_mode = ROUTE_STYLE_CONTRACT
+        route.source = "deterministic_style_contract_hint"
+        route.reason = "deterministic style-contract recall cues"
         return route
 
     resolver = route_resolver

@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, Iterable, List
 
+from .behavior_policy import render_compiled_behavior_policy_section
 from .db import BrainstackStore
+from .operating_context import render_operating_context_section
 from .profile_contract import COMMUNICATION_CANONICAL_SLOTS
 from .provenance import summarize_provenance
 from .style_contract import STYLE_CONTRACT_SLOT
@@ -64,12 +66,11 @@ COMMUNICATION_GRAPH_PREDICATES = {
 COMMUNICATION_ASSISTANT_SUBJECTS = {
     "assistant",
     "hermes",
-    "bestie",
 }
 
 COMMUNICATION_GRAPH_QUERY = (
     "writing style communication style response style emoji usage formatting style "
-    "message structure response language assistant name ai name nickname bestie dash "
+    "message structure response language assistant name ai name nickname assistant alias dash "
     "em dash pronoun capitalization"
 )
 
@@ -110,7 +111,7 @@ _COMMUNICATION_PROFILE_HINTS = (
     "respond in hungarian",
     "prefer hungarian",
     "magyar",
-    "bestie",
+    "assistant alias",
     "call the ai",
     "call me",
 )
@@ -137,8 +138,6 @@ def _extract_ai_name_hint(value: Any) -> str:
     for prefix in ("assistant's name is ", "assistant name is ", "asszisztens neve "):
         if lowered.startswith(prefix):
             return text[len(prefix) :].strip(" .")
-    if "bestie" in lowered:
-        return "Bestie"
     return ""
 
 
@@ -157,7 +156,7 @@ def _render_communication_profile_contract_line(row: Dict[str, Any]) -> str:
             return f"Refer to yourself as {ai_name} when naming yourself."
     if stable_key == "preference:communication_style":
         if "humanizer" in lowered:
-            return "Use Humanizer style: direct, concrete, natural, and low-fluff."
+            return "Use the configured communication style: direct, concrete, natural, and low-fluff."
     if stable_key == "preference:emoji_usage":
         return "Do not use emojis."
     if stable_key == "preference:message_structure":
@@ -207,11 +206,16 @@ def _communication_contract_subjects(profile_items: Iterable[Dict[str, Any]]) ->
     subjects = set(COMMUNICATION_ASSISTANT_SUBJECTS)
     subjects.update({"user", "the user"})
     for row in profile_items:
-        if str(row.get("category") or "").strip().lower() != "identity":
-            continue
-        hint = _extract_identity_name_hint(row.get("content"))
-        if hint:
-            subjects.add(hint)
+        category = str(row.get("category") or "").strip().lower()
+        stable_key = str(row.get("stable_key") or "").strip().lower()
+        if category == "identity":
+            hint = _extract_identity_name_hint(row.get("content"))
+            if hint:
+                subjects.add(hint)
+        if stable_key in {"preference:ai_name", "preference:ai_nickname"}:
+            ai_name = _normalize_compare_text(_extract_ai_name_hint(row.get("content")))
+            if ai_name:
+                subjects.add(ai_name)
     return subjects
 
 
@@ -277,6 +281,35 @@ def _build_active_communication_contract(
     return lines, hidden_profile_keys
 
 
+def _filter_compiled_behavior_profile_items(
+    profile_items: Iterable[Dict[str, Any]],
+    *,
+    route_mode: str,
+) -> List[Dict[str, Any]]:
+    output: List[Dict[str, Any]] = []
+    for row in profile_items:
+        stable_key = str(row.get("stable_key") or "").strip()
+        if _is_communication_profile_item(row):
+            continue
+        if route_mode != "style_contract" and stable_key == STYLE_CONTRACT_SLOT:
+            continue
+        output.append(row)
+    return output
+
+
+def _filter_compiled_behavior_graph_rows(
+    graph_rows: Iterable[Dict[str, Any]],
+    *,
+    profile_items: Iterable[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    allowed_subjects = _communication_contract_subjects(profile_items)
+    return [
+        row
+        for row in graph_rows
+        if not _is_current_communication_state(row, allowed_subjects=allowed_subjects)
+    ]
+
+
 def _render_communication_state_contract_line(row: Dict[str, Any]) -> str:
     predicate = _normalize_compare_text(row.get("predicate"))
     value = _trim(str(row.get("object_value") or ""), 220)
@@ -286,7 +319,7 @@ def _render_communication_state_contract_line(row: Dict[str, Any]) -> str:
     if predicate == "response_language" and ("hungarian" in lowered or "magyar" in lowered):
         return "Always respond in Hungarian."
     if predicate == "communication_style" and "humanizer" in lowered:
-        return "Use Humanizer style: direct, concrete, natural, and low-fluff."
+        return "Use the configured communication style: direct, concrete, natural, and low-fluff."
     if predicate == "emoji_usage":
         return "Do not use emojis."
     if predicate == "message_structure":
@@ -608,28 +641,54 @@ def build_system_prompt_block(
     *,
     profile_limit: int,
     principal_scope_key: str = "",
+    session_id: str = "",
 ) -> str:
     fetch_limit = max(profile_limit * 3, 10)
     items = store.list_profile_items(limit=fetch_limit, principal_scope_key=principal_scope_key)
-    graph_rows = store.list_current_graph_states(
-        limit=8,
-        attributes=COMMUNICATION_GRAPH_PREDICATES,
+    compiled_policy = store.get_compiled_behavior_policy(principal_scope_key=principal_scope_key)
+    operating_context_snapshot = store.get_operating_context_snapshot(
         principal_scope_key=principal_scope_key,
+        session_id=session_id,
     )
-    contract_lines, hidden_profile_keys = _build_active_communication_contract(
-        profile_items=items,
-        graph_rows=graph_rows,
-    )
-    filtered_items = [item for item in items if str(item.get("stable_key") or "").strip() not in hidden_profile_keys]
-    filtered_items = [item for item in filtered_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT]
+    contract_section = ""
+    compiled_policy_active = False
+    if compiled_policy:
+        contract_section = render_compiled_behavior_policy_section(
+            compiled_policy.get("policy"),
+            title="# Brainstack Active Communication Contract",
+        )
+        compiled_policy_active = bool(contract_section)
+    if compiled_policy_active:
+        filtered_items = _filter_compiled_behavior_profile_items(items, route_mode="fact")
+    else:
+        graph_rows = store.list_current_graph_states(
+            limit=8,
+            attributes=COMMUNICATION_GRAPH_PREDICATES,
+            principal_scope_key=principal_scope_key,
+        )
+        contract_lines, hidden_profile_keys = _build_active_communication_contract(
+            profile_items=items,
+            graph_rows=graph_rows,
+        )
+        filtered_items = [
+            item for item in items if str(item.get("stable_key") or "").strip() not in hidden_profile_keys
+        ]
+        filtered_items = [
+            item for item in filtered_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT
+        ]
+        contract_section = _render_contract_section("# Brainstack Active Communication Contract", contract_lines)
 
-    if not contract_lines and not filtered_items:
+    operating_context_section = render_operating_context_section(operating_context_snapshot)
+
+    if not contract_section and not filtered_items and not operating_context_section:
         return ""
 
     sections: List[str] = []
-    contract_section = _render_contract_section("# Brainstack Active Communication Contract", contract_lines)
     if contract_section:
         sections.append(contract_section)
+
+    if operating_context_section:
+        sections.append(operating_context_section)
 
     lines = []
     for item in filtered_items[:profile_limit]:
@@ -658,10 +717,28 @@ def render_working_memory_block(
 ) -> str:
     sections: List[str] = []
     provenance_mode = str(policy.get("provenance_mode", "compact"))
-    contract_lines, hidden_profile_keys = _build_active_communication_contract(
-        profile_items=profile_items,
-        graph_rows=graph_rows,
-    )
+    compiled_policy = policy.get("compiled_behavior_policy") if isinstance(policy, dict) else None
+    compiled_policy_active = False
+    contract_section = ""
+    hidden_profile_keys: set[str] = set()
+    graph_rows_for_sections = graph_rows
+    if isinstance(compiled_policy, dict):
+        contract_section = render_compiled_behavior_policy_section(
+            compiled_policy,
+            title="## Brainstack Active Communication Contract",
+        )
+        compiled_policy_active = bool(contract_section)
+    if compiled_policy_active:
+        graph_rows_for_sections = _filter_compiled_behavior_graph_rows(
+            graph_rows,
+            profile_items=profile_items,
+        )
+    else:
+        contract_lines, hidden_profile_keys = _build_active_communication_contract(
+            profile_items=profile_items,
+            graph_rows=graph_rows,
+        )
+        contract_section = _render_contract_section("## Brainstack Active Communication Contract", contract_lines)
 
     if policy.get("show_policy"):
         lines = [
@@ -691,27 +768,38 @@ def render_working_memory_block(
             )
         )
 
-    contract_section = _render_contract_section("## Brainstack Active Communication Contract", contract_lines)
     if contract_section:
         sections.append(contract_section)
 
-    filtered_profile_items = [
-        item for item in profile_items if str(item.get("stable_key") or "").strip() not in hidden_profile_keys
-    ]
-    if route_mode != "style_contract":
+    if compiled_policy_active:
+        filtered_profile_items = _filter_compiled_behavior_profile_items(profile_items, route_mode=route_mode)
+    else:
         filtered_profile_items = [
-            item for item in filtered_profile_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT
+            item for item in profile_items if str(item.get("stable_key") or "").strip() not in hidden_profile_keys
         ]
+        if route_mode != "style_contract":
+            filtered_profile_items = [
+                item for item in filtered_profile_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT
+            ]
     if filtered_profile_items:
-        lines = [
-            _with_provenance(
-                f"[{item['category'].replace('_', ' ')}] {_trim(item['content'], 160)}",
-                source=str(item.get("source", "")),
-                provenance_mode=provenance_mode,
-                metadata=item.get("metadata"),
+        style_contract_char_budget = max(320, int(policy.get("style_contract_char_budget", 2400)))
+        lines = []
+        for item in filtered_profile_items:
+            content = str(item.get("content") or "")
+            stable_key = str(item.get("stable_key") or "").strip()
+            rendered_content = (
+                _trim(content, style_contract_char_budget)
+                if route_mode == "style_contract" and stable_key == STYLE_CONTRACT_SLOT
+                else _trim(content, 160)
             )
-            for item in filtered_profile_items
-        ]
+            lines.append(
+                _with_provenance(
+                    f"[{item['category'].replace('_', ' ')}] {rendered_content}",
+                    source=str(item.get("source", "")),
+                    provenance_mode=provenance_mode,
+                    metadata=item.get("metadata"),
+                )
+            )
         sections.append("## Brainstack Profile Match\n" + _render_items(lines))
 
     if route_mode == "aggregate":
@@ -752,19 +840,19 @@ def render_working_memory_block(
         if packed_transcript:
             sections.append("## Brainstack Transcript Evidence\n" + _render_items(packed_transcript))
 
-    if graph_rows:
+    if graph_rows_for_sections:
         show_graph_history = bool(policy.get("show_graph_history", False))
         current_truth = [
             row
-            for row in graph_rows
+            for row in graph_rows_for_sections
             if _graph_fact_class(row) in {"explicit_state_current", "explicit_relation"}
         ]
-        conflicts = [row for row in graph_rows if _graph_fact_class(row) == "conflict"]
+        conflicts = [row for row in graph_rows_for_sections if _graph_fact_class(row) == "conflict"]
         historical_truth = [
-            row for row in graph_rows if _graph_fact_class(row) == "explicit_state_prior"
+            row for row in graph_rows_for_sections if _graph_fact_class(row) == "explicit_state_prior"
         ]
         inferred_links = [
-            row for row in graph_rows if _graph_fact_class(row) == "inferred_relation"
+            row for row in graph_rows_for_sections if _graph_fact_class(row) == "inferred_relation"
         ][: max(0, int(policy.get("graph_inferred_limit", 2)))]
 
         graph_sections: List[str] = []

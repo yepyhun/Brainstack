@@ -1,14 +1,34 @@
+# ruff: noqa: E402
 """Pragmatic real-world scenario tests for the current Brainstack layer."""
 
+import importlib.util
 from pathlib import Path
+import sys
 import threading
 import time
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+_host_shims_path = REPO_ROOT / "tests" / "_host_import_shims.py"
+_host_shims_spec = importlib.util.spec_from_file_location(
+    "real_world_flows_host_import_shims",
+    _host_shims_path,
+)
+assert _host_shims_spec and _host_shims_spec.loader
+_host_shims = importlib.util.module_from_spec(_host_shims_spec)
+_host_shims_spec.loader.exec_module(_host_shims)
+install_host_import_shims = _host_shims.install_host_import_shims
+
+install_host_import_shims(hermes_home=REPO_ROOT)
 
 from plugins.memory.brainstack.extraction_pipeline import build_turn_ingest_plan
 from plugins.memory.brainstack.provenance import merge_provenance, summarize_provenance
 from plugins.memory.brainstack.reconciler import reconcile_tier2_candidates
 from plugins.memory.brainstack.stable_memory_guardrails import should_admit_stable_memory
 from plugins.memory.brainstack import BrainstackMemoryProvider
+from plugins.memory.brainstack.style_contract import STYLE_CONTRACT_SLOT
 from plugins.memory.brainstack.temporal import normalize_temporal_fields, record_is_effective_at
 from plugins.memory.brainstack.tier2_extractor import extract_tier2_candidates
 
@@ -338,6 +358,51 @@ class TestBrainstackRealWorldFlows:
         finally:
             reader.shutdown()
 
+    def test_plugin_surface_structured_contract_exposes_compiled_policy_coverage(self, tmp_path):
+        provider = _make_provider(
+            tmp_path,
+            "session-policy-coverage",
+            user_id="user-a",
+            platform="discord",
+            agent_identity="assistant-main",
+            agent_workspace="discord-main",
+        )
+        try:
+            provider.on_memory_write(
+                "add",
+                "user",
+                (
+                    "User style contract\n\n"
+                    "Tartalmi minták:\n"
+                    "- Konkrét tények, nem jelentőségfelfújás\n"
+                    "- Egy konkrét forrás, nem homályos hivatkozások\n\n"
+                    "Nyelvi minták:\n"
+                    "- Vessző, pont, zárójel, em dash helyett\n"
+                    "- Emoji tilos\n\n"
+                    "Kommunikációs minták:\n"
+                    "- Szervilis hangnem kötelező"
+                ),
+            )
+            store = provider._store
+            assert store is not None
+
+            row = store.get_profile_item(
+                stable_key=STYLE_CONTRACT_SLOT,
+                principal_scope_key=provider._principal_scope_key,
+            )
+            compiled = store.get_compiled_behavior_policy(principal_scope_key=provider._principal_scope_key)
+
+            assert row is not None
+            assert compiled is not None
+            assert compiled["policy"]["no_silent_drop"] is True
+            assert len(compiled["policy"]["coverage"]) == compiled["policy"]["raw_rule_count"]
+            assert any(clause["kind"] == "content_policy" for clause in compiled["policy"]["clauses"])
+            assert any(clause["kind"] == "punctuation_policy" for clause in compiled["policy"]["clauses"])
+            assert any(clause["kind"] == "forbidden_surface_form" for clause in compiled["policy"]["clauses"])
+            assert "Forbidden surface forms:" in compiled["projection_text"]
+        finally:
+            provider.shutdown()
+
     def test_system_prompt_block_stays_within_same_principal_scope(self, tmp_path):
         writer_a = _make_provider(tmp_path, "session-prompt-a", user_id="user-a", platform="discord")
         try:
@@ -358,6 +423,33 @@ class TestBrainstackRealWorldFlows:
             assert "extremely detailed answers" not in block
         finally:
             reader.shutdown()
+
+    def test_explicit_user_memory_write_activates_behavior_policy_before_next_prompt(self, tmp_path):
+        provider = _make_provider(tmp_path, "session-policy-write", user_id="user-a", platform="discord")
+        try:
+            provider.on_memory_write(
+                "add",
+                "user",
+                (
+                    "User style contract\n\n"
+                    "Tartalmi minták:\n"
+                    "- Konkrét tények, nem jelentőségfelfújás\n"
+                    "- Egy konkrét forrás, nem homályos hivatkozások\n\n"
+                    "Nyelvi minták:\n"
+                    "- Nincs hármas szabály"
+                ),
+            )
+
+            block = provider.system_prompt_block()
+            compiled = provider._store.get_compiled_behavior_policy(principal_scope_key=provider._principal_scope_key)
+
+            assert compiled is not None
+            assert compiled["policy"]["status"] == "active"
+            assert "# Brainstack Active Communication Contract" in block
+            assert "User style contract" in block
+            assert "Konkrét tények, nem jelentőségfelfújás" in block
+        finally:
+            provider.shutdown()
 
     def test_temporal_graph_truth_shows_current_and_prior_state(self, tmp_path):
         provider = _make_provider(tmp_path, "session-graph")
@@ -465,9 +557,9 @@ class TestBrainstackRealWorldFlows:
                     {
                       "subject": "Tomi",
                       "predicate": "depends on",
-                      "object": "Hermes Bestie",
+                      "object": "Hermes Assistant",
                       "confidence": 0.61,
-                      "reason": "BrainStack was described as Tomi's project and as integrated into Hermes Bestie."
+                      "reason": "BrainStack was described as Tomi's project and as integrated into Hermes Assistant."
                     }
                   ],
                   "continuity_summary": "",
@@ -481,7 +573,7 @@ class TestBrainstackRealWorldFlows:
                 "id": 1,
                 "turn_number": 5,
                 "kind": "turn",
-                "content": "User: A BrainStacken dolgozom, és ezt kötjük rá a Hermes Bestie-re.\nAssistant: Rendben.",
+                "content": "User: A BrainStacken dolgozom, és ezt kötjük rá a Hermes Assistant-re.\nAssistant: Rendben.",
             }
         ]
         extracted = extract_tier2_candidates(rows, llm_caller=_fake_llm, transcript_limit=4)
@@ -1124,17 +1216,17 @@ class TestBrainstackRealWorldFlows:
                         {
                             "subject": "BrainStack",
                             "predicate": "depends_on",
-                            "object": "Hermes Bestie",
+                            "object": "Hermes Assistant",
                             "confidence": 0.61,
-                            "metadata": {"inference_reason": "The project was described as being hooked into Hermes Bestie."},
+                            "metadata": {"inference_reason": "The project was described as being hooked into Hermes Assistant."},
                         }
                     ],
-                    "continuity_summary": "Tomi works on BrainStack and it is being connected to Hermes Bestie.",
+                    "continuity_summary": "Tomi works on BrainStack and it is being connected to Hermes Assistant.",
                     "decisions": [],
                 },
             )
 
-            rows = provider._store.search_graph(query="BrainStack Hermes Bestie", limit=10)
+            rows = provider._store.search_graph(query="BrainStack Hermes Assistant", limit=10)
             explicit_index = next(index for index, row in enumerate(rows) if row["row_type"] == "relation")
             inferred_index = next(index for index, row in enumerate(rows) if row["row_type"] == "inferred_relation")
             assert explicit_index < inferred_index
@@ -1146,7 +1238,7 @@ class TestBrainstackRealWorldFlows:
             assert "### Current Truth" in block
             assert "### Inferred Links" in block
             assert "[relation:explicit] Tomi works_on BrainStack" in block
-            assert "[relation:inferred] BrainStack depends_on Hermes Bestie" in block
+            assert "[relation:inferred] BrainStack depends_on Hermes Assistant" in block
         finally:
             provider.shutdown()
 
@@ -1166,7 +1258,7 @@ class TestBrainstackRealWorldFlows:
                         {
                             "subject": "BrainStack",
                             "predicate": "integrates_with",
-                            "object": "Hermes Bestie",
+                            "object": "Hermes Assistant",
                             "confidence": 0.63,
                             "metadata": {"inference_reason": "Stable project context implied the integration."},
                         }
@@ -1187,7 +1279,7 @@ class TestBrainstackRealWorldFlows:
                         {
                             "subject": "BrainStack",
                             "predicate": "integrates_with",
-                            "object": "Hermes Bestie",
+                            "object": "Hermes Assistant",
                             "confidence": 0.89,
                         }
                     ],
@@ -1197,7 +1289,7 @@ class TestBrainstackRealWorldFlows:
                 },
             )
 
-            graph_rows = provider._store.search_graph(query="BrainStack Hermes Bestie", limit=10)
+            graph_rows = provider._store.search_graph(query="BrainStack Hermes Assistant", limit=10)
             assert any(row["row_type"] == "relation" for row in graph_rows)
             assert not any(row["row_type"] == "inferred_relation" for row in graph_rows)
         finally:
@@ -1448,11 +1540,11 @@ class TestBrainstackRealWorldFlows:
                 "_tier2_extractor": lambda rows, **kwargs: {
                     "profile_items": [
                         {"category": "preference", "content": "Prefer short Hungarian replies", "confidence": 0.93},
-                        {"category": "shared_work", "content": "We are rebuilding Brainstack into Hermes Bestie", "confidence": 0.87},
+                        {"category": "shared_work", "content": "We are rebuilding Brainstack into Hermes Assistant", "confidence": 0.87},
                     ],
                     "states": [],
-                    "relations": [{"subject": "Tomi", "predicate": "works_on", "object": "Brainstack into Hermes Bestie", "confidence": 0.84}],
-                    "continuity_summary": "Tomi prefers short Hungarian replies and current work is the Brainstack plus Hermes Bestie rebuild.",
+                    "relations": [{"subject": "Tomi", "predicate": "works_on", "object": "Brainstack into Hermes Assistant", "confidence": 0.84}],
+                    "continuity_summary": "Tomi prefers short Hungarian replies and current work is the Brainstack plus Hermes Assistant rebuild.",
                     "decisions": ["Brainstack remains the only memory owner."],
                 },
             }
@@ -1460,7 +1552,7 @@ class TestBrainstackRealWorldFlows:
         provider.initialize("session-everyday-focus", hermes_home=str(base))
         try:
             provider.sync_turn(
-                "Kérlek röviden és magyarul válaszolj. Most a Brainstacket rakjuk be a Hermes Bestie-be.",
+                "Kérlek röviden és magyarul válaszolj. Most a Brainstacket rakjuk be a Hermes Assistant-be.",
                 "Rendben.",
                 session_id="session-everyday-focus",
             )
@@ -1478,7 +1570,7 @@ class TestBrainstackRealWorldFlows:
 
             assert "## Brainstack Profile Match" in block
             assert "Prefer short Hungarian replies" in block
-            assert "Brainstack into Hermes Bestie" in block
+            assert "Brainstack into Hermes Assistant" in block
             assert "## Brainstack Continuity Match" in block
         finally:
             provider.shutdown()
@@ -1494,9 +1586,9 @@ class TestBrainstackRealWorldFlows:
                     "states": [],
                     "relations": [
                         {"subject": "Tomi", "predicate": "works_on", "object": "Brainstack", "confidence": 0.9},
-                        {"subject": "Brainstack", "predicate": "integrates_with", "object": "Hermes Bestie", "confidence": 0.86},
+                        {"subject": "Brainstack", "predicate": "integrates_with", "object": "Hermes Assistant", "confidence": 0.86},
                     ],
-                    "continuity_summary": "Tomi is working on Brainstack and Brainstack is being integrated with Hermes Bestie.",
+                    "continuity_summary": "Tomi is working on Brainstack and Brainstack is being integrated with Hermes Assistant.",
                     "decisions": [],
                 },
             }
@@ -1504,7 +1596,7 @@ class TestBrainstackRealWorldFlows:
         provider.initialize("session-everyday-relations", hermes_home=str(base))
         try:
             provider.sync_turn(
-                "Most a Brainstacken dolgozom, és ezt kötjük rá a Hermes Bestie-re.",
+                "Most a Brainstacken dolgozom, és ezt kötjük rá a Hermes Assistant-re.",
                 "Értettem.",
                 session_id="session-everyday-relations",
             )
@@ -1517,7 +1609,7 @@ class TestBrainstackRealWorldFlows:
 
             assert "## Brainstack Graph Truth" in block
             assert "[relation:explicit] Tomi works_on Brainstack" in block
-            assert "[relation:explicit] Brainstack integrates_with Hermes Bestie" in block
+            assert "[relation:explicit] Brainstack integrates_with Hermes Assistant" in block
         finally:
             provider.shutdown()
 

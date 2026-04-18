@@ -336,7 +336,7 @@ def test_patch_dockerignore_excludes_runtime_state(tmp_path: Path):
     assert "runtime/" in content
 
 
-def test_patch_dockerfile_backend_dependencies_installs_kuzu_and_chromadb(tmp_path: Path):
+def test_patch_dockerfile_backend_dependencies_installs_runtime_backend_packages(tmp_path: Path):
     path = tmp_path / "Dockerfile"
     path.write_text(
         "FROM debian:13.4\n"
@@ -352,7 +352,7 @@ def test_patch_dockerfile_backend_dependencies_installs_kuzu_and_chromadb(tmp_pa
 
     assert "dockerfile:install_backend_dependencies" in applied
     assert 'uv pip install --no-cache-dir -e ".[all]"' in content
-    assert "RUN uv pip install --no-cache-dir chromadb kuzu" in content
+    assert "RUN uv pip install --no-cache-dir chromadb kuzu openai" in content
 
 
 def test_patch_docker_entrypoint_adds_runtime_ownership_fix(tmp_path: Path):

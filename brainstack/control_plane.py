@@ -120,6 +120,7 @@ class WorkingMemoryPolicy:
     continuity_recent_limit: int
     transcript_limit: int
     transcript_char_budget: int
+    style_contract_char_budget: int
     graph_limit: int
     corpus_limit: int
     corpus_char_budget: int
@@ -165,6 +166,7 @@ def _initial_policy(
         continuity_recent_limit=min(continuity_recent_limit, 1),
         transcript_limit=min(transcript_match_limit, 2),
         transcript_char_budget=min(transcript_char_budget, 520),
+        style_contract_char_budget=0,
         graph_limit=min(graph_limit, 2),
         corpus_limit=min(corpus_limit, 2),
         corpus_char_budget=min(corpus_char_budget, 360),
@@ -294,6 +296,8 @@ def build_working_memory_packet(
         policy.show_graph_history = True
     elif routing.get("applied_mode") == "aggregate":
         policy.transcript_char_budget = max(policy.transcript_char_budget, 960)
+    elif routing.get("applied_mode") == "style_contract":
+        policy.style_contract_char_budget = max(policy.style_contract_char_budget, 2400)
 
     support_channels = sum(
         1
@@ -344,8 +348,13 @@ def build_working_memory_packet(
         policy.tool_avoidance_allowed = True
         policy.tool_avoidance_reason = "memory support is sufficient for a first response"
 
+    policy_payload = asdict(policy)
+    compiled_behavior_policy = store.get_compiled_behavior_policy(principal_scope_key=principal_scope_key)
+    if compiled_behavior_policy is not None:
+        policy_payload["compiled_behavior_policy"] = dict(compiled_behavior_policy.get("policy") or {})
+
     block = render_working_memory_block(
-        policy=asdict(policy),
+        policy=policy_payload,
         route_mode=str(routing.get("applied_mode") or "fact"),
         profile_items=profile_items,
         matched=matched,
@@ -380,7 +389,7 @@ def build_working_memory_packet(
         store.record_corpus_retrievals(rows=corpus_rows)
     return {
         "analysis": asdict(analysis),
-        "policy": asdict(policy),
+        "policy": policy_payload,
         "channels": channels,
         "profile_items": profile_items,
         "matched": matched,

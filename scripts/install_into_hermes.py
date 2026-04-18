@@ -27,6 +27,7 @@ SOURCE_HOST_PAYLOAD = REPO_ROOT / "host_payload"
 BACKEND_DEPENDENCIES = {
     "kuzu": "kuzu",
     "chromadb": "chromadb",
+    "openai": "openai",
 }
 
 

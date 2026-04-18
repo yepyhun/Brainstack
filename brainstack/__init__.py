@@ -11,6 +11,7 @@ Current provider slice:
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 import threading
@@ -29,6 +30,7 @@ from .retrieval import (
     build_compression_hint,
     build_system_prompt_block,
 )
+from .style_contract import build_style_contract_from_text
 from .tier1_extractor import build_profile_stable_key
 from .tier2_extractor import extract_tier2_candidates
 
@@ -127,6 +129,8 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._last_prefetch_routing: Dict[str, Any] | None = None
         self._last_prefetch_channels: list[Dict[str, Any]] | None = None
         self._last_prefetch_debug: Dict[str, Any] | None = None
+        self._last_behavior_policy_trace: Dict[str, Any] | None = None
+        self._last_operating_context_trace: Dict[str, Any] | None = None
         self._last_tier2_schedule: Dict[str, Any] | None = None
         self._last_tier2_batch_result: Dict[str, Any] | None = None
         self._tier2_batch_history: List[Dict[str, Any]] = []
@@ -201,6 +205,8 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._last_prefetch_routing = None
         self._last_prefetch_channels = []
         self._last_prefetch_debug = None
+        self._last_behavior_policy_trace = None
+        self._last_operating_context_trace = None
         self._last_tier2_schedule = None
         self._last_tier2_batch_result = None
         self._tier2_batch_history = []
@@ -251,11 +257,37 @@ class BrainstackMemoryProvider(MemoryProvider):
     def system_prompt_block(self) -> str:
         if not self._store:
             return ""
-        return build_system_prompt_block(
+        block = build_system_prompt_block(
             self._store,
             profile_limit=self._profile_prompt_limit,
             principal_scope_key=self._principal_scope_key,
+            session_id=self._session_id,
         )
+        snapshot = self._store.get_behavior_policy_snapshot(principal_scope_key=self._principal_scope_key)
+        trace = dict(self._last_behavior_policy_trace or {})
+        contract_title = str(snapshot.get("compiled_policy", {}).get("title") or "")
+        trace["system_prompt_block"] = {
+            "surface": "system_prompt_block",
+            "injected": bool(contract_title and contract_title in block),
+            "section_present": "# Brainstack Active Communication Contract" in block,
+            "title_present": bool(contract_title and contract_title in block),
+            "snapshot": snapshot,
+        }
+        self._last_behavior_policy_trace = trace
+        operating_snapshot = self._store.get_operating_context_snapshot(
+            principal_scope_key=self._principal_scope_key,
+            session_id=self._session_id,
+        )
+        operating_trace = dict(self._last_operating_context_trace or {})
+        operating_trace["system_prompt_block"] = {
+            "surface": "system_prompt_block",
+            "section_present": "# Brainstack Operating Context" in block,
+            "active_work_present": bool(str(operating_snapshot.get("active_work_summary") or "").strip()),
+            "open_decisions_present": bool(list(operating_snapshot.get("open_decisions") or [])),
+            "snapshot": operating_snapshot,
+        }
+        self._last_operating_context_trace = operating_trace
+        return block
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if not self._store:
@@ -297,6 +329,20 @@ class BrainstackMemoryProvider(MemoryProvider):
             }
         else:
             self._last_prefetch_debug = None
+        snapshot = self._store.get_behavior_policy_snapshot(principal_scope_key=self._principal_scope_key)
+        trace = dict(self._last_behavior_policy_trace or {})
+        compiled_policy = packet.get("policy", {}).get("compiled_behavior_policy")
+        projection_text = ""
+        if isinstance(compiled_policy, dict):
+            projection_text = str(compiled_policy.get("projection_text") or "").strip()
+        trace["prefetch"] = {
+            "surface": "prefetch",
+            "route_mode": str(packet.get("routing", {}).get("applied_mode") or "fact"),
+            "compiled_policy_present_in_packet": bool(isinstance(compiled_policy, dict) and projection_text),
+            "projection_present_in_block": bool(projection_text and projection_text in packet["block"]),
+            "snapshot": snapshot,
+        }
+        self._last_behavior_policy_trace = trace
         return packet["block"]
 
     def sync_turn(
@@ -491,6 +537,23 @@ class BrainstackMemoryProvider(MemoryProvider):
         if not self._store or not content or action == "remove":
             return
         if target == "user":
+            scoped_metadata = self._scoped_metadata({"target": target})
+            style_contract = build_style_contract_from_text(
+                raw_text=content,
+                source=f"builtin_{action}:style_contract",
+                confidence=0.9,
+                metadata=scoped_metadata,
+            )
+            if style_contract is not None:
+                self._store.upsert_profile_item(
+                    stable_key=style_contract["slot"],
+                    category=style_contract["category"],
+                    content=style_contract["content"],
+                    source=style_contract["source"],
+                    confidence=float(style_contract["confidence"]),
+                    metadata=style_contract["metadata"],
+                )
+                return
             category = "preference"
             stable_key = build_profile_stable_key(category, content)
             self._store.upsert_profile_item(
@@ -499,7 +562,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                 content=content,
                 source=f"builtin_{action}",
                 confidence=0.88,
-                metadata=self._scoped_metadata({"target": target}),
+                metadata=scoped_metadata,
             )
             return
 
@@ -510,6 +573,39 @@ class BrainstackMemoryProvider(MemoryProvider):
             content=content,
             source=f"on_memory_write:{action}:{target}",
             metadata=self._scoped_metadata({"target": target}),
+        )
+
+    def behavior_policy_snapshot(self) -> Dict[str, Any] | None:
+        if not self._store:
+            return None
+        return self._store.get_behavior_policy_snapshot(principal_scope_key=self._principal_scope_key)
+
+    def behavior_policy_trace(self) -> Dict[str, Any] | None:
+        if self._last_behavior_policy_trace is None:
+            return None
+        return json.loads(json.dumps(self._last_behavior_policy_trace, ensure_ascii=True))
+
+    def operating_context_snapshot(self) -> Dict[str, Any] | None:
+        if not self._store:
+            return None
+        return self._store.get_operating_context_snapshot(
+            principal_scope_key=self._principal_scope_key,
+            session_id=self._session_id,
+        )
+
+    def operating_context_trace(self) -> Dict[str, Any] | None:
+        if self._last_operating_context_trace is None:
+            return None
+        return json.loads(json.dumps(self._last_operating_context_trace, ensure_ascii=True))
+
+    def apply_behavior_policy_correction(self, *, rule_id: str, replacement_text: str) -> Dict[str, Any] | None:
+        if not self._store:
+            return None
+        return self._store.apply_behavior_policy_correction(
+            principal_scope_key=self._principal_scope_key,
+            rule_id=rule_id,
+            replacement_text=replacement_text,
+            source="provider_behavior_policy_correction",
         )
 
     def shutdown(self) -> None:
