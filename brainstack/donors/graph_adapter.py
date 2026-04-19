@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Sequence
 
-from ..graph import ingest_graph_evidence
+from ..graph import ingest_graph_evidence, ingest_graph_evidence_with_receipt
 from ..graph_evidence import GraphEvidenceItem, attach_graph_source_context
 
 
@@ -15,12 +15,31 @@ def ingest_turn_graph_candidates(
     source: str,
     metadata: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
+    return ingest_turn_graph_candidates_with_receipt(
+        store,
+        evidence_items=evidence_items,
+        session_id=session_id,
+        turn_number=turn_number,
+        source=source,
+        metadata=metadata,
+    )["results"]
+
+
+def ingest_turn_graph_candidates_with_receipt(
+    store,
+    *,
+    evidence_items: Sequence[GraphEvidenceItem | Mapping[str, Any]],
+    session_id: str,
+    turn_number: int,
+    source: str,
+    metadata: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     bound_items = attach_graph_source_context(
         evidence_items,
         session_id=session_id,
         turn_number=turn_number,
     )
-    return ingest_graph_evidence(
+    return ingest_graph_evidence_with_receipt(
         store,
         evidence_items=bound_items,
         source=source,
@@ -36,11 +55,28 @@ def ingest_session_graph_candidates(
     source: str,
     metadata: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
+    return ingest_session_graph_candidates_with_receipt(
+        store,
+        evidence_items=evidence_items,
+        session_id=session_id,
+        source=source,
+        metadata=metadata,
+    )["results"]
+
+
+def ingest_session_graph_candidates_with_receipt(
+    store,
+    *,
+    evidence_items: Sequence[GraphEvidenceItem | Mapping[str, Any]],
+    session_id: str,
+    source: str,
+    metadata: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     bound_items = attach_graph_source_context(
         evidence_items,
         session_id=session_id,
     )
-    return ingest_graph_evidence(
+    return ingest_graph_evidence_with_receipt(
         store,
         evidence_items=bound_items,
         source=source,

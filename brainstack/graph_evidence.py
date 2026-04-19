@@ -72,6 +72,16 @@ class GraphEvidenceItem:
         return payload
 
 
+class GraphEvidenceIngressError(TypeError):
+    def __init__(self, receipt: Mapping[str, Any]):
+        self.receipt = dict(receipt)
+        summary = (
+            f"graph evidence ingress rejected {int(self.receipt.get('rejected_count') or 0)} "
+            f"item(s) at boundary {GRAPH_EVIDENCE_BOUNDARY_VERSION}"
+        )
+        super().__init__(summary)
+
+
 def _clean_value(value: str) -> str:
     return " ".join(value.strip().strip(" .").split())
 
@@ -170,21 +180,83 @@ def attach_graph_source_context(
     turn_number: int | None = None,
     source_document_id: str = "",
 ) -> list[GraphEvidenceItem]:
+    prepared = prepare_graph_evidence_ingress(
+        evidence_items,
+        session_id=session_id,
+        turn_number=turn_number,
+        source_document_id=source_document_id,
+        strict=True,
+    )
+    return list(prepared["items"])
+
+
+def _graph_ingress_item_summary(item: GraphEvidenceItem) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "kind": item.kind,
+        "subject": item.subject,
+        "language": item.language,
+        "provenance_class": item.provenance_class,
+        "source_turn_id": item.source_turn_id,
+        "source_document_id": item.source_document_id,
+    }
+    if item.kind == "relation":
+        summary["predicate"] = item.predicate
+        summary["object_value"] = item.object_value
+    else:
+        summary["attribute"] = item.attribute
+        summary["value_text"] = item.value_text
+        summary["supersede"] = bool(item.supersede)
+    return summary
+
+
+def prepare_graph_evidence_ingress(
+    evidence_items: Sequence[GraphEvidenceItem | Mapping[str, Any]],
+    *,
+    session_id: str = "",
+    turn_number: int | None = None,
+    source_document_id: str = "",
+    strict: bool = True,
+) -> dict[str, Any]:
     derived_turn_id = ""
     if session_id and turn_number is not None:
         derived_turn_id = f"{session_id}:{int(turn_number)}"
     elif session_id:
         derived_turn_id = session_id
     derived_document_id = str(source_document_id or "").strip()
-    bound: list[GraphEvidenceItem] = []
-    for raw in evidence_items:
-        item = coerce_graph_evidence_item(raw)
-        if derived_turn_id and not item.source_turn_id:
-            item = replace(item, source_turn_id=derived_turn_id)
-        if derived_document_id and not item.source_document_id:
-            item = replace(item, source_document_id=derived_document_id)
-        bound.append(item)
-    return bound
+    accepted: list[GraphEvidenceItem] = []
+    rejected: list[dict[str, Any]] = []
+    for index, raw in enumerate(evidence_items):
+        try:
+            item = coerce_graph_evidence_item(raw)
+            if derived_turn_id and not item.source_turn_id:
+                item = replace(item, source_turn_id=derived_turn_id)
+            if derived_document_id and not item.source_document_id:
+                item = replace(item, source_document_id=derived_document_id)
+            accepted.append(item)
+        except (TypeError, ValueError) as exc:
+            rejected.append(
+                {
+                    "index": index,
+                    "input_type": type(raw).__name__,
+                    "error": str(exc),
+                }
+            )
+
+    receipt = {
+        "graph_evidence_boundary": GRAPH_EVIDENCE_BOUNDARY_VERSION,
+        "status": "accepted" if not rejected else ("rejected" if strict else "partial"),
+        "strict": bool(strict),
+        "accepted_count": len(accepted),
+        "rejected_count": len(rejected),
+        "accepted_items": [_graph_ingress_item_summary(item) for item in accepted],
+        "rejected_items": rejected,
+        "session_id": str(session_id or "").strip(),
+        "turn_number": int(turn_number) if turn_number is not None else None,
+        "source_document_id": derived_document_id,
+    }
+    if rejected and strict:
+        raise GraphEvidenceIngressError(receipt)
+    return {"items": accepted, "receipt": receipt}
 
 
 def extract_graph_evidence_from_text(
@@ -209,7 +281,6 @@ def extract_graph_evidence_from_text(
             start_char=int(sentence_match.start()),
             end_char=int(sentence_match.end()),
         )
-
         relation_match = re.search(
             r"(?P<subject>[A-Z][A-Za-z0-9_ /-]{1,60}?)\s+works on\s+(?P<object>[A-Z][A-Za-z0-9_ /-]{1,80})",
             cleaned,

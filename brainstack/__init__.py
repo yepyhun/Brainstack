@@ -163,6 +163,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._last_prefetch_debug: Dict[str, Any] | None = None
         self._last_behavior_policy_trace: Dict[str, Any] | None = None
         self._last_operating_context_trace: Dict[str, Any] | None = None
+        self._last_graph_ingress_trace: Dict[str, Any] | None = None
         self._last_memory_operation_trace: Dict[str, Any] | None = None
         self._last_write_receipt: Dict[str, Any] | None = None
         self._last_tier2_schedule: Dict[str, Any] | None = None
@@ -247,6 +248,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._last_prefetch_debug = None
         self._last_behavior_policy_trace = None
         self._last_operating_context_trace = None
+        self._last_graph_ingress_trace = None
         self._last_memory_operation_trace = None
         self._last_write_receipt = None
         self._last_tier2_schedule = None
@@ -1009,14 +1011,29 @@ class BrainstackMemoryProvider(MemoryProvider):
             )
 
         if plan.graph_evidence_items:
-            graph_adapter.ingest_turn_graph_candidates(
-                self._store,
-                evidence_items=plan.graph_evidence_items,
-                session_id=sid,
-                turn_number=self._turn_counter,
-                source="sync_turn:user",
-                metadata=self._scoped_metadata(),
-            )
+            try:
+                graph_result = graph_adapter.ingest_turn_graph_candidates_with_receipt(
+                    self._store,
+                    evidence_items=plan.graph_evidence_items,
+                    session_id=sid,
+                    turn_number=self._turn_counter,
+                    source="sync_turn:user",
+                    metadata=self._scoped_metadata(),
+                )
+            except Exception as exc:
+                receipt = getattr(exc, "receipt", None)
+                self._last_graph_ingress_trace = {
+                    "surface": "sync_turn_graph_ingress",
+                    "status": "failed",
+                    "error": str(exc),
+                    "receipt": dict(receipt) if isinstance(receipt, dict) else None,
+                }
+                raise
+            self._last_graph_ingress_trace = {
+                "surface": "sync_turn_graph_ingress",
+                "status": "committed",
+                "receipt": dict(graph_result.get("receipt") or {}),
+            }
         if plan.tier2_schedule.should_queue:
             self._queue_tier2_background(session_id=sid, turn_number=self._turn_counter, trigger_reason=plan.tier2_schedule.reason)
 
@@ -1147,13 +1164,28 @@ class BrainstackMemoryProvider(MemoryProvider):
                     ",".join(plan.durable_admission.matched_rules) or "-",
                 )
             if plan.graph_evidence_items:
-                graph_adapter.ingest_session_graph_candidates(
-                    self._store,
-                    evidence_items=plan.graph_evidence_items,
-                    session_id=self._session_id,
-                    source="session_end_scan:user",
-                    metadata=self._scoped_metadata(),
-                )
+                try:
+                    graph_result = graph_adapter.ingest_session_graph_candidates_with_receipt(
+                        self._store,
+                        evidence_items=plan.graph_evidence_items,
+                        session_id=self._session_id,
+                        source="session_end_scan:user",
+                        metadata=self._scoped_metadata(),
+                    )
+                except Exception as exc:
+                    receipt = getattr(exc, "receipt", None)
+                    self._last_graph_ingress_trace = {
+                        "surface": "session_end_graph_ingress",
+                        "status": "failed",
+                        "error": str(exc),
+                        "receipt": dict(receipt) if isinstance(receipt, dict) else None,
+                    }
+                    raise
+                self._last_graph_ingress_trace = {
+                    "surface": "session_end_graph_ingress",
+                    "status": "committed",
+                    "receipt": dict(graph_result.get("receipt") or {}),
+                }
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
         if not self._store or not content or action == "remove":
@@ -1230,6 +1262,11 @@ class BrainstackMemoryProvider(MemoryProvider):
         if self._last_memory_operation_trace is None:
             return None
         return json.loads(json.dumps(self._last_memory_operation_trace, ensure_ascii=True))
+
+    def graph_ingress_trace(self) -> Dict[str, Any] | None:
+        if self._last_graph_ingress_trace is None:
+            return None
+        return json.loads(json.dumps(self._last_graph_ingress_trace, ensure_ascii=True))
 
     def apply_behavior_policy_correction(self, *, rule_id: str, replacement_text: str) -> Dict[str, Any] | None:
         if not self._store:
