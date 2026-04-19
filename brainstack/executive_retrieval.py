@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping
@@ -313,6 +314,10 @@ def _candidate_priority_bonus(candidate: EvidenceCandidate) -> float:
     semantic_score = float(row.get("semantic_score") or 0.0)
     if semantic_score > 0.0:
         bonus += min(0.08, semantic_score * 0.08)
+
+    query_token_overlap = int(row.get("_brainstack_query_token_overlap") or 0)
+    if query_token_overlap > 0:
+        bonus += min(0.09, query_token_overlap * 0.03)
 
     if bool(row.get("same_session")):
         bonus += 0.03
@@ -1200,10 +1205,22 @@ def _collect_query_rows(
 
 def _annotate_query_flags(rows: Iterable[Dict[str, Any]], *, query: str) -> List[Dict[str, Any]]:
     query_has_digits = any(char.isdigit() for char in str(query or ""))
+    query_tokens = {
+        token
+        for token in re.findall(r"[^\W_]+", _normalize_text(query).casefold(), flags=re.UNICODE)
+        if len(token) >= 3
+    }
     annotated: List[Dict[str, Any]] = []
     for row in rows:
         payload = dict(row)
         payload["_brainstack_query_has_digits"] = query_has_digits
+        content = _normalize_text(payload.get("content") or payload.get("content_excerpt"))
+        row_tokens = {
+            token
+            for token in re.findall(r"[^\W_]+", content.casefold(), flags=re.UNICODE)
+            if len(token) >= 3
+        }
+        payload["_brainstack_query_token_overlap"] = len(query_tokens & row_tokens)
         annotated.append(payload)
     return annotated
 
@@ -1731,12 +1748,10 @@ def retrieve_executive_context(
     )
     temporal_continuity_rows = _annotate_query_flags(temporal_continuity_rows, query=query)
     recent_rows = _annotate_query_flags(recent_rows, query=query)
+    temporal_support_requested = route.applied_mode == ROUTE_TEMPORAL or route.requested_mode == ROUTE_TEMPORAL
+
     temporal_graph_rows = []
-    if graph_limit > 0 and (
-        route.applied_mode == ROUTE_TEMPORAL
-        or bool(analysis.get("temporal"))
-        or bool(analysis.get("preference"))
-    ):
+    if graph_limit > 0 and temporal_support_requested:
         temporal_graph_rows = _temporal_graph_rows(
             _collect_query_rows(
                 shelf="graph",
@@ -1751,9 +1766,7 @@ def retrieve_executive_context(
         )
 
     temporal_transcript_rows = []
-    if transcript_limit > 0 and (
-        route.applied_mode == ROUTE_TEMPORAL or bool(analysis.get("temporal"))
-    ):
+    if transcript_limit > 0 and temporal_support_requested:
         temporal_support_rows = _same_principal_session_support_rows(
             store,
             _dedupe_rows(_round_robin(temporal_continuity_rows, recent_rows)),

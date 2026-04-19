@@ -9,7 +9,7 @@ from .executive_retrieval import retrieve_executive_context
 from .operating_truth import parse_operating_lookup_query
 from .profile_contract import resolve_direct_identity_profile_slots
 from .retrieval import render_working_memory_block
-from .task_memory import TASK_FOLLOWUP_DATE_CUES, TASK_LOOKUP_CUES
+from .task_memory import parse_task_lookup_query
 
 HIGH_STAKES_TERMS = (
     "safe",
@@ -30,68 +30,6 @@ HIGH_STAKES_TERMS = (
     "drug",
 )
 
-EXPLANATION_TERMS = (
-    "why",
-    "how",
-    "explain",
-    "connection",
-    "connect",
-    "related",
-    "relationship",
-    "compare",
-    "összefügg",
-    "miért",
-    "hogyan",
-    "kapcsol",
-)
-
-TEMPORAL_TERMS = (
-    "now",
-    "current",
-    "currently",
-    "before",
-    "after",
-    "previous",
-    "changed",
-    "when",
-    "date",
-    "days",
-    "months",
-    "years",
-    "most recent",
-    "latest",
-    "most current",
-    "előző",
-    "most",
-    "jelenlegi",
-)
-
-PREFERENCE_TERMS = (
-    "prefer",
-    "preference",
-    "like",
-    "dislike",
-    "want",
-    "style",
-    "usually",
-    "mindig",
-    "inkább",
-    "szeretem",
-)
-CONTINUATION_TERMS = (
-    "continue",
-    "pick up where we left off",
-    "without repeating",
-    "continue that plan",
-    "resume",
-    "folytasd",
-    "folytatni",
-    "onnan folytassuk",
-    "ismétlés nélkül",
-    "ismételném",
-)
-
-
 def _contains_any(query: str, terms: tuple[str, ...]) -> bool:
     lowered = query.lower()
     return any(term in lowered for term in terms)
@@ -100,10 +38,6 @@ def _contains_any(query: str, terms: tuple[str, ...]) -> bool:
 @dataclass
 class QueryAnalysis:
     high_stakes: bool
-    explanatory: bool
-    temporal: bool
-    preference: bool
-    continuation: bool
     operating_like: bool
     task_like: bool
     profile_slot_targets: tuple[str, ...]
@@ -138,14 +72,11 @@ class WorkingMemoryPolicy:
 def analyze_query(query: str) -> QueryAnalysis:
     profile_slot_targets = resolve_direct_identity_profile_slots(query)
     operating_lookup = parse_operating_lookup_query(query)
+    task_lookup = parse_task_lookup_query(query, timezone_name="UTC")
     return QueryAnalysis(
         high_stakes=_contains_any(query, HIGH_STAKES_TERMS),
-        explanatory=_contains_any(query, EXPLANATION_TERMS),
-        temporal=_contains_any(query, TEMPORAL_TERMS),
-        preference=_contains_any(query, PREFERENCE_TERMS),
-        continuation=_contains_any(query, CONTINUATION_TERMS),
         operating_like=isinstance(operating_lookup, dict),
-        task_like=_contains_any(query, TASK_LOOKUP_CUES + TASK_FOLLOWUP_DATE_CUES),
+        task_like=isinstance(task_lookup, dict),
         profile_slot_targets=profile_slot_targets,
     )
 
@@ -188,21 +119,6 @@ def _initial_policy(
         suppress_contract_if_in_system_substrate=True,
     )
 
-    if analysis.preference and not analysis.high_stakes:
-        policy.mode = "balanced"
-        policy.collapse_mode = "balanced"
-        policy.profile_limit = max(policy.profile_limit, min(profile_match_limit, 4))
-        policy.continuity_match_limit = max(1, min(continuity_match_limit, 2))
-        policy.continuity_recent_limit = max(1, min(continuity_recent_limit, 2))
-        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
-        policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 560))
-        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 2))
-        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 2))
-        policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 2))
-        policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 320))
-        policy.show_authoritative_contract = False
-        policy.suppress_contract_if_in_system_substrate = False
-
     if analysis.profile_slot_targets and not analysis.high_stakes:
         policy.mode = "balanced"
         policy.collapse_mode = "balanced"
@@ -217,27 +133,6 @@ def _initial_policy(
         policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 260))
         policy.show_authoritative_contract = False
 
-    if analysis.explanatory:
-        policy.mode = "balanced"
-        policy.show_graph_history = True
-        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 3))
-        policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 3))
-        policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 650))
-        policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
-        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
-        policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 640))
-        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 3))
-
-    if analysis.continuation and not analysis.high_stakes:
-        policy.mode = "balanced"
-        policy.continuation_emphasis = True
-        policy.continuity_match_limit = max(policy.continuity_match_limit, min(continuity_match_limit, 2))
-        policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
-        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
-        policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 640))
-        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 3))
-        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 3))
-
     if analysis.operating_like and not analysis.high_stakes:
         policy.mode = "balanced"
         policy.collapse_mode = "balanced"
@@ -249,16 +144,6 @@ def _initial_policy(
         policy.graph_limit = max(policy.graph_limit, min(graph_limit, 2))
         policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 2))
         policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 360))
-
-    if analysis.temporal:
-        policy.mode = "balanced"
-        policy.show_graph_history = True
-        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 4))
-        policy.continuity_match_limit = max(policy.continuity_match_limit, min(continuity_match_limit, 3))
-        policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
-        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
-        policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 640))
-        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 2))
 
     if analysis.high_stakes:
         policy.mode = "deep"
@@ -313,6 +198,7 @@ def build_working_memory_packet(
     system_substrate: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     analysis = analyze_query(query)
+    compiled_behavior_policy = store.get_compiled_behavior_policy(principal_scope_key=principal_scope_key)
     policy = _initial_policy(
         analysis=analysis,
         profile_match_limit=profile_match_limit,
@@ -351,8 +237,20 @@ def build_working_memory_packet(
     if routing.get("applied_mode") == "temporal":
         policy.transcript_char_budget = max(policy.transcript_char_budget, 720)
         policy.show_graph_history = True
+        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 4))
+        policy.continuity_match_limit = max(policy.continuity_match_limit, min(continuity_match_limit, 3))
+        policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
+        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
+        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 2))
     elif routing.get("applied_mode") == "aggregate":
         policy.transcript_char_budget = max(policy.transcript_char_budget, 960)
+        policy.show_graph_history = True
+        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 3))
+        policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 3))
+        policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 650))
+        policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
+        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
+        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 3))
     elif routing.get("applied_mode") == "style_contract":
         policy.style_contract_char_budget = max(policy.style_contract_char_budget, 2400)
         policy.show_authoritative_contract = True
@@ -363,6 +261,50 @@ def build_working_memory_packet(
         if channel.get("status") == "active" and int(channel.get("candidate_count") or 0) > 0
     )
     conflict_present = any(row["row_type"] == "conflict" for row in graph_rows)
+    profile_support_present = bool(
+        profile_items
+        and (
+            analysis.profile_slot_targets
+            or routing.get("applied_mode") == "style_contract"
+            or any(str(row.get("category") or "").strip() == "preference" for row in profile_items)
+        )
+    )
+    thin_support_without_contract = not any(
+        (
+            profile_items,
+            matched,
+            recent,
+            transcript_rows,
+            task_rows,
+            operating_rows,
+            graph_rows,
+            corpus_rows,
+        )
+    )
+
+    if profile_support_present and not analysis.high_stakes:
+        policy.mode = "balanced"
+        policy.collapse_mode = "balanced"
+        policy.profile_limit = max(policy.profile_limit, min(profile_match_limit, 4))
+        policy.continuity_match_limit = max(1, min(continuity_match_limit, 2))
+        policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
+        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
+        policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 560))
+        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 2))
+        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 2))
+        policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 2))
+        policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 320))
+        if routing.get("applied_mode") != "style_contract":
+            policy.show_authoritative_contract = False
+            policy.suppress_contract_if_in_system_substrate = False
+
+    if (
+        compiled_behavior_policy is not None
+        and thin_support_without_contract
+        and not analysis.high_stakes
+        and routing.get("applied_mode") != "style_contract"
+    ):
+        policy.suppress_contract_if_in_system_substrate = False
 
     if conflict_present:
         policy.mode = "deep"
@@ -374,13 +316,13 @@ def build_working_memory_packet(
 
     if analysis.operating_like and operating_rows and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "high"
-    elif analysis.preference and (profile_items or recent) and not analysis.high_stakes and not conflict_present:
+    elif profile_support_present and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "high"
     elif routing.get("applied_mode") == "style_contract" and profile_items and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "high"
     elif analysis.profile_slot_targets and profile_items and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "high"
-    elif analysis.temporal and graph_rows and not analysis.high_stakes and not conflict_present:
+    elif routing.get("applied_mode") == "temporal" and graph_rows and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "high" if support_channels >= 2 else "medium"
     elif transcript_rows and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "medium"
@@ -409,7 +351,6 @@ def build_working_memory_packet(
         policy.tool_avoidance_reason = "memory support is sufficient for a first response"
 
     policy_payload = asdict(policy)
-    compiled_behavior_policy = store.get_compiled_behavior_policy(principal_scope_key=principal_scope_key)
     if compiled_behavior_policy is not None:
         policy_payload["compiled_behavior_policy"] = dict(compiled_behavior_policy.get("policy") or {})
         reinforcement = build_behavior_policy_reinforcement(
