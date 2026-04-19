@@ -32,6 +32,10 @@ def _make_provider(tmp_path, session_id: str, **init_kwargs):
     return provider
 
 
+def _sync_user_turn(provider: BrainstackMemoryProvider, content: str, *, session_id: str) -> None:
+    provider.sync_turn(content, "", session_id=session_id)
+
+
 def _operating_truth_text() -> str:
     return (
         "Active work:\n"
@@ -57,7 +61,7 @@ def test_operating_truth_commits_into_first_class_storage_and_renders_in_operati
         agent_workspace="workspace-a",
     )
     try:
-        block = provider.prefetch(_operating_truth_text(), session_id="operating-truth-commit")
+        _sync_user_turn(provider, _operating_truth_text(), session_id="operating-truth-commit")
         store = provider._store
         assert store is not None
 
@@ -73,7 +77,6 @@ def test_operating_truth_commits_into_first_class_storage_and_renders_in_operati
             "next_step",
             "external_owner_pointer",
         }.issubset(record_types)
-        assert "## Brainstack Memory Operation Receipt" in block
         assert "# Brainstack Operating Context" in prompt_block
         assert "Phase 35 operating truth rollout" in prompt_block
         assert "Current commitments:" in prompt_block
@@ -132,7 +135,7 @@ def test_operating_context_prefers_explicit_operating_truth_over_continuity_fall
         )
         store.conn.commit()
 
-        provider.prefetch(_operating_truth_text(), session_id="operating-truth-precedence")
+        _sync_user_turn(provider, _operating_truth_text(), session_id="operating-truth-precedence")
         snapshot = store.get_operating_context_snapshot(
             principal_scope_key=provider._principal_scope_key,
             session_id="operating-truth-precedence",
@@ -157,7 +160,7 @@ def test_owner_first_operating_retrieval_surfaces_next_step_for_operating_query(
         agent_workspace="workspace-a",
     )
     try:
-        provider.prefetch(_operating_truth_text(), session_id="operating-truth-query")
+        _sync_user_turn(provider, _operating_truth_text(), session_id="operating-truth-query")
         packet = build_working_memory_packet(
             provider._store,
             query="Mi a következő lépés most?",
@@ -194,7 +197,7 @@ def test_unrelated_query_does_not_overinject_operating_truth(tmp_path):
         agent_workspace="workspace-a",
     )
     try:
-        provider.prefetch(_operating_truth_text(), session_id="operating-truth-token-discipline")
+        _sync_user_turn(provider, _operating_truth_text(), session_id="operating-truth-token-discipline")
         packet = build_working_memory_packet(
             provider._store,
             query="What is my name?",

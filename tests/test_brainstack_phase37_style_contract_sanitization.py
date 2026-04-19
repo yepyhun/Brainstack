@@ -41,8 +41,13 @@ def _make_provider(tmp_path: Path, session_id: str) -> BrainstackMemoryProvider:
     return provider
 
 
+def _sync_user_turn(provider: BrainstackMemoryProvider, content: str, *, session_id: str) -> None:
+    provider.sync_turn(content, "", session_id=session_id)
+
+
 def _seed_style_contract(provider: BrainstackMemoryProvider) -> None:
-    provider.prefetch(
+    _sync_user_turn(
+        provider,
         (
             "User style contract\n\n"
             "rules:\n"
@@ -58,9 +63,11 @@ def _seed_style_contract(provider: BrainstackMemoryProvider) -> None:
 def test_conversational_fragment_cannot_pollute_multiline_contract_title(tmp_path: Path) -> None:
     provider = _make_provider(tmp_path, "phase37-pollution")
     try:
-        provider.prefetch("ird le pontosan mit kapsz meg mast ne", session_id="phase37-pollution")
-        provider.prefetch(
+        _sync_user_turn(provider, "ird le pontosan mit kapsz meg mast ne", session_id="phase37-pollution")
+        _sync_user_turn(
+            provider,
             (
+                "User style contract\n\n"
                 "content:\n"
                 "1. konkret tenyeket irj.\n"
                 "2. emoji tilos.\n\n"
@@ -90,9 +97,10 @@ def test_patch_lane_ignores_prior_chat_fragments(tmp_path: Path) -> None:
     provider = _make_provider(tmp_path, "phase37-patch")
     try:
         _seed_style_contract(provider)
-        provider.prefetch("mondd el pontosan mit latsz", session_id="phase37-patch")
-        provider.prefetch(
-            "Capitalize Én, Te, and Ő every time you use them.",
+        _sync_user_turn(provider, "mondd el pontosan mit latsz", session_id="phase37-patch")
+        _sync_user_turn(
+            provider,
+            "Please update my style contract: Capitalize Én, Te, and Ő every time you use them.",
             session_id="phase37-patch",
         )
 
@@ -122,8 +130,10 @@ def test_full_contract_commit_marks_replace_after_existing_contract(tmp_path: Pa
         first = store.get_behavior_contract(principal_scope_key=provider._principal_scope_key)
         assert first is not None
 
-        provider.prefetch(
+        _sync_user_turn(
+            provider,
             (
+                "User style contract\n\n"
                 "content:\n"
                 "1. konkret tenyeket irj.\n"
                 "2. emoji tilos.\n\n"

@@ -438,6 +438,7 @@ def compile_behavior_policy(
     metadata: Mapping[str, Any] | None = None,
     source_storage_key: str = "",
     source_updated_at: str = "",
+    source_revision_number: int = 0,
     char_budget: int = DEFAULT_BEHAVIOR_POLICY_CHAR_BUDGET,
 ) -> Dict[str, Any] | None:
     normalized_content = str(raw_content or "").strip()
@@ -550,6 +551,7 @@ def compile_behavior_policy(
         "source_storage_key": str(source_storage_key or "").strip(),
         "source_contract_hash": source_contract_hash,
         "source_contract_updated_at": str(source_updated_at or "").strip(),
+        "source_revision_number": int(source_revision_number or 0),
         "projection_text": projection_text,
         "projection_char_budget": projection_budget,
         "projection_char_count": len(projection_text),
@@ -653,6 +655,8 @@ def build_behavior_policy_snapshot(
             "title": raw_title or STYLE_CONTRACT_DEFAULT_TITLE,
             "storage_key": str(raw_row.get("storage_key") or ""),
             "stable_key": str(raw_row.get("stable_key") or ""),
+            "revision_number": int(raw_row.get("revision_number") or 0),
+            "status": str(raw_row.get("status") or ""),
             "updated_at": str(raw_row.get("updated_at") or ""),
             "source": str(raw_row.get("source") or ""),
             "source_rank": style_contract_source_rank(raw_row.get("source")),
@@ -674,6 +678,7 @@ def build_behavior_policy_snapshot(
             "updated_at": str(compiled_record.get("updated_at") or ""),
             "source_storage_key": str(compiled_policy.get("source_storage_key") or compiled_record.get("source_storage_key") or ""),
             "source_contract_hash": compiled_source_hash,
+            "source_revision_number": int(compiled_policy.get("source_revision_number") or 0),
             "policy_hash": _normalize_text(compiled_policy.get("policy_hash")),
             "projection_text": projection_text,
             "projection_rule_count": int(compiled_policy.get("projection_rule_count") or 0),
@@ -688,6 +693,11 @@ def build_behavior_policy_snapshot(
             "compiled_present": bool(compiled_policy),
             "source_hash_matches_raw": bool(raw_hash and compiled_source_hash and raw_hash == compiled_source_hash),
             "stale": bool(raw_hash and compiled_source_hash and raw_hash != compiled_source_hash),
+            "source_revision_matches_raw": bool(
+                int(raw_row.get("revision_number") or 0)
+                and int(compiled_policy.get("source_revision_number") or 0)
+                and int(raw_row.get("revision_number") or 0) == int(compiled_policy.get("source_revision_number") or 0)
+            ),
         },
     }
 

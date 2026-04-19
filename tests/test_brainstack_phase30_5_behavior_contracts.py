@@ -26,6 +26,10 @@ from brainstack.style_contract import (
 )
 
 
+def _sync_user_turn(provider: BrainstackMemoryProvider, content: str, *, session_id: str) -> None:
+    provider.sync_turn(content, "", session_id=session_id)
+
+
 def test_style_contract_commits_into_first_class_behavior_contract_storage(tmp_path):
     provider = BrainstackMemoryProvider(config={"db_path": str(tmp_path / "brainstack.db")})
     provider.initialize(
@@ -38,7 +42,8 @@ def test_style_contract_commits_into_first_class_behavior_contract_storage(tmp_p
     )
 
     try:
-        provider.prefetch(
+        _sync_user_turn(
+            provider,
             (
                 "User style contract\n\n"
                 "content:\n"
@@ -93,7 +98,8 @@ def test_behavior_policy_correction_creates_new_behavior_contract_revision(tmp_p
     )
 
     try:
-        provider.prefetch(
+        _sync_user_turn(
+            provider,
             (
                 "User style contract\n\n"
                 "rules:\n"
@@ -154,11 +160,8 @@ def test_multi_message_style_contract_fragments_converge_before_canonical_commit
             "em dash helyett kötőjel - sima hyphen-minus jelet használok"
         )
 
-        first_block = provider.prefetch(first_fragment, session_id="session-behavior-fragments")
-        assert "## Brainstack Memory Operation Receipt" not in first_block
-
-        second_block = provider.prefetch(second_fragment, session_id="session-behavior-fragments")
-        assert "## Brainstack Memory Operation Receipt" in second_block
+        _sync_user_turn(provider, first_fragment, session_id="session-behavior-fragments")
+        _sync_user_turn(provider, second_fragment, session_id="session-behavior-fragments")
 
         store = provider._store
         assert store is not None

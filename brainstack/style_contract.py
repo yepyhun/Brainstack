@@ -11,6 +11,19 @@ STYLE_CONTRACT_DEFAULT_TITLE = "User style contract"
 _RULE_BULLET_RE = re.compile(r"^(?:[-*•]|\d{1,3}\s*[.)-])\s+(?P<content>.+)$")
 _INLINE_RULE_RE = re.compile(r"^(?P<label>.+?)\s+(?:-|–|—)\s+(?P<detail>.+)$")
 _CHAT_FRAMING_PREFIX_RE = re.compile(r"^(?:\[[^\]]+\]\s+|(?:user|assistant|system|tool)\s*:\s+)", re.IGNORECASE)
+_STYLE_AUTHORITY_MARKERS = (
+    "style contract",
+    "communication contract",
+    "communication style",
+    "writing style",
+    "formatting style",
+    "style rules",
+    "communication rules",
+    "stílus",
+    "stilus",
+    "kommunikáció",
+    "kommunikacio",
+)
 _STYLE_CONTRACT_SOURCE_RANKS = (
     ("behavior_policy_correction", 400),
     ("prefetch:style_contract_patch", 350),
@@ -107,6 +120,13 @@ def _looks_like_chat_framing_line(line: Any) -> bool:
     if normalized.startswith("[") and " | turn " in lowered:
         return True
     return False
+
+
+def _contains_style_authority_marker(value: Any) -> bool:
+    normalized = _normalize_text(value).casefold()
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in _STYLE_AUTHORITY_MARKERS)
 
 
 def _style_contract_cleanliness_issues_for_parts(
@@ -304,8 +324,12 @@ def parse_style_contract_patch_text(raw_text: Any) -> List[str]:
     normalized_lines = [_normalize_text(line) for line in str(raw_text or "").splitlines() if _normalize_text(line)]
     if not normalized_lines or len(normalized_lines) > 3:
         return []
+    if len(normalized_lines) > 1 and any(_is_heading_line(line) for line in normalized_lines):
+        return []
     patch_lines: List[str] = []
     for line in normalized_lines:
+        if _looks_like_chat_framing_line(line):
+            return []
         if line.endswith("?"):
             return []
         bullet = _extract_rule_bullet(line)
@@ -599,20 +623,26 @@ def looks_like_style_contract_teaching(raw_text: Any) -> bool:
         for section in parsed.get("sections") or ()
         if isinstance(section, Mapping)
     ]
+    body_lines = normalized_lines[1:] if has_leading_title else list(normalized_lines)
+    bullet_line_count = sum(1 for line in body_lines if _extract_rule_bullet(line) is not None)
+    inline_rule_count = sum(1 for line in body_lines if _extract_inline_rule(line) is not None)
+    structured_rule_lines = bullet_line_count + inline_rule_count
     total_rules = sum(
         len(section.get("lines") or [])
         for section in sections
     )
     section_count = len(sections)
     headed_section_count = sum(1 for section in sections if _normalize_text(section.get("heading")))
+    style_authority_present = (has_leading_title and _contains_style_authority_marker(parsed.get("title"))) or any(
+        _contains_style_authority_marker(section.get("heading"))
+        for section in sections
+    )
 
-    if total_rules >= 10:
+    if style_authority_present and total_rules >= 3:
         return True
-    if section_count >= 2 and total_rules >= 3:
-        return True
-    if has_leading_title and total_rules >= 3:
-        return True
-    return headed_section_count >= 1 and total_rules >= 5
+    if has_leading_title or headed_section_count >= 1 or section_count >= 2:
+        return False
+    return structured_rule_lines >= 3 and inline_rule_count >= 2 and total_rules >= 3
 
 
 def build_style_contract_from_text(

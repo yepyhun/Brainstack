@@ -179,7 +179,13 @@ def _looks_like_explicit_task_capture(text: str) -> bool:
     if not normalized:
         return False
     lowered = f" {normalized.casefold()} "
-    if not any(cue in lowered for cue in TASK_CAPTURE_CUES + COMMITMENT_CAPTURE_CUES):
+    has_task_cue = any(cue in lowered for cue in TASK_CAPTURE_CUES)
+    has_commitment_cue = any(cue in lowered for cue in COMMITMENT_CAPTURE_CUES)
+    if not has_task_cue and not has_commitment_cue:
+        return False
+    # Operating truth owns headed commitment/current-state blocks. Task memory capture
+    # stays on explicit task-like structures instead of competing for the same text.
+    if not has_task_cue:
         return False
     if "\n" in str(text or ""):
         return True
@@ -258,4 +264,3 @@ def parse_task_lookup_query(query: str, *, timezone_name: str, now: datetime | N
         date_scope=date_scope,
         followup_only=followup_only,
     ).to_dict()
-

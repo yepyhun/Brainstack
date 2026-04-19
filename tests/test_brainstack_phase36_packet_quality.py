@@ -43,6 +43,10 @@ def _make_provider(tmp_path, session_id: str, **config):
     return provider
 
 
+def _sync_user_turn(provider: BrainstackMemoryProvider, content: str, *, session_id: str) -> None:
+    provider.sync_turn(content, "", session_id=session_id)
+
+
 def _style_contract_text() -> str:
     return (
         "User style contract\n\n"
@@ -72,13 +76,7 @@ def test_prefetch_combined_packet_deduplicates_contract_and_profile_against_syst
             confidence=0.95,
             metadata={"principal_scope_key": provider._principal_scope_key},
         )
-        store.upsert_behavior_contract(
-            category="preference",
-            content=_style_contract_text(),
-            source="test",
-            confidence=1.0,
-            metadata={"principal_scope_key": provider._principal_scope_key},
-        )
+        _sync_user_turn(provider, _style_contract_text(), session_id="phase36-combined-packet")
 
         system_block = provider.system_prompt_block()
         working_block = provider.prefetch("Mi a nevem?", session_id="phase36-combined-packet")

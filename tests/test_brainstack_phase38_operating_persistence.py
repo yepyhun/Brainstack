@@ -41,6 +41,10 @@ def _make_provider(tmp_path: Path, session_id: str) -> BrainstackMemoryProvider:
     return provider
 
 
+def _sync_user_turn(provider: BrainstackMemoryProvider, content: str, *, session_id: str) -> None:
+    provider.sync_turn(content, "", session_id=session_id)
+
+
 def _operating_truth_text() -> str:
     return (
         "Active work:\n"
@@ -65,7 +69,7 @@ def _task_capture_text() -> str:
 def test_operating_truth_preserves_multiple_commitments_and_next_steps(tmp_path: Path) -> None:
     provider = _make_provider(tmp_path, "phase38-operating-multi")
     try:
-        provider.prefetch(_operating_truth_text(), session_id="phase38-operating-multi")
+        _sync_user_turn(provider, _operating_truth_text(), session_id="phase38-operating-multi")
 
         store = provider._store
         assert store is not None
@@ -133,10 +137,10 @@ def test_prefetch_task_lookup_does_not_write_without_explicit_structure(tmp_path
         provider.shutdown()
 
 
-def test_prefetch_explicit_task_capture_still_commits(tmp_path: Path) -> None:
+def test_sync_turn_explicit_task_capture_commits(tmp_path: Path) -> None:
     provider = _make_provider(tmp_path, "phase38-task-explicit")
     try:
-        provider.prefetch(_task_capture_text(), session_id="phase38-task-explicit")
+        _sync_user_turn(provider, _task_capture_text(), session_id="phase38-task-explicit")
 
         store = provider._store
         assert store is not None

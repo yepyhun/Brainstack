@@ -62,6 +62,16 @@ def _build_personal_scope_key(*, platform: str = "", user_id: str = "") -> str:
     return "|".join(parts)
 
 
+def _extract_heading_titles(block: str) -> List[str]:
+    titles: List[str] = []
+    for raw_line in str(block or "").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("#"):
+            continue
+        titles.append(line)
+    return titles
+
+
 def _load_plugin_config() -> dict:
     from hermes_constants import get_hermes_home
 
@@ -161,6 +171,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._last_prefetch_routing: Dict[str, Any] | None = None
         self._last_prefetch_channels: list[Dict[str, Any]] | None = None
         self._last_prefetch_debug: Dict[str, Any] | None = None
+        self._last_memory_authority_debug: Dict[str, Any] | None = None
         self._last_behavior_policy_trace: Dict[str, Any] | None = None
         self._last_operating_context_trace: Dict[str, Any] | None = None
         self._last_graph_ingress_trace: Dict[str, Any] | None = None
@@ -246,6 +257,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._last_prefetch_routing = None
         self._last_prefetch_channels = []
         self._last_prefetch_debug = None
+        self._last_memory_authority_debug = None
         self._last_behavior_policy_trace = None
         self._last_operating_context_trace = None
         self._last_graph_ingress_trace = None
@@ -530,9 +542,17 @@ class BrainstackMemoryProvider(MemoryProvider):
     ) -> Dict[str, Any] | None:
         scoped_metadata = self._scoped_metadata(metadata)
         raw_contract = self._store.get_behavior_contract(principal_scope_key=self._principal_scope_key) if self._store else None
+        direct_text = str(content or "").strip()
+        allow_fragment_merge = not (
+            require_explicit_signal
+            and direct_text
+            and looks_like_style_contract_teaching(direct_text)
+        )
         best_candidate: Dict[str, Any] | None = None
         best_score: tuple[int, int, int] | None = None
         for raw_text, fragment_count in self._iter_style_contract_candidate_texts(content):
+            if fragment_count > 1 and not allow_fragment_merge:
+                continue
             if require_explicit_signal and not looks_like_style_contract_teaching(raw_text):
                 continue
             candidate = build_style_contract_from_text(
@@ -844,28 +864,15 @@ class BrainstackMemoryProvider(MemoryProvider):
         if not self._store:
             return ""
         sid = session_id or self._session_id
-        style_contract_receipt = self._upsert_style_contract_candidate(
+        style_contract_candidate = self._resolve_style_contract_candidate(
             content=query,
             source="prefetch:style_contract",
             confidence=0.9,
             metadata={"session_id": sid},
             require_explicit_signal=True,
         )
-        style_contract_activated = style_contract_receipt is not None
         task_capture = self._infer_task_capture_candidate(content=query)
-        task_capture_receipt = self._commit_task_capture_candidate(
-            capture=task_capture,
-            content=query,
-            source="prefetch:task_memory",
-            metadata={"session_id": sid},
-        )
         operating_truth_capture = self._infer_operating_truth_candidate(content=query)
-        operating_truth_receipt = self._commit_operating_truth_candidate(
-            capture=operating_truth_capture,
-            content=query,
-            source="prefetch:operating_truth",
-            metadata={"session_id": sid},
-        )
         system_substrate = build_system_prompt_projection(
             self._store,
             profile_limit=self._profile_prompt_limit,
@@ -921,25 +928,19 @@ class BrainstackMemoryProvider(MemoryProvider):
             projection_text = str(compiled_policy.get("projection_text") or "").strip()
         reinforcement = packet.get("policy", {}).get("behavior_policy_reinforcement")
         output_block = str(packet.get("block") or "")
-        receipt_blocks = [
-            self._render_memory_operation_receipt_block(receipt)
-            for receipt in (style_contract_receipt, task_capture_receipt, operating_truth_receipt)
-            if isinstance(receipt, dict)
-        ]
-        if receipt_blocks:
-            output_block = "\n\n".join(
-                part for part in (output_block, *receipt_blocks) if str(part).strip()
-            )
+        self._set_memory_operation_trace(surface="prefetch_lookup", note="Nominal read surface; no durable writes attempted.")
         trace["prefetch"] = {
             "surface": "prefetch",
             "route_mode": str(packet.get("routing", {}).get("applied_mode") or "fact"),
-            "style_contract_activated_before_prefetch": style_contract_activated,
-            "task_capture_activated_before_prefetch": bool(task_capture_receipt),
-            "operating_truth_activated_before_prefetch": bool(operating_truth_receipt),
-            "write_receipt_present": bool(style_contract_receipt or task_capture_receipt or operating_truth_receipt),
-            "write_receipt_status": str(
-                (operating_truth_receipt or task_capture_receipt or style_contract_receipt or {}).get("status") or ""
-            ),
+            "style_contract_activated_before_prefetch": False,
+            "task_capture_activated_before_prefetch": False,
+            "operating_truth_activated_before_prefetch": False,
+            "style_contract_candidate_detected": bool(style_contract_candidate),
+            "task_capture_candidate_detected": bool(task_capture),
+            "operating_truth_candidate_detected": bool(operating_truth_capture),
+            "write_receipt_present": False,
+            "write_receipt_status": "",
+            "read_side_effect_count": 0,
             "compiled_policy_present_in_packet": bool(isinstance(compiled_policy, dict) and projection_text),
             "projection_present_in_block": bool(projection_text and projection_text in output_block),
             "correction_reinforcement_present": bool(
@@ -951,6 +952,37 @@ class BrainstackMemoryProvider(MemoryProvider):
             "snapshot": snapshot,
         }
         self._last_behavior_policy_trace = trace
+        self._last_memory_authority_debug = {
+            "surface": "prefetch_debug",
+            "session_id": sid,
+            "read_side_effect_count": 0,
+            "write_receipts_in_packet": False,
+            "candidate_writes": {
+                "style_contract": bool(style_contract_candidate),
+                "task_memory": bool(task_capture),
+                "operating_truth": bool(operating_truth_capture),
+            },
+            "candidate_write_modes": {
+                "style_contract": str(
+                    ((style_contract_candidate or {}).get("metadata") or {}).get("style_contract_write_mode") or ""
+                ),
+                "task_memory": "explicit_structure" if isinstance(task_capture, dict) else "",
+                "operating_truth": "explicit_structure" if isinstance(operating_truth_capture, dict) else "",
+            },
+            "behavior_policy_snapshot": snapshot,
+            "packet_route_mode": str(packet.get("routing", {}).get("applied_mode") or "fact"),
+            "brainstack_packet_sections": _extract_heading_titles(output_block),
+            "system_substrate_sections": _extract_heading_titles(str(system_substrate.get("block") or "")),
+            "canonical_generation_revision": int((snapshot.get("raw_contract") or {}).get("revision_number") or 0),
+            "compiled_policy_source_revision": int((snapshot.get("compiled_policy") or {}).get("source_revision_number") or 0),
+            "active_lane_source_revision": int(system_substrate.get("active_lane_source_revision") or 0),
+            "host_runtime_layers_excluded": [
+                "host persona",
+                "runtime tools",
+                "delivery options",
+                "non-Brainstack system prompt layers",
+            ],
+        }
         return output_block
 
     def sync_turn(
@@ -984,6 +1016,13 @@ class BrainstackMemoryProvider(MemoryProvider):
             confidence=0.9,
             metadata={"session_id": sid, "turn_number": self._turn_counter},
             require_explicit_signal=True,
+        )
+        task_capture = self._infer_task_capture_candidate(content=user_content)
+        self._commit_task_capture_candidate(
+            capture=task_capture,
+            content=user_content,
+            source="sync_turn:task_memory",
+            metadata={"session_id": sid, "turn_number": self._turn_counter},
         )
         operating_truth_capture = self._infer_operating_truth_candidate(content=user_content)
         self._commit_operating_truth_candidate(
@@ -1245,6 +1284,11 @@ class BrainstackMemoryProvider(MemoryProvider):
             return None
         return json.loads(json.dumps(self._last_behavior_policy_trace, ensure_ascii=True))
 
+    def memory_authority_debug(self) -> Dict[str, Any] | None:
+        if self._last_memory_authority_debug is None:
+            return None
+        return json.loads(json.dumps(self._last_memory_authority_debug, ensure_ascii=True))
+
     def operating_context_snapshot(self) -> Dict[str, Any] | None:
         if not self._store:
             return None
@@ -1267,6 +1311,31 @@ class BrainstackMemoryProvider(MemoryProvider):
         if self._last_graph_ingress_trace is None:
             return None
         return json.loads(json.dumps(self._last_graph_ingress_trace, ensure_ascii=True))
+
+    def repair_memory_authority(self) -> Dict[str, Any] | None:
+        if not self._store:
+            return None
+        report = self._store.repair_behavior_contract_authority(principal_scope_key=self._principal_scope_key)
+        snapshot = self._store.get_behavior_policy_snapshot(principal_scope_key=self._principal_scope_key)
+        self._last_memory_authority_debug = {
+            "surface": "repair_memory_authority",
+            "repair_report": report,
+            "behavior_policy_snapshot": snapshot,
+            "host_runtime_layers_excluded": [
+                "host persona",
+                "runtime tools",
+                "delivery options",
+                "non-Brainstack system prompt layers",
+            ],
+        }
+        trace = dict(self._last_behavior_policy_trace or {})
+        trace["repair_memory_authority"] = {
+            "surface": "repair_memory_authority",
+            "report": dict(report or {}),
+            "snapshot": snapshot,
+        }
+        self._last_behavior_policy_trace = trace
+        return json.loads(json.dumps(report, ensure_ascii=True))
 
     def apply_behavior_policy_correction(self, *, rule_id: str, replacement_text: str) -> Dict[str, Any] | None:
         if not self._store:

@@ -36,7 +36,11 @@ def _make_provider(tmp_path, session_id: str, **init_kwargs):
     return provider
 
 
-def test_prefetch_commits_structured_task_records_with_truthful_receipt(tmp_path):
+def _sync_user_turn(provider: BrainstackMemoryProvider, content: str, *, session_id: str) -> None:
+    provider.sync_turn(content, "", session_id=session_id)
+
+
+def test_sync_turn_commits_structured_task_records_with_truthful_receipt(tmp_path):
     provider = _make_provider(
         tmp_path,
         "task-capture",
@@ -46,7 +50,8 @@ def test_prefetch_commits_structured_task_records_with_truthful_receipt(tmp_path
         agent_workspace="discord-main",
     )
     try:
-        block = provider.prefetch(
+        _sync_user_turn(
+            provider,
             "Mai feladatom: kaját főzni.\n\nEsetleg bevásárolni\nÉs németet tanulni!",
             session_id="task-capture",
         )
@@ -59,7 +64,6 @@ def test_prefetch_commits_structured_task_records_with_truthful_receipt(tmp_path
             limit=10,
         )
 
-        assert "## Brainstack Memory Operation Receipt" in block
         assert trace is not None
         assert trace["last_write_receipt"]["status"] == "committed"
         assert trace["last_write_receipt"]["owner"] == "brainstack.task_memory"
@@ -81,10 +85,7 @@ def test_task_lookup_after_reset_uses_committed_task_records_and_disables_corpus
         agent_workspace="discord-main",
     )
     try:
-        provider.prefetch(
-            "Mai feladatom: kaját főzni.\n\nEsetleg bevásárolni\nÉs németet tanulni!",
-            session_id="task-writer",
-        )
+        _sync_user_turn(provider, "Mai feladatom: kaját főzni.\n\nEsetleg bevásárolni\nÉs németet tanulni!", session_id="task-writer")
     finally:
         provider.shutdown()
 

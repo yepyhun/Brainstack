@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, List, Mapping
 from .behavior_policy import render_compiled_behavior_policy_section
 from .db import BrainstackStore
 from .operating_context import render_operating_context_section
-from .profile_contract import COMMUNICATION_CANONICAL_SLOTS
+from .profile_contract import COMMUNICATION_CANONICAL_SLOTS, normalize_profile_slot
 from .provenance import summarize_provenance
 from .style_contract import STYLE_CONTRACT_SLOT
 from .temporal import record_is_effective_at
@@ -48,6 +48,9 @@ def _render_numbered_items(items: Iterable[str]) -> str:
 
 
 COMMUNICATION_PROFILE_SLOTS = COMMUNICATION_CANONICAL_SLOTS
+STYLE_AUTHORITY_RESIDUE_SLOTS = {
+    "preference:communication_rules",
+}
 
 COMMUNICATION_GRAPH_PREDICATES = {
     "writing_style",
@@ -131,7 +134,7 @@ def _extract_ai_name_hint(value: Any) -> str:
 
 
 def _render_communication_profile_contract_line(row: Dict[str, Any]) -> str:
-    stable_key = str(row.get("stable_key") or "").strip().lower()
+    stable_key = normalize_profile_slot(str(row.get("stable_key") or "")).lower()
     content = _trim(str(row.get("content") or ""), 220)
     lowered = _normalize_compare_text(content)
     if not content or _looks_like_internal_contract_text(content):
@@ -220,10 +223,19 @@ def _is_current_communication_state(row: Dict[str, Any], *, allowed_subjects: se
 
 
 def _is_communication_profile_item(row: Dict[str, Any]) -> bool:
-    stable_key = str(row.get("stable_key") or "").strip()
+    stable_key = normalize_profile_slot(str(row.get("stable_key") or "")).strip()
     if stable_key == STYLE_CONTRACT_SLOT:
         return False
     return stable_key in COMMUNICATION_PROFILE_SLOTS
+
+
+def _is_style_authority_residue_profile_item(row: Dict[str, Any]) -> bool:
+    stable_key = normalize_profile_slot(str(row.get("stable_key") or "")).strip()
+    if stable_key == STYLE_CONTRACT_SLOT:
+        return True
+    if stable_key in COMMUNICATION_PROFILE_SLOTS:
+        return True
+    return stable_key in STYLE_AUTHORITY_RESIDUE_SLOTS
 
 
 def _build_active_communication_contract(
@@ -392,7 +404,15 @@ def build_system_prompt_projection(
 ) -> Dict[str, Any]:
     fetch_limit = max(profile_limit * 3, 10)
     items = store.list_profile_items(limit=fetch_limit, principal_scope_key=principal_scope_key)
-    compiled_policy = store.get_compiled_behavior_policy(principal_scope_key=principal_scope_key)
+    behavior_snapshot = store.get_behavior_policy_snapshot(principal_scope_key=principal_scope_key)
+    compiled_policy_row = store.get_compiled_behavior_policy(principal_scope_key=principal_scope_key)
+    compiled_policy = dict(compiled_policy_row.get("policy") or {}) if isinstance(compiled_policy_row, Mapping) else {}
+    compiled_policy_snapshot = behavior_snapshot.get("compiled_policy") if isinstance(behavior_snapshot, Mapping) else {}
+    canonical_style_present = bool(
+        isinstance(behavior_snapshot, Mapping)
+        and isinstance(behavior_snapshot.get("raw_contract"), Mapping)
+        and bool(behavior_snapshot.get("raw_contract", {}).get("present"))
+    )
     operating_context_snapshot = store.get_operating_context_snapshot(
         principal_scope_key=principal_scope_key,
         session_id=session_id,
@@ -402,14 +422,14 @@ def build_system_prompt_projection(
     hidden_profile_keys: set[str] = set()
     if compiled_policy:
         contract_section = render_compiled_behavior_policy_section(
-            compiled_policy.get("policy"),
+            compiled_policy,
             title="# Brainstack Active Communication Contract",
             mode="ordinary_turn",
         )
         compiled_policy_active = bool(contract_section)
     if compiled_policy_active:
         filtered_items = _filter_compiled_behavior_profile_items(items, route_mode="fact")
-    else:
+    elif not canonical_style_present:
         graph_rows = store.list_current_graph_states(
             limit=8,
             attributes=COMMUNICATION_GRAPH_PREDICATES,
@@ -426,6 +446,11 @@ def build_system_prompt_projection(
             item for item in filtered_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT
         ]
         contract_section = _render_contract_section("# Brainstack Active Communication Contract", contract_lines)
+    else:
+        filtered_items = list(items)
+
+    if canonical_style_present:
+        filtered_items = [item for item in filtered_items if not _is_style_authority_residue_profile_item(item)]
 
     operating_context_section = render_operating_context_section(operating_context_snapshot)
     truthful_memory_operations_section = _render_truthful_memory_operations_section(
@@ -468,6 +493,10 @@ def build_system_prompt_projection(
         "truthful_memory_operations_present": bool(contract_section or operating_context_section or profile_lines),
         "rendered_profile_keys": tuple(rendered_profile_keys),
         "hidden_profile_keys": tuple(sorted(hidden_profile_keys)),
+        "canonical_style_present": canonical_style_present,
+        "active_lane_source_revision": int(compiled_policy_snapshot.get("source_revision_number") or 0)
+        if compiled_policy_active
+        else 0,
     }
 
 
@@ -932,6 +961,12 @@ def render_working_memory_block(
     sections: List[str] = []
     provenance_mode = str(policy.get("provenance_mode", "compact"))
     compiled_policy = policy.get("compiled_behavior_policy") if isinstance(policy, dict) else None
+    behavior_snapshot = policy.get("behavior_policy_snapshot") if isinstance(policy, dict) else None
+    canonical_style_present = bool(
+        isinstance(behavior_snapshot, Mapping)
+        and isinstance(behavior_snapshot.get("raw_contract"), Mapping)
+        and bool(behavior_snapshot.get("raw_contract", {}).get("present"))
+    )
     compiled_policy_active = False
     contract_section = ""
     exact_contract_section = ""
@@ -968,7 +1003,7 @@ def render_working_memory_block(
             graph_rows,
             profile_items=profile_items,
         )
-    else:
+    elif not canonical_style_present:
         contract_lines, hidden_profile_keys = _build_active_communication_contract(
             profile_items=profile_items,
             graph_rows=graph_rows,
@@ -1039,6 +1074,10 @@ def render_working_memory_block(
             filtered_profile_items = [
                 item for item in filtered_profile_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT
             ]
+    if canonical_style_present:
+        filtered_profile_items = [
+            item for item in filtered_profile_items if not _is_style_authority_residue_profile_item(item)
+        ]
     if exact_contract_section:
         filtered_profile_items = [
             item for item in filtered_profile_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT

@@ -198,6 +198,7 @@ def build_working_memory_packet(
     system_substrate: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     analysis = analyze_query(query)
+    behavior_policy_snapshot = store.get_behavior_policy_snapshot(principal_scope_key=principal_scope_key)
     compiled_behavior_policy = store.get_compiled_behavior_policy(principal_scope_key=principal_scope_key)
     policy = _initial_policy(
         analysis=analysis,
@@ -351,8 +352,10 @@ def build_working_memory_packet(
         policy.tool_avoidance_reason = "memory support is sufficient for a first response"
 
     policy_payload = asdict(policy)
+    if isinstance(behavior_policy_snapshot, dict):
+        policy_payload["behavior_policy_snapshot"] = behavior_policy_snapshot
     if compiled_behavior_policy is not None:
-        policy_payload["compiled_behavior_policy"] = dict(compiled_behavior_policy.get("policy") or {})
+        policy_payload["compiled_behavior_policy"] = dict(compiled_behavior_policy)
         reinforcement = build_behavior_policy_reinforcement(
             query=query,
             compiled_policy=policy_payload["compiled_behavior_policy"],

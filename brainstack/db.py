@@ -24,6 +24,7 @@ from .profile_contract import (
     COMMUNICATION_CANONICAL_SLOTS,
     derive_transcript_identity_profile_items,
     expand_communication_profile_items,
+    normalize_profile_slot,
 )
 from .operating_context import build_operating_context_snapshot
 from .operating_truth import OPERATING_RECORD_TYPES
@@ -64,6 +65,7 @@ MIGRATION_COMPILED_BEHAVIOR_POLICY_V1 = "compiled_behavior_policy_v1"
 MIGRATION_COMPILED_BEHAVIOR_POLICY_V2 = "compiled_behavior_policy_v2"
 BEHAVIOR_CONTRACT_ACTIVE_STATUS = "active"
 BEHAVIOR_CONTRACT_SUPERSEDED_STATUS = "superseded"
+BEHAVIOR_CONTRACT_QUARANTINED_STATUS = "quarantined"
 
 
 def utc_now_iso() -> str:
@@ -1255,16 +1257,91 @@ class BrainstackStore:
             (scope_key,),
         )
 
-    def _rebuild_compiled_behavior_policy_from_behavior_contract_row(self, row: sqlite3.Row) -> bool:
-        item = _behavior_contract_row_to_dict(row)
+    def _get_compiled_behavior_policy_row(self, *, principal_scope_key: str) -> sqlite3.Row | None:
+        scope_key = str(principal_scope_key or "").strip()
+        if not scope_key:
+            return None
+        return self.conn.execute(
+            """
+            SELECT principal_scope_key, source_storage_key, source_contract_hash, source_contract_updated_at,
+                   schema_version, compiler_version, title, policy_json, projection_text, status, updated_at
+            FROM compiled_behavior_policies
+            WHERE principal_scope_key = ?
+            LIMIT 1
+            """,
+            (scope_key,),
+        ).fetchone()
+
+    def _build_compiled_behavior_policy_from_contract_item(self, item: Mapping[str, Any]) -> Dict[str, Any] | None:
         if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT:
-            return False
-        compiled = compile_behavior_policy(
+            return None
+        return compile_behavior_policy(
             raw_content=str(item.get("content") or ""),
             metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else None,
             source_storage_key=str(item.get("storage_key") or ""),
             source_updated_at=str(item.get("updated_at") or ""),
+            source_revision_number=int(item.get("revision_number") or 0),
         )
+
+    def _ensure_compiled_behavior_policy_for_contract_item(
+        self,
+        item: Mapping[str, Any],
+    ) -> Dict[str, Any] | None:
+        compiled = self._build_compiled_behavior_policy_from_contract_item(item)
+        principal_scope_key = str(item.get("principal_scope_key") or "").strip()
+        if not compiled:
+            self._delete_compiled_behavior_policy_record(principal_scope_key=principal_scope_key)
+            return None
+        self._upsert_compiled_behavior_policy_record(
+            principal_scope_key=principal_scope_key,
+            compiled_policy=compiled,
+        )
+        return compiled
+
+    def _deactivate_style_authority_profile_residue(self, *, principal_scope_key: str) -> int:
+        scope_key = str(principal_scope_key or "").strip()
+        if not scope_key:
+            return 0
+        rows = self.conn.execute(
+            """
+            SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at, active
+            FROM profile_items
+            WHERE active = 1
+            ORDER BY updated_at DESC, id DESC
+            """
+        ).fetchall()
+        updated = 0
+        now = utc_now_iso()
+        for row in rows:
+            item = _profile_row_to_dict(row)
+            if not _annotate_principal_scope(item, principal_scope_key=scope_key):
+                continue
+            logical_key = normalize_profile_slot(str(item.get("stable_key") or ""))
+            if logical_key != "preference:communication_rules":
+                continue
+            metadata = _merge_record_metadata(
+                row["metadata_json"],
+                {
+                    "repair_action": "deactivated_style_authority_residue",
+                    "repair_scope": scope_key,
+                },
+                source="behavior_contract_repair",
+            )
+            self.conn.execute(
+                """
+                UPDATE profile_items
+                SET active = 0, metadata_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (json.dumps(metadata, ensure_ascii=True, sort_keys=True), now, int(row["id"])),
+            )
+            self.conn.execute("DELETE FROM profile_fts WHERE rowid = ?", (int(row["id"]),))
+            updated += 1
+        return updated
+
+    def _rebuild_compiled_behavior_policy_from_behavior_contract_row(self, row: sqlite3.Row) -> bool:
+        item = _behavior_contract_row_to_dict(row)
+        compiled = self._build_compiled_behavior_policy_from_contract_item(item)
         if not compiled:
             self._delete_compiled_behavior_policy_record(
                 principal_scope_key=str(item.get("principal_scope_key") or ""),
@@ -2788,6 +2865,8 @@ class BrainstackStore:
             source=source,
         )
         if existing and str(existing["content"] or "").strip() == str(content or "").strip():
+            existing_item = _behavior_contract_row_to_dict(existing)
+            self._ensure_compiled_behavior_policy_for_contract_item(existing_item)
             return int(existing["id"])
         if (
             existing
@@ -2812,6 +2891,7 @@ class BrainstackStore:
                 and float(existing_item.get("confidence") or 0.0) == float(confidence)
                 and bool(existing_item.get("active", False)) == bool(active)
             ):
+                self._ensure_compiled_behavior_policy_for_contract_item(existing_item)
                 return int(existing_item["id"])
             parent_revision_id = int(existing_item["id"])
             revision_number = int(existing_item.get("revision_number") or 0) + 1
@@ -2830,6 +2910,7 @@ class BrainstackStore:
                 metadata=normalized_metadata,
                 source_storage_key=storage_key,
                 source_updated_at=now,
+                source_revision_number=revision_number,
             )
             if compiled is None:
                 raise ValueError("Behavior contract commit failed because compiled behavior policy could not be built")
@@ -2993,35 +3074,32 @@ class BrainstackStore:
             self._delete_compiled_behavior_policy_record(principal_scope_key=polluted_scope_key)
             self.conn.commit()
             return None
-        row = self.conn.execute(
-            """
-            SELECT principal_scope_key, source_storage_key, source_contract_hash, source_contract_updated_at,
-                   schema_version, compiler_version, title, policy_json, projection_text, status, updated_at
-            FROM compiled_behavior_policies
-            WHERE principal_scope_key = ?
-            LIMIT 1
-            """,
-            (requested_scope_key,),
-        ).fetchone()
+        row = self._get_compiled_behavior_policy_row(principal_scope_key=requested_scope_key)
         if row:
-            return _compiled_behavior_policy_row_to_dict(row)
+            compiled_item = _compiled_behavior_policy_row_to_dict(row)
+            raw_hash = hashlib.sha256(str(contract.get("content") or "").encode("utf-8")).hexdigest() if contract else ""
+            if contract and (
+                str(compiled_item.get("source_contract_hash") or "").strip() != raw_hash
+                or str(compiled_item.get("source_storage_key") or "").strip() != str(contract.get("storage_key") or "").strip()
+            ):
+                refreshed = self._ensure_compiled_behavior_policy_for_contract_item(contract)
+                self.conn.commit()
+                return _compiled_behavior_policy_row_to_dict(self._get_compiled_behavior_policy_row(principal_scope_key=requested_scope_key)) if refreshed else None
+            return compiled_item
         if not requested_scope_key:
             return None
         if not contract:
             return None
         fallback_scope_key = str(contract.get("principal_scope_key") or "").strip()
+        refreshed = self._ensure_compiled_behavior_policy_for_contract_item(contract)
+        if refreshed:
+            self.conn.commit()
+            scope_key = fallback_scope_key or requested_scope_key
+            rebuilt_row = self._get_compiled_behavior_policy_row(principal_scope_key=scope_key)
+            return _compiled_behavior_policy_row_to_dict(rebuilt_row) if rebuilt_row else None
         if not fallback_scope_key or fallback_scope_key == requested_scope_key:
             return None
-        fallback_row = self.conn.execute(
-            """
-            SELECT principal_scope_key, source_storage_key, source_contract_hash, source_contract_updated_at,
-                   schema_version, compiler_version, title, policy_json, projection_text, status, updated_at
-            FROM compiled_behavior_policies
-            WHERE principal_scope_key = ?
-            LIMIT 1
-            """,
-            (fallback_scope_key,),
-        ).fetchone()
+        fallback_row = self._get_compiled_behavior_policy_row(principal_scope_key=fallback_scope_key)
         return _compiled_behavior_policy_row_to_dict(fallback_row) if fallback_row else None
 
     @_locked
@@ -3637,6 +3715,108 @@ class BrainstackStore:
             reverse=True,
         )
         return candidates[0]
+
+    @_locked
+    def repair_behavior_contract_authority(
+        self,
+        *,
+        stable_key: str = STYLE_CONTRACT_SLOT,
+        principal_scope_key: str = "",
+    ) -> Dict[str, Any]:
+        requested_scope_key = str(principal_scope_key or "").strip()
+        logical_key = str(stable_key or "").strip() or STYLE_CONTRACT_SLOT
+        rows = self.conn.execute(
+            """
+            SELECT id, storage_key, principal_scope_key, stable_key, category, content, source, confidence,
+                   metadata_json, source_contract_hash, revision_number, parent_revision_id, status,
+                   committed_at, updated_at
+            FROM behavior_contracts
+            WHERE stable_key = ?
+            ORDER BY revision_number DESC, id DESC
+            LIMIT 32
+            """,
+            (logical_key,),
+        ).fetchall()
+        candidates: List[Dict[str, Any]] = []
+        for row in rows:
+            item = _behavior_contract_row_to_dict(row)
+            if requested_scope_key and not _annotate_principal_scope(item, principal_scope_key=requested_scope_key):
+                continue
+            candidates.append(item)
+
+        report: Dict[str, Any] = {
+            "surface": "behavior_contract_repair",
+            "requested_scope_key": requested_scope_key,
+            "stable_key": logical_key,
+            "candidate_count": len(candidates),
+            "quarantined_ids": [],
+            "superseded_ids": [],
+            "reactivated_id": 0,
+            "compiled_policy_rebuilt": False,
+            "compiled_policy_deleted": False,
+            "deactivated_profile_residue_count": 0,
+        }
+        if not candidates:
+            return report
+
+        clean_candidates = [
+            item
+            for item in candidates
+            if not style_contract_cleanliness_issues(
+                raw_text=str(item.get("content") or ""),
+                metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else None,
+            )
+        ]
+        chosen = clean_candidates[0] if clean_candidates else None
+        now = utc_now_iso()
+
+        for item in candidates:
+            row_id = int(item.get("id") or 0)
+            if row_id <= 0 or str(item.get("status") or "").strip() != BEHAVIOR_CONTRACT_ACTIVE_STATUS:
+                continue
+            is_dirty = bool(
+                style_contract_cleanliness_issues(
+                    raw_text=str(item.get("content") or ""),
+                    metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else None,
+                )
+            )
+            if chosen and row_id == int(chosen.get("id") or 0) and not is_dirty:
+                continue
+            next_status = BEHAVIOR_CONTRACT_QUARANTINED_STATUS if is_dirty else BEHAVIOR_CONTRACT_SUPERSEDED_STATUS
+            self.conn.execute(
+                "UPDATE behavior_contracts SET status = ?, updated_at = ? WHERE id = ?",
+                (next_status, now, row_id),
+            )
+            key = "quarantined_ids" if next_status == BEHAVIOR_CONTRACT_QUARANTINED_STATUS else "superseded_ids"
+            report[key].append(row_id)
+
+        active_scope_key = requested_scope_key
+        if chosen:
+            active_scope_key = str(chosen.get("principal_scope_key") or "").strip() or requested_scope_key
+            if str(chosen.get("status") or "").strip() != BEHAVIOR_CONTRACT_ACTIVE_STATUS:
+                self.conn.execute(
+                    "UPDATE behavior_contracts SET status = ?, updated_at = ? WHERE id = ?",
+                    (BEHAVIOR_CONTRACT_ACTIVE_STATUS, now, int(chosen["id"])),
+                )
+                report["reactivated_id"] = int(chosen["id"])
+            rebuilt = self._ensure_compiled_behavior_policy_for_contract_item(chosen)
+            report["compiled_policy_rebuilt"] = bool(rebuilt)
+            if not rebuilt:
+                report["compiled_policy_deleted"] = True
+            report["active_generation_revision"] = int(chosen.get("revision_number") or 0)
+            report["active_generation_storage_key"] = str(chosen.get("storage_key") or "")
+        else:
+            self._delete_compiled_behavior_policy_record(principal_scope_key=active_scope_key)
+            report["compiled_policy_deleted"] = True
+            report["active_generation_revision"] = 0
+            report["active_generation_storage_key"] = ""
+
+        if active_scope_key:
+            report["deactivated_profile_residue_count"] = self._deactivate_style_authority_profile_residue(
+                principal_scope_key=active_scope_key
+            )
+        self.conn.commit()
+        return report
 
     @_locked
     def record_profile_retrievals(self, *, rows: Iterable[Dict[str, Any]]) -> int:
