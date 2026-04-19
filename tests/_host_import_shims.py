@@ -43,6 +43,7 @@ def _locate_hermes_checkout() -> Path | None:
 
 def install_host_import_shims(*, hermes_home: Path | None = None) -> None:
     """Stabilize import-time-only host dependencies for source-repo tests."""
+    repo_root = Path(__file__).resolve().parents[1]
     hermes_checkout = _locate_hermes_checkout()
     if hermes_checkout is not None:
         hermes_path = str(hermes_checkout)
@@ -71,6 +72,32 @@ def install_host_import_shims(*, hermes_home: Path | None = None) -> None:
         agent_module = cast(Any, _module_stub("agent"))
         agent_module.__path__ = []
         sys.modules["agent"] = agent_module
+
+    plugins_module = cast(Any, sys.modules.get("plugins"))
+    if plugins_module is None:
+        plugins_module = cast(Any, _module_stub("plugins"))
+        plugins_module.__path__ = []
+        sys.modules["plugins"] = plugins_module
+    plugins_memory_module = cast(Any, sys.modules.get("plugins.memory"))
+    if plugins_memory_module is None:
+        try:
+            plugins_memory_module = cast(Any, importlib.import_module("plugins.memory"))
+        except Exception:
+            plugins_memory_module = cast(Any, _module_stub("plugins.memory"))
+            plugins_memory_module.__path__ = []
+            sys.modules["plugins.memory"] = plugins_memory_module
+    plugins_module.memory = plugins_memory_module
+    if not hasattr(plugins_memory_module, "load_memory_provider"):
+        plugins_memory_module.load_memory_provider = lambda *a, **k: None
+
+    if "agent.brainstack_mode" not in sys.modules:
+        source_brainstack_mode = repo_root / "host_payload" / "agent" / "brainstack_mode.py"
+        if source_brainstack_mode.exists():
+            spec = importlib.util.spec_from_file_location("agent.brainstack_mode", source_brainstack_mode)
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                sys.modules["agent.brainstack_mode"] = module
 
     memory_provider_module = cast(Any, sys.modules.get("agent.memory_provider"))
     if memory_provider_module is None:

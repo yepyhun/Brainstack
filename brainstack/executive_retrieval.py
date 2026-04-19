@@ -351,6 +351,34 @@ def _extract_style_contract_route_signals(style_contract_parts: Mapping[str, Any
     return {"title": title, "headings": headings, "rule_count": rule_count}
 
 
+def _missing_style_contract_row(*, principal_scope_key: str = "") -> Dict[str, Any]:
+    scope_key = str(principal_scope_key or "").strip()
+    return {
+        "id": 0,
+        "stable_key": "behavior_contract:missing",
+        "storage_key": f"behavior_contract::missing::{scope_key or '_global'}",
+        "principal_scope_key": scope_key,
+        "category": "system",
+        "content": (
+            "No committed full behavior contract is stored for this principal scope. "
+            "Do not reconstruct a full rule list from derived policy summaries, profile slots, or transcript fragments."
+        ),
+        "source": "brainstack.behavior_contract",
+        "confidence": 1.0,
+        "metadata": {
+            "memory_class": "behavior_contract_status",
+            "status_reason": "no_committed_behavior_contract",
+            "principal_scope_key": scope_key,
+        },
+        "updated_at": "",
+        "active": True,
+        "keyword_score": 2.0,
+        "retrieval_source": "behavior_contract.missing",
+        "match_mode": "authority",
+        "_direct_slot_match": True,
+    }
+
+
 def _looks_like_style_contract_recall(
     query: str,
     *,
@@ -1461,6 +1489,14 @@ def retrieve_executive_context(
         else []
     )
     keyword_profile_rows = _annotate_query_flags(keyword_profile_rows, query=query)
+    if route.applied_mode == ROUTE_STYLE_CONTRACT:
+        keyword_profile_rows = [
+            row
+            for row in keyword_profile_rows
+            if str(row.get("stable_key") or "").strip() == STYLE_CONTRACT_SLOT
+        ]
+        if not keyword_profile_rows:
+            keyword_profile_rows = [_missing_style_contract_row(principal_scope_key=principal_scope_key)]
     keyword_continuity_rows = (
         _collect_query_rows(
             shelf="continuity_match",

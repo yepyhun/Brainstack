@@ -55,8 +55,11 @@ MIGRATION_EXPLICIT_IDENTITY_BACKFILL_V1 = "explicit_identity_backfill_v1"
 MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V1 = "stable_logistics_typed_entities_v1"
 MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V2 = "stable_logistics_typed_entities_v2"
 MIGRATION_STYLE_CONTRACT_PROFILE_LANE_V1 = "style_contract_profile_lane_v1"
+MIGRATION_BEHAVIOR_CONTRACT_STORAGE_V1 = "behavior_contract_storage_v1"
 MIGRATION_COMPILED_BEHAVIOR_POLICY_V1 = "compiled_behavior_policy_v1"
 MIGRATION_COMPILED_BEHAVIOR_POLICY_V2 = "compiled_behavior_policy_v2"
+BEHAVIOR_CONTRACT_ACTIVE_STATUS = "active"
+BEHAVIOR_CONTRACT_SUPERSEDED_STATUS = "superseded"
 
 
 def utc_now_iso() -> str:
@@ -260,6 +263,35 @@ def _profile_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     item["storage_key"] = storage_key
     item["stable_key"] = logical_key
     item["principal_scope_key"] = _principal_scope_key_from_metadata(item.get("metadata")) or embedded_scope_key
+    return item
+
+
+def _behavior_contract_storage_key(
+    *,
+    stable_key: str,
+    principal_scope_key: str = "",
+    revision_number: int = 0,
+) -> str:
+    logical_key = str(stable_key or "").strip() or STYLE_CONTRACT_SLOT
+    scope_key = str(principal_scope_key or "").strip() or "_global"
+    revision = max(int(revision_number or 0), 1)
+    return f"behavior_contract::{logical_key}::{scope_key}::r{revision}"
+
+
+def _behavior_contract_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    item = _row_to_dict(row)
+    item["stable_key"] = str(item.get("stable_key") or STYLE_CONTRACT_SLOT).strip() or STYLE_CONTRACT_SLOT
+    item["principal_scope_key"] = str(
+        item.get("principal_scope_key")
+        or _principal_scope_key_from_metadata(item.get("metadata"))
+        or ""
+    ).strip()
+    item["storage_key"] = str(item.get("storage_key") or "").strip() or _behavior_contract_storage_key(
+        stable_key=item["stable_key"],
+        principal_scope_key=item["principal_scope_key"],
+        revision_number=int(item.get("revision_number") or 1),
+    )
+    item["active"] = str(item.get("status") or "").strip() == BEHAVIOR_CONTRACT_ACTIVE_STATUS
     return item
 
 
@@ -610,6 +642,8 @@ class BrainstackStore:
             self._apply_stable_logistics_typed_entities_migration_v2()
         if not self._migration_applied(MIGRATION_STYLE_CONTRACT_PROFILE_LANE_V1):
             self._apply_style_contract_profile_lane_migration_v1()
+        if not self._migration_applied(MIGRATION_BEHAVIOR_CONTRACT_STORAGE_V1):
+            self._apply_behavior_contract_storage_migration_v1()
         if not self._migration_applied(MIGRATION_COMPILED_BEHAVIOR_POLICY_V1):
             self._apply_compiled_behavior_policy_migration_v1()
         if not self._migration_applied(MIGRATION_COMPILED_BEHAVIOR_POLICY_V2):
@@ -972,6 +1006,54 @@ class BrainstackStore:
         else:
             logger.info("Applied style-contract profile-lane migration with no eligible corpus documents")
 
+    @_locked
+    def _apply_behavior_contract_storage_migration_v1(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at, active
+            FROM profile_items
+            WHERE active = 1
+            ORDER BY updated_at ASC, id ASC
+            """
+        ).fetchall()
+        migrated = 0
+        retired = 0
+        for row in rows:
+            item = _profile_row_to_dict(row)
+            if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT:
+                continue
+            self.upsert_behavior_contract(
+                stable_key=STYLE_CONTRACT_SLOT,
+                category=str(item.get("category") or "preference"),
+                content=str(item.get("content") or ""),
+                source=str(item.get("source") or ""),
+                confidence=float(item.get("confidence") or 0.9),
+                metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else None,
+                active=bool(item.get("active", True)),
+            )
+            storage_key = str(row["stable_key"] or "").strip()
+            self.conn.execute(
+                "UPDATE profile_items SET active = 0, updated_at = ? WHERE stable_key = ?",
+                (utc_now_iso(), storage_key),
+            )
+            self.conn.execute(
+                "DELETE FROM profile_fts WHERE rowid = ?",
+                (int(row["id"]),),
+            )
+            migrated += 1
+            retired += 1
+
+        self._mark_migration_applied(MIGRATION_BEHAVIOR_CONTRACT_STORAGE_V1)
+        self.conn.commit()
+        if migrated:
+            logger.info(
+                "Migrated %s canonical style contracts into first-class behavior-contract storage and retired %s profile rows",
+                migrated,
+                retired,
+            )
+        else:
+            logger.info("Applied behavior-contract storage migration with no eligible canonical style-contract rows")
+
     def _upsert_compiled_behavior_policy_record(
         self,
         *,
@@ -1024,8 +1106,8 @@ class BrainstackStore:
             ),
         )
 
-    def _rebuild_compiled_behavior_policy_from_style_contract_row(self, row: sqlite3.Row) -> bool:
-        item = _profile_row_to_dict(row)
+    def _rebuild_compiled_behavior_policy_from_behavior_contract_row(self, row: sqlite3.Row) -> bool:
+        item = _behavior_contract_row_to_dict(row)
         if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT:
             return False
         compiled = compile_behavior_policy(
@@ -1046,36 +1128,44 @@ class BrainstackStore:
     def _apply_compiled_behavior_policy_migration_v1(self) -> None:
         rows = self.conn.execute(
             """
-            SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at
-            FROM profile_items
-            WHERE active = 1
-            ORDER BY updated_at DESC, id DESC
+            SELECT id, storage_key, principal_scope_key, stable_key, category, content, source, confidence,
+                   metadata_json, source_contract_hash, revision_number, parent_revision_id, status,
+                   committed_at, updated_at
+            FROM behavior_contracts
+            WHERE status = ?
+            ORDER BY revision_number DESC, id DESC
             """
+            ,
+            (BEHAVIOR_CONTRACT_ACTIVE_STATUS,),
         ).fetchall()
         rebuilt = 0
         for row in rows:
-            if self._rebuild_compiled_behavior_policy_from_style_contract_row(row):
+            if self._rebuild_compiled_behavior_policy_from_behavior_contract_row(row):
                 rebuilt += 1
         self._mark_migration_applied(MIGRATION_COMPILED_BEHAVIOR_POLICY_V1)
         self.conn.commit()
         if rebuilt:
-            logger.info("Built %s compiled behavior policies from canonical style-contract rows", rebuilt)
+            logger.info("Built %s compiled behavior policies from canonical behavior-contract rows", rebuilt)
         else:
-            logger.info("Applied compiled behavior policy migration with no eligible style-contract rows")
+            logger.info("Applied compiled behavior policy migration with no eligible behavior-contract rows")
 
     @_locked
     def _apply_compiled_behavior_policy_migration_v2(self) -> None:
         rows = self.conn.execute(
             """
-            SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at
-            FROM profile_items
-            WHERE active = 1
-            ORDER BY updated_at DESC, id DESC
+            SELECT id, storage_key, principal_scope_key, stable_key, category, content, source, confidence,
+                   metadata_json, source_contract_hash, revision_number, parent_revision_id, status,
+                   committed_at, updated_at
+            FROM behavior_contracts
+            WHERE status = ?
+            ORDER BY revision_number DESC, id DESC
             """
+            ,
+            (BEHAVIOR_CONTRACT_ACTIVE_STATUS,),
         ).fetchall()
         rebuilt = 0
         for row in rows:
-            if self._rebuild_compiled_behavior_policy_from_style_contract_row(row):
+            if self._rebuild_compiled_behavior_policy_from_behavior_contract_row(row):
                 rebuilt += 1
         self._mark_migration_applied(MIGRATION_COMPILED_BEHAVIOR_POLICY_V2)
         self.conn.commit()
@@ -1162,6 +1252,31 @@ class BrainstackStore:
 
             CREATE INDEX IF NOT EXISTS idx_profile_category_updated
             ON profile_items(category, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS behavior_contracts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                storage_key TEXT NOT NULL UNIQUE,
+                principal_scope_key TEXT NOT NULL DEFAULT '',
+                stable_key TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL,
+                content TEXT NOT NULL,
+                source TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 0.5,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                source_contract_hash TEXT NOT NULL DEFAULT '',
+                revision_number INTEGER NOT NULL DEFAULT 1,
+                parent_revision_id INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active',
+                committed_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_behavior_contract_active_scope
+            ON behavior_contracts(principal_scope_key, stable_key)
+            WHERE status = 'active';
+
+            CREATE INDEX IF NOT EXISTS idx_behavior_contract_scope_revision
+            ON behavior_contracts(principal_scope_key, stable_key, revision_number DESC, id DESC);
 
             CREATE TABLE IF NOT EXISTS compiled_behavior_policies (
                 principal_scope_key TEXT PRIMARY KEY,
@@ -2419,6 +2534,153 @@ class BrainstackStore:
         )
         return scored[:limit]
 
+    def _get_active_behavior_contract_row(
+        self,
+        *,
+        stable_key: str = STYLE_CONTRACT_SLOT,
+        principal_scope_key: str = "",
+    ) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT id, storage_key, principal_scope_key, stable_key, category, content, source, confidence,
+                   metadata_json, source_contract_hash, revision_number, parent_revision_id, status,
+                   committed_at, updated_at
+            FROM behavior_contracts
+            WHERE principal_scope_key = ? AND stable_key = ? AND status = ?
+            ORDER BY revision_number DESC, id DESC
+            LIMIT 1
+            """,
+            (
+                str(principal_scope_key or "").strip(),
+                str(stable_key or "").strip() or STYLE_CONTRACT_SLOT,
+                BEHAVIOR_CONTRACT_ACTIVE_STATUS,
+            ),
+        ).fetchone()
+
+    @_locked
+    def upsert_behavior_contract(
+        self,
+        *,
+        stable_key: str = STYLE_CONTRACT_SLOT,
+        category: str,
+        content: str,
+        source: str,
+        confidence: float,
+        metadata: Dict[str, Any] | None = None,
+        active: bool = True,
+    ) -> int:
+        now = utc_now_iso()
+        principal_scope_key = _principal_scope_key_from_metadata(metadata)
+        logical_key = str(stable_key or "").strip() or STYLE_CONTRACT_SLOT
+        existing = self._get_active_behavior_contract_row(
+            stable_key=logical_key,
+            principal_scope_key=principal_scope_key,
+        )
+        if existing and str(existing["content"] or "").strip() == str(content or "").strip():
+            return int(existing["id"])
+        if (
+            existing
+            and _should_preserve_existing_style_contract(
+                existing_source=existing["source"],
+                incoming_source=source,
+            )
+            and str(existing["content"] or "").strip() != str(content or "").strip()
+        ):
+            return int(existing["id"])
+        normalized_metadata = _merge_record_metadata(
+            existing["metadata_json"] if existing else None,
+            metadata,
+            source=source,
+        )
+        metadata_json = json.dumps(normalized_metadata, ensure_ascii=True, sort_keys=True)
+        if existing:
+            existing_item = _behavior_contract_row_to_dict(existing)
+            if (
+                str(existing_item.get("content") or "").strip() == str(content or "").strip()
+                and str(existing_item.get("source") or "").strip() == str(source or "").strip()
+                and json.dumps(existing_item.get("metadata") or {}, ensure_ascii=True, sort_keys=True) == metadata_json
+                and float(existing_item.get("confidence") or 0.0) == float(confidence)
+                and bool(existing_item.get("active", False)) == bool(active)
+            ):
+                return int(existing_item["id"])
+            parent_revision_id = int(existing_item["id"])
+            revision_number = int(existing_item.get("revision_number") or 0) + 1
+        else:
+            parent_revision_id = 0
+            revision_number = 1
+        storage_key = _behavior_contract_storage_key(
+            stable_key=logical_key,
+            principal_scope_key=principal_scope_key,
+            revision_number=revision_number,
+        )
+        compiled = None
+        if active:
+            compiled = compile_behavior_policy(
+                raw_content=content,
+                metadata=normalized_metadata,
+                source_storage_key=storage_key,
+                source_updated_at=now,
+            )
+            if compiled is None:
+                raise ValueError("Behavior contract commit failed because compiled behavior policy could not be built")
+        if existing:
+            self.conn.execute(
+                """
+                UPDATE behavior_contracts
+                SET status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    BEHAVIOR_CONTRACT_SUPERSEDED_STATUS,
+                    now,
+                    int(existing["id"]),
+                ),
+            )
+        cur = self.conn.execute(
+            """
+            INSERT INTO behavior_contracts (
+                storage_key,
+                principal_scope_key,
+                stable_key,
+                category,
+                content,
+                source,
+                confidence,
+                metadata_json,
+                source_contract_hash,
+                revision_number,
+                parent_revision_id,
+                status,
+                committed_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                storage_key,
+                str(principal_scope_key or "").strip(),
+                logical_key,
+                category,
+                content,
+                source,
+                confidence,
+                metadata_json,
+                hashlib.sha256(str(content or "").encode("utf-8")).hexdigest() if str(content or "") else "",
+                revision_number,
+                parent_revision_id,
+                BEHAVIOR_CONTRACT_ACTIVE_STATUS if active else BEHAVIOR_CONTRACT_SUPERSEDED_STATUS,
+                now,
+                now,
+            ),
+        )
+        row_id = _cursor_lastrowid(cur)
+        if compiled is not None:
+            self._upsert_compiled_behavior_policy_record(
+                principal_scope_key=principal_scope_key,
+                compiled_policy=compiled,
+            )
+        self.conn.commit()
+        return row_id
+
     @_locked
     def upsert_profile_item(
         self,
@@ -2431,6 +2693,16 @@ class BrainstackStore:
         metadata: Dict[str, Any] | None = None,
         active: bool = True,
     ) -> int:
+        if str(stable_key or "").strip() == STYLE_CONTRACT_SLOT:
+            return self.upsert_behavior_contract(
+                stable_key=stable_key,
+                category=category,
+                content=content,
+                source=source,
+                confidence=confidence,
+                metadata=metadata,
+                active=active,
+            )
         now = utc_now_iso()
         principal_scope_key = _principal_scope_key_from_metadata(metadata)
         storage_key = _profile_storage_key(
@@ -2442,16 +2714,6 @@ class BrainstackStore:
             "SELECT id, content, source, metadata_json FROM profile_items WHERE stable_key = ?",
             (storage_key,),
         ).fetchone()
-        if (
-            str(stable_key or "").strip() == STYLE_CONTRACT_SLOT
-            and existing
-            and _should_preserve_existing_style_contract(
-                existing_source=existing["source"],
-                incoming_source=source,
-            )
-            and str(existing["content"] or "").strip() != str(content or "").strip()
-        ):
-            return int(existing["id"])
         normalized_metadata = _merge_record_metadata(
             existing["metadata_json"] if existing else None,
             metadata,
@@ -2506,18 +2768,6 @@ class BrainstackStore:
             "INSERT INTO profile_fts(rowid, content, category, stable_key) VALUES (?, ?, ?, ?)",
             (row_id, content, category, stable_key),
         )
-        if str(stable_key or "").strip() == STYLE_CONTRACT_SLOT and active:
-            compiled = compile_behavior_policy(
-                raw_content=content,
-                metadata=normalized_metadata,
-                source_storage_key=storage_key,
-                source_updated_at=now,
-            )
-            if compiled is not None:
-                self._upsert_compiled_behavior_policy_record(
-                    principal_scope_key=principal_scope_key,
-                    compiled_policy=compiled,
-                )
         self.conn.commit()
         return row_id
 
@@ -2537,10 +2787,7 @@ class BrainstackStore:
 
     @_locked
     def get_behavior_policy_snapshot(self, *, principal_scope_key: str = "") -> Dict[str, Any]:
-        raw_contract = self.get_profile_item(
-            stable_key=STYLE_CONTRACT_SLOT,
-            principal_scope_key=principal_scope_key,
-        )
+        raw_contract = self.get_behavior_contract(principal_scope_key=principal_scope_key)
         compiled_policy = self.get_compiled_behavior_policy(principal_scope_key=principal_scope_key)
         snapshot = build_behavior_policy_snapshot(
             raw_contract_row=raw_contract,
@@ -2587,10 +2834,7 @@ class BrainstackStore:
         replacement_text: Any,
         source: str = "behavior_policy_correction",
     ) -> Dict[str, Any] | None:
-        raw_contract = self.get_profile_item(
-            stable_key=STYLE_CONTRACT_SLOT,
-            principal_scope_key=principal_scope_key,
-        )
+        raw_contract = self.get_behavior_contract(principal_scope_key=principal_scope_key)
         if raw_contract is None:
             return None
         corrected = apply_style_contract_rule_correction(
@@ -2614,7 +2858,7 @@ class BrainstackStore:
             "rule_count": len(list_style_contract_rules(raw_text=corrected["content"], metadata=metadata)),
             "content_hash": hashlib.sha256(str(corrected["content"]).encode("utf-8")).hexdigest(),
         }
-        self.upsert_profile_item(
+        self.upsert_behavior_contract(
             stable_key=STYLE_CONTRACT_SLOT,
             category=str(raw_contract.get("category") or "preference"),
             content=str(corrected["content"]),
@@ -2835,6 +3079,11 @@ class BrainstackStore:
 
     @_locked
     def get_profile_item(self, *, stable_key: str, principal_scope_key: str = "") -> Dict[str, Any] | None:
+        if str(stable_key or "").strip() == STYLE_CONTRACT_SLOT:
+            return self.get_behavior_contract(
+                stable_key=stable_key,
+                principal_scope_key=principal_scope_key,
+            )
         storage_key = _profile_storage_key(
             stable_key=stable_key,
             principal_scope_key=principal_scope_key,
@@ -2849,6 +3098,19 @@ class BrainstackStore:
             (storage_key,),
         ).fetchone()
         return _profile_row_to_dict(row) if row else None
+
+    @_locked
+    def get_behavior_contract(
+        self,
+        *,
+        stable_key: str = STYLE_CONTRACT_SLOT,
+        principal_scope_key: str = "",
+    ) -> Dict[str, Any] | None:
+        row = self._get_active_behavior_contract_row(
+            stable_key=stable_key,
+            principal_scope_key=principal_scope_key,
+        )
+        return _behavior_contract_row_to_dict(row) if row else None
 
     @_locked
     def record_profile_retrievals(self, *, rows: Iterable[Dict[str, Any]]) -> int:

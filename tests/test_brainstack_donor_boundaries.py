@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from plugins.memory.brainstack import BrainstackMemoryProvider
-from plugins.memory.brainstack.donors import continuity_adapter, corpus_adapter, graph_adapter
+from brainstack import BrainstackMemoryProvider
+from brainstack.donors import continuity_adapter, corpus_adapter, graph_adapter
 
 
 def _make_provider(tmp_path, session_id: str, **config):
@@ -61,6 +61,9 @@ class TestBrainstackDonorBoundaries:
             provider.sync_turn("Project Atlas is active now.", "Saved.", session_id="session-graph")
             assert calls
             assert calls[0]["source"] == "sync_turn:user"
+            assert "evidence_items" in calls[0]
+            assert calls[0]["evidence_items"]
+            assert "text" not in calls[0]
             graph_rows = provider._store.search_graph(query="Project Atlas", limit=5)
             assert graph_rows
         finally:
@@ -119,6 +122,9 @@ class TestBrainstackDonorBoundaries:
             assert snapshot_calls[0]["kind"] == "session_summary"
             assert graph_calls
             assert graph_calls[0]["source"] == "session_end_scan:user"
+            assert "evidence_items" in graph_calls[0]
+            assert graph_calls[0]["evidence_items"]
+            assert "text" not in graph_calls[0]
             rows = provider._store.recent_continuity(session_id="session-end", limit=10)
             assert any(row["kind"] == "session_summary" for row in rows)
             graph_rows = provider._store.search_graph(query="Project Atlas", limit=5)

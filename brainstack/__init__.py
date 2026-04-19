@@ -432,8 +432,11 @@ class BrainstackMemoryProvider(MemoryProvider):
                 "rule_count": len(list(style_contract.get("metadata", {}).get("style_contract_rules") or [])),
             },
         )
+        raw_contract = self._store.get_behavior_contract(principal_scope_key=self._principal_scope_key)
         snapshot = self._store.get_behavior_policy_snapshot(principal_scope_key=self._principal_scope_key)
         compiled_policy = dict(snapshot.get("compiled_policy") or {})
+        receipt["behavior_contract_revision"] = int(raw_contract.get("revision_number") or 0) if raw_contract else 0
+        receipt["behavior_contract_storage_key"] = str(raw_contract.get("storage_key") or "") if raw_contract else ""
         receipt["compiled_policy_active"] = bool(compiled_policy.get("active"))
         receipt["compiled_policy_status"] = str(compiled_policy.get("status") or "")
         self._last_write_receipt = receipt
@@ -700,10 +703,10 @@ class BrainstackMemoryProvider(MemoryProvider):
                 ",".join(plan.durable_admission.matched_rules) or "-",
             )
 
-        if plan.graph_text:
+        if plan.graph_evidence_items:
             graph_adapter.ingest_turn_graph_candidates(
                 self._store,
-                text=plan.graph_text,
+                evidence_items=plan.graph_evidence_items,
                 session_id=sid,
                 turn_number=self._turn_counter,
                 source="sync_turn:user",
@@ -838,10 +841,10 @@ class BrainstackMemoryProvider(MemoryProvider):
                     plan.durable_admission.reason,
                     ",".join(plan.durable_admission.matched_rules) or "-",
                 )
-            if plan.graph_text:
+            if plan.graph_evidence_items:
                 graph_adapter.ingest_session_graph_candidates(
                     self._store,
-                    text=plan.graph_text,
+                    evidence_items=plan.graph_evidence_items,
                     session_id=self._session_id,
                     source="session_end_scan:user",
                     metadata=self._scoped_metadata(),
@@ -930,7 +933,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             principal_scope_key=self._principal_scope_key,
             rule_id=rule_id,
             replacement_text=replacement_text,
-            source="provider_behavior_policy_correction",
+            source="behavior_policy_correction:provider",
         )
 
     def validate_assistant_output(self, content: str) -> Dict[str, Any] | None:

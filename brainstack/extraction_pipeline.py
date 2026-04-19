@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List
 
+from .graph_evidence import GraphEvidenceItem, extract_graph_evidence_from_text
 from .stable_memory_guardrails import StableMemoryAdmissionDecision, should_admit_stable_memory
 
 
@@ -23,7 +24,7 @@ class Tier2ScheduleDecision:
 class TurnIngestPlan:
     durable_admission: StableMemoryAdmissionDecision
     profile_candidates: List[Dict[str, Any]]
-    graph_text: str
+    graph_evidence_items: List[GraphEvidenceItem]
     tier2_schedule: Tier2ScheduleDecision
 
 
@@ -31,7 +32,7 @@ class TurnIngestPlan:
 class SessionMessageIngestPlan:
     durable_admission: StableMemoryAdmissionDecision
     profile_candidates: List[Dict[str, Any]]
-    graph_text: str
+    graph_evidence_items: List[GraphEvidenceItem]
 
 
 def _plan_tier2_schedule(
@@ -90,7 +91,7 @@ def build_turn_ingest_plan(
         # live ingest path. Durable profile writes now belong to the Tier-2 path
         # or explicit memory writes, not language-specific slot guessing here.
         profile_candidates=[],
-        graph_text=user_content,
+        graph_evidence_items=extract_graph_evidence_from_text(user_content),
         tier2_schedule=schedule,
     )
 
@@ -100,11 +101,11 @@ def build_session_message_ingest_plan(*, role: str, content: str) -> SessionMess
         return SessionMessageIngestPlan(
             durable_admission=StableMemoryAdmissionDecision(False, "non_user_role"),
             profile_candidates=[],
-            graph_text="",
+            graph_evidence_items=[],
         )
     admission = should_admit_stable_memory(fact_text=content)
     return SessionMessageIngestPlan(
         durable_admission=admission,
         profile_candidates=[],
-        graph_text=content,
+        graph_evidence_items=extract_graph_evidence_from_text(content),
     )

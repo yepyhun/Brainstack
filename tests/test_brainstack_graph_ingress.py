@@ -10,15 +10,15 @@ from tests._host_import_shims import install_host_import_shims
 
 install_host_import_shims(hermes_home=REPO_ROOT)
 
-from brainstack.graph import _extract_graph_candidates
+from brainstack.graph_evidence import extract_graph_evidence_from_text
 
 
 def test_legacy_graph_ingress_ignores_broad_role_like_sentences():
-    candidates = _extract_graph_candidates("Do you think his rejection is a defense mechanism?")
-    assert candidates == []
+    evidence_items = extract_graph_evidence_from_text("Do you think his rejection is a defense mechanism?")
+    assert evidence_items == []
 
 
 def test_legacy_graph_ingress_keeps_status_and_location_patterns():
-    candidates = _extract_graph_candidates("Project Atlas is active now. Laura is in Budapest.")
-    assert any(item["kind"] == "state" and item["attribute"] == "status" for item in candidates)
-    assert any(item["kind"] == "state" and item["attribute"] == "location" for item in candidates)
+    evidence_items = extract_graph_evidence_from_text("Project Atlas is active now. Laura is in Budapest.")
+    assert any(item.kind == "state" and item.attribute == "status" for item in evidence_items)
+    assert any(item.kind == "state" and item.attribute == "location" for item in evidence_items)

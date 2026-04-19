@@ -1,108 +1,65 @@
 from __future__ import annotations
 
-import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping, Sequence
 
 from .db import BrainstackStore
+from .graph_evidence import (
+    GRAPH_EVIDENCE_BOUNDARY_VERSION,
+    GraphEvidenceItem,
+    coerce_graph_evidence_item,
+    extract_graph_evidence_from_text,
+)
+from .provenance import merge_provenance
 
 
-STATUS_WORDS = {"active", "paused", "archived", "completed", "retired", "pending"}
-SUPERSEDE_MARKERS = (" now", " currently", " changed to", " no longer", " from ")
-
-
-def _clean_value(value: str) -> str:
-    return " ".join(value.strip().strip(" .").split())
-
-
-def _should_supersede(sentence: str) -> bool:
-    lowered = f" {sentence.lower()} "
-    return any(marker in lowered for marker in SUPERSEDE_MARKERS)
-
-
-def _extract_graph_candidates(text: str) -> List[Dict[str, Any]]:
-    candidates: List[Dict[str, Any]] = []
-    if not text:
-        return candidates
-
-    sentences = [part.strip() for part in re.split(r"[.!?\n]+", text) if part.strip()]
-    for sentence in sentences:
-        cleaned = " ".join(sentence.split())
-
-        relation_match = re.search(
-            r"(?P<subject>[A-Z][A-Za-z0-9_ /-]{1,60}?)\s+works on\s+(?P<object>[A-Z][A-Za-z0-9_ /-]{1,80})",
-            cleaned,
-        )
-        if relation_match:
-            candidates.append(
-                {
-                    "kind": "relation",
-                    "subject": _clean_value(relation_match.group("subject")),
-                    "predicate": "works_on",
-                    "object": _clean_value(relation_match.group("object")),
-                }
-            )
-
-        location_match = re.search(
-            r"(?P<subject>[A-Z][A-Za-z0-9_ /-]{1,60}?)\s+is\s+(?:in|at)\s+(?P<value>[A-Z][A-Za-z0-9_ /-]{1,80})",
-            cleaned,
-        )
-        if location_match:
-            candidates.append(
-                {
-                    "kind": "state",
-                    "subject": _clean_value(location_match.group("subject")),
-                    "attribute": "location",
-                    "value": _clean_value(location_match.group("value")),
-                    "supersede": _should_supersede(cleaned),
-                }
-            )
-
-        status_match = re.search(
-            r"(?P<subject>[A-Z][A-Za-z0-9_ /-]{1,60}?)\s+is\s+(?P<value>active|paused|archived|completed|retired|pending)(?:\s+now|\s+currently)?",
-            cleaned,
-            re.IGNORECASE,
-        )
-        if status_match:
-            candidates.append(
-                {
-                    "kind": "state",
-                    "subject": _clean_value(status_match.group("subject")),
-                    "attribute": "status",
-                    "value": status_match.group("value").lower(),
-                    "supersede": _should_supersede(cleaned),
-                }
-            )
-
-    return candidates
-
-
-def ingest_graph_candidates(
+def ingest_graph_evidence(
     store: BrainstackStore,
     *,
-    text: str,
+    evidence_items: Sequence[GraphEvidenceItem | Mapping[str, Any]],
     source: str,
     metadata: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
-    for candidate in _extract_graph_candidates(text):
-        if candidate["kind"] == "relation":
+    base_metadata = dict(metadata or {})
+    for raw_item in evidence_items:
+        item = coerce_graph_evidence_item(raw_item)
+        item_metadata = dict(base_metadata)
+        item_metadata["graph_evidence_boundary"] = GRAPH_EVIDENCE_BOUNDARY_VERSION
+        item_metadata["graph_evidence"] = item.to_dict()
+        item_metadata["provenance"] = merge_provenance(
+            item_metadata.get("provenance") if isinstance(item_metadata.get("provenance"), Mapping) else None,
+            {
+                "origin": item.provenance_class,
+                "source_ids": [source],
+                "status_reason": "typed_graph_evidence",
+            },
+        )
+
+        if item.kind == "relation":
             relation_id = store.add_graph_relation(
-                subject_name=candidate["subject"],
-                predicate=candidate["predicate"],
-                object_name=candidate["object"],
+                subject_name=item.subject,
+                predicate=item.predicate,
+                object_name=item.object_value,
                 source=source,
-                metadata=metadata,
+                metadata=item_metadata,
             )
-            results.append({"status": "relation", "relation_id": relation_id, **candidate})
+            results.append({"status": "relation", "relation_id": relation_id, **item.to_dict()})
             continue
 
         outcome = store.upsert_graph_state(
-            subject_name=candidate["subject"],
-            attribute=candidate["attribute"],
-            value_text=candidate["value"],
+            subject_name=item.subject,
+            attribute=item.attribute,
+            value_text=item.value_text,
             source=source,
-            supersede=bool(candidate.get("supersede")),
-            metadata=metadata,
+            supersede=bool(item.supersede),
+            metadata=item_metadata,
         )
-        results.append({**candidate, **outcome})
+        results.append({**item.to_dict(), **outcome})
     return results
+
+
+__all__ = [
+    "GraphEvidenceItem",
+    "extract_graph_evidence_from_text",
+    "ingest_graph_evidence",
+]

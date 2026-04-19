@@ -7,9 +7,10 @@ from unittest.mock import MagicMock
 from tests._host_import_shims import install_host_import_shims
 install_host_import_shims()
 
-from plugins.memory.brainstack import BrainstackMemoryProvider
-from plugins.memory.brainstack.extraction_pipeline import Tier2ScheduleDecision, TurnIngestPlan
-from plugins.memory.brainstack.stable_memory_guardrails import StableMemoryAdmissionDecision
+from brainstack import BrainstackMemoryProvider
+from brainstack.extraction_pipeline import Tier2ScheduleDecision, TurnIngestPlan
+from brainstack.graph_evidence import GraphEvidenceItem
+from brainstack.stable_memory_guardrails import StableMemoryAdmissionDecision
 from agent.brainstack_mode import blocked_brainstack_only_tool_error
 from run_agent import AIAgent
 
@@ -156,7 +157,15 @@ class TestBrainstackIntegrationInvariants:
             fake_plan = TurnIngestPlan(
                 durable_admission=StableMemoryAdmissionDecision(False, "forced_test_reject"),
                 profile_candidates=[],
-                graph_text="Project Atlas is active.",
+                graph_evidence_items=[
+                    GraphEvidenceItem(
+                        kind="state",
+                        subject="Project Atlas",
+                        attribute="status",
+                        value_text="active",
+                        confidence=0.95,
+                    )
+                ],
                 tier2_schedule=Tier2ScheduleDecision(
                     should_queue=True,
                     reason="turn_batch_limit",
@@ -166,7 +175,7 @@ class TestBrainstackIntegrationInvariants:
                     idle_seconds=0.0,
                 ),
             )
-            monkeypatch.setattr("plugins.memory.brainstack.build_turn_ingest_plan", lambda **kwargs: fake_plan)
+            monkeypatch.setattr("brainstack.build_turn_ingest_plan", lambda **kwargs: fake_plan)
 
             provider.sync_turn(
                 "My name is Laura. I prefer concise answers.",

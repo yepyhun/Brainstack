@@ -696,7 +696,7 @@ def test_compiled_behavior_policy_becomes_ordinary_turn_owner(tmp_path):
 
     compiled = store.get_compiled_behavior_policy(principal_scope_key=principal_scope_key)
     assert compiled is not None
-    assert compiled["policy"]["source_storage_key"].startswith(STYLE_CONTRACT_SLOT)
+    assert compiled["policy"]["source_storage_key"].startswith("behavior_contract::")
 
     prompt_block = build_system_prompt_block(
         store,
@@ -916,7 +916,7 @@ def test_open_backfills_compiled_behavior_policy_from_existing_style_contract_ro
         compiled = reopened.get_compiled_behavior_policy(principal_scope_key=principal_scope_key)
         assert compiled is not None
         assert compiled["policy"]["compiler_version"] == BEHAVIOR_POLICY_COMPILER_VERSION
-        assert compiled["policy"]["source_storage_key"].startswith(STYLE_CONTRACT_SLOT)
+        assert compiled["policy"]["source_storage_key"].startswith("behavior_contract::")
         assert compiled["policy"]["no_silent_drop"] is True
         assert len(compiled["policy"]["coverage"]) == compiled["policy"]["raw_rule_count"]
         assert "Chatbot maradványok tilos" in compiled["projection_text"]
