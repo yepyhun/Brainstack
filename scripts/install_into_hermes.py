@@ -735,12 +735,18 @@ def _patch_memory_manager(path: Path, dry_run: bool) -> list[str]:
         '        "[System note: The following is private recalled memory context, NOT new user input. "\n'
         '        "Apply it silently in your reply. Do not mention memory blocks, recalled-memory headings, "\n'
         '        "or internal memory state unless the user explicitly asks about memory behavior or debugging. "\n'
-        '        "When recalled memory provides a specific, non-conflicted factual user detail or committed owner-backed record such as a name, number, date, or task record, treat it as authoritative over assistant suggestions or generic prior knowledge unless another recalled fact in this memory block conflicts with it.]\\n\\n"\n'
+        '        "Use recalled details as supporting memory context, and when recalled items disagree, prefer the strongest committed or non-conflicted recalled record instead of blending them.]\\n\\n"\n'
     )
     current_private_note = (
         '        "[System note: The following is private recalled memory context, NOT new user input. "\n'
         '        "Apply it silently in your reply. Do not mention memory blocks, recalled-memory headings, "\n'
         '        "or internal memory state unless the user explicitly asks about memory behavior or debugging.]\\n\\n"\n'
+    )
+    authoritative_private_note = (
+        '        "[System note: The following is private recalled memory context, NOT new user input. "\n'
+        '        "Apply it silently in your reply. Do not mention memory blocks, recalled-memory headings, "\n'
+        '        "or internal memory state unless the user explicitly asks about memory behavior or debugging. "\n'
+        '        "When recalled memory provides a specific, non-conflicted factual user detail or committed owner-backed record such as a name, number, date, or task record, treat it as authoritative over assistant suggestions or generic prior knowledge unless another recalled fact in this memory block conflicts with it.]\\n\\n"\n'
     )
     if new_note not in text:
         text = _replace_once_any(
@@ -748,6 +754,7 @@ def _patch_memory_manager(path: Path, dry_run: bool) -> list[str]:
             [
                 (old_note, new_note),
                 (current_private_note, new_note),
+                (authoritative_private_note, new_note),
             ],
             label="memory_manager private recall note",
             path=path,
@@ -1700,6 +1707,13 @@ def _patch_dockerfile_backend_dependencies(path: Path, dry_run: bool) -> list[st
     backend_packages = " ".join(sorted(set(BACKEND_DEPENDENCIES.values())))
     install_line = f'uv pip install --no-cache-dir {backend_packages}'
     if install_line in text:
+        return []
+    if (
+        "uv pip install --no-cache-dir -r /tmp/requirements.txt" in text
+        and "uv pip install --no-cache-dir chromadb kuzu" in text
+    ):
+        # Newer Hermes Dockerfiles already install openai from requirements and
+        # keep kuzu/chromadb in a dedicated backend layer, so no patch is needed.
         return []
     anchor = '    uv pip install --no-cache-dir -e ".[all]"\n'
     if anchor not in text:

@@ -209,7 +209,8 @@ def test_memory_manager_patch_hardens_private_recall_wrapper(tmp_path: Path):
     assert "memory_manager:private_recall_note" in applied
     assert "Apply it silently in your reply." in content
     assert "unless the user explicitly asks about memory behavior or debugging" in content
-    assert "factual user detail or committed owner-backed record" in content
+    assert "Use recalled details as supporting memory context" in content
+    assert "factual user detail or committed owner-backed record" not in content
 
 
 def test_memory_manager_patch_upgrades_existing_private_note_to_stronger_grounding(tmp_path: Path):
@@ -231,7 +232,8 @@ def test_memory_manager_patch_upgrades_existing_private_note_to_stronger_groundi
     content = path.read_text(encoding="utf-8")
 
     assert "memory_manager:private_recall_note" in applied
-    assert "factual user detail or committed owner-backed record" in content
+    assert "Use recalled details as supporting memory context" in content
+    assert "factual user detail or committed owner-backed record" not in content
 
 
 def test_patch_config_sets_embedded_graph_and_corpus_defaults(tmp_path: Path):

@@ -383,6 +383,94 @@ def _render_truthful_memory_operations_section(title: str) -> str:
     return f"{title}\n{_render_items(lines)}"
 
 
+def build_system_prompt_projection(
+    store: BrainstackStore,
+    *,
+    profile_limit: int,
+    principal_scope_key: str = "",
+    session_id: str = "",
+) -> Dict[str, Any]:
+    fetch_limit = max(profile_limit * 3, 10)
+    items = store.list_profile_items(limit=fetch_limit, principal_scope_key=principal_scope_key)
+    compiled_policy = store.get_compiled_behavior_policy(principal_scope_key=principal_scope_key)
+    operating_context_snapshot = store.get_operating_context_snapshot(
+        principal_scope_key=principal_scope_key,
+        session_id=session_id,
+    )
+    contract_section = ""
+    compiled_policy_active = False
+    hidden_profile_keys: set[str] = set()
+    if compiled_policy:
+        contract_section = render_compiled_behavior_policy_section(
+            compiled_policy.get("policy"),
+            title="# Brainstack Active Communication Contract",
+            mode="ordinary_turn",
+        )
+        compiled_policy_active = bool(contract_section)
+    if compiled_policy_active:
+        filtered_items = _filter_compiled_behavior_profile_items(items, route_mode="fact")
+    else:
+        graph_rows = store.list_current_graph_states(
+            limit=8,
+            attributes=COMMUNICATION_GRAPH_PREDICATES,
+            principal_scope_key=principal_scope_key,
+        )
+        contract_lines, hidden_profile_keys = _build_active_communication_contract(
+            profile_items=items,
+            graph_rows=graph_rows,
+        )
+        filtered_items = [
+            item for item in items if str(item.get("stable_key") or "").strip() not in hidden_profile_keys
+        ]
+        filtered_items = [
+            item for item in filtered_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT
+        ]
+        contract_section = _render_contract_section("# Brainstack Active Communication Contract", contract_lines)
+
+    operating_context_section = render_operating_context_section(operating_context_snapshot)
+    truthful_memory_operations_section = _render_truthful_memory_operations_section(
+        "# Brainstack Truthful Memory Operations"
+    )
+    operating_context_profile_keys = {
+        str(entry.get("stable_key") or "").strip()
+        for entry in list(operating_context_snapshot.get("stable_profile_entries") or [])
+        if isinstance(entry, Mapping) and str(entry.get("stable_key") or "").strip()
+    }
+    rendered_profile_keys: List[str] = []
+    profile_lines: List[str] = []
+    for item in filtered_items[:profile_limit]:
+        stable_key = str(item.get("stable_key") or "").strip()
+        if stable_key and stable_key in operating_context_profile_keys:
+            continue
+        if stable_key:
+            rendered_profile_keys.append(stable_key)
+        label = item["category"].replace("_", " ")
+        profile_lines.append(f"[{label}] {_trim(item['content'], 140)}")
+
+    sections: List[str] = []
+    if contract_section:
+        sections.append(contract_section)
+    if operating_context_section:
+        sections.append(operating_context_section)
+    if contract_section or operating_context_section or profile_lines:
+        sections.append(truthful_memory_operations_section)
+    if profile_lines:
+        sections.append(
+            "# Brainstack Profile\n"
+            "Stable user and shared-work signals.\n"
+            f"{_render_items(profile_lines)}"
+        )
+
+    return {
+        "block": "\n\n".join(section for section in sections if section.strip()),
+        "contract_present": bool(contract_section),
+        "operating_context_present": bool(operating_context_section),
+        "truthful_memory_operations_present": bool(contract_section or operating_context_section or profile_lines),
+        "rendered_profile_keys": tuple(rendered_profile_keys),
+        "hidden_profile_keys": tuple(sorted(hidden_profile_keys)),
+    }
+
+
 def _render_lookup_semantics_section(payload: Mapping[str, Any] | None) -> str:
     if not isinstance(payload, Mapping):
         return ""
@@ -776,68 +864,55 @@ def build_system_prompt_block(
     principal_scope_key: str = "",
     session_id: str = "",
 ) -> str:
-    fetch_limit = max(profile_limit * 3, 10)
-    items = store.list_profile_items(limit=fetch_limit, principal_scope_key=principal_scope_key)
-    compiled_policy = store.get_compiled_behavior_policy(principal_scope_key=principal_scope_key)
-    operating_context_snapshot = store.get_operating_context_snapshot(
-        principal_scope_key=principal_scope_key,
-        session_id=session_id,
-    )
-    contract_section = ""
-    compiled_policy_active = False
-    if compiled_policy:
-        contract_section = render_compiled_behavior_policy_section(
-            compiled_policy.get("policy"),
-            title="# Brainstack Active Communication Contract",
-            mode="ordinary_turn",
-        )
-        compiled_policy_active = bool(contract_section)
-    if compiled_policy_active:
-        filtered_items = _filter_compiled_behavior_profile_items(items, route_mode="fact")
-    else:
-        graph_rows = store.list_current_graph_states(
-            limit=8,
-            attributes=COMMUNICATION_GRAPH_PREDICATES,
+    return str(
+        build_system_prompt_projection(
+            store,
+            profile_limit=profile_limit,
             principal_scope_key=principal_scope_key,
+            session_id=session_id,
+        ).get("block")
+        or ""
+    )
+
+
+def _row_overlap_markers(row: Mapping[str, Any], *, transcript_like: bool = False) -> set[tuple[str, str]]:
+    markers: set[tuple[str, str]] = set()
+    session_id = str(row.get("session_id") or "").strip()
+    row_id = int(row.get("id") or 0)
+    if session_id and row_id > 0:
+        markers.add(("row", f"{session_id}:{row_id}"))
+    turn_number = int(row.get("turn_number") or 0)
+    if session_id and turn_number > 0:
+        markers.add(("turn", f"{session_id}:{turn_number}"))
+    content = str(row.get("content") or "").strip()
+    if content:
+        rendered = (
+            _render_user_first_exchange(content, max_len=220)
+            if transcript_like or ("user:" in content.lower() and "assistant:" in content.lower())
+            else _trim(content, 220)
         )
-        contract_lines, hidden_profile_keys = _build_active_communication_contract(
-            profile_items=items,
-            graph_rows=graph_rows,
-        )
-        filtered_items = [
-            item for item in items if str(item.get("stable_key") or "").strip() not in hidden_profile_keys
-        ]
-        filtered_items = [
-            item for item in filtered_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT
-        ]
-        contract_section = _render_contract_section("# Brainstack Active Communication Contract", contract_lines)
+        fingerprint = _normalize_compare_text(rendered)
+        if fingerprint:
+            markers.add(("fp", fingerprint))
+    return markers
 
-    operating_context_section = render_operating_context_section(operating_context_snapshot)
 
-    if not contract_section and not filtered_items and not operating_context_section:
-        return ""
-
-    sections: List[str] = []
-    if contract_section:
-        sections.append(contract_section)
-
-    if operating_context_section:
-        sections.append(operating_context_section)
-
-    sections.append(_render_truthful_memory_operations_section("# Brainstack Truthful Memory Operations"))
-
-    lines = []
-    for item in filtered_items[:profile_limit]:
-        label = item["category"].replace("_", " ")
-        lines.append(f"[{label}] {_trim(item['content'], 140)}")
-    if lines:
-        sections.append(
-            "# Brainstack Profile\n"
-            "Stable user and shared-work signals.\n"
-            f"{_render_items(lines)}"
-        )
-
-    return "\n\n".join(section for section in sections if section.strip())
+def _suppress_overlapping_rows(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    seen_markers: set[tuple[str, str]] | None = None,
+    transcript_like: bool = False,
+) -> List[Dict[str, Any]]:
+    consumed = set(seen_markers or set())
+    kept: List[Dict[str, Any]] = []
+    for raw_row in rows:
+        row = dict(raw_row)
+        markers = _row_overlap_markers(row, transcript_like=transcript_like)
+        if markers and markers & consumed:
+            continue
+        kept.append(row)
+        consumed.update(markers)
+    return kept
 
 
 def render_working_memory_block(
@@ -852,6 +927,7 @@ def render_working_memory_block(
     graph_rows: List[Dict[str, Any]],
     corpus_rows: List[Dict[str, Any]],
     operating_rows: List[Dict[str, Any]] | None = None,
+    system_substrate: Mapping[str, Any] | None = None,
 ) -> str:
     sections: List[str] = []
     provenance_mode = str(policy.get("provenance_mode", "compact"))
@@ -861,6 +937,12 @@ def render_working_memory_block(
     exact_contract_section = ""
     hidden_profile_keys: set[str] = set()
     graph_rows_for_sections = graph_rows
+    system_substrate = system_substrate if isinstance(system_substrate, Mapping) else {}
+    suppress_contract_section = bool(system_substrate.get("contract_present")) and route_mode != "style_contract"
+    suppress_evidence_priority = bool(system_substrate.get("truthful_memory_operations_present"))
+    substrate_profile_keys = {
+        str(key).strip() for key in (system_substrate.get("rendered_profile_keys") or ()) if str(key).strip()
+    }
     style_contract_row = _extract_style_contract_profile_row(profile_items)
     if route_mode == "style_contract":
         exact_contract_section = _render_exact_contract_section(
@@ -870,12 +952,13 @@ def render_working_memory_block(
             provenance_mode=provenance_mode,
         )
     if isinstance(compiled_policy, dict) and route_mode != "style_contract":
-        contract_section = render_compiled_behavior_policy_section(
-            compiled_policy,
-            title="## Brainstack Active Communication Contract",
-            mode="ordinary_turn",
-        )
-        compiled_policy_active = bool(contract_section)
+        if not suppress_contract_section:
+            contract_section = render_compiled_behavior_policy_section(
+                compiled_policy,
+                title="## Brainstack Active Communication Contract",
+                mode="ordinary_turn",
+            )
+        compiled_policy_active = True
     if compiled_policy_active:
         graph_rows_for_sections = _filter_compiled_behavior_graph_rows(
             graph_rows,
@@ -886,7 +969,8 @@ def render_working_memory_block(
             profile_items=profile_items,
             graph_rows=graph_rows,
         )
-        contract_section = _render_contract_section("## Brainstack Active Communication Contract", contract_lines)
+        if not suppress_contract_section:
+            contract_section = _render_contract_section("## Brainstack Active Communication Contract", contract_lines)
 
     if policy.get("show_policy"):
         lines = [
@@ -903,7 +987,8 @@ def render_working_memory_block(
             lines.append("[escalation] open conflict present; verification required")
         sections.append("## Brainstack Working Memory Policy\n" + _render_items(lines))
 
-    sections.append(_render_evidence_priority_section("## Brainstack Evidence Priority"))
+    if not suppress_evidence_priority:
+        sections.append(_render_evidence_priority_section("## Brainstack Evidence Priority"))
 
     lookup_semantics_section = _render_lookup_semantics_section(policy.get("lookup_semantics"))
     if lookup_semantics_section:
@@ -954,6 +1039,10 @@ def render_working_memory_block(
         filtered_profile_items = [
             item for item in filtered_profile_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT
         ]
+    if substrate_profile_keys:
+        filtered_profile_items = [
+            item for item in filtered_profile_items if str(item.get("stable_key") or "").strip() not in substrate_profile_keys
+        ]
     if filtered_profile_items:
         style_contract_char_budget = max(320, int(policy.get("style_contract_char_budget", 2400)))
         lines = []
@@ -990,24 +1079,45 @@ def render_working_memory_block(
                 + _render_numbered_items(packed_aggregate)
             )
     else:
-        if matched:
+        deduped_matched = _suppress_overlapping_rows(matched)
+        deduped_recent = _suppress_overlapping_rows(
+            recent,
+            seen_markers={
+                marker
+                for row in deduped_matched
+                for marker in _row_overlap_markers(row)
+            },
+        )
+        deduped_transcript = _suppress_overlapping_rows(
+            transcript_rows,
+            seen_markers={
+                marker
+                for row in [*deduped_matched, *deduped_recent]
+                for marker in _row_overlap_markers(row)
+            },
+            transcript_like=True,
+        )
+        if not deduped_transcript and transcript_rows:
+            deduped_transcript = [dict(transcript_rows[0])]
+
+        if deduped_matched:
             lines = _pack_continuity_rows(
-                matched,
-                char_budget=max(320, min(900, 260 * max(1, len(matched)))),
+                deduped_matched,
+                char_budget=max(320, min(900, 260 * max(1, len(deduped_matched)))),
                 provenance_mode=provenance_mode,
             )
             sections.append("## Brainstack Continuity Match\n" + _render_items(lines))
 
-        if recent:
+        if deduped_recent:
             lines = _pack_continuity_rows(
-                recent,
-                char_budget=max(240, min(640, 220 * max(1, len(recent)))),
+                deduped_recent,
+                char_budget=max(240, min(640, 220 * max(1, len(deduped_recent)))),
                 provenance_mode=provenance_mode,
             )
             sections.append("## Brainstack Recent Continuity\n" + _render_items(lines))
 
         packed_transcript = _pack_transcript_rows(
-            transcript_rows,
+            deduped_transcript,
             char_budget=int(policy.get("transcript_char_budget", 320)),
             provenance_mode=provenance_mode,
         )

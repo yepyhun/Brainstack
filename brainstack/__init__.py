@@ -35,7 +35,7 @@ from .output_contract import validate_output_against_contract
 from .reconciler import reconcile_tier2_candidates
 from .retrieval import (
     build_compression_hint,
-    build_system_prompt_block,
+    build_system_prompt_projection,
 )
 from .style_contract import (
     apply_style_contract_patch,
@@ -743,12 +743,13 @@ class BrainstackMemoryProvider(MemoryProvider):
     def system_prompt_block(self) -> str:
         if not self._store:
             return ""
-        block = build_system_prompt_block(
+        projection = build_system_prompt_projection(
             self._store,
             profile_limit=self._profile_prompt_limit,
             principal_scope_key=self._principal_scope_key,
             session_id=self._session_id,
         )
+        block = str(projection.get("block") or "")
         snapshot = self._store.get_behavior_policy_snapshot(principal_scope_key=self._principal_scope_key)
         trace = dict(self._last_behavior_policy_trace or {})
         contract_title = str(snapshot.get("compiled_policy", {}).get("title") or "")
@@ -758,6 +759,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             "section_present": "# Brainstack Active Communication Contract" in block,
             "title_present": bool(contract_title and contract_title in block),
             "snapshot": snapshot,
+            "projection": dict(projection),
         }
         self._last_behavior_policy_trace = trace
         operating_snapshot = self._store.get_operating_context_snapshot(
@@ -797,6 +799,12 @@ class BrainstackMemoryProvider(MemoryProvider):
             source="prefetch:operating_truth",
             metadata={"session_id": sid},
         )
+        system_substrate = build_system_prompt_projection(
+            self._store,
+            profile_limit=self._profile_prompt_limit,
+            principal_scope_key=self._principal_scope_key,
+            session_id=sid,
+        )
         packet = build_working_memory_packet(
             self._store,
             query=query,
@@ -813,6 +821,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             corpus_limit=self._corpus_match_limit,
             corpus_char_budget=self._corpus_char_budget,
             route_resolver=self._route_resolver_override or self._config.get("_route_resolver"),
+            system_substrate=system_substrate,
         )
         self._last_prefetch_policy = packet["policy"]
         self._last_prefetch_routing = dict(packet.get("routing") or {})

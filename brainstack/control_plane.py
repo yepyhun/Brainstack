@@ -307,6 +307,7 @@ def build_working_memory_packet(
     operating_match_limit: int = 3,
     route_resolver: Callable[[str], Dict[str, Any] | str] | None = None,
     timezone_name: str = "UTC",
+    system_substrate: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     analysis = analyze_query(query)
     policy = _initial_policy(
@@ -429,6 +430,7 @@ def build_working_memory_packet(
         transcript_rows=transcript_rows,
         graph_rows=graph_rows,
         corpus_rows=corpus_rows,
+        system_substrate=system_substrate,
     )
 
     if profile_items:
@@ -469,5 +471,6 @@ def build_working_memory_packet(
         "fused_candidates": retrieval["fused_candidates"],
         "decomposition": retrieval.get("decomposition", {"used": False, "queries": [query]}),
         "routing": routing,
+        "system_substrate": dict(system_substrate or {}),
         "block": block,
     }
