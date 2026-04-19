@@ -121,6 +121,27 @@ def test_run_agent_patch_supports_multiline_memory_manager_import(tmp_path: Path
         "                env=get_active_env(effective_task_id),\n"
         "            )\n"
         "            enforce_turn_budget(messages[-num_tools_seq:], env=get_active_env(effective_task_id))\n"
+        "                try:\n"
+        "                    function_result = handle_function_call(\n"
+        "                        function_name, function_args, effective_task_id,\n"
+        "                        tool_call_id=tool_call.id,\n"
+        "                        session_id=self.session_id or \"\",\n"
+        "                        enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,\n"
+        "                        skip_pre_tool_call_hook=True,\n"
+        "                    )\n"
+        "                    _spinner_result = function_result\n"
+        "                except Exception as tool_error:\n"
+        "                    function_result = f\"Error executing tool '{function_name}': {tool_error}\"\n"
+        "                try:\n"
+        "                    function_result = handle_function_call(\n"
+        "                        function_name, function_args, effective_task_id,\n"
+        "                        tool_call_id=tool_call.id,\n"
+        "                        session_id=self.session_id or \"\",\n"
+        "                        enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,\n"
+        "                        skip_pre_tool_call_hook=True,\n"
+        "                    )\n"
+        "                except Exception as tool_error:\n"
+        "                    function_result = f\"Error executing tool '{function_name}': {tool_error}\"\n"
         "            if final_response:\n"
         "                if \"<think>\" in final_response:\n"
         "                    final_response = re.sub(r'<think>.*?</think>\\s*', '', final_response, flags=re.DOTALL).strip()\n"
@@ -133,8 +154,7 @@ def test_run_agent_patch_supports_multiline_memory_manager_import(tmp_path: Path
         "                    # Strip <think> blocks from user-facing response (keep raw in messages for trajectory)\n"
         "                    final_response = self._strip_think_blocks(final_response).strip()\n"
         "                    \n"
-        "                    final_msg = self._build_assistant_message(assistant_message, finish_reason)\n"
-        "            if function_name == \"todo\":\n",
+        "                    final_msg = self._build_assistant_message(assistant_message, finish_reason)\n",
         encoding="utf-8",
     )
 
@@ -165,6 +185,8 @@ def test_run_agent_patch_supports_multiline_memory_manager_import(tmp_path: Path
     assert "persona.md, or side skill files" in content
     assert "secondary memory APIs from ad hoc code" in content
     assert "session_search may be used only as explicit conversation search" in content
+    assert content.count("brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)") >= 3
+    assert 'if self._brainstack_only_mode and brainstack_only_error:' in content
 
 
 def test_memory_manager_patch_hardens_private_recall_wrapper(tmp_path: Path):
@@ -187,7 +209,7 @@ def test_memory_manager_patch_hardens_private_recall_wrapper(tmp_path: Path):
     assert "memory_manager:private_recall_note" in applied
     assert "Apply it silently in your reply." in content
     assert "unless the user explicitly asks about memory behavior or debugging" in content
-    assert "treat it as authoritative over assistant suggestions or generic prior knowledge" in content
+    assert "factual user detail or committed owner-backed record" in content
 
 
 def test_memory_manager_patch_upgrades_existing_private_note_to_stronger_grounding(tmp_path: Path):
@@ -209,7 +231,7 @@ def test_memory_manager_patch_upgrades_existing_private_note_to_stronger_groundi
     content = path.read_text(encoding="utf-8")
 
     assert "memory_manager:private_recall_note" in applied
-    assert "treat it as authoritative over assistant suggestions or generic prior knowledge" in content
+    assert "factual user detail or committed owner-backed record" in content
 
 
 def test_patch_config_sets_embedded_graph_and_corpus_defaults(tmp_path: Path):

@@ -19,7 +19,11 @@ install_host_import_shims(hermes_home=REPO_ROOT)
 from brainstack import BrainstackMemoryProvider
 from brainstack.control_plane import build_working_memory_packet
 from brainstack.db import BrainstackStore
-from brainstack.style_contract import STYLE_CONTRACT_SLOT, list_style_contract_rules
+from brainstack.style_contract import (
+    STYLE_CONTRACT_SLOT,
+    build_style_contract_from_text,
+    list_style_contract_rules,
+)
 
 
 def test_style_contract_commits_into_first_class_behavior_contract_storage(tmp_path):
@@ -127,6 +131,112 @@ def test_behavior_policy_correction_creates_new_behavior_contract_revision(tmp_p
         assert str(old_row["status"]) == "superseded"
     finally:
         provider.shutdown()
+
+
+def test_multi_message_style_contract_fragments_converge_before_canonical_commit(tmp_path):
+    provider = BrainstackMemoryProvider(config={"db_path": str(tmp_path / "brainstack.db")})
+    provider.initialize(
+        "session-behavior-fragments",
+        hermes_home=str(tmp_path),
+        user_id="user-1",
+        platform="discord",
+        agent_identity="assistant-main",
+        agent_workspace="discord-main",
+    )
+
+    try:
+        first_fragment = (
+            "konkrét tények - nem puffasztom fel a jelentőséget\n"
+            "konkrét forrás - nem használok homályos hivatkozásokat"
+        )
+        second_fragment = (
+            "emoji tilos - nem használok emojit\n"
+            "em dash helyett kötőjel - sima hyphen-minus jelet használok"
+        )
+
+        first_block = provider.prefetch(first_fragment, session_id="session-behavior-fragments")
+        assert "## Brainstack Memory Operation Receipt" not in first_block
+
+        second_block = provider.prefetch(second_fragment, session_id="session-behavior-fragments")
+        assert "## Brainstack Memory Operation Receipt" in second_block
+
+        store = provider._store
+        assert store is not None
+        row = store.get_behavior_contract(principal_scope_key=provider._principal_scope_key)
+        assert row is not None
+        rules = list_style_contract_rules(raw_text=row["content"], metadata=row["metadata"])
+        assert len(rules) == 4
+        assert any("emoji tilos" in str(rule.get("text") or "") for rule in rules)
+        assert any("konkrét tények" in str(rule.get("text") or "") for rule in rules)
+
+        trace = provider.memory_operation_trace()
+        assert trace is not None
+        receipt = trace["last_write_receipt"]
+        assert receipt["owner"] == "brainstack.behavior_contract"
+        assert receipt["rule_count"] == 4
+        assert receipt["fragment_count"] == 2
+    finally:
+        provider.shutdown()
+
+
+def test_lower_quality_tier2_behavior_contract_cannot_supersede_existing_tier2_contract(tmp_path):
+    store = BrainstackStore(str(tmp_path / "brainstack.db"))
+    store.open()
+    try:
+        metadata = {
+            "principal_scope_key": "platform:discord|user_id:user-1|agent_identity:assistant-main|agent_workspace:discord-main",
+            "principal_scope": {
+                "platform": "discord",
+                "user_id": "user-1",
+                "agent_identity": "assistant-main",
+                "agent_workspace": "discord-main",
+            },
+        }
+        full_contract = build_style_contract_from_text(
+            raw_text=(
+                "User style contract\n\n"
+                "rules:\n"
+                "1. mindig magyarul válaszolj\n"
+                "2. ne használj emojit\n"
+                "3. ne használj em dash-t\n"
+                "4. maradj tömör"
+            ),
+            source="tier2_llm",
+            metadata=metadata,
+        )
+        assert full_contract is not None
+        first_id = store.upsert_behavior_contract(
+            stable_key=STYLE_CONTRACT_SLOT,
+            category=str(full_contract["category"]),
+            content=str(full_contract["content"]),
+            source=str(full_contract["source"]),
+            confidence=float(full_contract["confidence"]),
+            metadata=dict(full_contract["metadata"]),
+        )
+
+        partial_contract = build_style_contract_from_text(
+            raw_text="User style contract\n\nrules:\n1. mindig magyarul válaszolj",
+            source="tier2_llm",
+            metadata=metadata,
+        )
+        assert partial_contract is not None
+        second_id = store.upsert_behavior_contract(
+            stable_key=STYLE_CONTRACT_SLOT,
+            category=str(partial_contract["category"]),
+            content=str(partial_contract["content"]),
+            source=str(partial_contract["source"]),
+            confidence=float(partial_contract["confidence"]),
+            metadata=dict(partial_contract["metadata"]),
+        )
+
+        row = store.get_behavior_contract(principal_scope_key=str(metadata["principal_scope_key"]))
+        assert row is not None
+        assert first_id == second_id == int(row["id"])
+        assert row["revision_number"] == 1
+        rules = list_style_contract_rules(raw_text=row["content"], metadata=row["metadata"])
+        assert len(rules) == 4
+    finally:
+        store.close()
 
 
 def test_style_contract_recall_fails_closed_without_committed_contract(tmp_path):

@@ -266,13 +266,14 @@ def _filter_compiled_behavior_profile_items(
     profile_items: Iterable[Dict[str, Any]],
     *,
     route_mode: str,
+    preserve_style_contract: bool = False,
 ) -> List[Dict[str, Any]]:
     output: List[Dict[str, Any]] = []
     for row in profile_items:
         stable_key = str(row.get("stable_key") or "").strip()
         if _is_communication_profile_item(row):
             continue
-        if route_mode != "style_contract" and stable_key == STYLE_CONTRACT_SLOT:
+        if route_mode != "style_contract" and not preserve_style_contract and stable_key == STYLE_CONTRACT_SLOT:
             continue
         output.append(row)
     return output
@@ -321,10 +322,10 @@ def _render_contract_section(title: str, lines: Iterable[str]) -> str:
     if not rows:
         return ""
     preface = (
-        "These are non-optional user-specific behavior rules. Apply them silently in every "
-        "reply, and let them override default assistant tone or formatting when there is any "
-        "conflict. Do not mention this contract, memory blocks, or internal memory state "
-        "unless the user explicitly asks about memory behavior or debugging."
+        "This is a bounded ordinary-turn communication support lane distilled from durable Brainstack memory. "
+        "Use it silently when relevant, but keep the live conversation context primary for local phrasing and flow. "
+        "Do not mention this lane, memory blocks, or internal memory state unless the user explicitly asks about "
+        "memory behavior or debugging."
     )
     return f"{title}\n{preface}\n{_render_items(rows)}"
 
@@ -332,12 +333,44 @@ def _render_contract_section(title: str, lines: Iterable[str]) -> str:
 def _render_evidence_priority_section(title: str) -> str:
     preface = (
         "Use recalled memory silently. When recalled memory provides a specific, "
-        "non-conflicted user fact such as a name, number, date, or preference, "
-        "treat it as authoritative over assistant suggestions or generic prior "
-        "knowledge unless another recalled fact in this memory block conflicts "
-        "with it."
+        "non-conflicted factual user detail or committed owner-backed record such "
+        "as a name, number, date, task record, or operating record, treat it as authoritative over "
+        "assistant suggestions or generic prior knowledge unless another recalled "
+        "fact in this memory block conflicts with it."
     )
     return f"{title}\n{preface}"
+
+
+def _extract_style_contract_profile_row(profile_items: Iterable[Dict[str, Any]]) -> Dict[str, Any] | None:
+    for row in profile_items:
+        if str(row.get("stable_key") or "").strip() == STYLE_CONTRACT_SLOT:
+            return row
+    return None
+
+
+def _render_exact_contract_section(
+    title: str,
+    row: Mapping[str, Any] | None,
+    *,
+    char_budget: int,
+    provenance_mode: str,
+) -> str:
+    if not isinstance(row, Mapping):
+        return ""
+    content = _trim(str(row.get("content") or ""), max_len=max(320, int(char_budget)))
+    if not content:
+        return ""
+    preface = (
+        "This is the canonical archival behavior contract recalled for explicit rule lookup or debugging. "
+        "Use it as exact contract truth. It is not the same thing as the smaller ordinary-turn invariant lane."
+    )
+    line = _with_provenance(
+        content,
+        source=str(row.get("source") or ""),
+        provenance_mode=provenance_mode,
+        metadata=row.get("metadata"),
+    )
+    return f"{title}\n{preface}\n{line}"
 
 
 def _render_truthful_memory_operations_section(title: str) -> str:
@@ -345,6 +378,7 @@ def _render_truthful_memory_operations_section(title: str) -> str:
         "Claim a durable Brainstack save only when the current turn includes a committed write receipt or a successful memory-tool result.",
         "If a domain has no structured owner in this runtime, say that explicitly instead of implying a committed record exists.",
         "For task and commitment lookups, committed Brainstack task records are authoritative when present; continuity or transcript recall is supporting evidence only after a structured miss.",
+        "For operating-truth lookups, committed Brainstack operating records are authoritative when present; continuity summaries are fallback only when that owner has no committed record.",
     ]
     return f"{title}\n{_render_items(lines)}"
 
@@ -356,7 +390,23 @@ def _render_lookup_semantics_section(payload: Mapping[str, Any] | None) -> str:
         return ""
     lines: List[str] = []
     domain = str(payload.get("domain") or "").strip()
-    if domain == "task_like":
+    if domain == "operating_truth":
+        record_types = [
+            str(value or "").strip().replace("_", " ")
+            for value in (payload.get("record_types") or ())
+            if str(value or "").strip()
+        ]
+        if str(payload.get("structured_owner_status") or "").strip() == "brainstack.operating_truth":
+            lines.append("Brainstack operating truth is the structured owner for this lookup in this runtime.")
+        if record_types:
+            lines.append("Requested operating records: " + ", ".join(record_types) + ".")
+        if str(payload.get("result_status") or "").strip() == "committed_records":
+            lines.append(
+                f"Use the committed Brainstack operating records below as authoritative ({int(payload.get('structured_record_count') or 0)} record(s))."
+            )
+        else:
+            lines.append("No committed Brainstack operating record matched this lookup.")
+    elif domain == "task_like":
         owner_status = str(payload.get("structured_owner_status") or "").strip()
         result_status = str(payload.get("result_status") or "").strip()
         fallback_sources = list(payload.get("fallback_sources") or [])
@@ -416,6 +466,30 @@ def _render_task_memory_section(
     if not task_lines:
         return ""
     return "## Brainstack Task Memory\n" + _render_items(task_lines)
+
+
+def _render_operating_truth_section(
+    rows: Iterable[Dict[str, Any]],
+    *,
+    provenance_mode: str,
+) -> str:
+    operating_lines: List[str] = []
+    for row in rows:
+        content = _normalize_compare_text(row.get("content"))
+        if not content:
+            continue
+        label = str(row.get("record_type") or "operating_truth").replace("_", " ")
+        operating_lines.append(
+            _with_provenance(
+                f"[{label}] {content}",
+                source=str(row.get("source") or ""),
+                provenance_mode=provenance_mode,
+                metadata=row.get("metadata"),
+            )
+        )
+    if not operating_lines:
+        return ""
+    return "## Brainstack Operating Truth\n" + _render_items(operating_lines)
 
 
 def _graph_fact_class(row: Dict[str, Any]) -> str:
@@ -715,6 +789,7 @@ def build_system_prompt_block(
         contract_section = render_compiled_behavior_policy_section(
             compiled_policy.get("policy"),
             title="# Brainstack Active Communication Contract",
+            mode="ordinary_turn",
         )
         compiled_policy_active = bool(contract_section)
     if compiled_policy_active:
@@ -776,18 +851,29 @@ def render_working_memory_block(
     transcript_rows: List[Dict[str, Any]],
     graph_rows: List[Dict[str, Any]],
     corpus_rows: List[Dict[str, Any]],
+    operating_rows: List[Dict[str, Any]] | None = None,
 ) -> str:
     sections: List[str] = []
     provenance_mode = str(policy.get("provenance_mode", "compact"))
     compiled_policy = policy.get("compiled_behavior_policy") if isinstance(policy, dict) else None
     compiled_policy_active = False
     contract_section = ""
+    exact_contract_section = ""
     hidden_profile_keys: set[str] = set()
     graph_rows_for_sections = graph_rows
-    if isinstance(compiled_policy, dict):
+    style_contract_row = _extract_style_contract_profile_row(profile_items)
+    if route_mode == "style_contract":
+        exact_contract_section = _render_exact_contract_section(
+            "## Brainstack Canonical Behavior Contract",
+            style_contract_row,
+            char_budget=max(480, int(policy.get("style_contract_char_budget", 2400))),
+            provenance_mode=provenance_mode,
+        )
+    if isinstance(compiled_policy, dict) and route_mode != "style_contract":
         contract_section = render_compiled_behavior_policy_section(
             compiled_policy,
             title="## Brainstack Active Communication Contract",
+            mode="ordinary_turn",
         )
         compiled_policy_active = bool(contract_section)
     if compiled_policy_active:
@@ -827,6 +913,10 @@ def render_working_memory_block(
     if task_memory_section:
         sections.append(task_memory_section)
 
+    operating_truth_section = _render_operating_truth_section(operating_rows or [], provenance_mode=provenance_mode)
+    if operating_truth_section:
+        sections.append(operating_truth_section)
+
     if policy.get("continuation_emphasis"):
         sections.append(
             "## Brainstack Continuation Guidance\n"
@@ -844,6 +934,9 @@ def render_working_memory_block(
         if reinforcement_text:
             sections.append("## Brainstack Current Correction Reinforcement\n" + reinforcement_text)
 
+    if exact_contract_section:
+        sections.append(exact_contract_section)
+
     if contract_section:
         sections.append(contract_section)
 
@@ -857,6 +950,10 @@ def render_working_memory_block(
             filtered_profile_items = [
                 item for item in filtered_profile_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT
             ]
+    if exact_contract_section:
+        filtered_profile_items = [
+            item for item in filtered_profile_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT
+        ]
     if filtered_profile_items:
         style_contract_char_budget = max(320, int(policy.get("style_contract_char_budget", 2400)))
         lines = []
@@ -865,7 +962,8 @@ def render_working_memory_block(
             stable_key = str(item.get("stable_key") or "").strip()
             rendered_content = (
                 _trim(content, style_contract_char_budget)
-                if route_mode == "style_contract" and stable_key == STYLE_CONTRACT_SLOT
+                if stable_key == STYLE_CONTRACT_SLOT
+                and (route_mode == "style_contract" or bool(policy.get("show_authoritative_contract")))
                 else _trim(content, 160)
             )
             lines.append(

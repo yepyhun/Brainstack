@@ -585,11 +585,12 @@ def test_style_contract_explicit_recall_uses_canonical_profile_slot_without_leak
 
     assert explicit_packet["routing"]["applied_mode"] == "style_contract"
     assert [row["stable_key"] for row in explicit_packet["profile_items"]] == [STYLE_CONTRACT_SLOT]
+    assert "## Brainstack Canonical Behavior Contract" in explicit_packet["block"]
     assert "User style contract" in explicit_packet["block"]
     assert "Tartalmi minták:" in explicit_packet["block"]
     assert "- Konkrét tények, nem jelentőségfelfújás" in explicit_packet["block"]
     assert "- Egy konkrét forrás, nem homályos hivatkozások" in explicit_packet["block"]
-    assert "..." not in explicit_packet["block"].split("## Brainstack Profile Match\n", 1)[1]
+    assert "..." not in explicit_packet["block"].split("## Brainstack Canonical Behavior Contract\n", 1)[1]
 
     ordinary_packet = build_working_memory_packet(
         store,
@@ -961,7 +962,7 @@ def test_style_contract_explicit_recall_stays_bounded_for_oversized_contracts(tm
         route_resolver=lambda query: {"mode": "style_contract", "reason": "test"},
     )
 
-    profile_section = explicit_packet["block"].split("## Brainstack Profile Match\n", 1)[1]
+    profile_section = explicit_packet["block"].split("## Brainstack Canonical Behavior Contract\n", 1)[1]
     assert "User style contract" in profile_section
     assert "- Rule 1: keep the wording precise and concrete." in profile_section
     assert "..." in profile_section

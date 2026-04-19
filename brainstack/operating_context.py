@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Mapping
 
+from .operating_truth import (
+    OPERATING_RECORD_ACTIVE_WORK,
+    OPERATING_RECORD_CURRENT_COMMITMENT,
+    OPERATING_RECORD_EXTERNAL_OWNER_POINTER,
+    OPERATING_RECORD_NEXT_STEP,
+    OPERATING_RECORD_OPEN_DECISION,
+)
+
 
 OPERATING_CONTEXT_SNAPSHOT_VERSION = 1
 DEFAULT_OPERATING_CONTEXT_CHAR_BUDGET = 900
@@ -74,6 +82,22 @@ def _build_active_work_summary(continuity_rows: Iterable[Mapping[str, Any]]) -> 
     return ""
 
 
+def _operating_record_lines(
+    operating_rows: Iterable[Mapping[str, Any]],
+    *,
+    record_type: str,
+    limit: int,
+) -> List[str]:
+    return _unique_lines(
+        (
+            str(row.get("content") or "")
+            for row in operating_rows
+            if str(row.get("record_type") or "").strip() == record_type
+        ),
+        limit=limit,
+    )
+
+
 def _build_open_decisions(continuity_rows: Iterable[Mapping[str, Any]], *, limit: int) -> List[str]:
     return _unique_lines(
         (
@@ -83,6 +107,35 @@ def _build_open_decisions(continuity_rows: Iterable[Mapping[str, Any]], *, limit
         ),
         limit=limit,
     )
+
+
+def _build_current_commitments(
+    operating_rows: Iterable[Mapping[str, Any]],
+    task_rows: Iterable[Mapping[str, Any]],
+    *,
+    limit: int,
+) -> List[str]:
+    records = _operating_record_lines(
+        operating_rows,
+        record_type=OPERATING_RECORD_CURRENT_COMMITMENT,
+        limit=limit,
+    )
+    if records:
+        return records
+    return _unique_lines((str(row.get("title") or "") for row in task_rows), limit=limit)
+
+
+def _build_external_owner_pointers(
+    operating_rows: Iterable[Mapping[str, Any]],
+    *,
+    limit: int,
+) -> List[Dict[str, str]]:
+    lines = _operating_record_lines(
+        operating_rows,
+        record_type=OPERATING_RECORD_EXTERNAL_OWNER_POINTER,
+        limit=limit,
+    )
+    return [{"content": line} for line in lines]
 
 
 def _build_session_state(lifecycle_state: Mapping[str, Any] | None) -> Dict[str, Any]:
@@ -113,19 +166,37 @@ def build_operating_context_snapshot(
     principal_scope_key: str,
     compiled_behavior_policy_record: Mapping[str, Any] | None,
     profile_items: Iterable[Mapping[str, Any]],
+    operating_rows: Iterable[Mapping[str, Any]],
+    task_rows: Iterable[Mapping[str, Any]],
     continuity_rows: Iterable[Mapping[str, Any]],
     lifecycle_state: Mapping[str, Any] | None,
     stable_profile_limit: int = 4,
     decision_limit: int = 4,
 ) -> Dict[str, Any]:
     continuity_list = [dict(row) for row in continuity_rows]
+    operating_list = [dict(row) for row in operating_rows]
     stable_profile_entries = _build_stable_profile_entries(profile_items, limit=stable_profile_limit)
-    active_work_summary = _build_active_work_summary(continuity_list)
-    open_decisions = _build_open_decisions(continuity_list, limit=decision_limit)
+    active_work_candidates = _operating_record_lines(
+        operating_list,
+        record_type=OPERATING_RECORD_ACTIVE_WORK,
+        limit=1,
+    )
+    active_work_summary = active_work_candidates[0] if active_work_candidates else _build_active_work_summary(continuity_list)
+    open_decisions = _operating_record_lines(
+        operating_list,
+        record_type=OPERATING_RECORD_OPEN_DECISION,
+        limit=decision_limit,
+    ) or _build_open_decisions(continuity_list, limit=decision_limit)
+    current_commitments = _build_current_commitments(operating_list, task_rows, limit=4)
+    next_steps = _operating_record_lines(
+        operating_list,
+        record_type=OPERATING_RECORD_NEXT_STEP,
+        limit=4,
+    )
     session_state = _build_session_state(lifecycle_state)
-    external_owner_pointers: List[Dict[str, str]] = []
+    external_owner_pointers = _build_external_owner_pointers(operating_list, limit=4)
     proactive_guidance = ""
-    if session_state["active"] and (active_work_summary or open_decisions):
+    if session_state["active"] and (active_work_summary or open_decisions or current_commitments or next_steps):
         proactive_guidance = (
             "If the user re-engages vaguely, resume the active work or open decisions below before falling back to generic small talk. "
             "Do not invent reminders or scheduling state that is not grounded in the committed records."
@@ -144,11 +215,20 @@ def build_operating_context_snapshot(
         "active_work_summary": active_work_summary,
         "open_decisions": open_decisions,
         "open_decision_count": len(open_decisions),
+        "current_commitments": current_commitments,
+        "current_commitment_count": len(current_commitments),
+        "next_steps": next_steps,
+        "next_step_count": len(next_steps),
         "session_state": session_state,
+        "operating_truth_rows": operating_list,
+        "operating_truth_row_count": len(operating_list),
         "external_owner_pointers": external_owner_pointers,
         "external_owner_pointer_count": len(external_owner_pointers),
         "proactive_guidance": proactive_guidance,
-        "owner_boundary": "Brainstack owns bounded task and commitment truth recorded in its structured task memory. Reminders and broader scheduling authority stay with dedicated owners.",
+        "owner_boundary": (
+            "Brainstack owns bounded task and commitment truth recorded in its structured task memory, "
+            "plus committed operating truth recorded in its operating substrate. Reminders and broader scheduling authority stay with dedicated owners."
+        ),
     }
 
 
@@ -172,10 +252,13 @@ def render_operating_context_section(
     lines: List[str] = [title]
     active_work_summary = _normalize_text(snapshot.get("active_work_summary"))
     open_decisions = _unique_lines(snapshot.get("open_decisions") or [], limit=4)
+    current_commitments = _unique_lines(snapshot.get("current_commitments") or [], limit=4)
+    next_steps = _unique_lines(snapshot.get("next_steps") or [], limit=4)
     stable_profile_entries = list(snapshot.get("stable_profile_entries") or [])
     session_state = snapshot.get("session_state") if isinstance(snapshot.get("session_state"), Mapping) else {}
     proactive_guidance = _normalize_text(snapshot.get("proactive_guidance"))
     owner_boundary = _normalize_text(snapshot.get("owner_boundary"))
+    external_owner_pointers = list(snapshot.get("external_owner_pointers") or [])
 
     content_added = False
 
@@ -196,6 +279,18 @@ def render_operating_context_section(
             decision_lines.append(f"- {_trim(decision, 180)}")
         content_added = _append_block(lines, decision_lines, char_budget=char_budget) or content_added
 
+    if current_commitments:
+        commitment_lines = ["", "Current commitments:"]
+        for commitment in current_commitments:
+            commitment_lines.append(f"- {_trim(commitment, 180)}")
+        content_added = _append_block(lines, commitment_lines, char_budget=char_budget) or content_added
+
+    if next_steps:
+        next_step_lines = ["", "Next steps:"]
+        for next_step in next_steps:
+            next_step_lines.append(f"- {_trim(next_step, 180)}")
+        content_added = _append_block(lines, next_step_lines, char_budget=char_budget) or content_added
+
     if stable_profile_entries:
         profile_lines = ["", "Stable project signals:"]
         for entry in stable_profile_entries[:4]:
@@ -213,6 +308,12 @@ def render_operating_context_section(
             ],
             char_budget=char_budget,
         ) or content_added
+
+    if external_owner_pointers:
+        pointer_lines = ["", "External owner pointers:"]
+        for pointer in external_owner_pointers[:4]:
+            pointer_lines.append(f"- {_trim(pointer.get('content'), 180)}")
+        content_added = _append_block(lines, pointer_lines, char_budget=char_budget) or content_added
 
     if content_added and owner_boundary:
         _append_block(

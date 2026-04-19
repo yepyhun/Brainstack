@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict
 from .behavior_policy import build_behavior_policy_reinforcement
 from .db import BrainstackStore
 from .executive_retrieval import retrieve_executive_context
+from .operating_truth import parse_operating_lookup_query
 from .profile_contract import resolve_direct_identity_profile_slots
 from .retrieval import render_working_memory_block
 from .task_memory import TASK_FOLLOWUP_DATE_CUES, TASK_LOOKUP_CUES
@@ -103,6 +104,7 @@ class QueryAnalysis:
     temporal: bool
     preference: bool
     continuation: bool
+    operating_like: bool
     task_like: bool
     profile_slot_targets: tuple[str, ...]
 
@@ -124,20 +126,24 @@ class WorkingMemoryPolicy:
     transcript_limit: int
     transcript_char_budget: int
     style_contract_char_budget: int
+    operating_limit: int
     graph_limit: int
     corpus_limit: int
     corpus_char_budget: int
     continuation_emphasis: bool
+    show_authoritative_contract: bool
 
 
 def analyze_query(query: str) -> QueryAnalysis:
     profile_slot_targets = resolve_direct_identity_profile_slots(query)
+    operating_lookup = parse_operating_lookup_query(query)
     return QueryAnalysis(
         high_stakes=_contains_any(query, HIGH_STAKES_TERMS),
         explanatory=_contains_any(query, EXPLANATION_TERMS),
         temporal=_contains_any(query, TEMPORAL_TERMS),
         preference=_contains_any(query, PREFERENCE_TERMS),
         continuation=_contains_any(query, CONTINUATION_TERMS),
+        operating_like=isinstance(operating_lookup, dict),
         task_like=_contains_any(query, TASK_LOOKUP_CUES + TASK_FOLLOWUP_DATE_CUES),
         profile_slot_targets=profile_slot_targets,
     )
@@ -154,6 +160,7 @@ def _initial_policy(
     graph_limit: int,
     corpus_limit: int,
     corpus_char_budget: int,
+    operating_match_limit: int = 3,
 ) -> WorkingMemoryPolicy:
     policy = WorkingMemoryPolicy(
         mode="balanced",
@@ -171,35 +178,41 @@ def _initial_policy(
         transcript_limit=min(transcript_match_limit, 2),
         transcript_char_budget=min(transcript_char_budget, 520),
         style_contract_char_budget=0,
+        operating_limit=min(operating_match_limit, 2),
         graph_limit=min(graph_limit, 2),
         corpus_limit=min(corpus_limit, 2),
         corpus_char_budget=min(corpus_char_budget, 360),
         continuation_emphasis=False,
+        show_authoritative_contract=False,
     )
 
     if analysis.preference and not analysis.high_stakes:
-        policy.mode = "compact"
-        policy.collapse_mode = "aggressive"
+        policy.mode = "balanced"
+        policy.collapse_mode = "balanced"
         policy.profile_limit = max(policy.profile_limit, min(profile_match_limit, 4))
-        policy.continuity_match_limit = min(continuity_match_limit, 1)
+        policy.continuity_match_limit = max(1, min(continuity_match_limit, 2))
         policy.continuity_recent_limit = max(1, min(continuity_recent_limit, 2))
-        policy.transcript_limit = 0
-        policy.transcript_char_budget = 0
-        policy.graph_limit = 1
-        policy.corpus_limit = 0
-        policy.corpus_char_budget = 0
+        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
+        policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 560))
+        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 2))
+        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 2))
+        policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 2))
+        policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 320))
+        policy.show_authoritative_contract = False
 
     if analysis.profile_slot_targets and not analysis.high_stakes:
-        policy.mode = "compact"
-        policy.collapse_mode = "aggressive"
+        policy.mode = "balanced"
+        policy.collapse_mode = "balanced"
         policy.profile_limit = max(policy.profile_limit, min(profile_match_limit, 4))
-        policy.continuity_match_limit = min(policy.continuity_match_limit, min(continuity_match_limit, 1))
+        policy.continuity_match_limit = max(policy.continuity_match_limit, min(continuity_match_limit, 2))
         policy.continuity_recent_limit = max(1, min(continuity_recent_limit, 1))
-        policy.transcript_limit = min(policy.transcript_limit, min(transcript_match_limit, 1))
-        policy.transcript_char_budget = min(policy.transcript_char_budget, min(transcript_char_budget, 240))
-        policy.graph_limit = 0
-        policy.corpus_limit = 0
-        policy.corpus_char_budget = 0
+        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
+        policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 560))
+        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 2))
+        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 1))
+        policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 1))
+        policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 260))
+        policy.show_authoritative_contract = False
 
     if analysis.explanatory:
         policy.mode = "balanced"
@@ -210,6 +223,7 @@ def _initial_policy(
         policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
         policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
         policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 640))
+        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 3))
 
     if analysis.continuation and not analysis.high_stakes:
         policy.mode = "balanced"
@@ -218,7 +232,20 @@ def _initial_policy(
         policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
         policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
         policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 640))
+        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 3))
         policy.graph_limit = max(policy.graph_limit, min(graph_limit, 3))
+
+    if analysis.operating_like and not analysis.high_stakes:
+        policy.mode = "balanced"
+        policy.collapse_mode = "balanced"
+        policy.continuity_match_limit = max(policy.continuity_match_limit, min(continuity_match_limit, 2))
+        policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
+        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
+        policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 640))
+        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 4))
+        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 2))
+        policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 2))
+        policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 360))
 
     if analysis.temporal:
         policy.mode = "balanced"
@@ -228,6 +255,7 @@ def _initial_policy(
         policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
         policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
         policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 640))
+        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 2))
 
     if analysis.high_stakes:
         policy.mode = "deep"
@@ -240,6 +268,7 @@ def _initial_policy(
         policy.profile_limit = max(policy.profile_limit, min(profile_match_limit, 4))
         policy.continuity_match_limit = max(policy.continuity_match_limit, min(continuity_match_limit, 3))
         policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
+        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 4))
         policy.graph_limit = max(policy.graph_limit, min(graph_limit, 5))
         policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 4))
         policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 900))
@@ -252,6 +281,7 @@ def _initial_policy(
         policy.continuity_recent_limit = max(1, min(continuity_recent_limit, 1))
         policy.transcript_limit = max(1, min(transcript_match_limit, 1))
         policy.transcript_char_budget = min(max(policy.transcript_char_budget, 220), 320)
+        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 2))
         policy.graph_limit = 0
         policy.corpus_limit = 0
         policy.corpus_char_budget = 0
@@ -274,6 +304,7 @@ def build_working_memory_packet(
     graph_limit: int,
     corpus_limit: int,
     corpus_char_budget: int,
+    operating_match_limit: int = 3,
     route_resolver: Callable[[str], Dict[str, Any] | str] | None = None,
     timezone_name: str = "UTC",
 ) -> Dict[str, Any]:
@@ -285,6 +316,7 @@ def build_working_memory_packet(
         continuity_match_limit=continuity_match_limit,
         transcript_match_limit=transcript_match_limit,
         transcript_char_budget=transcript_char_budget,
+        operating_match_limit=operating_match_limit,
         graph_limit=graph_limit,
         corpus_limit=corpus_limit,
         corpus_char_budget=corpus_char_budget,
@@ -308,6 +340,7 @@ def build_working_memory_packet(
     graph_rows = retrieval["graph_rows"]
     corpus_rows = retrieval["corpus_rows"]
     task_rows = retrieval.get("task_rows") or []
+    operating_rows = retrieval.get("operating_rows") or []
     channels = retrieval["channels"]
     routing = retrieval.get("routing", {"requested_mode": "fact", "applied_mode": "fact"})
 
@@ -318,6 +351,7 @@ def build_working_memory_packet(
         policy.transcript_char_budget = max(policy.transcript_char_budget, 960)
     elif routing.get("applied_mode") == "style_contract":
         policy.style_contract_char_budget = max(policy.style_contract_char_budget, 2400)
+        policy.show_authoritative_contract = True
 
     support_channels = sum(
         1
@@ -334,7 +368,9 @@ def build_working_memory_packet(
         policy.conflict_escalation = True
         policy.show_policy = True
 
-    if analysis.preference and (profile_items or recent) and not analysis.high_stakes and not conflict_present:
+    if analysis.operating_like and operating_rows and not analysis.high_stakes and not conflict_present:
+        policy.confidence_band = "high"
+    elif analysis.preference and (profile_items or recent) and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "high"
     elif routing.get("applied_mode") == "style_contract" and profile_items and not analysis.high_stakes and not conflict_present:
         policy.confidence_band = "high"
@@ -387,6 +423,7 @@ def build_working_memory_packet(
         route_mode=str(routing.get("applied_mode") or "fact"),
         profile_items=profile_items,
         task_rows=task_rows,
+        operating_rows=operating_rows,
         matched=matched,
         recent=recent,
         transcript_rows=transcript_rows,
@@ -423,6 +460,7 @@ def build_working_memory_packet(
         "channels": channels,
         "profile_items": profile_items,
         "task_rows": task_rows,
+        "operating_rows": operating_rows,
         "matched": matched,
         "recent": recent,
         "transcript_rows": transcript_rows,

@@ -25,6 +25,7 @@ REQUIRED_PLUGIN_FILES = [
     "behavior_policy.py",
     "output_contract.py",
     "operating_context.py",
+    "operating_truth.py",
     "plugin.yaml",
     "db.py",
     "corpus_backend.py",

@@ -21,6 +21,7 @@ BEHAVIOR_POLICY_COVERAGE_STATUS_COMPILED_ACTIVE = "compiled_active"
 BEHAVIOR_POLICY_PROJECTION_STATUS_INJECTED = "injected"
 BEHAVIOR_POLICY_PROJECTION_STATUS_OMITTED_DUE_BUDGET = "omitted_due_budget"
 DEFAULT_BEHAVIOR_POLICY_CHAR_BUDGET = 2400
+DEFAULT_PINNED_BEHAVIOR_POLICY_CHAR_BUDGET = 720
 _POLICY_TOKEN_RE = re.compile(r"[0-9A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű]{3,}", re.UNICODE)
 _CORRECTION_CUES = (
     "nem ",
@@ -88,6 +89,18 @@ _KIND_ORDER = (
     "forbidden_surface_form",
     "uncertainty_policy",
     "custom_clause",
+)
+
+PINNED_ORDINARY_TURN_KINDS = (
+    "language_policy",
+    "addressing_policy",
+    "content_policy",
+    "verbosity_policy",
+    "structure_policy",
+    "punctuation_policy",
+    "formatting_policy",
+    "forbidden_surface_form",
+    "uncertainty_policy",
 )
 _SECTION_FALLBACK_KIND = {
     "tartalmi": "content_policy",
@@ -355,6 +368,54 @@ def _render_projection(
     return projection_text, truncated, included_rule_ids, total_rules
 
 
+def build_pinned_behavior_policy_view(
+    policy: Mapping[str, Any] | None,
+    *,
+    char_budget: int = DEFAULT_PINNED_BEHAVIOR_POLICY_CHAR_BUDGET,
+) -> Dict[str, Any] | None:
+    if not isinstance(policy, Mapping):
+        return None
+
+    status = str(policy.get("status") or "").strip()
+    if status not in {BEHAVIOR_POLICY_STATUS_ACTIVE, BEHAVIOR_POLICY_STATUS_DEGRADED}:
+        return None
+
+    raw_clauses = policy.get("clauses")
+    if not isinstance(raw_clauses, Iterable):
+        return None
+
+    pinned_clauses = [
+        dict(clause)
+        for clause in raw_clauses
+        if isinstance(clause, Mapping)
+        and str(clause.get("status") or "").strip() == BEHAVIOR_POLICY_STATUS_ACTIVE
+        and str(clause.get("kind") or "").strip() in PINNED_ORDINARY_TURN_KINDS
+    ]
+    if not pinned_clauses:
+        return None
+
+    projection_text, truncated, included_rule_ids, total_rules = _render_projection(
+        pinned_clauses,
+        char_budget=max(240, int(char_budget)),
+    )
+    if not projection_text:
+        return None
+
+    included_rule_id_set = {rule_id for rule_id in included_rule_ids if rule_id}
+    return {
+        "title": _normalize_text(policy.get("title")) or STYLE_CONTRACT_DEFAULT_TITLE,
+        "status": BEHAVIOR_POLICY_STATUS_ACTIVE if not truncated else BEHAVIOR_POLICY_STATUS_DEGRADED,
+        "projection_text": projection_text,
+        "projection_char_budget": max(240, int(char_budget)),
+        "projection_rule_count": len(included_rule_id_set),
+        "raw_rule_count": total_rules,
+        "omitted_rule_count": max(0, total_rules - len(included_rule_id_set)),
+        "truncated": truncated,
+        "source_contract_hash": str(policy.get("source_contract_hash") or "").strip(),
+        "kinds": list(PINNED_ORDINARY_TURN_KINDS),
+    }
+
+
 def compile_behavior_policy(
     *,
     raw_content: str,
@@ -486,7 +547,29 @@ def render_compiled_behavior_policy_section(
     policy: Mapping[str, Any] | None,
     *,
     title: str,
+    mode: str = "full",
 ) -> str:
+    if mode == "ordinary_turn":
+        pinned_view = build_pinned_behavior_policy_view(policy)
+        if not isinstance(pinned_view, Mapping):
+            return ""
+        projection_text = str(pinned_view.get("projection_text") or "").strip()
+        if not projection_text:
+            return ""
+        contract_title = _normalize_text(pinned_view.get("title")) or STYLE_CONTRACT_DEFAULT_TITLE
+        preface = (
+            "This is a bounded ordinary-turn invariant subset derived from the user's canonical behavior contract. "
+            "Use it silently as support on ordinary turns, but keep the live conversation context primary for local "
+            "phrasing, short-range flow, and social reasoning. Do not mention this invariant lane, memory blocks, "
+            "or internal memory state unless the user explicitly asks about memory behavior or debugging."
+        )
+        if str(pinned_view.get("status") or "").strip() == BEHAVIOR_POLICY_STATUS_DEGRADED:
+            preface += (
+                " Status: narrowed by budget. Only the included high-value invariant subset below is kept on the "
+                "ordinary-turn hot path."
+            )
+        return f"{title}\n{contract_title}\n{preface}\n{projection_text}"
+
     if not isinstance(policy, Mapping):
         return ""
     status = str(policy.get("status") or "").strip()
@@ -497,15 +580,12 @@ def render_compiled_behavior_policy_section(
         return ""
     contract_title = _normalize_text(policy.get("title")) or STYLE_CONTRACT_DEFAULT_TITLE
     preface = (
-        "This compiled behavior policy is the active ordinary-turn authority derived from the user's "
-        "archival behavior contract. Apply it silently in every reply, and let it override default "
-        "assistant tone or formatting when there is any conflict. Do not mention this policy, memory "
-        "blocks, or internal memory state unless the user explicitly asks about memory behavior or debugging."
+        "This compiled behavior policy is a derived projection of the user's archival behavior contract. "
+        "Use it only as a derived view of the canonical contract, not as a substitute for exact contract recall."
     )
     if status == BEHAVIOR_POLICY_STATUS_DEGRADED:
         preface += (
-            " Status: degraded. Some active rules did not fit into the bounded ordinary-turn projection, "
-            "so only the included rules below are guaranteed to be injected in this turn."
+            " Status: degraded. Some active rules did not fit into the bounded projection, so this view is incomplete."
         )
     return f"{title}\n{contract_title}\n{preface}\n{projection_text}"
 

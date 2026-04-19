@@ -426,24 +426,115 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
         text = _replace_once(text, invoke_anchor, invoke_inject, label="run_agent invoke guard", path=path)
         applied.append("run_agent:block_legacy_dispatch")
 
-    seq_anchor = "            if function_name == \"todo\":\n"
-    seq_inject = (
-        "            brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)\n"
-        "            if self._brainstack_only_mode and brainstack_only_error:\n"
-        "                function_result = json.dumps(\n"
-        "                    {\n"
-        "                        \"success\": False,\n"
-        "                        \"error\": brainstack_only_error,\n"
-        "                    }\n"
-        "                )\n"
-        "                tool_duration = time.time() - tool_start_time\n"
-        "                if self._should_emit_quiet_tool_messages():\n"
-        "                    self._vprint(\n"
-        "                        f\"  {_get_cute_tool_message_impl(function_name, function_args, tool_duration, result=function_result)}\"\n"
+    quiet_seq_anchor = (
+        "                try:\n"
+        "                    function_result = handle_function_call(\n"
+        "                        function_name, function_args, effective_task_id,\n"
+        "                        tool_call_id=tool_call.id,\n"
+        "                        session_id=self.session_id or \"\",\n"
+        "                        enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,\n"
+        "                        skip_pre_tool_call_hook=True,\n"
         "                    )\n"
-        "            elif function_name == \"todo\":\n"
+        "                    _spinner_result = function_result\n"
     )
-    if "brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)" not in text or "elif function_name == \"todo\":" not in text:
+    quiet_seq_inject = (
+        "                try:\n"
+        "                    brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)\n"
+        "                    if self._brainstack_only_mode and brainstack_only_error:\n"
+        "                        function_result = json.dumps(\n"
+        "                            {\n"
+        "                                \"success\": False,\n"
+        "                                \"error\": brainstack_only_error,\n"
+        "                            }\n"
+        "                        )\n"
+        "                    else:\n"
+        "                        function_result = handle_function_call(\n"
+        "                            function_name, function_args, effective_task_id,\n"
+        "                            tool_call_id=tool_call.id,\n"
+        "                            session_id=self.session_id or \"\",\n"
+        "                            enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,\n"
+        "                            skip_pre_tool_call_hook=True,\n"
+        "                        )\n"
+        "                    _spinner_result = function_result\n"
+    )
+    quiet_seq_marker = (
+        "                    brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)\n"
+        "                    if self._brainstack_only_mode and brainstack_only_error:\n"
+        "                        function_result = json.dumps(\n"
+        "                            {\n"
+        "                                \"success\": False,\n"
+        "                                \"error\": brainstack_only_error,\n"
+        "                            }\n"
+        "                        )\n"
+        "                    else:\n"
+        "                        function_result = handle_function_call(\n"
+        "                            function_name, function_args, effective_task_id,\n"
+        "                            tool_call_id=tool_call.id,\n"
+        "                            session_id=self.session_id or \"\",\n"
+        "                            enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,\n"
+        "                            skip_pre_tool_call_hook=True,\n"
+        "                        )\n"
+        "                    _spinner_result = function_result\n"
+    )
+    if quiet_seq_marker not in text:
+        text = _replace_once(
+            text,
+            quiet_seq_anchor,
+            quiet_seq_inject,
+            label="run_agent quiet sequential guard",
+            path=path,
+        )
+        applied.append("run_agent:block_quiet_sequential_path")
+
+    seq_anchor = (
+        "                try:\n"
+        "                    function_result = handle_function_call(\n"
+        "                        function_name, function_args, effective_task_id,\n"
+        "                        tool_call_id=tool_call.id,\n"
+        "                        session_id=self.session_id or \"\",\n"
+        "                        enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,\n"
+        "                        skip_pre_tool_call_hook=True,\n"
+        "                    )\n"
+    )
+    seq_inject = (
+        "                try:\n"
+        "                    brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)\n"
+        "                    if self._brainstack_only_mode and brainstack_only_error:\n"
+        "                        function_result = json.dumps(\n"
+        "                            {\n"
+        "                                \"success\": False,\n"
+        "                                \"error\": brainstack_only_error,\n"
+        "                            }\n"
+        "                        )\n"
+        "                    else:\n"
+        "                        function_result = handle_function_call(\n"
+        "                            function_name, function_args, effective_task_id,\n"
+        "                            tool_call_id=tool_call.id,\n"
+        "                            session_id=self.session_id or \"\",\n"
+        "                            enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,\n"
+        "                            skip_pre_tool_call_hook=True,\n"
+        "                        )\n"
+    )
+    seq_marker = (
+        "                    brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)\n"
+        "                    if self._brainstack_only_mode and brainstack_only_error:\n"
+        "                        function_result = json.dumps(\n"
+            "                            {\n"
+            "                                \"success\": False,\n"
+            "                                \"error\": brainstack_only_error,\n"
+            "                            }\n"
+            "                        )\n"
+            "                    else:\n"
+            "                        function_result = handle_function_call(\n"
+            "                            function_name, function_args, effective_task_id,\n"
+            "                            tool_call_id=tool_call.id,\n"
+            "                            session_id=self.session_id or \"\",\n"
+            "                            enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,\n"
+            "                            skip_pre_tool_call_hook=True,\n"
+            "                        )\n"
+        "                except Exception as tool_error:\n"
+    )
+    if seq_marker not in text:
         text = _replace_once(text, seq_anchor, seq_inject, label="run_agent sequential guard", path=path)
         applied.append("run_agent:block_legacy_sequential_path")
 
@@ -644,7 +735,7 @@ def _patch_memory_manager(path: Path, dry_run: bool) -> list[str]:
         '        "[System note: The following is private recalled memory context, NOT new user input. "\n'
         '        "Apply it silently in your reply. Do not mention memory blocks, recalled-memory headings, "\n'
         '        "or internal memory state unless the user explicitly asks about memory behavior or debugging. "\n'
-        '        "When recalled memory provides a specific, non-conflicted user fact such as a name, number, date, or preference, treat it as authoritative over assistant suggestions or generic prior knowledge unless another recalled fact in this memory block conflicts with it.]\\n\\n"\n'
+        '        "When recalled memory provides a specific, non-conflicted factual user detail or committed owner-backed record such as a name, number, date, or task record, treat it as authoritative over assistant suggestions or generic prior knowledge unless another recalled fact in this memory block conflicts with it.]\\n\\n"\n'
     )
     current_private_note = (
         '        "[System note: The following is private recalled memory context, NOT new user input. "\n'

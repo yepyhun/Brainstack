@@ -58,8 +58,8 @@ def test_system_prompt_projects_active_communication_contract(tmp_path):
     block = build_system_prompt_block(store, profile_limit=6)
 
     assert "# Brainstack Active Communication Contract" in block
-    assert "These are non-optional user-specific behavior rules." in block
-    assert "Apply them silently in every reply" in block
+    assert "bounded ordinary-turn communication support lane" in block
+    assert "keep the live conversation context primary" in block
     assert "rarely use emoji" in block
     assert "[identity] Tomi" in block
     assert "[preference] Minimize emoji usage" not in block

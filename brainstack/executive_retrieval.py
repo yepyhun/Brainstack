@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 from .db import BrainstackStore
+from .operating_truth import OPERATING_RECORD_TYPES, parse_operating_lookup_query
 from .style_contract import STYLE_CONTRACT_SLOT, extract_style_contract_parts
 from .task_memory import parse_task_lookup_query
 from .tier2_extractor import _default_llm_caller, _extract_json_object, _extract_text_content
@@ -190,8 +191,34 @@ def _build_lookup_semantics(
     query: str,
     task_lookup: Mapping[str, Any] | None,
     task_rows: List[Dict[str, Any]],
+    operating_lookup: Mapping[str, Any] | None,
+    operating_rows: List[Dict[str, Any]],
     selected: Mapping[str, Any],
 ) -> Dict[str, Any] | None:
+    if isinstance(operating_lookup, Mapping):
+        fallback_sources: List[str] = []
+        if list(selected.get("matched") or []):
+            fallback_sources.append("continuity_match")
+        if list(selected.get("recent") or []):
+            fallback_sources.append("continuity_recent")
+        if list(selected.get("transcript_rows") or []):
+            fallback_sources.append("transcript")
+        if list(selected.get("graph_rows") or []):
+            fallback_sources.append("graph")
+        return {
+            "active": True,
+            "domain": "operating_truth",
+            "structured_owner_status": "brainstack.operating_truth",
+            "structured_lookup_performed": True,
+            "structured_record_count": len(operating_rows),
+            "record_types": [
+                str(value or "").strip()
+                for value in (operating_lookup.get("record_types") or ())
+                if str(value or "").strip() in OPERATING_RECORD_TYPES
+            ],
+            "fallback_sources": fallback_sources,
+            "result_status": "committed_records" if operating_rows else "structured_miss",
+        }
     if not isinstance(task_lookup, Mapping):
         return None
 
@@ -267,6 +294,8 @@ def _candidate_priority_bonus(candidate: EvidenceCandidate) -> float:
             bonus += 0.04
         if _looks_user_led(text):
             bonus += 0.06
+    elif candidate.shelf == "operating":
+        bonus += 0.07
     elif candidate.shelf == "continuity_match":
         bonus += 0.02
     elif candidate.shelf == "continuity_recent":
@@ -961,6 +990,7 @@ def _fact_sort_key(candidate: EvidenceCandidate) -> tuple[Any, ...]:
         candidate.rrf_score + bonus,
         bonus,
         len(candidate.channel_ranks),
+        1 if candidate.shelf == "operating" else 0,
         1 if candidate.shelf == "transcript" else 0,
         1 if candidate.shelf == "graph" else 0,
         1 if candidate.shelf == "profile" else 0,
@@ -974,6 +1004,7 @@ def _route_limits(
     continuity_match_limit: int,
     continuity_recent_limit: int,
     transcript_limit: int,
+    operating_limit: int,
     graph_limit: int,
     corpus_limit: int,
 ) -> Dict[str, int]:
@@ -982,6 +1013,7 @@ def _route_limits(
         "continuity_match_limit": continuity_match_limit,
         "continuity_recent_limit": continuity_recent_limit,
         "transcript_limit": transcript_limit,
+        "operating_limit": operating_limit,
         "graph_limit": graph_limit,
         "corpus_limit": corpus_limit,
     }
@@ -1012,6 +1044,7 @@ def _route_limits(
         limits["continuity_match_limit"] = 0
         limits["continuity_recent_limit"] = 0
         limits["transcript_limit"] = 0
+        limits["operating_limit"] = 0
         limits["graph_limit"] = 0
         limits["corpus_limit"] = 0
         route.bounds = {"kind": "slot_target", "profile": limits["profile_limit"]}
@@ -1191,6 +1224,19 @@ def _profile_keyword_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dic
     return [row for _, row in ranked[:limit]]
 
 
+def _operating_channel_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+    ranked = list(enumerate(_dedupe_rows(rows)))
+    ranked.sort(
+        key=lambda item: (
+            float(item[1].get("keyword_score") or 0.0),
+            str(item[1].get("updated_at") or ""),
+            -0.05 * item[0],
+        ),
+        reverse=True,
+    )
+    return [row for _, row in ranked[:limit]]
+
+
 def _graph_match_text(row: Dict[str, Any]) -> str:
     parts = [
         str(row.get("subject") or "").strip(),
@@ -1266,6 +1312,9 @@ def _candidate_key(shelf: str, row: Dict[str, Any]) -> str:
     if shelf == "profile":
         stable_key = str(row.get("stable_key") or "").strip()
         return f"profile:{stable_key or row.get('id')}"
+    if shelf == "operating":
+        stable_key = str(row.get("stable_key") or "").strip()
+        return f"operating:{stable_key or row.get('id')}"
     if shelf in {"continuity_match", "continuity_recent"}:
         return f"continuity:{int(row.get('id') or 0)}"
     if shelf == "transcript":
@@ -1280,11 +1329,12 @@ def _candidate_key(shelf: str, row: Dict[str, Any]) -> str:
 def _merge_shelf(existing: str, new: str) -> str:
     priorities = {
         "profile": 5,
-        "graph": 4,
-        "continuity_match": 3,
-        "continuity_recent": 2,
-        "transcript": 1,
-        "corpus": 0,
+        "operating": 4,
+        "graph": 3,
+        "continuity_match": 2,
+        "continuity_recent": 1,
+        "transcript": 0,
+        "corpus": -1,
     }
     return existing if priorities.get(existing, 0) >= priorities.get(new, 0) else new
 
@@ -1326,6 +1376,7 @@ def _select_rows(
     continuity_match_limit: int,
     continuity_recent_limit: int,
     transcript_limit: int,
+    operating_limit: int,
     graph_limit: int,
     corpus_limit: int,
 ) -> Dict[str, List[Dict[str, Any]]]:
@@ -1333,12 +1384,14 @@ def _select_rows(
     matched: List[Dict[str, Any]] = []
     recent: List[Dict[str, Any]] = []
     transcript_rows: List[Dict[str, Any]] = []
+    operating_rows: List[Dict[str, Any]] = []
     graph_rows: List[Dict[str, Any]] = []
     corpus_rows: List[Dict[str, Any]] = []
 
     seen_profile_keys: set[str] = set()
     seen_continuity_ids: set[int] = set()
     seen_transcript_ids: set[int] = set()
+    seen_operating_keys: set[str] = set()
     seen_graph_keys: set[tuple[str, int]] = set()
     seen_corpus_keys: set[tuple[int, int]] = set()
 
@@ -1379,6 +1432,13 @@ def _select_rows(
                 transcript_rows.append(row)
             continue
 
+        if candidate.shelf == "operating" and len(operating_rows) < operating_limit:
+            stable_key = str(row.get("stable_key") or "").strip()
+            if stable_key and stable_key not in seen_operating_keys:
+                seen_operating_keys.add(stable_key)
+                operating_rows.append(row)
+            continue
+
         if candidate.shelf == "graph" and len(graph_rows) < graph_limit:
             row_key = (str(row.get("row_type") or ""), int(row.get("row_id") or 0))
             if row_key[1] > 0 and row_key not in seen_graph_keys:
@@ -1398,6 +1458,7 @@ def _select_rows(
         "matched": matched,
         "recent": recent,
         "transcript_rows": transcript_rows,
+        "operating_rows": operating_rows,
         "graph_rows": graph_rows,
         "corpus_rows": corpus_rows,
     }
@@ -1418,6 +1479,7 @@ def retrieve_executive_context(
     continuity_match_limit = max(int(policy.get("continuity_match_limit", 0)), 0)
     continuity_recent_limit = max(int(policy.get("continuity_recent_limit", 0)), 0)
     transcript_limit = max(int(policy.get("transcript_limit", 0)), 0)
+    operating_limit = max(int(policy.get("operating_limit", 0)), 0)
     graph_limit = max(int(policy.get("graph_limit", 0)), 0)
     corpus_limit = max(int(policy.get("corpus_limit", 0)), 0)
     style_contract_row = store.get_profile_item(
@@ -1445,12 +1507,14 @@ def retrieve_executive_context(
         continuity_match_limit=continuity_match_limit,
         continuity_recent_limit=continuity_recent_limit,
         transcript_limit=transcript_limit,
+        operating_limit=operating_limit,
         graph_limit=graph_limit,
         corpus_limit=corpus_limit,
     )
     search_queries = [_normalize_text(query)]
     continuity_queries = _build_cross_session_search_queries(query)
     task_lookup = parse_task_lookup_query(query, timezone_name=timezone_name)
+    operating_lookup = parse_operating_lookup_query(query)
     task_rows = (
         store.list_task_items(
             principal_scope_key=principal_scope_key,
@@ -1462,17 +1526,28 @@ def retrieve_executive_context(
         if isinstance(task_lookup, Mapping)
         else []
     )
+    operating_target_types = (
+        [
+            str(value or "").strip()
+            for value in (operating_lookup.get("record_types") or ())
+            if str(value or "").strip() in OPERATING_RECORD_TYPES
+        ]
+        if isinstance(operating_lookup, Mapping)
+        else []
+    )
     profile_limit = limits["profile_limit"]
     continuity_match_limit = limits["continuity_match_limit"]
     continuity_recent_limit = limits["continuity_recent_limit"]
     transcript_limit = limits["transcript_limit"]
+    operating_limit = limits["operating_limit"]
     graph_limit = limits["graph_limit"]
     corpus_limit = limits["corpus_limit"]
 
     profile_target_slots = tuple(str(slot) for slot in analysis.get("profile_slot_targets") or ())
-    if route.applied_mode == ROUTE_STYLE_CONTRACT:
+    preserve_authoritative_contract = bool(policy.get("show_authoritative_contract"))
+    if route.applied_mode == ROUTE_STYLE_CONTRACT or preserve_authoritative_contract:
         profile_target_slots = tuple({*profile_target_slots, STYLE_CONTRACT_SLOT})
-    excluded_profile_slots = () if route.applied_mode == ROUTE_STYLE_CONTRACT else (STYLE_CONTRACT_SLOT,)
+    excluded_profile_slots = () if route.applied_mode == ROUTE_STYLE_CONTRACT or preserve_authoritative_contract else (STYLE_CONTRACT_SLOT,)
 
     keyword_profile_rows = (
         _profile_keyword_rows(
@@ -1545,6 +1620,30 @@ def retrieve_executive_context(
         keyword_transcript_session_rows,
         keyword_transcript_global_rows,
     )
+    keyword_operating_rows = (
+        _operating_channel_rows(
+            store.search_operating_records(
+                query=query,
+                principal_scope_key=principal_scope_key,
+                record_types=operating_target_types or None,
+                limit=max(operating_limit * 4, 8),
+            ),
+            limit=max(operating_limit * 3, 8),
+        )
+        if operating_limit > 0
+        else []
+    )
+    keyword_operating_rows = _annotate_query_flags(keyword_operating_rows, query=query)
+    current_operating_rows = (
+        store.list_operating_records(
+            principal_scope_key=principal_scope_key,
+            record_types=operating_target_types or None,
+            limit=max(operating_limit * 2, 6),
+        )
+        if operating_limit > 0 and isinstance(operating_lookup, Mapping)
+        else []
+    )
+    current_operating_rows = _annotate_query_flags(current_operating_rows, query=query)
     keyword_corpus_rows = (
         _collect_query_rows(
             shelf="corpus",
@@ -1588,6 +1687,7 @@ def retrieve_executive_context(
     semantic_corpus_rows = _annotate_query_flags(semantic_corpus_rows, query=query)
     keyword_rows = _round_robin(
         keyword_profile_rows,
+        keyword_operating_rows,
         keyword_continuity_rows,
         keyword_transcript_rows,
         keyword_corpus_rows,
@@ -1683,6 +1783,8 @@ def retrieve_executive_context(
 
     merged: Dict[str, EvidenceCandidate] = {}
     _merge_channel(merged, channel_name="keyword", rows=keyword_profile_rows, shelf="profile")
+    _merge_channel(merged, channel_name="operating", rows=keyword_operating_rows, shelf="operating")
+    _merge_channel(merged, channel_name="operating", rows=current_operating_rows, shelf="operating")
     _merge_channel(merged, channel_name="keyword", rows=keyword_continuity_rows, shelf="continuity_match")
     _merge_channel(merged, channel_name="keyword", rows=keyword_transcript_rows, shelf="transcript")
     _merge_channel(merged, channel_name="keyword", rows=keyword_corpus_rows, shelf="corpus")
@@ -1702,6 +1804,7 @@ def retrieve_executive_context(
         continuity_match_limit=continuity_match_limit,
         continuity_recent_limit=continuity_recent_limit,
         transcript_limit=transcript_limit,
+        operating_limit=operating_limit,
         graph_limit=graph_limit,
         corpus_limit=corpus_limit,
     )
@@ -1764,6 +1867,12 @@ def retrieve_executive_context(
             status="active" if task_lookup is not None else "idle",
         ),
         _channel_status(
+            "operating_truth",
+            keyword_operating_rows + current_operating_rows,
+            reason="first-class operating truth",
+            status="active" if operating_lookup is not None else "idle",
+        ),
+        _channel_status(
             "semantic",
             semantic_conversation_rows + semantic_corpus_rows,
             reason=str(semantic_status.get("reason") or ""),
@@ -1782,12 +1891,15 @@ def retrieve_executive_context(
         query=query,
         task_lookup=task_lookup,
         task_rows=task_rows,
+        operating_lookup=operating_lookup,
+        operating_rows=selected.get("operating_rows") or [],
         selected=selected,
     )
 
     return {
         **selected,
         "task_rows": task_rows,
+        "operating_rows": selected.get("operating_rows") or [],
         "channels": channels,
         "fused_candidates": [
             {

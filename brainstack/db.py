@@ -26,6 +26,7 @@ from .profile_contract import (
     expand_communication_profile_items,
 )
 from .operating_context import build_operating_context_snapshot
+from .operating_truth import OPERATING_RECORD_TYPES
 from .provenance import merge_provenance
 from .style_contract import (
     STYLE_CONTRACT_DOC_KIND,
@@ -50,6 +51,8 @@ NUMERIC_TOKEN_RE = re.compile(r"\d+(?::\d+)?(?:\.\d+)?")
 QUERY_TOKEN_RE = re.compile(r"[^\W_]+(?:[-_][^\W_]+)*", re.UNICODE)
 PROFILE_SCOPE_DELIMITER = "::principal_scope::"
 PRINCIPAL_SCOPED_PROFILE_CATEGORIES = {"identity", "preference"}
+PRINCIPAL_SCOPE_KEY_FIELDS = ("platform", "user_id", "agent_identity", "agent_workspace")
+PERSONAL_SCOPE_KEY_FIELDS = ("platform", "user_id")
 MIGRATION_CANONICAL_COMMUNICATION_ROWS_V1 = "canonical_communication_rows_v1"
 MIGRATION_EXPLICIT_IDENTITY_BACKFILL_V1 = "explicit_identity_backfill_v1"
 MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V1 = "stable_logistics_typed_entities_v1"
@@ -201,6 +204,23 @@ def _task_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     }
 
 
+def _operating_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "stable_key": str(row["stable_key"] or ""),
+        "principal_scope_key": str(row["principal_scope_key"] or ""),
+        "record_type": str(row["record_type"] or ""),
+        "content": str(row["content"] or ""),
+        "owner": str(row["owner"] or ""),
+        "source": str(row["source"] or ""),
+        "source_session_id": str(row["source_session_id"] or ""),
+        "source_turn_number": int(row["source_turn_number"] or 0),
+        "metadata": _decode_json_object(row["metadata_json"]),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+    }
+
+
 def _merge_record_metadata(
     existing_metadata_json: Any,
     incoming_metadata: Dict[str, Any] | None,
@@ -226,8 +246,39 @@ def _merge_record_metadata(
     return merged
 
 
-def _should_preserve_existing_style_contract(*, existing_source: Any, incoming_source: Any) -> bool:
-    return style_contract_source_rank(existing_source) > style_contract_source_rank(incoming_source)
+def _style_contract_rule_count(*, content: Any, metadata: Any) -> int:
+    rules = list_style_contract_rules(
+        raw_text=content,
+        metadata=_decode_json_object(metadata) if not isinstance(metadata, dict) else metadata,
+    )
+    return len(rules)
+
+
+def _should_preserve_existing_style_contract(
+    *,
+    existing_source: Any,
+    incoming_source: Any,
+    existing_content: Any = "",
+    existing_metadata: Any = None,
+    incoming_content: Any = "",
+    incoming_metadata: Any = None,
+) -> bool:
+    existing_rank = style_contract_source_rank(existing_source)
+    incoming_rank = style_contract_source_rank(incoming_source)
+    if existing_rank > incoming_rank:
+        return True
+
+    incoming_source_text = str(incoming_source or "").strip().lower()
+    if "tier2" not in incoming_source_text:
+        return False
+
+    existing_rules = _style_contract_rule_count(content=existing_content, metadata=existing_metadata)
+    incoming_rules = _style_contract_rule_count(content=incoming_content, metadata=incoming_metadata)
+    if existing_rules > incoming_rules:
+        return True
+    existing_length = len(str(existing_content or "").strip())
+    incoming_length = len(str(incoming_content or "").strip())
+    return existing_rules == incoming_rules and existing_length > incoming_length
 
 
 def _is_principal_scoped_profile(*, stable_key: str = "", category: str = "") -> bool:
@@ -291,6 +342,9 @@ def _behavior_contract_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
         principal_scope_key=item["principal_scope_key"],
         revision_number=int(item.get("revision_number") or 1),
     )
+    item["personal_scope_key"] = _personal_scope_key_from_metadata(item.get("metadata")) or _personal_scope_key_from_principal_scope_key(
+        item["principal_scope_key"]
+    )
     item["active"] = str(item.get("status") or "").strip() == BEHAVIOR_CONTRACT_ACTIVE_STATUS
     return item
 
@@ -310,6 +364,31 @@ def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     return item
 
 
+def _scope_payload_from_key(scope_key: str) -> Dict[str, str]:
+    payload: Dict[str, str] = {}
+    for raw_part in str(scope_key or "").split("|"):
+        part = str(raw_part or "").strip()
+        if not part or ":" not in part:
+            continue
+        key, value = part.split(":", 1)
+        normalized_key = str(key or "").strip()
+        normalized_value = str(value or "").strip()
+        if normalized_key and normalized_value:
+            payload[normalized_key] = normalized_value
+    return payload
+
+
+def _scope_key_from_payload(payload: Mapping[str, Any] | None, *, fields: Iterable[str]) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+    parts: List[str] = []
+    for key in fields:
+        value = str(payload.get(key) or "").strip()
+        if value:
+            parts.append(f"{key}:{value}")
+    return "|".join(parts)
+
+
 def _principal_scope_key_from_metadata(metadata: Dict[str, Any] | None) -> str:
     if not isinstance(metadata, dict):
         return ""
@@ -325,12 +404,7 @@ def _principal_scope_key_from_metadata(metadata: Dict[str, Any] | None) -> str:
                 if scoped:
                     return scoped
         return ""
-    parts: list[str] = []
-    for key in ("platform", "user_id", "agent_identity", "agent_workspace"):
-        value = str(nested.get(key) or "").strip()
-        if value:
-            parts.append(f"{key}:{value}")
-    return "|".join(parts)
+    return _scope_key_from_payload(nested, fields=PRINCIPAL_SCOPE_KEY_FIELDS)
 
 
 def _principal_scope_payload_from_metadata(metadata: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -342,6 +416,45 @@ def _principal_scope_payload_from_metadata(metadata: Dict[str, Any] | None) -> D
     return {}
 
 
+def _personal_scope_key_from_scope_payload(payload: Mapping[str, Any] | None) -> str:
+    return _scope_key_from_payload(payload, fields=PERSONAL_SCOPE_KEY_FIELDS)
+
+
+def _personal_scope_key_from_principal_scope_key(scope_key: str) -> str:
+    return _personal_scope_key_from_scope_payload(_scope_payload_from_key(scope_key))
+
+
+def _personal_scope_key_from_metadata(metadata: Dict[str, Any] | None) -> str:
+    if not isinstance(metadata, dict):
+        return ""
+    direct = str(metadata.get("personal_scope_key") or "").strip()
+    if direct:
+        return direct
+    nested = _principal_scope_payload_from_metadata(metadata)
+    scoped = _personal_scope_key_from_scope_payload(nested)
+    if scoped:
+        return scoped
+    return _personal_scope_key_from_principal_scope_key(_principal_scope_key_from_metadata(metadata))
+
+
+def _scope_match_priority(
+    *,
+    current_principal_scope_key: str,
+    item_principal_scope_key: str,
+    current_personal_scope_key: str = "",
+    item_personal_scope_key: str = "",
+    session_id: str | None = None,
+    item_session_id: str = "",
+) -> int:
+    if current_principal_scope_key and item_principal_scope_key == current_principal_scope_key:
+        return 3
+    if current_personal_scope_key and item_personal_scope_key == current_personal_scope_key:
+        return 2
+    if session_id is not None and item_session_id == session_id:
+        return 1
+    return 0
+
+
 def _annotate_principal_scope(
     item: Dict[str, Any],
     *,
@@ -349,14 +462,20 @@ def _annotate_principal_scope(
     session_id: str | None = None,
 ) -> bool:
     current_principal_scope_key = str(principal_scope_key or "").strip()
+    current_personal_scope_key = _personal_scope_key_from_principal_scope_key(current_principal_scope_key)
     item_scope_key = _principal_scope_key_from_metadata(item.get("metadata"))
     if not item_scope_key:
         item_scope_key = str(item.get("principal_scope_key") or "").strip()
     if not item_scope_key:
         storage_key = str(item.get("storage_key") or item.get("stable_key") or "").strip()
         _, item_scope_key = _split_profile_storage_key(storage_key)
+    item_personal_scope_key = _personal_scope_key_from_metadata(item.get("metadata")) or _personal_scope_key_from_principal_scope_key(
+        item_scope_key
+    )
     item["principal_scope_key"] = item_scope_key
+    item["personal_scope_key"] = item_personal_scope_key
     item["same_principal"] = bool(current_principal_scope_key) and item_scope_key == current_principal_scope_key
+    item["same_personal_scope"] = bool(current_personal_scope_key) and item_personal_scope_key == current_personal_scope_key
     if not current_principal_scope_key:
         return True
     if not item_scope_key:
@@ -366,9 +485,29 @@ def _annotate_principal_scope(
         )
     if item_scope_key == current_principal_scope_key:
         return True
+    if current_personal_scope_key and item_personal_scope_key == current_personal_scope_key:
+        return True
     if session_id is not None and str(item.get("session_id") or "") == session_id:
         return True
     return False
+
+
+def _scoped_row_priority(item: Mapping[str, Any], *, principal_scope_key: str, session_id: str | None = None) -> tuple[int, float, str, int]:
+    annotated = dict(item)
+    _annotate_principal_scope(annotated, principal_scope_key=principal_scope_key, session_id=session_id)
+    return (
+        _scope_match_priority(
+            current_principal_scope_key=str(principal_scope_key or "").strip(),
+            item_principal_scope_key=str(annotated.get("principal_scope_key") or "").strip(),
+            current_personal_scope_key=_personal_scope_key_from_principal_scope_key(principal_scope_key),
+            item_personal_scope_key=str(annotated.get("personal_scope_key") or "").strip(),
+            session_id=session_id,
+            item_session_id=str(annotated.get("session_id") or "").strip(),
+        ),
+        float(annotated.get("confidence") or 0.0),
+        str(annotated.get("updated_at") or annotated.get("committed_at") or ""),
+        int(annotated.get("id") or 0),
+    )
 
 
 def _graph_metadata_confidence(metadata: Dict[str, Any] | None) -> float:
@@ -1314,9 +1453,34 @@ class BrainstackStore:
             CREATE INDEX IF NOT EXISTS idx_task_items_scope_due_status
             ON task_items(principal_scope_key, due_date, status, optional, updated_at DESC);
 
+            CREATE TABLE IF NOT EXISTS operating_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stable_key TEXT NOT NULL UNIQUE,
+                principal_scope_key TEXT NOT NULL DEFAULT '',
+                record_type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                owner TEXT NOT NULL DEFAULT 'brainstack.operating_truth',
+                source TEXT NOT NULL,
+                source_session_id TEXT NOT NULL DEFAULT '',
+                source_turn_number INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_operating_records_scope_type_updated
+            ON operating_records(principal_scope_key, record_type, updated_at DESC);
+
             CREATE VIRTUAL TABLE IF NOT EXISTS profile_fts USING fts5(
                 content,
                 category UNINDEXED,
+                stable_key UNINDEXED,
+                tokenize = 'unicode61'
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS operating_fts USING fts5(
+                content,
+                record_type UNINDEXED,
                 stable_key UNINDEXED,
                 tokenize = 'unicode61'
             );
@@ -2576,6 +2740,40 @@ class BrainstackStore:
             stable_key=logical_key,
             principal_scope_key=principal_scope_key,
         )
+        if existing is None and principal_scope_key:
+            candidate_rows = self.conn.execute(
+                """
+                SELECT id, storage_key, principal_scope_key, stable_key, category, content, source, confidence,
+                       metadata_json, source_contract_hash, revision_number, parent_revision_id, status,
+                       committed_at, updated_at
+                FROM behavior_contracts
+                WHERE stable_key = ? AND status = ?
+                ORDER BY committed_at DESC, revision_number DESC, id DESC
+                LIMIT 16
+                """,
+                (
+                    logical_key,
+                    BEHAVIOR_CONTRACT_ACTIVE_STATUS,
+                ),
+            ).fetchall()
+            fallback_existing: sqlite3.Row | None = None
+            fallback_priority: tuple[int, float, str, int] | None = None
+            for candidate_row in candidate_rows:
+                item = _behavior_contract_row_to_dict(candidate_row)
+                if not _annotate_principal_scope(item, principal_scope_key=principal_scope_key):
+                    continue
+                priority = _scoped_row_priority(item, principal_scope_key=principal_scope_key)
+                if priority[0] <= 0:
+                    continue
+                if fallback_priority is None or priority > fallback_priority:
+                    fallback_existing = candidate_row
+                    fallback_priority = priority
+            existing = fallback_existing
+        normalized_metadata = _merge_record_metadata(
+            existing["metadata_json"] if existing else None,
+            metadata,
+            source=source,
+        )
         if existing and str(existing["content"] or "").strip() == str(content or "").strip():
             return int(existing["id"])
         if (
@@ -2583,15 +2781,14 @@ class BrainstackStore:
             and _should_preserve_existing_style_contract(
                 existing_source=existing["source"],
                 incoming_source=source,
+                existing_content=existing["content"],
+                existing_metadata=existing["metadata_json"],
+                incoming_content=content,
+                incoming_metadata=normalized_metadata,
             )
             and str(existing["content"] or "").strip() != str(content or "").strip()
         ):
             return int(existing["id"])
-        normalized_metadata = _merge_record_metadata(
-            existing["metadata_json"] if existing else None,
-            metadata,
-            source=source,
-        )
         metadata_json = json.dumps(normalized_metadata, ensure_ascii=True, sort_keys=True)
         if existing:
             existing_item = _behavior_contract_row_to_dict(existing)
@@ -2773,6 +2970,7 @@ class BrainstackStore:
 
     @_locked
     def get_compiled_behavior_policy(self, *, principal_scope_key: str = "") -> Dict[str, Any] | None:
+        requested_scope_key = str(principal_scope_key or "").strip()
         row = self.conn.execute(
             """
             SELECT principal_scope_key, source_storage_key, source_contract_hash, source_contract_updated_at,
@@ -2781,9 +2979,29 @@ class BrainstackStore:
             WHERE principal_scope_key = ?
             LIMIT 1
             """,
-            (str(principal_scope_key or "").strip(),),
+            (requested_scope_key,),
         ).fetchone()
-        return _compiled_behavior_policy_row_to_dict(row) if row else None
+        if row:
+            return _compiled_behavior_policy_row_to_dict(row)
+        if not requested_scope_key:
+            return None
+        contract = self.get_behavior_contract(principal_scope_key=requested_scope_key)
+        if not contract:
+            return None
+        fallback_scope_key = str(contract.get("principal_scope_key") or "").strip()
+        if not fallback_scope_key or fallback_scope_key == requested_scope_key:
+            return None
+        fallback_row = self.conn.execute(
+            """
+            SELECT principal_scope_key, source_storage_key, source_contract_hash, source_contract_updated_at,
+                   schema_version, compiler_version, title, policy_json, projection_text, status, updated_at
+            FROM compiled_behavior_policies
+            WHERE principal_scope_key = ?
+            LIMIT 1
+            """,
+            (fallback_scope_key,),
+        ).fetchone()
+        return _compiled_behavior_policy_row_to_dict(fallback_row) if fallback_row else None
 
     @_locked
     def get_behavior_policy_snapshot(self, *, principal_scope_key: str = "") -> Dict[str, Any]:
@@ -2813,12 +3031,24 @@ class BrainstackStore:
             limit=max(12, stable_profile_limit * 4),
             principal_scope_key=scope_key,
         )
+        operating_rows = self.list_operating_records(
+            principal_scope_key=scope_key,
+            limit=16,
+        )
+        task_rows = self.list_task_items(
+            principal_scope_key=scope_key,
+            item_type="commitment",
+            statuses=("open",),
+            limit=8,
+        )
         continuity_rows = self.recent_continuity(session_id=sid, limit=max(continuity_limit, decision_limit * 2)) if sid else []
         lifecycle_state = self.get_continuity_lifecycle_state(session_id=sid) if sid else None
         return build_operating_context_snapshot(
             principal_scope_key=scope_key,
             compiled_behavior_policy_record=compiled_policy,
             profile_items=profile_items,
+            operating_rows=operating_rows,
+            task_rows=task_rows,
             continuity_rows=continuity_rows,
             lifecycle_state=lifecycle_state,
             stable_profile_limit=stable_profile_limit,
@@ -2997,6 +3227,213 @@ class BrainstackStore:
         return [_task_row_to_dict(row) for row in rows]
 
     @_locked
+    def upsert_operating_record(
+        self,
+        *,
+        stable_key: str,
+        principal_scope_key: str,
+        record_type: str,
+        content: str,
+        owner: str,
+        source: str,
+        source_session_id: str = "",
+        source_turn_number: int = 0,
+        metadata: Dict[str, Any] | None = None,
+    ) -> int:
+        now = utc_now_iso()
+        existing = self.conn.execute(
+            "SELECT id, metadata_json FROM operating_records WHERE stable_key = ?",
+            (str(stable_key or "").strip(),),
+        ).fetchone()
+        meta_json = json.dumps(
+            _merge_record_metadata(
+                existing["metadata_json"] if existing else None,
+                metadata,
+                source=source,
+            ),
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+        if existing:
+            row_id = int(existing["id"])
+            self.conn.execute(
+                """
+                UPDATE operating_records
+                SET principal_scope_key = ?, record_type = ?, content = ?, owner = ?, source = ?,
+                    source_session_id = ?, source_turn_number = ?, metadata_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    str(principal_scope_key or "").strip(),
+                    str(record_type or "").strip(),
+                    str(content or "").strip(),
+                    str(owner or "brainstack.operating_truth").strip() or "brainstack.operating_truth",
+                    str(source or "").strip(),
+                    str(source_session_id or "").strip(),
+                    int(source_turn_number or 0),
+                    meta_json,
+                    now,
+                    row_id,
+                ),
+            )
+            self.conn.execute("DELETE FROM operating_fts WHERE rowid = ?", (row_id,))
+            self.conn.execute(
+                "INSERT INTO operating_fts(rowid, content, record_type, stable_key) VALUES (?, ?, ?, ?)",
+                (
+                    row_id,
+                    str(content or "").strip(),
+                    str(record_type or "").strip(),
+                    str(stable_key or "").strip(),
+                ),
+            )
+            self.conn.commit()
+            return row_id
+
+        cur = self.conn.execute(
+            """
+            INSERT INTO operating_records (
+                stable_key, principal_scope_key, record_type, content, owner, source,
+                source_session_id, source_turn_number, metadata_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(stable_key or "").strip(),
+                str(principal_scope_key or "").strip(),
+                str(record_type or "").strip(),
+                str(content or "").strip(),
+                str(owner or "brainstack.operating_truth").strip() or "brainstack.operating_truth",
+                str(source or "").strip(),
+                str(source_session_id or "").strip(),
+                int(source_turn_number or 0),
+                meta_json,
+                now,
+                now,
+            ),
+        )
+        row_id = _cursor_lastrowid(cur)
+        self.conn.execute(
+            "INSERT INTO operating_fts(rowid, content, record_type, stable_key) VALUES (?, ?, ?, ?)",
+            (
+                row_id,
+                str(content or "").strip(),
+                str(record_type or "").strip(),
+                str(stable_key or "").strip(),
+            ),
+        )
+        self.conn.commit()
+        return row_id
+
+    @_locked
+    def list_operating_records(
+        self,
+        *,
+        principal_scope_key: str,
+        record_types: Iterable[str] | None = None,
+        limit: int = 12,
+    ) -> List[Dict[str, Any]]:
+        requested_scope_key = str(principal_scope_key or "").strip()
+        candidate_limit = max(int(limit or 0) * 6, 24)
+        params: List[Any] = []
+        sql = """
+            SELECT
+                id, stable_key, principal_scope_key, record_type, content, owner, source,
+                source_session_id, source_turn_number, metadata_json, created_at, updated_at
+            FROM operating_records
+            WHERE 1 = 1
+        """
+        normalized_record_types = [
+            str(value or "").strip()
+            for value in (record_types or ())
+            if str(value or "").strip() in OPERATING_RECORD_TYPES
+        ]
+        if normalized_record_types:
+            sql += f" AND record_type IN ({','.join('?' for _ in normalized_record_types)})"
+            params.extend(normalized_record_types)
+        sql += " ORDER BY updated_at DESC, id DESC LIMIT ?"
+        params.append(candidate_limit)
+        rows = self.conn.execute(sql, tuple(params)).fetchall()
+
+        scoped: Dict[str, Dict[str, Any]] = {}
+        for candidate_row in rows:
+            item = _operating_row_to_dict(candidate_row)
+            if not _annotate_principal_scope(item, principal_scope_key=requested_scope_key):
+                continue
+            logical_key = str(item.get("stable_key") or "").strip() or f"row:{item.get('id')}"
+            existing = scoped.get(logical_key)
+            if existing is None or _scoped_row_priority(item, principal_scope_key=requested_scope_key) > _scoped_row_priority(
+                existing,
+                principal_scope_key=requested_scope_key,
+            ):
+                scoped[logical_key] = item
+        output = sorted(
+            scoped.values(),
+            key=lambda item: (
+                _scoped_row_priority(item, principal_scope_key=requested_scope_key),
+                str(item.get("updated_at") or ""),
+            ),
+            reverse=True,
+        )
+        return output[: max(int(limit or 0), 1)]
+
+    @_locked
+    def search_operating_records(
+        self,
+        *,
+        query: str,
+        principal_scope_key: str,
+        record_types: Iterable[str] | None = None,
+        limit: int = 8,
+    ) -> List[Dict[str, Any]]:
+        requested_scope_key = str(principal_scope_key or "").strip()
+        candidate_limit = max(int(limit or 0) * 8, 24)
+        normalized_record_types = [
+            str(value or "").strip()
+            for value in (record_types or ())
+            if str(value or "").strip() in OPERATING_RECORD_TYPES
+        ]
+        fts_query = build_fts_query(query)
+        if not fts_query:
+            return []
+        params: List[Any]
+        rows: List[sqlite3.Row]
+        sql = """
+            SELECT
+                o.id, o.stable_key, o.principal_scope_key, o.record_type, o.content, o.owner, o.source,
+                o.source_session_id, o.source_turn_number, o.metadata_json, o.created_at, o.updated_at
+            FROM operating_fts fts
+            JOIN operating_records o ON o.id = fts.rowid
+            WHERE operating_fts MATCH ?
+        """
+        params = [fts_query]
+        if normalized_record_types:
+            sql += f" AND o.record_type IN ({','.join('?' for _ in normalized_record_types)})"
+            params.extend(normalized_record_types)
+        sql += " ORDER BY bm25(operating_fts), o.updated_at DESC LIMIT ?"
+        params.append(candidate_limit)
+        try:
+            rows = self.conn.execute(sql, tuple(params)).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+
+        scored = _attach_keyword_scores(_operating_row_to_dict(row) for row in rows)
+        filtered: List[Dict[str, Any]] = []
+        for row in scored:
+            if not _annotate_principal_scope(row, principal_scope_key=requested_scope_key):
+                continue
+            row["retrieval_source"] = "operating.keyword"
+            row["match_mode"] = "keyword"
+            filtered.append(row)
+        filtered.sort(
+            key=lambda item: (
+                _scoped_row_priority(item, principal_scope_key=requested_scope_key),
+                float(item.get("keyword_score") or 0.0),
+                str(item.get("updated_at") or ""),
+            ),
+            reverse=True,
+        )
+        return filtered[: max(int(limit or 0), 1)]
+
+    @_locked
     def list_profile_items(
         self,
         *,
@@ -3018,12 +3455,23 @@ class BrainstackStore:
         sql += " ORDER BY confidence DESC, updated_at DESC, id DESC LIMIT ?"
         params.append(fetch_limit)
         rows = self.conn.execute(sql, tuple(params)).fetchall()
-        parsed: List[Dict[str, Any]] = []
+        parsed_by_key: Dict[str, Dict[str, Any]] = {}
         for row in rows:
             item = _profile_row_to_dict(row)
             if not _annotate_principal_scope(item, principal_scope_key=principal_scope_key):
                 continue
-            parsed.append(item)
+            logical_key = str(item.get("stable_key") or "").strip() or str(item.get("storage_key") or "")
+            existing = parsed_by_key.get(logical_key)
+            if existing is None or _scoped_row_priority(item, principal_scope_key=principal_scope_key) > _scoped_row_priority(
+                existing,
+                principal_scope_key=principal_scope_key,
+            ):
+                parsed_by_key[logical_key] = item
+        parsed = sorted(
+            parsed_by_key.values(),
+            key=lambda item: _scoped_row_priority(item, principal_scope_key=principal_scope_key),
+            reverse=True,
+        )
         return parsed[:limit]
 
     @_locked
@@ -3097,7 +3545,33 @@ class BrainstackStore:
             """,
             (storage_key,),
         ).fetchone()
-        return _profile_row_to_dict(row) if row else None
+        if row:
+            return _profile_row_to_dict(row)
+        if not principal_scope_key or not _is_principal_scoped_profile(stable_key=stable_key):
+            return None
+        like_pattern = f"{str(stable_key or '').strip()}{PROFILE_SCOPE_DELIMITER}%"
+        candidate_rows = self.conn.execute(
+            """
+            SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at, active
+            FROM profile_items
+            WHERE active = 1 AND stable_key LIKE ?
+            ORDER BY confidence DESC, updated_at DESC, id DESC
+            LIMIT 16
+            """,
+            (like_pattern,),
+        ).fetchall()
+        candidates: List[Dict[str, Any]] = []
+        for candidate_row in candidate_rows:
+            item = _profile_row_to_dict(candidate_row)
+            if _annotate_principal_scope(item, principal_scope_key=principal_scope_key):
+                candidates.append(item)
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda item: _scoped_row_priority(item, principal_scope_key=principal_scope_key),
+            reverse=True,
+        )
+        return candidates[0]
 
     @_locked
     def get_behavior_contract(
@@ -3106,11 +3580,42 @@ class BrainstackStore:
         stable_key: str = STYLE_CONTRACT_SLOT,
         principal_scope_key: str = "",
     ) -> Dict[str, Any] | None:
+        requested_scope_key = str(principal_scope_key or "").strip()
         row = self._get_active_behavior_contract_row(
             stable_key=stable_key,
-            principal_scope_key=principal_scope_key,
+            principal_scope_key=requested_scope_key,
         )
-        return _behavior_contract_row_to_dict(row) if row else None
+        if row:
+            return _behavior_contract_row_to_dict(row)
+        if not requested_scope_key:
+            return None
+        candidate_rows = self.conn.execute(
+            """
+            SELECT id, storage_key, principal_scope_key, stable_key, category, content, source, confidence,
+                   metadata_json, source_contract_hash, revision_number, parent_revision_id, status,
+                   committed_at, updated_at
+            FROM behavior_contracts
+            WHERE stable_key = ? AND status = ?
+            ORDER BY committed_at DESC, revision_number DESC, id DESC
+            LIMIT 16
+            """,
+            (
+                str(stable_key or "").strip() or STYLE_CONTRACT_SLOT,
+                BEHAVIOR_CONTRACT_ACTIVE_STATUS,
+            ),
+        ).fetchall()
+        candidates: List[Dict[str, Any]] = []
+        for candidate_row in candidate_rows:
+            item = _behavior_contract_row_to_dict(candidate_row)
+            if _annotate_principal_scope(item, principal_scope_key=requested_scope_key):
+                candidates.append(item)
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda item: _scoped_row_priority(item, principal_scope_key=requested_scope_key),
+            reverse=True,
+        )
+        return candidates[0]
 
     @_locked
     def record_profile_retrievals(self, *, rows: Iterable[Dict[str, Any]]) -> int:

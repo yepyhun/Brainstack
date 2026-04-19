@@ -26,18 +26,39 @@ from .db import BrainstackStore
 from .donors import continuity_adapter, corpus_adapter, graph_adapter
 from .donors.registry import get_donor_registry
 from .extraction_pipeline import build_session_message_ingest_plan, build_turn_ingest_plan
+from .operating_truth import (
+    OPERATING_OWNER,
+    build_operating_stable_key,
+    parse_operating_capture,
+)
 from .output_contract import validate_output_against_contract
 from .reconciler import reconcile_tier2_candidates
 from .retrieval import (
     build_compression_hint,
     build_system_prompt_block,
 )
-from .style_contract import build_style_contract_from_text, looks_like_style_contract_teaching
+from .style_contract import (
+    apply_style_contract_patch,
+    build_style_contract_from_text,
+    list_style_contract_rules,
+    looks_like_style_contract_teaching,
+)
 from .task_memory import build_task_stable_key, parse_task_capture, resolve_user_timezone
 from .tier1_extractor import build_profile_stable_key
 from .tier2_extractor import extract_tier2_candidates
 
 logger = logging.getLogger(__name__)
+
+
+def _build_personal_scope_key(*, platform: str = "", user_id: str = "") -> str:
+    parts: List[str] = []
+    normalized_platform = str(platform or "").strip()
+    normalized_user_id = str(user_id or "").strip()
+    if normalized_platform:
+        parts.append(f"platform:{normalized_platform}")
+    if normalized_user_id:
+        parts.append(f"user_id:{normalized_user_id}")
+    return "|".join(parts)
 
 
 def _load_plugin_config() -> dict:
@@ -98,6 +119,9 @@ def _build_principal_scope(**kwargs: Any) -> Dict[str, str]:
         scope["agent_workspace"] = agent_workspace
     if timezone_name and timezone_name != "UTC":
         scope["timezone"] = timezone_name
+    personal_scope_key = _build_personal_scope_key(platform=platform, user_id=user_id)
+    if personal_scope_key:
+        scope["personal_scope_key"] = personal_scope_key
     key_parts: List[str] = []
     for key in ("platform", "user_id", "agent_identity", "agent_workspace"):
         value = str(scope.get(key) or "").strip()
@@ -121,6 +145,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._compression_snapshot_limit = int(self._config.get("compression_snapshot_limit", 6))
         self._transcript_match_limit = int(self._config.get("transcript_match_limit", 2))
         self._transcript_char_budget = int(self._config.get("transcript_char_budget", 560))
+        self._operating_match_limit = int(self._config.get("operating_match_limit", 3))
         self._graph_match_limit = int(self._config.get("graph_match_limit", 6))
         self._corpus_match_limit = int(self._config.get("corpus_match_limit", 4))
         self._corpus_char_budget = int(self._config.get("corpus_char_budget", 700))
@@ -153,6 +178,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._tier2_followup_requested = False
         self._principal_scope: Dict[str, str] = {}
         self._principal_scope_key = ""
+        self._recent_user_messages: List[str] = []
 
     @property
     def name(self) -> str:
@@ -182,6 +208,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             {"key": "continuity_match_limit", "description": "How many query-matched continuity items to inject", "default": "4"},
             {"key": "transcript_match_limit", "description": "How many transcript evidence lines may be injected when strongly supported", "default": "2"},
             {"key": "transcript_char_budget", "description": "Approximate character budget for transcript evidence when it is allowed", "default": "560"},
+            {"key": "operating_match_limit", "description": "How many operating-truth items to consider per turn", "default": "3"},
             {"key": "graph_match_limit", "description": "How many graph-truth items to inject per turn", "default": "6"},
             {"key": "corpus_match_limit", "description": "How many corpus sections to consider per turn", "default": "4"},
             {"key": "corpus_char_budget", "description": "Approximate character budget for packed corpus recall", "default": "700"},
@@ -233,6 +260,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._tier2_thread = None
         self._principal_scope = {}
         self._principal_scope_key = ""
+        self._recent_user_messages = []
 
     def initialize(self, session_id: str, **kwargs) -> None:
         hermes_home = str(kwargs.get("hermes_home") or "")
@@ -401,14 +429,14 @@ class BrainstackMemoryProvider(MemoryProvider):
     ) -> Dict[str, Any] | None:
         if not self._store or not content:
             return None
-        if require_explicit_signal and not looks_like_style_contract_teaching(content):
-            return None
-        style_contract = build_style_contract_from_text(
-            raw_text=content,
+        style_contract = self._resolve_style_contract_candidate(
+            content=content,
             source=source,
             confidence=confidence,
-            metadata=self._scoped_metadata(metadata),
+            metadata=metadata,
+            require_explicit_signal=require_explicit_signal,
         )
+        self._remember_recent_user_message(content)
         if style_contract is None:
             return None
 
@@ -420,7 +448,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             stable_key=str(style_contract["slot"]),
             category=str(style_contract["category"]),
             content=str(style_contract["content"]),
-            commit=lambda: self._store.upsert_profile_item(
+            commit=lambda: self._store.upsert_behavior_contract(
                 stable_key=style_contract["slot"],
                 category=style_contract["category"],
                 content=style_contract["content"],
@@ -429,7 +457,11 @@ class BrainstackMemoryProvider(MemoryProvider):
                 metadata=style_contract["metadata"],
             ),
             extra={
-                "rule_count": len(list(style_contract.get("metadata", {}).get("style_contract_rules") or [])),
+                "rule_count": int(style_contract.get("metadata", {}).get("style_contract_rule_count") or 0),
+                "fragment_count": int(style_contract.get("metadata", {}).get("style_contract_fragment_count") or 1),
+                "patch_rule_count": int(
+                    style_contract.get("metadata", {}).get("last_style_contract_patch", {}).get("patch_rule_count") or 0
+                ),
             },
         )
         raw_contract = self._store.get_behavior_contract(principal_scope_key=self._principal_scope_key)
@@ -442,6 +474,121 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._last_write_receipt = receipt
         self._set_memory_operation_trace(surface="style_contract_upsert")
         return receipt
+
+    def _remember_recent_user_message(self, content: str) -> None:
+        text = str(content or "").strip()
+        if not text:
+            return
+        if self._recent_user_messages and self._recent_user_messages[-1] == text:
+            return
+        self._recent_user_messages.append(text)
+        if len(self._recent_user_messages) > 4:
+            self._recent_user_messages = self._recent_user_messages[-4:]
+
+    def _iter_style_contract_candidate_texts(self, content: str) -> List[tuple[str, int]]:
+        text = str(content or "").strip()
+        if not text:
+            return []
+        prior_fragments = [
+            fragment
+            for fragment in self._recent_user_messages
+            if str(fragment or "").strip() and str(fragment or "").strip() != text
+        ]
+        candidates: List[tuple[str, int]] = []
+        seen: set[str] = set()
+
+        def _add(raw_text: str, fragment_count: int) -> None:
+            normalized = str(raw_text or "").strip()
+            if not normalized or normalized in seen:
+                return
+            seen.add(normalized)
+            candidates.append((normalized, fragment_count))
+
+        _add(text, 1)
+        if "\n" not in text:
+            return candidates
+        for fragment_count in range(1, min(len(prior_fragments), 2) + 1):
+            _add("\n".join([*prior_fragments[-fragment_count:], text]), fragment_count + 1)
+        return candidates
+
+    def _resolve_style_contract_candidate(
+        self,
+        *,
+        content: str,
+        source: str,
+        confidence: float,
+        metadata: Dict[str, Any] | None,
+        require_explicit_signal: bool,
+    ) -> Dict[str, Any] | None:
+        scoped_metadata = self._scoped_metadata(metadata)
+        best_candidate: Dict[str, Any] | None = None
+        best_score: tuple[int, int, int] | None = None
+        for raw_text, fragment_count in self._iter_style_contract_candidate_texts(content):
+            if require_explicit_signal and not looks_like_style_contract_teaching(raw_text):
+                continue
+            candidate = build_style_contract_from_text(
+                raw_text=raw_text,
+                source=source,
+                confidence=confidence,
+                metadata={
+                    **scoped_metadata,
+                    "style_contract_fragment_count": fragment_count,
+                },
+            )
+            if candidate is None:
+                continue
+            rule_count = int(
+                candidate.get("metadata", {}).get("style_contract_rule_count")
+                or len(list_style_contract_rules(raw_text=raw_text, metadata=candidate.get("metadata")))
+            )
+            score = (rule_count, len(str(candidate.get("content") or "")), fragment_count)
+            if best_score is None or score > best_score:
+                best_candidate = candidate
+                best_score = score
+        if best_candidate is not None:
+            return best_candidate
+
+        if not self._store:
+            return None
+        raw_contract = self._store.get_behavior_contract(principal_scope_key=self._principal_scope_key)
+        if raw_contract is None:
+            return None
+
+        patch_source = source.replace(":style_contract", ":style_contract_patch")
+        scoped_metadata = self._scoped_metadata(metadata)
+        for raw_text, fragment_count in self._iter_style_contract_candidate_texts(content):
+            corrected = apply_style_contract_patch(
+                raw_text=raw_contract.get("content"),
+                patch_text=raw_text,
+                metadata=raw_contract.get("metadata"),
+            )
+            if corrected is None:
+                continue
+            merged_metadata = {
+                **dict(raw_contract.get("metadata") or {}),
+                **scoped_metadata,
+                "memory_class": "style_contract",
+                "style_contract_title": corrected["title"],
+                "style_contract_sections": corrected["sections"],
+                "style_contract_rule_count": len(
+                    list_style_contract_rules(raw_text=corrected["content"], metadata={"style_contract_sections": corrected["sections"]})
+                ),
+                "style_contract_fragment_count": fragment_count,
+                "last_style_contract_patch": {
+                    "updated_rule_ids": list(corrected.get("updated_rule_ids") or []),
+                    "patch_rule_count": int(corrected.get("patch_rule_count") or 0),
+                    "source": patch_source,
+                },
+            }
+            return {
+                "category": str(raw_contract.get("category") or "preference"),
+                "slot": str(raw_contract.get("stable_key") or "preference:style_contract"),
+                "content": str(corrected["content"]),
+                "confidence": float(raw_contract.get("confidence") or confidence or 0.9),
+                "source": patch_source,
+                "metadata": merged_metadata,
+            }
+        return None
 
     def _upsert_task_capture_candidate(
         self,
@@ -524,6 +671,75 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._set_memory_operation_trace(surface="task_capture_upsert")
         return receipt
 
+    def _upsert_operating_truth_candidate(
+        self,
+        *,
+        content: str,
+        source: str,
+        metadata: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any] | None:
+        if not self._store or not content:
+            return None
+        capture = parse_operating_capture(content)
+        if capture is None:
+            return None
+
+        items = list(capture.get("items") or [])
+        if not items:
+            return None
+
+        batch_stable_key = "::".join(
+            [
+                "operating_truth_batch",
+                self._principal_scope_key or "global",
+                str((metadata or {}).get("session_id") or self._session_id or "").strip() or "session",
+                str((metadata or {}).get("turn_number") or self._turn_counter or 0),
+            ]
+        )
+
+        def commit() -> None:
+            scoped_metadata = self._scoped_metadata(metadata)
+            for item in items:
+                record_type = str(item.get("record_type") or "").strip()
+                content_text = str(item.get("content") or "").strip()
+                if not record_type or not content_text:
+                    continue
+                stable_key = build_operating_stable_key(
+                    principal_scope_key=self._principal_scope_key,
+                    record_type=record_type,
+                    content=content_text,
+                )
+                self._store.upsert_operating_record(
+                    stable_key=stable_key,
+                    principal_scope_key=self._principal_scope_key,
+                    record_type=record_type,
+                    content=content_text,
+                    owner=OPERATING_OWNER,
+                    source=source,
+                    source_session_id=str((metadata or {}).get("session_id") or self._session_id or "").strip(),
+                    source_turn_number=int((metadata or {}).get("turn_number") or self._turn_counter or 0),
+                    metadata=scoped_metadata,
+                )
+
+        receipt = self._commit_explicit_write(
+            owner=OPERATING_OWNER,
+            write_class="operating_truth",
+            source=source,
+            target="user",
+            stable_key=batch_stable_key,
+            category="operating_truth",
+            content=content,
+            commit=commit,
+            extra={
+                "item_count": len(items),
+                "record_types": [str(item.get("record_type") or "").strip() for item in items],
+                "items": [dict(item) for item in items],
+            },
+        )
+        self._last_write_receipt = receipt
+        self._set_memory_operation_trace(surface="operating_truth_upsert")
+        return receipt
+
     def system_prompt_block(self) -> str:
         if not self._store:
             return ""
@@ -576,6 +792,11 @@ class BrainstackMemoryProvider(MemoryProvider):
             source="prefetch:task_memory",
             metadata={"session_id": sid},
         )
+        operating_truth_receipt = self._upsert_operating_truth_candidate(
+            content=query,
+            source="prefetch:operating_truth",
+            metadata={"session_id": sid},
+        )
         packet = build_working_memory_packet(
             self._store,
             query=query,
@@ -587,6 +808,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             continuity_match_limit=self._continuity_match_limit,
             transcript_match_limit=self._transcript_match_limit,
             transcript_char_budget=self._transcript_char_budget,
+            operating_match_limit=self._operating_match_limit,
             graph_limit=self._graph_match_limit,
             corpus_limit=self._corpus_match_limit,
             corpus_char_budget=self._corpus_char_budget,
@@ -607,6 +829,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                     "matched": [_debug_row_snapshot(row) for row in list(packet.get("matched") or [])],
                     "recent": [_debug_row_snapshot(row) for row in list(packet.get("recent") or [])],
                     "transcript_rows": [_debug_row_snapshot(row) for row in list(packet.get("transcript_rows") or [])],
+                    "operating_rows": [dict(row) for row in list(packet.get("operating_rows") or [])],
                     "graph_rows": [_debug_row_snapshot(row) for row in list(packet.get("graph_rows") or [])],
                     "corpus_rows": [_debug_row_snapshot(row) for row in list(packet.get("corpus_rows") or [])],
                     "task_rows": [dict(row) for row in list(packet.get("task_rows") or [])],
@@ -624,7 +847,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         output_block = str(packet.get("block") or "")
         receipt_blocks = [
             self._render_memory_operation_receipt_block(receipt)
-            for receipt in (style_contract_receipt, task_capture_receipt)
+            for receipt in (style_contract_receipt, task_capture_receipt, operating_truth_receipt)
             if isinstance(receipt, dict)
         ]
         if receipt_blocks:
@@ -636,9 +859,10 @@ class BrainstackMemoryProvider(MemoryProvider):
             "route_mode": str(packet.get("routing", {}).get("applied_mode") or "fact"),
             "style_contract_activated_before_prefetch": style_contract_activated,
             "task_capture_activated_before_prefetch": bool(task_capture_receipt),
-            "write_receipt_present": bool(style_contract_receipt or task_capture_receipt),
+            "operating_truth_activated_before_prefetch": bool(operating_truth_receipt),
+            "write_receipt_present": bool(style_contract_receipt or task_capture_receipt or operating_truth_receipt),
             "write_receipt_status": str(
-                (task_capture_receipt or style_contract_receipt or {}).get("status") or ""
+                (operating_truth_receipt or task_capture_receipt or style_contract_receipt or {}).get("status") or ""
             ),
             "compiled_policy_present_in_packet": bool(isinstance(compiled_policy, dict) and projection_text),
             "projection_present_in_block": bool(projection_text and projection_text in output_block),
@@ -684,6 +908,11 @@ class BrainstackMemoryProvider(MemoryProvider):
             confidence=0.9,
             metadata={"session_id": sid, "turn_number": self._turn_counter},
             require_explicit_signal=True,
+        )
+        self._upsert_operating_truth_candidate(
+            content=user_content,
+            source="sync_turn:operating_truth",
+            metadata={"session_id": sid, "turn_number": self._turn_counter},
         )
         plan = build_turn_ingest_plan(
             user_content=user_content,

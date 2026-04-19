@@ -86,7 +86,9 @@ def test_prefetch_can_activate_structured_style_contract_before_first_answer(tmp
         assert row["source"] == "prefetch:style_contract"
         assert compiled is not None
         assert compiled["policy"]["status"] == "active"
-        assert "## Brainstack Active Communication Contract" in block
+        assert "## Brainstack Memory Operation Receipt" in block
+        assert provider.memory_operation_trace()["last_write_receipt"]["owner"] == "brainstack.behavior_contract"
+        assert "# Brainstack Active Communication Contract" in provider.system_prompt_block()
         assert provider.behavior_policy_trace()["prefetch"]["style_contract_activated_before_prefetch"] is True
     finally:
         provider.shutdown()

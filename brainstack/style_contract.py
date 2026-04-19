@@ -9,13 +9,18 @@ STYLE_CONTRACT_DOC_KIND = "style_contract"
 STYLE_CONTRACT_CATEGORY = "preference"
 STYLE_CONTRACT_DEFAULT_TITLE = "User style contract"
 _RULE_BULLET_RE = re.compile(r"^(?:[-*•]|\d{1,3}\s*[.)-])\s+(?P<content>.+)$")
+_INLINE_RULE_RE = re.compile(r"^(?P<label>.+?)\s+(?:-|–|—)\s+(?P<detail>.+)$")
 _STYLE_CONTRACT_SOURCE_RANKS = (
     ("behavior_policy_correction", 400),
+    ("prefetch:style_contract_patch", 350),
+    ("memory_write:style_contract_patch", 350),
+    ("sync_turn:user_style_contract_patch", 350),
     ("prefetch:style_contract", 300),
     ("memory_write:style_contract", 300),
     ("sync_turn:user_style_contract", 300),
     ("tier2_llm", 100),
 )
+_PATCH_TOKEN_RE = re.compile(r"[0-9A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű]{2,}", re.UNICODE)
 
 
 def _normalize_text(value: Any) -> str:
@@ -28,6 +33,10 @@ def _coerce_confidence(value: Any, *, default: float = 0.86) -> float:
     except (TypeError, ValueError):
         return default
     return max(0.0, min(1.0, number))
+
+
+def _tokenize_patch_text(value: Any) -> List[str]:
+    return [token.casefold() for token in _PATCH_TOKEN_RE.findall(_normalize_text(value))]
 
 
 def _normalize_rule_lines(values: Any) -> List[str]:
@@ -64,6 +73,22 @@ def _extract_rule_bullet(line: str) -> str | None:
         return None
     content = _normalize_text(match.group("content"))
     return content or None
+
+
+def _extract_inline_rule(line: str) -> str | None:
+    normalized = _normalize_text(line)
+    if not normalized or _extract_rule_bullet(normalized) is not None:
+        return None
+    match = _INLINE_RULE_RE.match(normalized)
+    if not match:
+        return None
+    label = _normalize_text(match.group("label"))
+    detail = _normalize_text(match.group("detail"))
+    if not label or not detail:
+        return None
+    if label.endswith(":"):
+        return None
+    return f"{label} - {detail}"
 
 
 def _is_heading_line(line: str) -> bool:
@@ -215,6 +240,99 @@ def apply_style_contract_rule_correction(
     }
 
 
+def parse_style_contract_patch_text(raw_text: Any) -> List[str]:
+    normalized_lines = [_normalize_text(line) for line in str(raw_text or "").splitlines() if _normalize_text(line)]
+    if not normalized_lines or len(normalized_lines) > 3:
+        return []
+    patch_lines: List[str] = []
+    for line in normalized_lines:
+        if line.endswith("?"):
+            return []
+        bullet = _extract_rule_bullet(line)
+        inline_rule = _extract_inline_rule(line)
+        candidate = bullet or inline_rule or line
+        if len(_tokenize_patch_text(candidate)) < 3:
+            return []
+        patch_lines.append(candidate)
+    return patch_lines
+
+
+def apply_style_contract_patch(
+    *,
+    raw_text: Any,
+    patch_text: Any,
+    metadata: Mapping[str, Any] | None = None,
+) -> Dict[str, Any] | None:
+    patch_lines = parse_style_contract_patch_text(patch_text)
+    if not patch_lines:
+        return None
+
+    rules = list_style_contract_rules(raw_text=raw_text, metadata=metadata)
+    if not rules:
+        return None
+
+    replacement_map: Dict[str, str] = {}
+    for patch_line in patch_lines:
+        patch_tokens = set(_tokenize_patch_text(patch_line))
+        if not patch_tokens:
+            return None
+        scored: List[tuple[int, str]] = []
+        for rule in rules:
+            rule_id = str(rule.get("rule_id") or "").strip()
+            if not rule_id:
+                continue
+            rule_tokens = set(_tokenize_patch_text(rule.get("text")))
+            overlap = len(rule_tokens & patch_tokens)
+            if overlap > 0:
+                scored.append((overlap, rule_id))
+        if not scored:
+            return None
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        best_score, best_rule_id = scored[0]
+        second_score = scored[1][0] if len(scored) > 1 else -1
+        if best_score < 2 or best_score == second_score:
+            return None
+        replacement_map[best_rule_id] = patch_line
+
+    updated_rule_ids: List[str] = []
+    current_content = str(raw_text or "")
+    current_metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+    for rule in rules:
+        rule_id = str(rule.get("rule_id") or "").strip()
+        if rule_id not in replacement_map:
+            continue
+        corrected = apply_style_contract_rule_correction(
+            raw_text=current_content,
+            rule_id=rule_id,
+            replacement_text=replacement_map[rule_id],
+            metadata=current_metadata,
+        )
+        if corrected is None:
+            return None
+        current_content = str(corrected["content"])
+        current_metadata = {
+            **current_metadata,
+            "style_contract_title": corrected["title"],
+            "style_contract_sections": corrected["sections"],
+        }
+        updated_rule_ids.append(rule_id)
+
+    if not updated_rule_ids or _normalize_text(current_content) == _normalize_text(raw_text):
+        return None
+
+    parts = extract_style_contract_parts(current_content, metadata=current_metadata)
+    if parts is None:
+        return None
+    return {
+        "title": str(parts["title"] or STYLE_CONTRACT_DEFAULT_TITLE),
+        "summary": str(parts.get("summary") or ""),
+        "sections": list(parts["sections"]),
+        "content": current_content,
+        "updated_rule_ids": updated_rule_ids,
+        "patch_rule_count": len(updated_rule_ids),
+    }
+
+
 def render_style_contract_content(
     *,
     title: str,
@@ -330,7 +448,11 @@ def parse_style_contract_text(raw_text: Any) -> Dict[str, Any] | None:
     title = STYLE_CONTRACT_DEFAULT_TITLE
     index = 0
     first_line = normalized_lines[0]
-    if not _is_heading_line(first_line) and _extract_rule_bullet(first_line) is None:
+    if (
+        not _is_heading_line(first_line)
+        and _extract_rule_bullet(first_line) is None
+        and _extract_inline_rule(first_line) is None
+    ):
         title = first_line
         index = 1
 
@@ -339,6 +461,7 @@ def parse_style_contract_text(raw_text: Any) -> Dict[str, Any] | None:
     current_lines: List[str] = []
     saw_heading = False
     bullet_line_count = 0
+    inline_rule_count = 0
 
     def _flush() -> None:
         nonlocal current_heading, current_lines
@@ -358,8 +481,13 @@ def parse_style_contract_text(raw_text: Any) -> Dict[str, Any] | None:
         if bullet is not None:
             bullet_line_count += 1
             current_lines.append(bullet)
-        else:
-            current_lines.append(line)
+            continue
+        inline_rule = _extract_inline_rule(line)
+        if inline_rule is not None:
+            inline_rule_count += 1
+            current_lines.append(inline_rule)
+            continue
+        current_lines.append(line)
 
     _flush()
 
@@ -371,7 +499,8 @@ def parse_style_contract_text(raw_text: Any) -> Dict[str, Any] | None:
     total_rules = sum(len(section.get("lines") or []) for section in sections)
     if total_rules == 0:
         return None
-    if not saw_heading and bullet_line_count < 2:
+    structured_rule_lines = bullet_line_count + inline_rule_count
+    if not saw_heading and structured_rule_lines < 3:
         return None
     if not saw_heading and total_rules < 3:
         return None
@@ -427,11 +556,21 @@ def build_style_contract_from_text(
         return None
 
     merged_metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+    rules = list_style_contract_rules(
+        raw_text=raw_text,
+        metadata={
+            **merged_metadata,
+            "style_contract_title": parsed["title"],
+            "style_contract_sections": parsed["sections"],
+        },
+    )
     merged_metadata.update(
         {
             "memory_class": "style_contract",
             "style_contract_title": parsed["title"],
             "style_contract_sections": parsed["sections"],
+            "style_contract_rules": rules,
+            "style_contract_rule_count": len(rules),
         }
     )
     content = render_style_contract_content(
