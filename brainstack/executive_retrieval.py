@@ -118,6 +118,8 @@ class RetrievalRoute:
     source: str = "default"
     reason: str = ""
     fallback_used: bool = False
+    resolution_status: str = "not_attempted"
+    resolution_error: str = ""
     bounds: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -505,6 +507,7 @@ def _resolve_route(
         route.applied_mode = deterministic_mode
         route.source = str(deterministic.get("source") or "deterministic_route_hint")
         route.reason = str(deterministic.get("reason") or "")
+        route.resolution_status = "deterministic"
         return route
 
     if style_contract_available and _looks_like_style_contract_recall(
@@ -515,6 +518,7 @@ def _resolve_route(
         route.applied_mode = ROUTE_STYLE_CONTRACT
         route.source = "deterministic_style_contract_hint"
         route.reason = "deterministic style-contract recall cues"
+        route.resolution_status = "deterministic"
         return route
 
     resolver = route_resolver
@@ -525,14 +529,17 @@ def _resolve_route(
     if resolver is None:
         route.source = str(deterministic.get("source") or "deterministic_route_hint")
         route.reason = str(deterministic.get("reason") or route.reason)
+        route.resolution_status = "skipped"
         return route
 
     try:
         payload = resolver(normalized)
     except Exception as exc:
         logger.warning("Brainstack route resolution failed: %s", exc)
-        route.source = "fallback"
-        route.reason = f"route hint failed: {exc}"
+        route.source = "route_resolution_failed"
+        route.reason = "route resolver failed; staying on fact route"
+        route.resolution_status = "failed"
+        route.resolution_error = str(exc)
         return route
 
     if isinstance(payload, str):
@@ -543,14 +550,23 @@ def _resolve_route(
         reason = _normalize_text(payload.get("reason"))
         source = _normalize_text(payload.get("source")) or source
     else:
+        route.source = "route_resolution_failed"
+        route.reason = "route resolver returned unsupported payload; staying on fact route"
+        route.resolution_status = "failed"
+        route.resolution_error = f"unsupported payload type: {type(payload).__name__}"
         return route
 
     if mode not in {ROUTE_FACT, ROUTE_TEMPORAL, ROUTE_AGGREGATE, ROUTE_STYLE_CONTRACT}:
+        route.source = "route_resolution_failed"
+        route.reason = "route resolver returned unsupported mode; staying on fact route"
+        route.resolution_status = "failed"
+        route.resolution_error = f"unsupported mode: {mode or '<empty>'}"
         return route
     route.requested_mode = mode
     route.applied_mode = mode
     route.source = source
     route.reason = reason
+    route.resolution_status = "resolved"
     return route
 
 

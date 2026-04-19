@@ -874,8 +874,10 @@ def test_style_contract_deterministic_route_does_not_capture_ordinary_queries(tm
     )
 
     assert packet["routing"]["applied_mode"] == "fact"
-    assert packet["routing"]["source"] == "fallback"
-    assert packet["routing"]["reason"].startswith("route hint failed:")
+    assert packet["routing"]["source"] == "route_resolution_failed"
+    assert packet["routing"]["resolution_status"] == "failed"
+    assert packet["routing"]["resolution_error"] == "forced fallback"
+    assert packet["routing"]["reason"] == "route resolver failed; staying on fact route"
     assert all(row["stable_key"] != STYLE_CONTRACT_SLOT for row in packet["profile_items"])
     assert STYLE_CONTRACT_SLOT not in packet["block"]
 

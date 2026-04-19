@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import re
 from typing import Any, Callable, Dict
 
 from .behavior_policy import build_behavior_policy_reinforcement
@@ -31,8 +32,12 @@ HIGH_STAKES_TERMS = (
 )
 
 def _contains_any(query: str, terms: tuple[str, ...]) -> bool:
-    lowered = query.lower()
-    return any(term in lowered for term in terms)
+    lowered = " ".join(str(query or "").strip().split()).casefold()
+    return any(
+        re.search(r"(?<!\w)" + re.escape(str(term or "").casefold()) + r"(?!\w)", lowered, flags=re.UNICODE)
+        is not None
+        for term in terms
+    )
 
 
 @dataclass
@@ -119,7 +124,7 @@ def _initial_policy(
         suppress_contract_if_in_system_substrate=True,
     )
 
-    if analysis.profile_slot_targets and not analysis.high_stakes:
+    if analysis.profile_slot_targets:
         policy.mode = "balanced"
         policy.collapse_mode = "balanced"
         policy.profile_limit = max(policy.profile_limit, min(profile_match_limit, 4))
@@ -133,7 +138,7 @@ def _initial_policy(
         policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 260))
         policy.show_authoritative_contract = False
 
-    if analysis.operating_like and not analysis.high_stakes:
+    if analysis.operating_like:
         policy.mode = "balanced"
         policy.collapse_mode = "balanced"
         policy.continuity_match_limit = max(policy.continuity_match_limit, min(continuity_match_limit, 2))
@@ -144,22 +149,6 @@ def _initial_policy(
         policy.graph_limit = max(policy.graph_limit, min(graph_limit, 2))
         policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 2))
         policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 360))
-
-    if analysis.high_stakes:
-        policy.mode = "deep"
-        policy.collapse_mode = "minimal"
-        policy.provenance_mode = "expanded"
-        policy.show_graph_history = True
-        policy.show_policy = True
-        policy.transcript_limit = 0
-        policy.transcript_char_budget = 0
-        policy.profile_limit = max(policy.profile_limit, min(profile_match_limit, 4))
-        policy.continuity_match_limit = max(policy.continuity_match_limit, min(continuity_match_limit, 3))
-        policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
-        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 4))
-        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 5))
-        policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 4))
-        policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 900))
 
     if analysis.task_like:
         policy.mode = "compact"
@@ -283,7 +272,7 @@ def build_working_memory_packet(
         )
     )
 
-    if profile_support_present and not analysis.high_stakes:
+    if profile_support_present:
         policy.mode = "balanced"
         policy.collapse_mode = "balanced"
         policy.profile_limit = max(policy.profile_limit, min(profile_match_limit, 4))
@@ -302,7 +291,6 @@ def build_working_memory_packet(
     if (
         compiled_behavior_policy is not None
         and thin_support_without_contract
-        and not analysis.high_stakes
         and routing.get("applied_mode") != "style_contract"
     ):
         policy.suppress_contract_if_in_system_substrate = False
@@ -315,19 +303,19 @@ def build_working_memory_packet(
         policy.conflict_escalation = True
         policy.show_policy = True
 
-    if analysis.operating_like and operating_rows and not analysis.high_stakes and not conflict_present:
+    if analysis.operating_like and operating_rows and not conflict_present:
         policy.confidence_band = "high"
-    elif profile_support_present and not analysis.high_stakes and not conflict_present:
+    elif profile_support_present and not conflict_present:
         policy.confidence_band = "high"
-    elif routing.get("applied_mode") == "style_contract" and profile_items and not analysis.high_stakes and not conflict_present:
+    elif routing.get("applied_mode") == "style_contract" and profile_items and not conflict_present:
         policy.confidence_band = "high"
-    elif analysis.profile_slot_targets and profile_items and not analysis.high_stakes and not conflict_present:
+    elif analysis.profile_slot_targets and profile_items and not conflict_present:
         policy.confidence_band = "high"
-    elif routing.get("applied_mode") == "temporal" and graph_rows and not analysis.high_stakes and not conflict_present:
+    elif routing.get("applied_mode") == "temporal" and graph_rows and not conflict_present:
         policy.confidence_band = "high" if support_channels >= 2 else "medium"
-    elif transcript_rows and not analysis.high_stakes and not conflict_present:
+    elif transcript_rows and not conflict_present:
         policy.confidence_band = "medium"
-    elif support_channels >= 3 and not analysis.high_stakes and not conflict_present:
+    elif support_channels >= 3 and not conflict_present:
         policy.confidence_band = "high"
     elif support_channels >= 1 and not conflict_present:
         policy.confidence_band = "medium"
@@ -335,6 +323,10 @@ def build_working_memory_packet(
         policy.confidence_band = "low"
 
     if policy.confidence_band == "low":
+        policy.provenance_mode = "expanded"
+        policy.show_policy = True
+
+    if analysis.high_stakes:
         policy.provenance_mode = "expanded"
         policy.show_policy = True
 
@@ -355,10 +347,16 @@ def build_working_memory_packet(
     if isinstance(behavior_policy_snapshot, dict):
         policy_payload["behavior_policy_snapshot"] = behavior_policy_snapshot
     if compiled_behavior_policy is not None:
-        policy_payload["compiled_behavior_policy"] = dict(compiled_behavior_policy)
+        compiled_policy_payload = (
+            dict(compiled_behavior_policy.get("policy") or {})
+            if isinstance(compiled_behavior_policy, dict)
+            else {}
+        )
+        if compiled_policy_payload:
+            policy_payload["compiled_behavior_policy"] = compiled_policy_payload
         reinforcement = build_behavior_policy_reinforcement(
             query=query,
-            compiled_policy=policy_payload["compiled_behavior_policy"],
+            compiled_policy=policy_payload.get("compiled_behavior_policy") or {},
         )
         if reinforcement is not None:
             policy_payload["behavior_policy_reinforcement"] = reinforcement

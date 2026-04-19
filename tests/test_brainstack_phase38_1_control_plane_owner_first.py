@@ -102,3 +102,61 @@ def test_temporal_route_shapes_policy_from_retrieval_route_without_control_plane
         assert packet["policy"]["transcript_char_budget"] >= 720
     finally:
         store.close()
+
+
+def test_high_stakes_flag_is_bounded_and_does_not_force_deep_packet(tmp_path):
+    store = BrainstackStore(str(tmp_path / "brainstack.db"))
+    store.open()
+    try:
+        packet = build_working_memory_packet(
+            store,
+            query="What legal dose should I prescribe to a patient right now?",
+            session_id="phase40-1-high-stakes",
+            principal_scope_key="",
+            profile_match_limit=4,
+            continuity_recent_limit=4,
+            continuity_match_limit=4,
+            transcript_match_limit=2,
+            transcript_char_budget=560,
+            graph_limit=6,
+            corpus_limit=4,
+            corpus_char_budget=700,
+        )
+
+        assert packet["policy"]["mode"] == "balanced"
+        assert packet["policy"]["provenance_mode"] == "expanded"
+        assert packet["policy"]["show_policy"] is True
+        assert packet["policy"]["tool_avoidance_allowed"] is False
+        assert packet["policy"]["transcript_limit"] > 0
+        assert packet["policy"]["graph_limit"] <= 2
+    finally:
+        store.close()
+
+
+def test_route_resolution_failure_is_explicit_and_auditable(tmp_path):
+    store = BrainstackStore(str(tmp_path / "brainstack.db"))
+    store.open()
+    try:
+        packet = build_working_memory_packet(
+            store,
+            query="Magyarazd el roviden ezt a kodot.",
+            session_id="phase40-1-route-failure",
+            principal_scope_key="",
+            profile_match_limit=4,
+            continuity_recent_limit=4,
+            continuity_match_limit=4,
+            transcript_match_limit=2,
+            transcript_char_budget=560,
+            graph_limit=6,
+            corpus_limit=4,
+            corpus_char_budget=700,
+            route_resolver=lambda _query: (_ for _ in ()).throw(RuntimeError("forced resolver failure")),
+        )
+
+        assert packet["routing"]["applied_mode"] == "fact"
+        assert packet["routing"]["source"] == "route_resolution_failed"
+        assert packet["routing"]["resolution_status"] == "failed"
+        assert packet["routing"]["resolution_error"] == "forced resolver failure"
+        assert packet["routing"]["reason"] == "route resolver failed; staying on fact route"
+    finally:
+        store.close()

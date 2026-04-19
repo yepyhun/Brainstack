@@ -62,6 +62,19 @@ def _normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
 
 
+def _contains_bounded_cue(text: str, cue: str) -> bool:
+    normalized_text = _normalize_text(text).casefold()
+    normalized_cue = _normalize_text(cue).casefold()
+    if not normalized_text or not normalized_cue:
+        return False
+    pattern = r"(?<!\w)" + re.escape(normalized_cue) + r"(?!\w)"
+    return re.search(pattern, normalized_text, flags=re.UNICODE) is not None
+
+
+def _contains_any_bounded_cue(text: str, cues: tuple[str, ...]) -> bool:
+    return any(_contains_bounded_cue(text, cue) for cue in cues)
+
+
 def resolve_user_timezone(value: str | None) -> str:
     candidate = str(value or "").strip() or "UTC"
     try:
@@ -127,14 +140,12 @@ def build_task_stable_key(*, principal_scope_key: str, item_type: str, due_date:
 
 
 def _detect_item_type(text: str) -> str:
-    lowered = f" {text.casefold()} "
-    if any(cue in lowered for cue in COMMITMENT_CAPTURE_CUES) and not any(cue in lowered for cue in TASK_CAPTURE_CUES):
+    if _contains_any_bounded_cue(text, COMMITMENT_CAPTURE_CUES) and not _contains_any_bounded_cue(text, TASK_CAPTURE_CUES):
         return ITEM_TYPE_COMMITMENT
     return ITEM_TYPE_TASK
 
 
 def _extract_due_date(*, text: str, timezone_name: str, now: datetime | None = None) -> tuple[str, str]:
-    lowered = f" {_normalize_text(text).casefold()} "
     base = current_local_date(timezone_name=timezone_name, now=now)
     match = DATE_RE.search(text)
     if match:
@@ -144,13 +155,13 @@ def _extract_due_date(*, text: str, timezone_name: str, now: datetime | None = N
         except ValueError:
             return "", "none"
         return explicit.isoformat(), "explicit_date"
-    if any(cue in lowered for cue in DAY_BEFORE_CUES):
+    if _contains_any_bounded_cue(text, DAY_BEFORE_CUES):
         return (base - timedelta(days=2)).isoformat(), "day_before_yesterday"
-    if any(cue in lowered for cue in YESTERDAY_CUES):
+    if _contains_any_bounded_cue(text, YESTERDAY_CUES):
         return (base - timedelta(days=1)).isoformat(), "yesterday"
-    if any(cue in lowered for cue in TOMORROW_CUES):
+    if _contains_any_bounded_cue(text, TOMORROW_CUES):
         return (base + timedelta(days=1)).isoformat(), "tomorrow"
-    if any(cue in lowered for cue in TODAY_CUES):
+    if _contains_any_bounded_cue(text, TODAY_CUES):
         return base.isoformat(), "today"
     return "", "none"
 
@@ -178,9 +189,8 @@ def _looks_like_explicit_task_capture(text: str) -> bool:
     normalized = _normalize_text(text)
     if not normalized:
         return False
-    lowered = f" {normalized.casefold()} "
-    has_task_cue = any(cue in lowered for cue in TASK_CAPTURE_CUES)
-    has_commitment_cue = any(cue in lowered for cue in COMMITMENT_CAPTURE_CUES)
+    has_task_cue = _contains_any_bounded_cue(normalized, TASK_CAPTURE_CUES)
+    has_commitment_cue = _contains_any_bounded_cue(normalized, COMMITMENT_CAPTURE_CUES)
     if not has_task_cue and not has_commitment_cue:
         return False
     # Operating truth owns headed commitment/current-state blocks. Task memory capture
@@ -247,12 +257,11 @@ def parse_task_lookup_query(query: str, *, timezone_name: str, now: datetime | N
     normalized = _normalize_text(query)
     if not normalized:
         return None
-    lowered = f" {normalized.casefold()} "
     explicit_due_date, date_scope = _extract_due_date(text=normalized, timezone_name=timezone_name, now=now)
-    cue_hit = any(cue in lowered for cue in TASK_LOOKUP_CUES)
+    cue_hit = _contains_any_bounded_cue(normalized, TASK_LOOKUP_CUES)
     followup_only = False
     if not cue_hit:
-        if any(cue in lowered for cue in TASK_FOLLOWUP_DATE_CUES):
+        if _contains_any_bounded_cue(normalized, TASK_FOLLOWUP_DATE_CUES):
             cue_hit = True
             followup_only = True
     if not cue_hit:
