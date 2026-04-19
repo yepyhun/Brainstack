@@ -595,19 +595,32 @@ class BrainstackMemoryProvider(MemoryProvider):
             "metadata": merged_metadata,
         }
 
-    def _upsert_task_capture_candidate(
+    def _infer_task_capture_candidate(
         self,
         *,
         content: str,
-        source: str,
-        metadata: Dict[str, Any] | None = None,
     ) -> Dict[str, Any] | None:
-        if not self._store or not content:
+        if not content:
             return None
         capture = parse_task_capture(content, timezone_name=self._user_timezone)
         if capture is None:
             return None
 
+        items = list(capture.get("items") or [])
+        if not items:
+            return None
+        return capture
+
+    def _commit_task_capture_candidate(
+        self,
+        *,
+        capture: Dict[str, Any] | None,
+        content: str,
+        source: str,
+        metadata: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any] | None:
+        if not self._store or not content or not isinstance(capture, dict):
+            return None
         items = list(capture.get("items") or [])
         if not items:
             return None
@@ -676,19 +689,47 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._set_memory_operation_trace(surface="task_capture_upsert")
         return receipt
 
-    def _upsert_operating_truth_candidate(
+    def _upsert_task_capture_candidate(
         self,
         *,
         content: str,
         source: str,
         metadata: Dict[str, Any] | None = None,
     ) -> Dict[str, Any] | None:
-        if not self._store or not content:
+        capture = self._infer_task_capture_candidate(content=content)
+        return self._commit_task_capture_candidate(
+            capture=capture,
+            content=content,
+            source=source,
+            metadata=metadata,
+        )
+
+    def _infer_operating_truth_candidate(
+        self,
+        *,
+        content: str,
+    ) -> Dict[str, Any] | None:
+        if not content:
             return None
         capture = parse_operating_capture(content)
         if capture is None:
             return None
 
+        items = list(capture.get("items") or [])
+        if not items:
+            return None
+        return capture
+
+    def _commit_operating_truth_candidate(
+        self,
+        *,
+        capture: Dict[str, Any] | None,
+        content: str,
+        source: str,
+        metadata: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any] | None:
+        if not self._store or not content or not isinstance(capture, dict):
+            return None
         items = list(capture.get("items") or [])
         if not items:
             return None
@@ -745,6 +786,21 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._set_memory_operation_trace(surface="operating_truth_upsert")
         return receipt
 
+    def _upsert_operating_truth_candidate(
+        self,
+        *,
+        content: str,
+        source: str,
+        metadata: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any] | None:
+        capture = self._infer_operating_truth_candidate(content=content)
+        return self._commit_operating_truth_candidate(
+            capture=capture,
+            content=content,
+            source=source,
+            metadata=metadata,
+        )
+
     def system_prompt_block(self) -> str:
         if not self._store:
             return ""
@@ -794,12 +850,16 @@ class BrainstackMemoryProvider(MemoryProvider):
             require_explicit_signal=True,
         )
         style_contract_activated = style_contract_receipt is not None
-        task_capture_receipt = self._upsert_task_capture_candidate(
+        task_capture = self._infer_task_capture_candidate(content=query)
+        task_capture_receipt = self._commit_task_capture_candidate(
+            capture=task_capture,
             content=query,
             source="prefetch:task_memory",
             metadata={"session_id": sid},
         )
-        operating_truth_receipt = self._upsert_operating_truth_candidate(
+        operating_truth_capture = self._infer_operating_truth_candidate(content=query)
+        operating_truth_receipt = self._commit_operating_truth_candidate(
+            capture=operating_truth_capture,
             content=query,
             source="prefetch:operating_truth",
             metadata={"session_id": sid},
@@ -923,7 +983,9 @@ class BrainstackMemoryProvider(MemoryProvider):
             metadata={"session_id": sid, "turn_number": self._turn_counter},
             require_explicit_signal=True,
         )
-        self._upsert_operating_truth_candidate(
+        operating_truth_capture = self._infer_operating_truth_candidate(content=user_content)
+        self._commit_operating_truth_candidate(
+            capture=operating_truth_capture,
             content=user_content,
             source="sync_turn:operating_truth",
             metadata={"session_id": sid, "turn_number": self._turn_counter},
