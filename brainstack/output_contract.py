@@ -50,7 +50,7 @@ def build_output_contract(compiled_policy: Mapping[str, Any] | None) -> Dict[str
     if not isinstance(compiled_policy, Mapping):
         return {
             "active": False,
-            "forbid_em_dash": False,
+            "dash_policy": "",
             "forbid_emoji": False,
             "forbid_markdown_bold": False,
             "forbidden_phrases": [],
@@ -61,7 +61,7 @@ def build_output_contract(compiled_policy: Mapping[str, Any] | None) -> Dict[str
     if not isinstance(clauses, Iterable):
         clauses = []
 
-    forbid_em_dash = False
+    dash_policy = ""
     forbid_emoji = False
     forbid_markdown_bold = False
     forbidden_phrase_specs: List[Dict[str, str]] = []
@@ -76,12 +76,19 @@ def build_output_contract(compiled_policy: Mapping[str, Any] | None) -> Dict[str
         text = _normalize_text(raw_clause.get("compiled_short_form") or raw_clause.get("text"))
         lowered = text.casefold()
         kind = str(raw_clause.get("kind") or "").strip()
+        constraint_code = str(raw_clause.get("constraint_code") or "").strip()
         if not text:
             continue
         if clause_id:
             sources.append(clause_id)
-        if kind == "punctuation_policy" and _contains_any(lowered, ("u+2014", "em dash", "u+2013", "en dash")):
-            forbid_em_dash = True
+        if kind == "punctuation_policy":
+            if constraint_code == "forbid_all_dash_like":
+                dash_policy = "forbid_all_dash_like"
+            elif not dash_policy and (
+                constraint_code == "forbid_em_dash_only"
+                or _contains_any(lowered, ("u+2014", "em dash", "u+2013", "en dash"))
+            ):
+                dash_policy = "forbid_em_dash_only"
         if kind == "forbidden_surface_form" and "emoji" in lowered:
             forbid_emoji = True
         if kind == "formatting_policy" and _contains_any(lowered, ("boldface", "félkövér", "felkövér")):
@@ -99,7 +106,7 @@ def build_output_contract(compiled_policy: Mapping[str, Any] | None) -> Dict[str
     )
     return {
         "active": bool(deduped_sources),
-        "forbid_em_dash": forbid_em_dash,
+        "dash_policy": dash_policy,
         "forbid_emoji": forbid_emoji,
         "forbid_markdown_bold": forbid_markdown_bold,
         "forbidden_phrases": deduped_phrase_specs,
@@ -126,8 +133,9 @@ def validate_output_against_contract(
 
     current = original
     repairs: List[Dict[str, Any]] = []
+    remaining_violations: List[Dict[str, Any]] = []
 
-    if contract["forbid_em_dash"]:
+    if contract["dash_policy"] == "forbid_em_dash_only":
         replaced = current.replace("—", "-").replace("–", "-")
         if replaced != current:
             repairs.append(
@@ -138,6 +146,14 @@ def validate_output_against_contract(
                 }
             )
             current = replaced
+    elif contract["dash_policy"] == "forbid_all_dash_like" and _contains_any(current, ("—", "–", "-")):
+        remaining_violations.append(
+            {
+                "kind": "punctuation_policy",
+                "violation": "dash_like_punctuation",
+                "repair": "none",
+            }
+        )
 
     if contract["forbid_emoji"]:
         replaced = _strip_emoji(current)
@@ -163,7 +179,6 @@ def validate_output_against_contract(
             )
             current = replaced
 
-    remaining_violations: List[Dict[str, Any]] = []
     lowered_current = current.casefold()
     for item in contract["forbidden_phrases"]:
         phrase = str(item.get("phrase") or "").strip()

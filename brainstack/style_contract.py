@@ -10,6 +10,7 @@ STYLE_CONTRACT_CATEGORY = "preference"
 STYLE_CONTRACT_DEFAULT_TITLE = "User style contract"
 _RULE_BULLET_RE = re.compile(r"^(?:[-*•]|\d{1,3}\s*[.)-])\s+(?P<content>.+)$")
 _INLINE_RULE_RE = re.compile(r"^(?P<label>.+?)\s+(?:-|–|—)\s+(?P<detail>.+)$")
+_CHAT_FRAMING_PREFIX_RE = re.compile(r"^(?:\[[^\]]+\]\s+|(?:user|assistant|system|tool)\s*:\s+)", re.IGNORECASE)
 _STYLE_CONTRACT_SOURCE_RANKS = (
     ("behavior_policy_correction", 400),
     ("prefetch:style_contract_patch", 350),
@@ -94,6 +95,65 @@ def _extract_inline_rule(line: str) -> str | None:
 def _is_heading_line(line: str) -> bool:
     normalized = _normalize_text(line)
     return bool(normalized) and normalized.endswith(":") and _extract_rule_bullet(normalized) is None
+
+
+def _looks_like_chat_framing_line(line: Any) -> bool:
+    normalized = _normalize_text(line)
+    if not normalized:
+        return False
+    lowered = normalized.casefold()
+    if _CHAT_FRAMING_PREFIX_RE.match(normalized):
+        return True
+    if normalized.startswith("[") and " | turn " in lowered:
+        return True
+    return False
+
+
+def _style_contract_cleanliness_issues_for_parts(
+    *,
+    title: Any,
+    sections: Iterable[Mapping[str, Any]] | None,
+) -> List[str]:
+    issues: List[str] = []
+    normalized_title = _normalize_text(title)
+    if normalized_title and normalized_title != STYLE_CONTRACT_DEFAULT_TITLE and _looks_like_chat_framing_line(normalized_title):
+        issues.append("polluted_title")
+
+    for section in sections or ():
+        if not isinstance(section, Mapping):
+            continue
+        heading = _normalize_text(section.get("heading"))
+        if heading and _looks_like_chat_framing_line(heading):
+            issues.append("polluted_heading")
+        for line in _normalize_rule_lines(section.get("lines")):
+            if _looks_like_chat_framing_line(line):
+                issues.append("polluted_rule_line")
+                break
+
+    return list(dict.fromkeys(issue for issue in issues if issue))
+
+
+def style_contract_cleanliness_issues(
+    *,
+    raw_text: Any,
+    metadata: Mapping[str, Any] | None = None,
+) -> List[str]:
+    title, _summary, sections = _sections_from_metadata(metadata)
+    if not sections:
+        parsed = parse_style_contract_text(raw_text)
+        if parsed is None:
+            return ["unparseable_contract"]
+        title = parsed.get("title")
+        sections = parsed.get("sections")
+    return _style_contract_cleanliness_issues_for_parts(title=title, sections=sections)
+
+
+def has_clean_style_contract_parts(
+    *,
+    raw_text: Any,
+    metadata: Mapping[str, Any] | None = None,
+) -> bool:
+    return not style_contract_cleanliness_issues(raw_text=raw_text, metadata=metadata)
 
 
 def style_contract_source_rank(source: Any) -> int:
@@ -255,6 +315,13 @@ def parse_style_contract_patch_text(raw_text: Any) -> List[str]:
             return []
         patch_lines.append(candidate)
     return patch_lines
+
+
+def looks_like_style_contract_fragment(raw_text: Any) -> bool:
+    text = str(raw_text or "").strip()
+    if not text:
+        return False
+    return looks_like_style_contract_teaching(text) or bool(parse_style_contract_patch_text(text))
 
 
 def apply_style_contract_patch(
@@ -455,6 +522,8 @@ def parse_style_contract_text(raw_text: Any) -> Dict[str, Any] | None:
     ):
         title = first_line
         index = 1
+    if title != STYLE_CONTRACT_DEFAULT_TITLE and _looks_like_chat_framing_line(title):
+        return None
 
     sections: List[Dict[str, Any]] = []
     current_heading = ""
@@ -503,6 +572,8 @@ def parse_style_contract_text(raw_text: Any) -> Dict[str, Any] | None:
     if not saw_heading and structured_rule_lines < 3:
         return None
     if not saw_heading and total_rules < 3:
+        return None
+    if _style_contract_cleanliness_issues_for_parts(title=title, sections=sections):
         return None
 
     return {
@@ -571,6 +642,7 @@ def build_style_contract_from_text(
             "style_contract_sections": parsed["sections"],
             "style_contract_rules": rules,
             "style_contract_rule_count": len(rules),
+            "style_contract_clean": True,
         }
     )
     content = render_style_contract_content(

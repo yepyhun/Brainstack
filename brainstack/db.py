@@ -34,6 +34,7 @@ from .style_contract import (
     apply_style_contract_rule_correction,
     build_style_contract_from_document,
     list_style_contract_rules,
+    style_contract_cleanliness_issues,
     style_contract_source_rank,
 )
 from .task_memory import STATUS_OPEN
@@ -1245,6 +1246,15 @@ class BrainstackStore:
             ),
         )
 
+    def _delete_compiled_behavior_policy_record(self, *, principal_scope_key: str) -> None:
+        scope_key = str(principal_scope_key or "").strip()
+        if not scope_key:
+            return
+        self.conn.execute(
+            "DELETE FROM compiled_behavior_policies WHERE principal_scope_key = ?",
+            (scope_key,),
+        )
+
     def _rebuild_compiled_behavior_policy_from_behavior_contract_row(self, row: sqlite3.Row) -> bool:
         item = _behavior_contract_row_to_dict(row)
         if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT:
@@ -1256,6 +1266,9 @@ class BrainstackStore:
             source_updated_at=str(item.get("updated_at") or ""),
         )
         if not compiled:
+            self._delete_compiled_behavior_policy_record(
+                principal_scope_key=str(item.get("principal_scope_key") or ""),
+            )
             return False
         self._upsert_compiled_behavior_policy_record(
             principal_scope_key=str(item.get("principal_scope_key") or ""),
@@ -2971,6 +2984,15 @@ class BrainstackStore:
     @_locked
     def get_compiled_behavior_policy(self, *, principal_scope_key: str = "") -> Dict[str, Any] | None:
         requested_scope_key = str(principal_scope_key or "").strip()
+        contract = self.get_behavior_contract(principal_scope_key=requested_scope_key)
+        if contract and style_contract_cleanliness_issues(
+            raw_text=str(contract.get("content") or ""),
+            metadata=contract.get("metadata") if isinstance(contract.get("metadata"), dict) else None,
+        ):
+            polluted_scope_key = str(contract.get("principal_scope_key") or "").strip() or requested_scope_key
+            self._delete_compiled_behavior_policy_record(principal_scope_key=polluted_scope_key)
+            self.conn.commit()
+            return None
         row = self.conn.execute(
             """
             SELECT principal_scope_key, source_storage_key, source_contract_hash, source_contract_updated_at,
@@ -2985,7 +3007,6 @@ class BrainstackStore:
             return _compiled_behavior_policy_row_to_dict(row)
         if not requested_scope_key:
             return None
-        contract = self.get_behavior_contract(principal_scope_key=requested_scope_key)
         if not contract:
             return None
         fallback_scope_key = str(contract.get("principal_scope_key") or "").strip()

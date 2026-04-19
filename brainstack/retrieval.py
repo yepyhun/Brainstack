@@ -938,7 +938,11 @@ def render_working_memory_block(
     hidden_profile_keys: set[str] = set()
     graph_rows_for_sections = graph_rows
     system_substrate = system_substrate if isinstance(system_substrate, Mapping) else {}
-    suppress_contract_section = bool(system_substrate.get("contract_present")) and route_mode != "style_contract"
+    suppress_contract_section = (
+        bool(system_substrate.get("contract_present"))
+        and route_mode != "style_contract"
+        and bool(policy.get("suppress_contract_if_in_system_substrate", True))
+    )
     suppress_evidence_priority = bool(system_substrate.get("truthful_memory_operations_present"))
     substrate_profile_keys = {
         str(key).strip() for key in (system_substrate.get("rendered_profile_keys") or ()) if str(key).strip()

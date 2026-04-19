@@ -41,6 +41,7 @@ from .style_contract import (
     apply_style_contract_patch,
     build_style_contract_from_text,
     list_style_contract_rules,
+    looks_like_style_contract_fragment,
     looks_like_style_contract_teaching,
 )
 from .task_memory import build_task_stable_key, parse_task_capture, resolve_user_timezone
@@ -459,6 +460,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             extra={
                 "rule_count": int(style_contract.get("metadata", {}).get("style_contract_rule_count") or 0),
                 "fragment_count": int(style_contract.get("metadata", {}).get("style_contract_fragment_count") or 1),
+                "write_mode": str(style_contract.get("metadata", {}).get("style_contract_write_mode") or ""),
                 "patch_rule_count": int(
                     style_contract.get("metadata", {}).get("last_style_contract_patch", {}).get("patch_rule_count") or 0
                 ),
@@ -492,7 +494,11 @@ class BrainstackMemoryProvider(MemoryProvider):
         prior_fragments = [
             fragment
             for fragment in self._recent_user_messages
-            if str(fragment or "").strip() and str(fragment or "").strip() != text
+            if (
+                str(fragment or "").strip()
+                and str(fragment or "").strip() != text
+                and looks_like_style_contract_fragment(fragment)
+            )
         ]
         candidates: List[tuple[str, int]] = []
         seen: set[str] = set()
@@ -505,7 +511,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             candidates.append((normalized, fragment_count))
 
         _add(text, 1)
-        if "\n" not in text:
+        if "\n" not in text or not looks_like_style_contract_fragment(text):
             return candidates
         for fragment_count in range(1, min(len(prior_fragments), 2) + 1):
             _add("\n".join([*prior_fragments[-fragment_count:], text]), fragment_count + 1)
@@ -521,6 +527,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         require_explicit_signal: bool,
     ) -> Dict[str, Any] | None:
         scoped_metadata = self._scoped_metadata(metadata)
+        raw_contract = self._store.get_behavior_contract(principal_scope_key=self._principal_scope_key) if self._store else None
         best_candidate: Dict[str, Any] | None = None
         best_score: tuple[int, int, int] | None = None
         for raw_text, fragment_count in self._iter_style_contract_candidate_texts(content):
@@ -541,54 +548,52 @@ class BrainstackMemoryProvider(MemoryProvider):
                 candidate.get("metadata", {}).get("style_contract_rule_count")
                 or len(list_style_contract_rules(raw_text=raw_text, metadata=candidate.get("metadata")))
             )
-            score = (rule_count, len(str(candidate.get("content") or "")), fragment_count)
+            score = (rule_count, -fragment_count, -len(str(candidate.get("content") or "")))
             if best_score is None or score > best_score:
                 best_candidate = candidate
                 best_score = score
         if best_candidate is not None:
+            best_candidate.setdefault("metadata", {})
+            best_candidate["metadata"]["style_contract_write_mode"] = "replace" if raw_contract else "create"
             return best_candidate
 
-        if not self._store:
-            return None
-        raw_contract = self._store.get_behavior_contract(principal_scope_key=self._principal_scope_key)
-        if raw_contract is None:
+        if not self._store or raw_contract is None:
             return None
 
         patch_source = source.replace(":style_contract", ":style_contract_patch")
         scoped_metadata = self._scoped_metadata(metadata)
-        for raw_text, fragment_count in self._iter_style_contract_candidate_texts(content):
-            corrected = apply_style_contract_patch(
-                raw_text=raw_contract.get("content"),
-                patch_text=raw_text,
-                metadata=raw_contract.get("metadata"),
-            )
-            if corrected is None:
-                continue
-            merged_metadata = {
-                **dict(raw_contract.get("metadata") or {}),
-                **scoped_metadata,
-                "memory_class": "style_contract",
-                "style_contract_title": corrected["title"],
-                "style_contract_sections": corrected["sections"],
-                "style_contract_rule_count": len(
-                    list_style_contract_rules(raw_text=corrected["content"], metadata={"style_contract_sections": corrected["sections"]})
-                ),
-                "style_contract_fragment_count": fragment_count,
-                "last_style_contract_patch": {
-                    "updated_rule_ids": list(corrected.get("updated_rule_ids") or []),
-                    "patch_rule_count": int(corrected.get("patch_rule_count") or 0),
-                    "source": patch_source,
-                },
-            }
-            return {
-                "category": str(raw_contract.get("category") or "preference"),
-                "slot": str(raw_contract.get("stable_key") or "preference:style_contract"),
-                "content": str(corrected["content"]),
-                "confidence": float(raw_contract.get("confidence") or confidence or 0.9),
+        corrected = apply_style_contract_patch(
+            raw_text=raw_contract.get("content"),
+            patch_text=content,
+            metadata=raw_contract.get("metadata"),
+        )
+        if corrected is None:
+            return None
+        merged_metadata = {
+            **dict(raw_contract.get("metadata") or {}),
+            **scoped_metadata,
+            "memory_class": "style_contract",
+            "style_contract_title": corrected["title"],
+            "style_contract_sections": corrected["sections"],
+            "style_contract_rule_count": len(
+                list_style_contract_rules(raw_text=corrected["content"], metadata={"style_contract_sections": corrected["sections"]})
+            ),
+            "style_contract_fragment_count": 1,
+            "style_contract_write_mode": "patch",
+            "last_style_contract_patch": {
+                "updated_rule_ids": list(corrected.get("updated_rule_ids") or []),
+                "patch_rule_count": int(corrected.get("patch_rule_count") or 0),
                 "source": patch_source,
-                "metadata": merged_metadata,
-            }
-        return None
+            },
+        }
+        return {
+            "category": str(raw_contract.get("category") or "preference"),
+            "slot": str(raw_contract.get("stable_key") or "preference:style_contract"),
+            "content": str(corrected["content"]),
+            "confidence": float(raw_contract.get("confidence") or confidence or 0.9),
+            "source": patch_source,
+            "metadata": merged_metadata,
+        }
 
     def _upsert_task_capture_candidate(
         self,

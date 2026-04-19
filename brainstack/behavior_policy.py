@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Mapping
 from .style_contract import (
     STYLE_CONTRACT_DEFAULT_TITLE,
     extract_style_contract_parts,
+    style_contract_cleanliness_issues,
     list_style_contract_rules,
     style_contract_source_rank,
 )
@@ -156,6 +157,15 @@ def _sanitize_policy_surface(text: Any) -> str:
     return normalized.replace("—", "U+2014 EM DASH").replace("–", "U+2013 EN DASH")
 
 
+def _resolve_punctuation_constraint(text: str) -> str:
+    lowered = _normalize_text(text).casefold()
+    if _contains_any(lowered, ("u+2014", "em dash", "u+2013", "en dash")):
+        return "forbid_em_dash_only"
+    if _contains_any(lowered, ("dash", "dashes", "kötőjel", "kotojel", "hyphen", "hyphen-minus")):
+        return "forbid_all_dash_like"
+    return "surface_text"
+
+
 def _extract_sections_from_raw_contract(raw_text: str) -> tuple[str, List[Dict[str, Any]]]:
     parts = extract_style_contract_parts(raw_text)
     if parts is None:
@@ -229,10 +239,16 @@ def _compile_short_form(*, kind: str, text: str) -> str:
     normalized = _normalize_text(text)
     lowered = normalized.casefold()
     if kind == "punctuation_policy":
-        if _contains_any(lowered, ("em dash", "dash", "kötőjel", "hyphen")):
+        constraint = _resolve_punctuation_constraint(normalized)
+        if constraint == "forbid_em_dash_only":
             return (
                 "Ne írj U+2014 EM DASH karaktert a válaszba. "
                 "Ha dash kell, sima hyphen-minus `-` jelet használj."
+            )
+        if constraint == "forbid_all_dash_like":
+            return (
+                "Ne használj dash-szerű írásjelet a válaszban. "
+                "Fogalmazd át a mondatot kötőjel és dash nélkül."
             )
         return _sanitize_policy_surface(normalized)
     if kind != "question_policy":
@@ -436,6 +452,14 @@ def compile_behavior_policy(
     title = title_from_metadata or parsed_title or STYLE_CONTRACT_DEFAULT_TITLE
     if not sections:
         return None
+    if style_contract_cleanliness_issues(
+        raw_text=normalized_content,
+        metadata={
+            "style_contract_title": title,
+            "style_contract_sections": sections,
+        },
+    ):
+        return None
 
     raw_rules = _build_raw_rules(sections)
     if not raw_rules:
@@ -456,6 +480,7 @@ def compile_behavior_policy(
             "section": str(raw_rule["section"]),
             "text": str(raw_rule["text"]),
             "kind": kind,
+            "constraint_code": _resolve_punctuation_constraint(str(raw_rule["text"])) if kind == "punctuation_policy" else "",
             "hardness": "hard",
             "applies_to": ["text_reply"],
             "status": BEHAVIOR_POLICY_STATUS_ACTIVE,

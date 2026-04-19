@@ -132,6 +132,7 @@ class WorkingMemoryPolicy:
     corpus_char_budget: int
     continuation_emphasis: bool
     show_authoritative_contract: bool
+    suppress_contract_if_in_system_substrate: bool
 
 
 def analyze_query(query: str) -> QueryAnalysis:
@@ -184,6 +185,7 @@ def _initial_policy(
         corpus_char_budget=min(corpus_char_budget, 360),
         continuation_emphasis=False,
         show_authoritative_contract=False,
+        suppress_contract_if_in_system_substrate=True,
     )
 
     if analysis.preference and not analysis.high_stakes:
@@ -199,6 +201,7 @@ def _initial_policy(
         policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 2))
         policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 320))
         policy.show_authoritative_contract = False
+        policy.suppress_contract_if_in_system_substrate = False
 
     if analysis.profile_slot_targets and not analysis.high_stakes:
         policy.mode = "balanced"
