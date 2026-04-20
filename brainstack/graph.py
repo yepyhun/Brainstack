@@ -8,7 +8,6 @@ from .graph_evidence import (
     GraphEvidenceIngressError,
     GraphEvidenceItem,
     coerce_graph_evidence_item,
-    extract_graph_evidence_from_text,
     prepare_graph_evidence_ingress,
 )
 from .provenance import merge_provenance
@@ -90,7 +89,6 @@ def ingest_graph_evidence_with_receipt(
 __all__ = [
     "GraphEvidenceIngressError",
     "GraphEvidenceItem",
-    "extract_graph_evidence_from_text",
     "ingest_graph_evidence",
     "ingest_graph_evidence_with_receipt",
 ]

@@ -14,11 +14,12 @@ install_host_import_shims(hermes_home=REPO_ROOT)
 from brainstack import BrainstackMemoryProvider
 from brainstack.extraction_pipeline import build_session_message_ingest_plan, build_turn_ingest_plan
 from brainstack.graph import ingest_graph_evidence
-from brainstack.graph_evidence import GraphEvidenceItem, extract_graph_evidence_from_text
+from brainstack.graph_evidence import GraphEvidenceItem
+from brainstack.legacy_graph_text_extractor import extract_graph_evidence_from_text
 from brainstack.db import BrainstackStore
 
 
-def test_turn_ingest_plan_emits_typed_graph_evidence():
+def test_turn_ingest_plan_keeps_graph_evidence_empty_without_explicit_typed_input():
     plan = build_turn_ingest_plan(
         user_content="Project Atlas is active now. Laura is in Budapest.",
         pending_turns=0,
@@ -27,10 +28,7 @@ def test_turn_ingest_plan_emits_typed_graph_evidence():
         batch_turn_limit=5,
     )
 
-    assert plan.graph_evidence_items
-    assert all(isinstance(item, GraphEvidenceItem) for item in plan.graph_evidence_items)
-    assert any(item.kind == "state" and item.attribute == "status" for item in plan.graph_evidence_items)
-    assert any(item.kind == "state" and item.attribute == "location" for item in plan.graph_evidence_items)
+    assert plan.graph_evidence_items == []
 
 
 def test_session_message_ingest_plan_fails_closed_without_typed_graph_evidence():
@@ -84,33 +82,34 @@ def test_provider_sync_turn_keeps_graph_truth_empty_without_typed_evidence(tmp_p
         provider.shutdown()
 
 
-def test_provider_sync_turn_persists_typed_graph_evidence(tmp_path):
-    provider = BrainstackMemoryProvider(
-        config={
-            "db_path": str(tmp_path / "brainstack.db"),
-            "graph_backend": "none",
-            "corpus_backend": "none",
-        }
-    )
-    provider.initialize("session-typed-graph", hermes_home=str(tmp_path))
+def test_ingest_graph_evidence_persists_explicit_typed_graph_evidence(tmp_path):
+    store = BrainstackStore(str(tmp_path / "brainstack.db"), graph_backend="none", corpus_backend="none")
+    store.open()
     try:
-        provider.sync_turn(
-            "Project Atlas is active now. Laura is in Budapest.",
-            "Saved.",
-            session_id="session-typed-graph",
+        ingest_graph_evidence(
+            store,
+            evidence_items=[
+                GraphEvidenceItem(
+                    kind="state",
+                    subject="Project Atlas",
+                    attribute="status",
+                    value_text="active",
+                    confidence=0.9,
+                )
+            ],
+            source="test",
+            metadata={"session_id": "session-typed-graph"},
         )
-
-        assert provider._store is not None
-        graph_rows = provider._store.search_graph(query="Project Atlas", limit=5)
+        graph_rows = store.search_graph(query="Project Atlas", limit=5)
         assert any(
             row["subject"] == "Project Atlas" and row["object_value"] == "active"
             for row in graph_rows
         )
     finally:
-        provider.shutdown()
+        store.close()
 
 
-def test_text_extraction_produces_bounded_evidence_spans():
+def test_legacy_text_extraction_produces_bounded_evidence_spans():
     evidence_items = extract_graph_evidence_from_text("Project Atlas is active now.")
 
     assert len(evidence_items) == 1

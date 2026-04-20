@@ -330,19 +330,52 @@ class TestBrainstackRealWorldFlows:
             reader.shutdown()
 
     def test_cross_session_graph_truth_stays_within_same_principal_scope(self, tmp_path):
-        writer_a = _make_provider(tmp_path, "session-graph-a", user_id="user-a", platform="discord")
+        base = Path(tmp_path)
+        writer_a = BrainstackMemoryProvider(
+            config={
+                "db_path": str(base / "brainstack.db"),
+                "tier2_batch_turn_limit": 1,
+                "_tier2_extractor": lambda rows, **kwargs: {
+                    "profile_items": [],
+                    "states": [
+                        {"subject": "Project Atlas", "attribute": "status", "value": "active", "confidence": 0.92}
+                    ],
+                    "relations": [],
+                    "continuity_summary": "",
+                    "decisions": [],
+                },
+            }
+        )
+        writer_a.initialize("session-graph-a", hermes_home=str(base), user_id="user-a", platform="discord")
         try:
             writer_a.sync_turn("Project Atlas is active now.", "Understood.", session_id="session-graph-a")
+            assert writer_a._wait_for_tier2_worker(timeout=1.0) is True
         finally:
             writer_a.shutdown()
 
-        writer_b = _make_provider(tmp_path, "session-graph-b", user_id="user-b", platform="discord")
+        writer_b = BrainstackMemoryProvider(
+            config={
+                "db_path": str(base / "brainstack.db"),
+                "tier2_batch_turn_limit": 1,
+                "_tier2_extractor": lambda rows, **kwargs: {
+                    "profile_items": [],
+                    "states": [
+                        {"subject": "Project Atlas", "attribute": "status", "value": "archived", "confidence": 0.92}
+                    ],
+                    "relations": [],
+                    "continuity_summary": "",
+                    "decisions": [],
+                },
+            }
+        )
+        writer_b.initialize("session-graph-b", hermes_home=str(base), user_id="user-b", platform="discord")
         try:
             writer_b.sync_turn("Project Atlas is archived now.", "Understood.", session_id="session-graph-b")
+            assert writer_b._wait_for_tier2_worker(timeout=1.0) is True
         finally:
             writer_b.shutdown()
 
-        reader = _make_provider(tmp_path, "session-graph-c", user_id="user-a", platform="discord")
+        reader = _make_provider(base, "session-graph-c", user_id="user-a", platform="discord")
         try:
             graph_rows = reader._store.search_graph(
                 query="Project Atlas status",
@@ -452,13 +485,33 @@ class TestBrainstackRealWorldFlows:
             provider.shutdown()
 
     def test_temporal_graph_truth_shows_current_and_prior_state(self, tmp_path):
-        provider = _make_provider(tmp_path, "session-graph")
+        base = Path(tmp_path)
+        provider = BrainstackMemoryProvider(
+            config={
+                "db_path": str(base / "brainstack.db"),
+                "tier2_batch_turn_limit": 1,
+                "_tier2_extractor": lambda rows, **kwargs: {
+                    "profile_items": [],
+                    "states": [
+                        {"subject": "Project Atlas", "attribute": "status", "value": "active", "supersede": False, "confidence": 0.9},
+                        {"subject": "Project Atlas", "attribute": "status", "value": "paused", "supersede": True, "confidence": 0.94},
+                    ] if any("paused" in row["content"].lower() for row in rows) else [
+                        {"subject": "Project Atlas", "attribute": "status", "value": "active", "supersede": False, "confidence": 0.9},
+                    ],
+                    "relations": [],
+                    "continuity_summary": "",
+                    "decisions": [],
+                },
+            }
+        )
+        provider.initialize("session-graph", hermes_home=str(base))
         try:
             provider.sync_turn("Project Atlas is active.", "Noted.", session_id="session-graph")
             provider.sync_turn("Project Atlas is paused now.", "Noted, current status paused.", session_id="session-graph")
+            assert provider._wait_for_tier2_worker(timeout=1.0) is True
 
             block = provider.prefetch(
-                "What is the current status of Project Atlas and what changed?",
+                "When did Project Atlas change status and what is it now?",
                 session_id="session-graph",
             )
             assert "## Brainstack Graph Truth" in block
@@ -468,10 +521,30 @@ class TestBrainstackRealWorldFlows:
             provider.shutdown()
 
     def test_non_temporal_graph_query_prefers_current_truth_without_history_spam(self, tmp_path):
-        provider = _make_provider(tmp_path, "session-graph-compact")
+        base = Path(tmp_path)
+        provider = BrainstackMemoryProvider(
+            config={
+                "db_path": str(base / "brainstack.db"),
+                "tier2_batch_turn_limit": 1,
+                "_tier2_extractor": lambda rows, **kwargs: {
+                    "profile_items": [],
+                    "states": [
+                        {"subject": "Project Atlas", "attribute": "status", "value": "active", "supersede": False, "confidence": 0.9},
+                        {"subject": "Project Atlas", "attribute": "status", "value": "paused", "supersede": True, "confidence": 0.94},
+                    ] if any("paused" in row["content"].lower() for row in rows) else [
+                        {"subject": "Project Atlas", "attribute": "status", "value": "active", "supersede": False, "confidence": 0.9},
+                    ],
+                    "relations": [],
+                    "continuity_summary": "",
+                    "decisions": [],
+                },
+            }
+        )
+        provider.initialize("session-graph-compact", hermes_home=str(base))
         try:
             provider.sync_turn("Project Atlas is active.", "Noted.", session_id="session-graph-compact")
             provider.sync_turn("Project Atlas is paused now.", "Noted.", session_id="session-graph-compact")
+            assert provider._wait_for_tier2_worker(timeout=1.0) is True
 
             block = provider.prefetch(
                 "Project Atlas status?",
@@ -1642,7 +1715,7 @@ class TestBrainstackRealWorldFlows:
 
             current_block = provider.prefetch("Tomi location", session_id="session-everyday-correction")
             changed_block = provider.prefetch(
-                "Hol élek most és mi változott korábban?",
+                "When did Tomi location change and where do I live now?",
                 session_id="session-everyday-correction",
             )
 

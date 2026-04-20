@@ -89,7 +89,6 @@ def install_host_import_shims(*, hermes_home: Path | None = None) -> None:
     plugins_module.memory = plugins_memory_module
     if not hasattr(plugins_memory_module, "load_memory_provider"):
         plugins_memory_module.load_memory_provider = lambda *a, **k: None
-
     if "agent.brainstack_mode" not in sys.modules:
         source_brainstack_mode = repo_root / "host_payload" / "agent" / "brainstack_mode.py"
         if source_brainstack_mode.exists():
@@ -131,3 +130,12 @@ def install_host_import_shims(*, hermes_home: Path | None = None) -> None:
         hermes_constants.get_hermes_home = lambda: hermes_home
     elif not hasattr(hermes_constants, "get_hermes_home"):
         hermes_constants.get_hermes_home = lambda: Path("/tmp")
+
+    if "plugins.memory.brainstack" not in sys.modules:
+        try:
+            brainstack_package = importlib.import_module("brainstack")
+        except Exception:
+            brainstack_package = None
+        if brainstack_package is not None:
+            sys.modules["plugins.memory.brainstack"] = brainstack_package
+            plugins_memory_module.brainstack = brainstack_package

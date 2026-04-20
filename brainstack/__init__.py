@@ -1073,6 +1073,12 @@ class BrainstackMemoryProvider(MemoryProvider):
                 "status": "committed",
                 "receipt": dict(graph_result.get("receipt") or {}),
             }
+        else:
+            self._last_graph_ingress_trace = {
+                "surface": "sync_turn_graph_ingress",
+                "status": "skipped_no_typed_graph_evidence",
+                "reason": "no explicit producer-aligned graph evidence items",
+            }
         if plan.tier2_schedule.should_queue:
             self._queue_tier2_background(session_id=sid, turn_number=self._turn_counter, trigger_reason=plan.tier2_schedule.reason)
 
@@ -1224,6 +1230,12 @@ class BrainstackMemoryProvider(MemoryProvider):
                     "surface": "session_end_graph_ingress",
                     "status": "committed",
                     "receipt": dict(graph_result.get("receipt") or {}),
+                }
+            else:
+                self._last_graph_ingress_trace = {
+                    "surface": "session_end_graph_ingress",
+                    "status": "skipped_no_typed_graph_evidence",
+                    "reason": "no explicit producer-aligned graph evidence items",
                 }
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:

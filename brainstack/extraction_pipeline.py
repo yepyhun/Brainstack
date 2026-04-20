@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List
 
-from .graph_evidence import GraphEvidenceItem, extract_graph_evidence_from_text
+from .graph_evidence import GraphEvidenceItem
 from .stable_memory_guardrails import StableMemoryAdmissionDecision, should_admit_stable_memory
 
 
@@ -33,6 +33,13 @@ class SessionMessageIngestPlan:
     durable_admission: StableMemoryAdmissionDecision
     profile_candidates: List[Dict[str, Any]]
     graph_evidence_items: List[GraphEvidenceItem]
+
+
+def _default_live_graph_evidence_items() -> List[GraphEvidenceItem]:
+    # Phase 40.3 removes regex-based raw text graph guessing from the default
+    # ingest path. Live graph writes now require explicit typed evidence from a
+    # producer-aligned surface rather than boundary text pattern matching.
+    return []
 
 
 def _plan_tier2_schedule(
@@ -91,7 +98,7 @@ def build_turn_ingest_plan(
         # live ingest path. Durable profile writes now belong to the Tier-2 path
         # or explicit memory writes, not language-specific slot guessing here.
         profile_candidates=[],
-        graph_evidence_items=extract_graph_evidence_from_text(user_content),
+        graph_evidence_items=_default_live_graph_evidence_items(),
         tier2_schedule=schedule,
     )
 
@@ -107,5 +114,5 @@ def build_session_message_ingest_plan(*, role: str, content: str) -> SessionMess
     return SessionMessageIngestPlan(
         durable_admission=admission,
         profile_candidates=[],
-        graph_evidence_items=extract_graph_evidence_from_text(content),
+        graph_evidence_items=_default_live_graph_evidence_items(),
     )

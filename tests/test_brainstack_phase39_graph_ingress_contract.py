@@ -96,12 +96,10 @@ def test_provider_sync_turn_records_graph_ingress_trace(tmp_path):
         trace = provider.graph_ingress_trace()
         assert trace is not None
         assert trace["surface"] == "sync_turn_graph_ingress"
-        assert trace["status"] == "committed"
-        receipt = trace["receipt"]
-        assert receipt["accepted_count"] >= 2
-        assert receipt["rejected_count"] == 0
+        assert trace["status"] == "skipped_no_typed_graph_evidence"
+        assert trace["reason"] == "no explicit producer-aligned graph evidence items"
         assert provider._store is not None
         rows = provider._store.search_graph(query="Project Atlas", limit=5)
-        assert rows
+        assert rows == []
     finally:
         provider.shutdown()

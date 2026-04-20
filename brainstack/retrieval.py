@@ -1082,10 +1082,6 @@ def render_working_memory_block(
         filtered_profile_items = [
             item for item in filtered_profile_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT
         ]
-    if substrate_profile_keys:
-        filtered_profile_items = [
-            item for item in filtered_profile_items if str(item.get("stable_key") or "").strip() not in substrate_profile_keys
-        ]
     if filtered_profile_items:
         style_contract_char_budget = max(320, int(policy.get("style_contract_char_budget", 2400)))
         lines = []
