@@ -17,7 +17,7 @@ import logging
 from pathlib import Path
 import threading
 import time
-from typing import Any, Callable, Dict, List, Mapping
+from typing import Any, Callable, Dict, List, Mapping, Sequence
 
 from agent.memory_provider import MemoryProvider
 
@@ -1122,6 +1122,110 @@ class BrainstackMemoryProvider(MemoryProvider):
             sections=payload["sections"],
             metadata=metadata,
         )
+
+    def ingest_graph_evidence(
+        self,
+        *,
+        evidence_items: Sequence[Mapping[str, Any] | Any],
+        source: str,
+        metadata: Dict[str, Any] | None = None,
+        session_id: str = "",
+        turn_number: int | None = None,
+        source_document_id: str = "",
+    ) -> Dict[str, Any]:
+        if not self._store:
+            raise RuntimeError("BrainstackStore is not initialized")
+        normalized_source = " ".join(str(source).split()).strip()
+        if not normalized_source:
+            raise ValueError("source is required")
+        target_session_id = str(session_id or self._session_id or "").strip()
+        scoped_metadata = self._scoped_metadata(metadata)
+        try:
+            if turn_number is not None:
+                graph_result = graph_adapter.ingest_turn_graph_candidates_with_receipt(
+                    self._store,
+                    evidence_items=evidence_items,
+                    session_id=target_session_id,
+                    turn_number=int(turn_number),
+                    source=normalized_source,
+                    source_document_id=source_document_id,
+                    metadata=scoped_metadata,
+                )
+            else:
+                graph_result = graph_adapter.ingest_session_graph_candidates_with_receipt(
+                    self._store,
+                    evidence_items=evidence_items,
+                    session_id=target_session_id,
+                    source=normalized_source,
+                    source_document_id=source_document_id,
+                    metadata=scoped_metadata,
+                )
+        except Exception as exc:
+            receipt = getattr(exc, "receipt", None)
+            self._last_graph_ingress_trace = {
+                "surface": "explicit_graph_ingress",
+                "status": "failed",
+                "error": str(exc),
+                "receipt": dict(receipt) if isinstance(receipt, dict) else None,
+            }
+            raise
+        self._last_graph_ingress_trace = {
+            "surface": "explicit_graph_ingress",
+            "status": "committed",
+            "receipt": dict(graph_result.get("receipt") or {}),
+        }
+        self._set_memory_operation_trace(
+            surface="explicit_graph_ingress",
+            note="Explicit producer-aligned typed graph ingest committed.",
+        )
+        return json.loads(json.dumps(graph_result, ensure_ascii=True))
+
+    def ingest_multimodal_memory_artifact(
+        self,
+        *,
+        title: str,
+        content: str,
+        source: str,
+        modality: str,
+        doc_kind: str = "document",
+        metadata: Dict[str, Any] | None = None,
+        graph_evidence_items: Sequence[Mapping[str, Any] | Any] | None = None,
+        session_id: str = "",
+        turn_number: int | None = None,
+    ) -> Dict[str, Any]:
+        normalized_modality = " ".join(str(modality or "").split()).strip().lower()
+        if not normalized_modality:
+            raise ValueError("modality is required")
+        artifact_metadata = dict(metadata or {})
+        artifact_metadata["modality"] = normalized_modality
+        corpus_result = self.ingest_corpus_document(
+            title=title,
+            content=content,
+            source=source,
+            doc_kind=doc_kind,
+            metadata=artifact_metadata,
+        )
+        source_document_id = f"corpus_document:{str(corpus_result.get('stable_key') or '')}"
+        graph_result = None
+        if graph_evidence_items:
+            graph_result = self.ingest_graph_evidence(
+                evidence_items=graph_evidence_items,
+                source=f"{source}:graph",
+                metadata=artifact_metadata,
+                session_id=session_id,
+                turn_number=turn_number,
+                source_document_id=source_document_id,
+            )
+        self._set_memory_operation_trace(
+            surface="ingest_multimodal_memory_artifact",
+            note="Explicit producer-aligned multimodal corpus ingest committed.",
+        )
+        return {
+            "modality": normalized_modality,
+            "source_document_id": source_document_id,
+            "corpus_document": corpus_result,
+            "graph_ingress": graph_result,
+        }
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
         self._turn_counter = max(self._turn_counter, turn_number - 1)

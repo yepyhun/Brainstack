@@ -12,6 +12,24 @@ from .retrieval import render_working_memory_block
 from .task_memory import parse_task_lookup_query
 
 
+def _query_requests_graph_history(query: str) -> bool:
+    """Bounded query-hygiene seam for explicit change-over-time graph questions."""
+    normalized = " ".join(str(query or "").strip().lower().split())
+    if not normalized:
+        return False
+    change_markers = ("when did", "change ", " changed", "mikor", "valtoz", "változ")
+    current_markers = ("now", "current", "currently", "most", "jelenleg")
+    return any(marker in normalized for marker in change_markers) and any(
+        marker in normalized for marker in current_markers
+    )
+
+
+def _has_current_and_prior_graph_states(graph_rows: list[dict[str, Any]]) -> bool:
+    has_current = any(str(row.get("row_type") or "") == "state" and bool(row.get("is_current")) for row in graph_rows)
+    has_prior = any(str(row.get("row_type") or "") == "state" and not bool(row.get("is_current")) for row in graph_rows)
+    return has_current and has_prior
+
+
 @dataclass
 class QueryAnalysis:
     operating_like: bool
@@ -272,6 +290,11 @@ def build_working_memory_packet(
         policy.show_graph_history = True
         policy.conflict_escalation = True
         policy.show_policy = True
+    elif _has_current_and_prior_graph_states(graph_rows) and _query_requests_graph_history(query):
+        policy.show_graph_history = True
+        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 4))
+        policy.continuity_match_limit = max(policy.continuity_match_limit, min(continuity_match_limit, 3))
+        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
 
     if analysis.operating_like and operating_rows and not conflict_present:
         policy.confidence_band = "high"

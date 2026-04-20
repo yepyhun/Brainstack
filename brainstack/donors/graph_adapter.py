@@ -13,6 +13,7 @@ def ingest_turn_graph_candidates(
     session_id: str,
     turn_number: int,
     source: str,
+    source_document_id: str = "",
     metadata: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     return ingest_turn_graph_candidates_with_receipt(
@@ -21,6 +22,7 @@ def ingest_turn_graph_candidates(
         session_id=session_id,
         turn_number=turn_number,
         source=source,
+        source_document_id=source_document_id,
         metadata=metadata,
     )["results"]
 
@@ -32,12 +34,14 @@ def ingest_turn_graph_candidates_with_receipt(
     session_id: str,
     turn_number: int,
     source: str,
+    source_document_id: str = "",
     metadata: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     bound_items = attach_graph_source_context(
         evidence_items,
         session_id=session_id,
         turn_number=turn_number,
+        source_document_id=source_document_id,
     )
     return ingest_graph_evidence_with_receipt(
         store,
@@ -53,6 +57,7 @@ def ingest_session_graph_candidates(
     evidence_items: Sequence[GraphEvidenceItem | Mapping[str, Any]],
     session_id: str,
     source: str,
+    source_document_id: str = "",
     metadata: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     return ingest_session_graph_candidates_with_receipt(
@@ -60,6 +65,7 @@ def ingest_session_graph_candidates(
         evidence_items=evidence_items,
         session_id=session_id,
         source=source,
+        source_document_id=source_document_id,
         metadata=metadata,
     )["results"]
 
@@ -70,11 +76,13 @@ def ingest_session_graph_candidates_with_receipt(
     evidence_items: Sequence[GraphEvidenceItem | Mapping[str, Any]],
     session_id: str,
     source: str,
+    source_document_id: str = "",
     metadata: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     bound_items = attach_graph_source_context(
         evidence_items,
         session_id=session_id,
+        source_document_id=source_document_id,
     )
     return ingest_graph_evidence_with_receipt(
         store,
