@@ -1301,6 +1301,99 @@ class BrainstackMemoryProvider(MemoryProvider):
             return None
         return json.loads(json.dumps(self._last_memory_authority_debug, ensure_ascii=True))
 
+    def inspector_proof_snapshot(self) -> Dict[str, Any] | None:
+        behavior_snapshot = self.behavior_policy_snapshot()
+        memory_debug = self.memory_authority_debug()
+        behavior_trace = self.behavior_policy_trace()
+        operating_snapshot = self.operating_context_snapshot()
+        operating_trace = self.operating_context_trace()
+        memory_trace = self.memory_operation_trace()
+        graph_trace = self.graph_ingress_trace()
+        if not any(
+            value is not None
+            for value in (
+                behavior_snapshot,
+                memory_debug,
+                behavior_trace,
+                operating_snapshot,
+                operating_trace,
+                memory_trace,
+                graph_trace,
+            )
+        ):
+            return None
+
+        canonical_revision = int((memory_debug or {}).get("canonical_generation_revision") or 0)
+        compiled_revision = int((memory_debug or {}).get("compiled_policy_source_revision") or 0)
+        active_lane_revision = int((memory_debug or {}).get("active_lane_source_revision") or 0)
+        read_side_effect_count = int((memory_debug or {}).get("read_side_effect_count") or 0)
+        write_receipts_in_packet = bool((memory_debug or {}).get("write_receipts_in_packet"))
+
+        snapshot = {
+            "authority": {
+                "canonical_generation_revision": canonical_revision,
+                "compiled_policy_source_revision": compiled_revision,
+                "active_lane_source_revision": active_lane_revision,
+                "converged": (
+                    canonical_revision > 0
+                    and compiled_revision == canonical_revision
+                    and active_lane_revision == canonical_revision
+                ),
+            },
+            "read_surface": {
+                "read_side_effect_count": read_side_effect_count,
+                "write_receipts_in_packet": write_receipts_in_packet,
+                "clean": read_side_effect_count == 0 and not write_receipts_in_packet,
+            },
+            "routing": json.loads(json.dumps(self._last_prefetch_routing or {}, ensure_ascii=True)),
+            "channels": json.loads(json.dumps(self._last_prefetch_channels or [], ensure_ascii=True)),
+            "behavior_policy_snapshot": behavior_snapshot,
+            "behavior_policy_trace": behavior_trace,
+            "memory_authority_debug": memory_debug,
+            "operating_context_snapshot": operating_snapshot,
+            "operating_context_trace": operating_trace,
+            "memory_operation_trace": memory_trace,
+            "graph_ingress_trace": graph_trace,
+            "prefetch_debug": json.loads(json.dumps(self._last_prefetch_debug, ensure_ascii=True))
+            if self._last_prefetch_debug is not None
+            else None,
+            "host_runtime_layers_excluded": list((memory_debug or {}).get("host_runtime_layers_excluded") or []),
+        }
+        return json.loads(json.dumps(snapshot, ensure_ascii=True))
+
+    def inspector_proof_report(self) -> str | None:
+        snapshot = self.inspector_proof_snapshot()
+        if snapshot is None:
+            return None
+        authority = dict(snapshot.get("authority") or {})
+        read_surface = dict(snapshot.get("read_surface") or {})
+        routing = dict(snapshot.get("routing") or {})
+        graph_trace = dict(snapshot.get("graph_ingress_trace") or {})
+        lines = [
+            "# Brainstack Inspector Proof",
+            "",
+            "## Authority",
+            f"- converged: {authority.get('converged', False)}",
+            f"- canonical_generation_revision: {authority.get('canonical_generation_revision', 0)}",
+            f"- compiled_policy_source_revision: {authority.get('compiled_policy_source_revision', 0)}",
+            f"- active_lane_source_revision: {authority.get('active_lane_source_revision', 0)}",
+            "",
+            "## Read Surface",
+            f"- clean: {read_surface.get('clean', False)}",
+            f"- read_side_effect_count: {read_surface.get('read_side_effect_count', 0)}",
+            f"- write_receipts_in_packet: {read_surface.get('write_receipts_in_packet', False)}",
+            "",
+            "## Routing",
+            f"- applied_mode: {routing.get('applied_mode', '')}",
+            f"- source: {routing.get('source', '')}",
+            f"- resolution_status: {routing.get('resolution_status', '')}",
+            f"- resolution_error_class: {routing.get('resolution_error_class', '')}",
+            "",
+            "## Graph Ingress",
+            f"- status: {graph_trace.get('status', '')}",
+        ]
+        return "\n".join(lines)
+
     def operating_context_snapshot(self) -> Dict[str, Any] | None:
         if not self._store:
             return None
