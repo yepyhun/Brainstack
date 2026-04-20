@@ -405,6 +405,27 @@ def _looks_like_style_contract_recall(
                 value = int(stripped)
                 if 5 <= value <= 99:
                     return True
+    lowered_query = normalized_query.casefold()
+    rule_reference = any(
+        re.search(pattern, lowered_query)
+        for pattern in (
+            r"\b(?:kommunik[aá]ci[oó]s )?szab[aá]ly(?:ok(?:at|ra|r[oó]l|r[eé])?)?\b",
+            r"\balapszab[aá]ly(?:ok(?:at|ra|r[oó]l|r[eé])?)?\b",
+            r"\b(?:communication|style) rules?\b",
+        )
+    )
+    recall_or_obedience = any(
+        re.search(pattern, lowered_query)
+        for pattern in (
+            r"\beml[eé]ksz(?:el)?\b",
+            r"\b(?:be)?tart(?:od|ja|juk|ani)?\b",
+            r"\btart(?:od|ja|juk)? be\b",
+            r"\b(?:[íi]rd le|mondd el|sorold fel|mik|melyik|h[aá]ny)\b",
+            r"\b(?:remember|recall|follow|list|what are|which are|how many)\b",
+        )
+    )
+    if rule_reference and recall_or_obedience:
+        return True
     return False
 
 

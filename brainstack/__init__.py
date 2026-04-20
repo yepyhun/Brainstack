@@ -826,6 +826,7 @@ class BrainstackMemoryProvider(MemoryProvider):
     def system_prompt_block(self) -> str:
         if not self._store:
             return ""
+        self._ensure_behavior_authority_ready(surface="system_prompt_block")
         projection = build_system_prompt_projection(
             self._store,
             profile_limit=self._profile_prompt_limit,
@@ -863,6 +864,7 @@ class BrainstackMemoryProvider(MemoryProvider):
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if not self._store:
             return ""
+        authority_state = self._ensure_behavior_authority_ready(surface="prefetch")
         sid = session_id or self._session_id
         style_contract_candidate = self._resolve_style_contract_candidate(
             content=query,
@@ -976,6 +978,11 @@ class BrainstackMemoryProvider(MemoryProvider):
             "canonical_generation_revision": int((snapshot.get("raw_contract") or {}).get("revision_number") or 0),
             "compiled_policy_source_revision": int((snapshot.get("compiled_policy") or {}).get("source_revision_number") or 0),
             "active_lane_source_revision": int(system_substrate.get("active_lane_source_revision") or 0),
+            "authority_bootstrap": {
+                "repair_attempted": bool(authority_state.get("repair_attempted")),
+                "blocked": bool(authority_state.get("blocked")),
+                "reason": str(authority_state.get("reason") or ""),
+            },
             "host_runtime_layers_excluded": [
                 "host persona",
                 "runtime tools",
@@ -1395,6 +1402,71 @@ class BrainstackMemoryProvider(MemoryProvider):
             return None
         return self._store.get_behavior_policy_snapshot(principal_scope_key=self._principal_scope_key)
 
+    def _ensure_behavior_authority_ready(self, *, surface: str) -> Dict[str, Any]:
+        if not self._store:
+            return {
+                "surface": surface,
+                "repair_attempted": False,
+                "repair_report": None,
+                "raw_contract_present": False,
+                "compiled_policy_present": False,
+                "blocked": False,
+                "reason": "store_unavailable",
+            }
+
+        snapshot_before = self._store.get_behavior_policy_snapshot(principal_scope_key=self._principal_scope_key)
+        raw_before = snapshot_before.get("raw_contract") if isinstance(snapshot_before, Mapping) else None
+        compiled_before = (
+            snapshot_before.get("compiled_policy") if isinstance(snapshot_before, Mapping) else {}
+        ) or {}
+
+        repair_attempted = bool(raw_before) and not bool(compiled_before.get("present"))
+        repair_report: Dict[str, Any] | None = None
+        if repair_attempted:
+            repair_report = self._store.repair_behavior_contract_authority(
+                principal_scope_key=self._principal_scope_key,
+            )
+
+        snapshot_after = self._store.get_behavior_policy_snapshot(principal_scope_key=self._principal_scope_key)
+        raw_after = snapshot_after.get("raw_contract") if isinstance(snapshot_after, Mapping) else None
+        compiled_after = (
+            snapshot_after.get("compiled_policy") if isinstance(snapshot_after, Mapping) else {}
+        ) or {}
+        blocked = bool(raw_after) and not bool(compiled_after.get("present"))
+        result = {
+            "surface": surface,
+            "repair_attempted": repair_attempted,
+            "repair_report": json.loads(json.dumps(repair_report, ensure_ascii=True))
+            if isinstance(repair_report, Mapping)
+            else None,
+            "raw_contract_present": bool(raw_after),
+            "compiled_policy_present": bool(compiled_after.get("present")),
+            "blocked": blocked,
+            "reason": (
+                "active_behavior_authority_missing_compiled_policy"
+                if blocked
+                else "repair_converged"
+                if repair_attempted
+                else "authority_ready"
+            ),
+            "snapshot": snapshot_after,
+        }
+
+        trace = dict(self._last_behavior_policy_trace or {})
+        authority_trace = dict(trace.get("authority_bootstrap") or {})
+        authority_trace[surface] = {
+            "surface": surface,
+            "repair_attempted": repair_attempted,
+            "repair_report": result["repair_report"],
+            "raw_contract_present": bool(raw_after),
+            "compiled_policy_present": bool(compiled_after.get("present")),
+            "blocked": blocked,
+            "reason": result["reason"],
+        }
+        trace["authority_bootstrap"] = authority_trace
+        self._last_behavior_policy_trace = trace
+        return result
+
     def behavior_policy_trace(self) -> Dict[str, Any] | None:
         if self._last_behavior_policy_trace is None:
             return None
@@ -1559,6 +1631,47 @@ class BrainstackMemoryProvider(MemoryProvider):
     def validate_assistant_output(self, content: str) -> Dict[str, Any] | None:
         if not self._store:
             return None
+        authority_state = self._ensure_behavior_authority_ready(surface="final_output_validation")
+        if authority_state.get("blocked"):
+            result = {
+                "content": str(content or ""),
+                "changed": False,
+                "applied": True,
+                "status": "blocked",
+                "blocked": True,
+                "can_ship": False,
+                "block_reason": "compiled_behavior_policy_unavailable",
+                "contract": {
+                    "active": True,
+                    "authority_required": True,
+                    "compiled_policy_present": False,
+                    "sources": [],
+                },
+                "repairs": [],
+                "remaining_violations": [
+                    {
+                        "kind": "behavior_policy_authority",
+                        "violation": "compiled_policy_missing_for_active_authority",
+                        "repair": "repair_or_fail_closed",
+                        "enforcement": "block",
+                    }
+                ],
+            }
+            trace = dict(self._last_behavior_policy_trace or {})
+            trace["final_output_validation"] = {
+                "surface": "final_output_validation",
+                "applied": True,
+                "changed": False,
+                "status": "blocked",
+                "blocked": True,
+                "can_ship": False,
+                "block_reason": "compiled_behavior_policy_unavailable",
+                "repair_count": 0,
+                "remaining_violation_count": 1,
+                "contract": dict(result.get("contract") or {}),
+            }
+            self._last_behavior_policy_trace = trace
+            return result
         compiled_policy_record = self._store.get_compiled_behavior_policy(principal_scope_key=self._principal_scope_key)
         compiled_policy = (
             dict(compiled_policy_record.get("policy") or {})
