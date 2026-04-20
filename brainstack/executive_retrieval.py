@@ -28,52 +28,6 @@ AGGREGATE_GRAPH_CAP = 2
 
 logger = logging.getLogger(__name__)
 
-AGGREGATE_ROUTE_CUES = (
-    "in total",
-    "total",
-    "how many",
-    "count",
-    "altogether",
-    "combined",
-    "sum",
-)
-STYLE_CONTRACT_STRONG_CUES = (
-    "style contract",
-    "communication rules",
-    "rule list",
-    "communication contract",
-)
-STYLE_CONTRACT_RECALL_CUES = (
-    "tell me",
-    "list",
-    "what are",
-    "do you know",
-    "exact",
-    "full",
-)
-TEMPORAL_STRONG_CUES = (
-    "order of",
-    "earliest",
-    "latest",
-    "most recent",
-    "first",
-    "second",
-    "third",
-    "what is the order",
-    "which came first",
-    "which happened first",
-    "how many days",
-    "how many months",
-    "how many years",
-    "when did",
-)
-TEMPORAL_WEAK_CUES = (
-    "before",
-    "after",
-    "previous",
-    "changed",
-    "between",
-)
 TASK_QUERY_CUES = (
     "task",
     "tasks",
@@ -367,10 +321,6 @@ def _llm_route_resolver(query: str) -> Dict[str, Any]:
     }
 
 
-def _contains_cue(normalized: str, cue: str) -> bool:
-    return cue in normalized
-
-
 def _extract_style_contract_route_signals(style_contract_parts: Mapping[str, Any] | None) -> Dict[str, Any]:
     if not isinstance(style_contract_parts, Mapping):
         return {"title": "", "headings": [], "rule_count": 0}
@@ -422,14 +372,6 @@ def _looks_like_style_contract_recall(
 ) -> bool:
     normalized_query = _normalize_text(query)
     normalized = f" {normalized_query.lower()} "
-    strong_hits = [cue for cue in STYLE_CONTRACT_STRONG_CUES if _contains_cue(normalized, cue)]
-    if strong_hits:
-        return True
-
-    has_recall_term = any(_contains_cue(normalized, cue) for cue in STYLE_CONTRACT_RECALL_CUES)
-    if has_recall_term and "rules" in normalized:
-        return True
-
     signals = _extract_style_contract_route_signals(style_contract_parts)
     title = str(signals.get("title") or "").casefold()
     if title and len(title) >= 8 and f" {title} " in normalized:
@@ -456,35 +398,10 @@ def _looks_like_style_contract_recall(
 
 
 def _default_route_resolver(query: str) -> Dict[str, Any]:
-    normalized = f" {_normalize_text(query).lower()} "
-    temporal_strong_hits = [cue for cue in TEMPORAL_STRONG_CUES if _contains_cue(normalized, cue)]
-    if temporal_strong_hits:
-        return {
-            "mode": ROUTE_TEMPORAL,
-            "reason": f"deterministic temporal cues: {', '.join(temporal_strong_hits)}",
-            "source": "deterministic_route_hint",
-        }
-
-    aggregate_hits = [cue for cue in AGGREGATE_ROUTE_CUES if _contains_cue(normalized, cue)]
-    if aggregate_hits:
-        return {
-            "mode": ROUTE_AGGREGATE,
-            "reason": f"deterministic aggregate cues: {', '.join(aggregate_hits)}",
-            "source": "deterministic_route_hint",
-        }
-
-    temporal_weak_hits = [cue for cue in TEMPORAL_WEAK_CUES if _contains_cue(normalized, cue)]
-    if temporal_weak_hits and any(char.isdigit() for char in normalized):
-        return {
-            "mode": ROUTE_TEMPORAL,
-            "reason": f"deterministic temporal cues: {', '.join(temporal_weak_hits)} + digits",
-            "source": "deterministic_route_hint",
-        }
-
     return {
         "mode": ROUTE_FACT,
-        "reason": "deterministic fact default: no strong structural route cues",
-        "source": "deterministic_route_hint",
+        "reason": "fact route default: no owner-derived routing signal",
+        "source": "fact_default",
     }
 
 
@@ -494,40 +411,39 @@ def _resolve_route(
     route_resolver: Callable[[str], Dict[str, Any] | str] | None,
     style_contract_available: bool = False,
     style_contract_parts: Mapping[str, Any] | None = None,
+    profile_slot_targets: Iterable[str] = (),
 ) -> RetrievalRoute:
     normalized = _normalize_text(query)
     route = RetrievalRoute(reason="fact route default")
     if not normalized:
         return route
 
+    normalized_targets = {str(value or "").strip() for value in profile_slot_targets if str(value or "").strip()}
     deterministic = _default_route_resolver(normalized)
-    deterministic_mode = _normalize_text(deterministic.get("mode")).lower()
-    if deterministic_mode in {ROUTE_TEMPORAL, ROUTE_AGGREGATE}:
-        route.requested_mode = deterministic_mode
-        route.applied_mode = deterministic_mode
-        route.source = str(deterministic.get("source") or "deterministic_route_hint")
-        route.reason = str(deterministic.get("reason") or "")
-        route.resolution_status = "deterministic"
-        return route
-
-    if style_contract_available and _looks_like_style_contract_recall(
+    if style_contract_available and (
+        STYLE_CONTRACT_SLOT in normalized_targets
+        or _looks_like_style_contract_recall(
         normalized,
         style_contract_parts=style_contract_parts,
+        )
     ):
         route.requested_mode = ROUTE_STYLE_CONTRACT
         route.applied_mode = ROUTE_STYLE_CONTRACT
-        route.source = "deterministic_style_contract_hint"
-        route.reason = "deterministic style-contract recall cues"
+        route.source = (
+            "direct_profile_slot_match" if STYLE_CONTRACT_SLOT in normalized_targets else "deterministic_style_contract_hint"
+        )
+        route.reason = (
+            "direct style-contract slot request"
+            if STYLE_CONTRACT_SLOT in normalized_targets
+            else "deterministic style-contract recall cues"
+        )
         route.resolution_status = "deterministic"
         return route
 
     resolver = route_resolver
     source = "injected"
-    if resolver is None and style_contract_available:
-        resolver = _llm_route_resolver
-        source = "llm_route_hint"
     if resolver is None:
-        route.source = str(deterministic.get("source") or "deterministic_route_hint")
+        route.source = str(deterministic.get("source") or "fact_default")
         route.reason = str(deterministic.get("reason") or route.reason)
         route.resolution_status = "skipped"
         return route
@@ -1533,6 +1449,7 @@ def retrieve_executive_context(
         route_resolver=route_resolver,
         style_contract_available=style_contract_available,
         style_contract_parts=style_contract_parts,
+        profile_slot_targets=tuple(str(slot) for slot in analysis.get("profile_slot_targets") or ()),
     )
     limits = _route_limits(
         route=route,

@@ -82,9 +82,15 @@ def test_ordinary_turn_contract_section_uses_pinned_invariant_subset(tmp_path):
 def test_style_contract_route_renders_canonical_contract_separately(tmp_path):
     provider = _make_provider(tmp_path, "style-recall")
     try:
-        provider.prefetch(_style_contract_text(), session_id="style-recall")
         store = provider._store
         assert store is not None
+        store.upsert_behavior_contract(
+            category="preference",
+            content=_style_contract_text(),
+            source="test",
+            confidence=1.0,
+            metadata={"principal_scope_key": provider._principal_scope_key},
+        )
         compiled = store.get_compiled_behavior_policy(principal_scope_key=provider._principal_scope_key)
         style_row = store.get_profile_item(
             stable_key=STYLE_CONTRACT_SLOT,

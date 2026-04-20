@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Iterable, List, Mapping
 
+from .style_contract import STYLE_CONTRACT_SLOT
+
 
 COMMUNICATION_CANONICAL_SLOTS = {
     "preference:communication_style",
@@ -95,6 +97,13 @@ _DIRECT_AGE_QUERY_PATTERNS = (
     re.compile(r"\bmi\s+az\s+életkorom\b", re.IGNORECASE),
 )
 
+_DIRECT_STYLE_CONTRACT_QUERY_PATTERNS = (
+    re.compile(r"\bstyle contract\b", re.IGNORECASE),
+    re.compile(r"\bcommunication contract\b", re.IGNORECASE),
+    re.compile(r"\bcommunication rules\b", re.IGNORECASE),
+    re.compile(r"\bkommunik[aá]ci[oó]s\s+szab[aá]ly", re.IGNORECASE),
+)
+
 _ASSISTANT_NAME_PATTERNS = (
     re.compile(r"\bassistant(?:'s)? name is\s+([A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű0-9_-]{2,40})\b", re.IGNORECASE),
     re.compile(r"\byour name is\s+([A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű0-9_-]{2,40})\b", re.IGNORECASE),
@@ -170,6 +179,8 @@ def resolve_direct_identity_profile_slots(query: str) -> tuple[str, ...]:
     text = normalize_compare_text(query)
     if not text:
         return ()
+    if any(pattern.search(text) for pattern in _DIRECT_STYLE_CONTRACT_QUERY_PATTERNS):
+        return (STYLE_CONTRACT_SLOT,)
     if any(pattern.search(text) for pattern in _DIRECT_AGE_QUERY_PATTERNS):
         return ("identity:age",)
     return ()

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-import re
 from typing import Any, Callable, Dict
 
 from .behavior_policy import build_behavior_policy_reinforcement
@@ -12,37 +11,9 @@ from .profile_contract import resolve_direct_identity_profile_slots
 from .retrieval import render_working_memory_block
 from .task_memory import parse_task_lookup_query
 
-HIGH_STAKES_TERMS = (
-    "safe",
-    "safety",
-    "dose",
-    "dosage",
-    "diagnosis",
-    "diagnose",
-    "treatment",
-    "treat",
-    "patient",
-    "symptom",
-    "legal",
-    "law",
-    "contract",
-    "prescription",
-    "medicine",
-    "drug",
-)
-
-def _contains_any(query: str, terms: tuple[str, ...]) -> bool:
-    lowered = " ".join(str(query or "").strip().split()).casefold()
-    return any(
-        re.search(r"(?<!\w)" + re.escape(str(term or "").casefold()) + r"(?!\w)", lowered, flags=re.UNICODE)
-        is not None
-        for term in terms
-    )
-
 
 @dataclass
 class QueryAnalysis:
-    high_stakes: bool
     operating_like: bool
     task_like: bool
     profile_slot_targets: tuple[str, ...]
@@ -79,7 +50,6 @@ def analyze_query(query: str) -> QueryAnalysis:
     operating_lookup = parse_operating_lookup_query(query)
     task_lookup = parse_task_lookup_query(query, timezone_name="UTC")
     return QueryAnalysis(
-        high_stakes=_contains_any(query, HIGH_STAKES_TERMS),
         operating_like=isinstance(operating_lookup, dict),
         task_like=isinstance(task_lookup, dict),
         profile_slot_targets=profile_slot_targets,
@@ -326,14 +296,7 @@ def build_working_memory_packet(
         policy.provenance_mode = "expanded"
         policy.show_policy = True
 
-    if analysis.high_stakes:
-        policy.provenance_mode = "expanded"
-        policy.show_policy = True
-
-    if analysis.high_stakes:
-        policy.tool_avoidance_allowed = False
-        policy.tool_avoidance_reason = "high-stakes query requires explicit verification or tools"
-    elif conflict_present:
+    if conflict_present:
         policy.tool_avoidance_allowed = False
         policy.tool_avoidance_reason = "open graph conflict requires verification before relying on memory only"
     elif policy.confidence_band == "low":

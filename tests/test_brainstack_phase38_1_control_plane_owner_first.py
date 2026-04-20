@@ -12,7 +12,21 @@ from tests._host_import_shims import install_host_import_shims
 install_host_import_shims(hermes_home=REPO_ROOT)
 
 from brainstack.control_plane import build_working_memory_packet
+from brainstack.style_contract import STYLE_CONTRACT_SLOT
 from brainstack.db import BrainstackStore
+
+
+def _style_contract_text() -> str:
+    return (
+        "A set of 25 rules for communication style and formatting.\n\n"
+        "Rules:\n"
+        "- Bestie-kent hivatkozom magamra amikor nevet adok magamnak.\n"
+        "- Nem hasznalok emojikat.\n"
+        "- Nem hasznalok kotohjeles irasjeleket a valaszokban.\n"
+        "- En, Te, O nagybetuvel irando.\n"
+        "- Kozvetlen, konkret, termeszetes es alacsony felesleges szoveges stilust hasznalok.\n"
+        "- Gondolatonkent uj sort kezdek.\n"
+    )
 
 
 def test_task_policy_can_follow_owner_parser_signal_without_query_cues(monkeypatch, tmp_path):
@@ -104,14 +118,21 @@ def test_temporal_route_shapes_policy_from_retrieval_route_without_control_plane
         store.close()
 
 
-def test_high_stakes_flag_is_bounded_and_does_not_force_deep_packet(tmp_path):
+def test_direct_style_contract_slot_request_routes_without_cue_table(tmp_path):
     store = BrainstackStore(str(tmp_path / "brainstack.db"))
     store.open()
     try:
+        store.upsert_profile_item(
+            category="preference",
+            content=_style_contract_text(),
+            stable_key=STYLE_CONTRACT_SLOT,
+            source="test",
+            confidence=1.0,
+        )
         packet = build_working_memory_packet(
             store,
-            query="What legal dose should I prescribe to a patient right now?",
-            session_id="phase40-1-high-stakes",
+            query="Írd le a kommunikációs szabályokat.",
+            session_id="phase42-style-slot",
             principal_scope_key="",
             profile_match_limit=4,
             continuity_recent_limit=4,
@@ -123,12 +144,10 @@ def test_high_stakes_flag_is_bounded_and_does_not_force_deep_packet(tmp_path):
             corpus_char_budget=700,
         )
 
-        assert packet["policy"]["mode"] == "balanced"
-        assert packet["policy"]["provenance_mode"] == "expanded"
-        assert packet["policy"]["show_policy"] is True
-        assert packet["policy"]["tool_avoidance_allowed"] is False
-        assert packet["policy"]["transcript_limit"] > 0
-        assert packet["policy"]["graph_limit"] <= 2
+        assert packet["routing"]["requested_mode"] == "style_contract"
+        assert packet["routing"]["applied_mode"] == "style_contract"
+        assert packet["routing"]["source"] == "direct_profile_slot_match"
+        assert packet["policy"]["show_authoritative_contract"] is True
     finally:
         store.close()
 

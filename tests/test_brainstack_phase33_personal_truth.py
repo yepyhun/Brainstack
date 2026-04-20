@@ -102,7 +102,7 @@ def test_behavior_contract_falls_back_across_workspace_scope_drift(tmp_path):
     )
     reader = None
     try:
-        writer.prefetch(_style_contract_text(), session_id="behavior-writer")
+        writer.on_memory_write("add", "user", _style_contract_text())
         writer_store = writer._store
         assert writer_store is not None
         committed = writer_store.get_behavior_contract(principal_scope_key=writer._principal_scope_key)
@@ -146,17 +146,14 @@ def test_short_explicit_correction_patches_canonical_behavior_contract(tmp_path)
         agent_workspace="workspace-a",
     )
     try:
-        provider.prefetch(_style_contract_text(), session_id="short-correction")
+        provider.on_memory_write("add", "user", _style_contract_text())
         store = provider._store
         assert store is not None
 
         first = store.get_behavior_contract(principal_scope_key=provider._principal_scope_key)
         assert first is not None
 
-        block = provider.prefetch(
-            "Capitalize Én, Te, and Ő every time you use them.",
-            session_id="short-correction",
-        )
+        provider.on_memory_write("add", "user", "Capitalize Én, Te, and Ő every time you use them.")
 
         second = store.get_behavior_contract(principal_scope_key=provider._principal_scope_key)
         trace = provider.memory_operation_trace()
@@ -165,12 +162,11 @@ def test_short_explicit_correction_patches_canonical_behavior_contract(tmp_path)
         assert second["revision_number"] == first["revision_number"] + 1
         assert "Capitalize Én, Te, and Ő every time you use them." in second["content"]
         assert "only when explicitly requested" not in second["content"]
-        assert "## Brainstack Memory Operation Receipt" in block
         assert trace is not None
         receipt = trace["last_write_receipt"]
         assert receipt["owner"] == "brainstack.behavior_contract"
         assert receipt["patch_rule_count"] == 1
-        assert str(receipt["source"]).startswith("prefetch:style_contract_patch")
+        assert str(receipt["source"]).startswith("builtin_add:style_contract_patch")
     finally:
         provider.shutdown()
 
@@ -185,7 +181,7 @@ def test_preference_query_reduces_starvation_without_forcing_full_contract_visib
         agent_workspace="workspace-a",
     )
     try:
-        provider.prefetch(_style_contract_text(), session_id="personal-depth")
+        provider.on_memory_write("add", "user", _style_contract_text())
 
         block = provider.prefetch("What style do I prefer?", session_id="personal-depth")
         policy = provider._last_prefetch_policy

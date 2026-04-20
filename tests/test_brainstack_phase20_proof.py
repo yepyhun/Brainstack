@@ -378,8 +378,8 @@ def test_phase20_3_fact_route_does_not_inherit_legacy_decomposition_gate(monkeyp
 
         assert packet["decomposition"]["used"] is False
         assert packet["decomposition"]["legacy_disabled"] is True
-        assert packet["routing"]["requested_mode"] == "temporal"
-        assert packet["routing"]["applied_mode"] == "temporal"
+        assert packet["routing"]["requested_mode"] == "fact"
+        assert packet["routing"]["applied_mode"] == "fact"
         assert "## Brainstack Transcript Evidence" in packet["block"]
         recovered = [
             item
@@ -634,16 +634,16 @@ def test_phase20_3_temporal_route_falls_back_when_only_one_distinct_temporal_anc
 def test_phase20_3_default_route_resolver_matches_current_bounded_cues():
     assert _default_route_resolver("What are we working on right now?")["mode"] == "fact"
     assert _default_route_resolver("What are my running shoes?")["mode"] == "fact"
-    assert _default_route_resolver("How much money did I raise for charity in total?")["mode"] == "aggregate"
-    assert _default_route_resolver("Which book did I finish reading first?")["mode"] == "temporal"
-    assert _default_route_resolver("What is the order of the three trips I took?")["mode"] == "temporal"
+    assert _default_route_resolver("How much money did I raise for charity in total?")["mode"] == "fact"
+    assert _default_route_resolver("Which book did I finish reading first?")["mode"] == "fact"
+    assert _default_route_resolver("What is the order of the three trips I took?")["mode"] == "fact"
     assert _default_route_resolver("Order these events: ShopRite, Walmart coupon, Ibotta")["mode"] == "fact"
 
 
 def test_phase20_8_default_route_resolver_uses_bounded_deterministic_modes():
-    assert _default_route_resolver("How much money did I raise for charity in total?")["mode"] == "aggregate"
-    assert _default_route_resolver("What is the order of the three trips I took in the past three months?")["mode"] == "temporal"
-    assert _default_route_resolver("How many days between Sunday mass and Ash Wednesday?")["mode"] == "temporal"
+    assert _default_route_resolver("How much money did I raise for charity in total?")["mode"] == "fact"
+    assert _default_route_resolver("What is the order of the three trips I took in the past three months?")["mode"] == "fact"
+    assert _default_route_resolver("How many days between Sunday mass and Ash Wednesday?")["mode"] == "fact"
     assert _default_route_resolver(
         "I'm planning to revisit Orlando. Can you remind me of that unique dessert shop with the giant milkshakes we talked about last time?"
     )["mode"] == "fact"
