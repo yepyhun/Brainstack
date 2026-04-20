@@ -176,6 +176,37 @@ def test_route_resolution_failure_is_explicit_and_auditable(tmp_path):
         assert packet["routing"]["source"] == "route_resolution_failed"
         assert packet["routing"]["resolution_status"] == "failed"
         assert packet["routing"]["resolution_error"] == "forced resolver failure"
+        assert packet["routing"]["resolution_error_class"] == "resolver_failure"
         assert packet["routing"]["reason"] == "route resolver failed; staying on fact route"
+    finally:
+        store.close()
+
+
+def test_route_resolution_failure_classifies_economic_drift(tmp_path):
+    store = BrainstackStore(str(tmp_path / "brainstack.db"))
+    store.open()
+    try:
+        packet = build_working_memory_packet(
+            store,
+            query="Sorold fel a szabályokat.",
+            session_id="phase43-route-failure",
+            principal_scope_key="",
+            profile_match_limit=4,
+            continuity_recent_limit=4,
+            continuity_match_limit=4,
+            transcript_match_limit=2,
+            transcript_char_budget=560,
+            graph_limit=6,
+            corpus_limit=4,
+            corpus_char_budget=700,
+            route_resolver=lambda _query: (_ for _ in ()).throw(
+                RuntimeError("Error code: 402 - This request requires more credits")
+            ),
+        )
+
+        assert packet["routing"]["applied_mode"] == "fact"
+        assert packet["routing"]["source"] == "route_resolution_failed"
+        assert packet["routing"]["resolution_status"] == "failed"
+        assert packet["routing"]["resolution_error_class"] == "economic_drift"
     finally:
         store.close()

@@ -74,11 +74,22 @@ class RetrievalRoute:
     fallback_used: bool = False
     resolution_status: str = "not_attempted"
     resolution_error: str = ""
+    resolution_error_class: str = ""
     bounds: Dict[str, Any] = field(default_factory=dict)
 
 
 def _normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
+
+
+def _classify_route_resolution_error(exc: Exception) -> str:
+    text = _normalize_text(exc).casefold()
+    status_code = getattr(exc, "status_code", None)
+    if status_code == 402 or any(term in text for term in ("payment required", "credits", "can only afford", "billing")):
+        return "economic_drift"
+    if any(term in text for term in ("auth", "unauthorized", "refresh token", "re-authenticate", "access token")):
+        return "auth_drift"
+    return "resolver_failure"
 
 
 def _contains_any_cue(normalized: str, cues: Iterable[str]) -> bool:
@@ -456,6 +467,7 @@ def _resolve_route(
         route.reason = "route resolver failed; staying on fact route"
         route.resolution_status = "failed"
         route.resolution_error = str(exc)
+        route.resolution_error_class = _classify_route_resolution_error(exc)
         return route
 
     if isinstance(payload, str):
@@ -470,6 +482,7 @@ def _resolve_route(
         route.reason = "route resolver returned unsupported payload; staying on fact route"
         route.resolution_status = "failed"
         route.resolution_error = f"unsupported payload type: {type(payload).__name__}"
+        route.resolution_error_class = "unsupported_payload"
         return route
 
     if mode not in {ROUTE_FACT, ROUTE_TEMPORAL, ROUTE_AGGREGATE, ROUTE_STYLE_CONTRACT}:
@@ -477,6 +490,7 @@ def _resolve_route(
         route.reason = "route resolver returned unsupported mode; staying on fact route"
         route.resolution_status = "failed"
         route.resolution_error = f"unsupported mode: {mode or '<empty>'}"
+        route.resolution_error_class = "unsupported_mode"
         return route
     route.requested_mode = mode
     route.applied_mode = mode
