@@ -126,6 +126,10 @@ def validate_output_against_contract(
             "content": original,
             "changed": False,
             "applied": False,
+            "status": "inactive",
+            "blocked": False,
+            "can_ship": True,
+            "block_reason": "",
             "contract": contract,
             "repairs": [],
             "remaining_violations": [],
@@ -143,6 +147,7 @@ def validate_output_against_contract(
                     "kind": "punctuation_policy",
                     "violation": "em_dash",
                     "repair": "replace_with_hyphen_minus",
+                    "enforcement": "repair",
                 }
             )
             current = replaced
@@ -152,6 +157,7 @@ def validate_output_against_contract(
                 "kind": "punctuation_policy",
                 "violation": "dash_like_punctuation",
                 "repair": "none",
+                "enforcement": "block",
             }
         )
 
@@ -163,6 +169,7 @@ def validate_output_against_contract(
                     "kind": "forbidden_surface_form",
                     "violation": "emoji",
                     "repair": "strip_emoji_codepoints",
+                    "enforcement": "repair",
                 }
             )
             current = replaced
@@ -175,6 +182,7 @@ def validate_output_against_contract(
                     "kind": "formatting_policy",
                     "violation": "markdown_bold",
                     "repair": "strip_bold_markers",
+                    "enforcement": "repair",
                 }
             )
             current = replaced
@@ -189,14 +197,21 @@ def validate_output_against_contract(
                     "violation": str(item.get("label") or "forbidden_phrase"),
                     "phrase": phrase,
                     "repair": "none",
+                    "enforcement": "block",
                     "source_rule_id": str(item.get("source_rule_id") or ""),
                 }
             )
 
+    blocked = bool(remaining_violations)
+    status = "blocked" if blocked else "repaired" if repairs else "clean"
     return {
         "content": current,
         "changed": current != original,
         "applied": True,
+        "status": status,
+        "blocked": blocked,
+        "can_ship": not blocked,
+        "block_reason": "non_repairable_typed_invariant_violation" if blocked else "",
         "contract": contract,
         "repairs": repairs,
         "remaining_violations": remaining_violations,

@@ -17,7 +17,7 @@ import logging
 from pathlib import Path
 import threading
 import time
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Mapping
 
 from agent.memory_provider import MemoryProvider
 
@@ -1377,12 +1377,36 @@ class BrainstackMemoryProvider(MemoryProvider):
             "surface": "final_output_validation",
             "applied": bool(result.get("applied")),
             "changed": bool(result.get("changed")),
+            "status": str(result.get("status") or ""),
+            "blocked": bool(result.get("blocked")),
+            "can_ship": bool(result.get("can_ship", True)),
+            "block_reason": str(result.get("block_reason") or ""),
             "repair_count": len(list(result.get("repairs") or [])),
             "remaining_violation_count": len(list(result.get("remaining_violations") or [])),
             "contract": dict(result.get("contract") or {}),
         }
         self._last_behavior_policy_trace = trace
         return result
+
+    def record_output_validation_delivery(self, result: Mapping[str, Any] | None, *, delivered_content: str) -> None:
+        trace = dict(self._last_behavior_policy_trace or {})
+        final_trace = dict(trace.get("final_output_validation") or {})
+        final_trace.update(
+            {
+                "delivered": True,
+                "delivered_content_changed": str(delivered_content or "") != str(result.get("content") or "")
+                if isinstance(result, Mapping)
+                else False,
+                "delivered_status": str(result.get("status") or "") if isinstance(result, Mapping) else "",
+                "delivered_blocked": bool(result.get("blocked")) if isinstance(result, Mapping) else False,
+                "delivered_can_ship": bool(result.get("can_ship", True)) if isinstance(result, Mapping) else True,
+                "delivered_remaining_violation_count": len(list(result.get("remaining_violations") or []))
+                if isinstance(result, Mapping)
+                else 0,
+            }
+        )
+        trace["final_output_validation"] = final_trace
+        self._last_behavior_policy_trace = trace
 
     def shutdown(self) -> None:
         worker_finished = self._wait_for_tier2_worker(timeout=self._tier2_timeout_seconds + 2.0)
