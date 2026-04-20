@@ -228,21 +228,69 @@ def _find_brainstack_provider(memory_manager: Any) -> Any | None:
     return None
 
 
-def apply_brainstack_output_validation(memory_manager: Any, content: str) -> str:
+def _default_output_validation_result(content: str) -> dict[str, Any]:
     text = str(content or "")
+    return {
+        "content": text,
+        "applied": False,
+        "changed": False,
+        "status": "skipped",
+        "blocked": False,
+        "can_ship": True,
+        "remaining_violations": [],
+    }
+
+
+def _blocked_output_delivery_text() -> str:
+    return (
+        "Brainstack output blocked because the reply breaks an active communication rule. "
+        "Please regenerate the answer in compliant form."
+    )
+
+
+def validate_brainstack_output(memory_manager: Any, content: str) -> dict[str, Any]:
+    text = str(content or "")
+    result = _default_output_validation_result(text)
     if not text or memory_manager is None:
-        return text
+        return result
     provider = _find_brainstack_provider(memory_manager)
     if provider is None:
-        return text
+        return result
     validator = getattr(provider, "validate_assistant_output", None)
     if not callable(validator):
-        return text
+        return result
     try:
-        result = validator(text)
+        validated = validator(text)
     except Exception:
         logger.warning("Brainstack final-output validation failed", exc_info=True)
-        return text
+        return result
+    if isinstance(validated, dict):
+        result.update(validated)
+    result["content"] = str(result.get("content") or text)
+    result["applied"] = bool(result.get("applied", False))
+    result["changed"] = bool(result.get("changed", False))
+    result["blocked"] = bool(result.get("blocked", False))
+    result["can_ship"] = bool(result.get("can_ship", not result["blocked"]))
+    result["remaining_violations"] = list(result.get("remaining_violations") or [])
+    delivered_content = result["content"]
+    if result["blocked"] or not result["can_ship"]:
+        result["status"] = "blocked"
+        result["blocked"] = True
+        result["can_ship"] = False
+        delivered_content = _blocked_output_delivery_text()
+        result["content"] = delivered_content
+    recorder = getattr(provider, "record_output_validation_delivery", None)
+    if callable(recorder):
+        try:
+            recorder(result, delivered_content=delivered_content)
+        except Exception:
+            logger.warning("Brainstack output delivery trace failed", exc_info=True)
+    return result
+
+
+def apply_brainstack_output_validation(memory_manager: Any, content: str) -> str:
+    result = validate_brainstack_output(memory_manager, content)
+    text = str(content or "")
     if not isinstance(result, dict):
         return text
     validated = str(result.get("content") or text)
