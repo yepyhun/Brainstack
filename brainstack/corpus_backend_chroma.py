@@ -6,6 +6,13 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List
 import urllib.request
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message="'asyncio\\.iscoroutinefunction' is deprecated and slated for removal in Python 3\\.16; use inspect\\.iscoroutinefunction\\(\\) instead",
+    category=DeprecationWarning,
+)
 
 
 class ChromaCorpusBackend:
