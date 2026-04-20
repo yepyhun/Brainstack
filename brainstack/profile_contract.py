@@ -17,6 +17,10 @@ COMMUNICATION_CANONICAL_SLOTS = {
     "preference:ai_nickname",
 }
 
+STYLE_AUTHORITY_PROFILE_SLOTS = COMMUNICATION_CANONICAL_SLOTS | {
+    "preference:communication_rules",
+}
+
 PROFILE_SLOT_ALIASES = {
     "name": "identity:name",
     "identity_name": "identity:name",
@@ -114,6 +118,54 @@ def normalize_profile_slot(value: Any) -> str:
     return PROFILE_SLOT_ALIASES.get(normalized, normalized)
 
 
+def _style_contract_payload_has_rules(style_contract: Mapping[str, Any] | None) -> bool:
+    if not isinstance(style_contract, Mapping):
+        return False
+    logical_slot = normalize_profile_slot(
+        style_contract.get("slot") or style_contract.get("stable_key") or ""
+    )
+    metadata = style_contract.get("metadata")
+    if logical_slot == "preference:style_contract":
+        if isinstance(metadata, Mapping):
+            sections = metadata.get("style_contract_sections")
+            if isinstance(sections, list) and sections:
+                return True
+        content = str(style_contract.get("content") or "").strip()
+        if content:
+            return True
+    title = str(style_contract.get("title") or "").strip()
+    if title:
+        return True
+    sections = style_contract.get("sections")
+    if not isinstance(sections, list):
+        return False
+    for section in sections:
+        if not isinstance(section, Mapping):
+            continue
+        lines = section.get("lines")
+        if not isinstance(lines, list):
+            continue
+        if any(str(line or "").strip() for line in lines):
+            return True
+    return False
+
+
+def has_style_authority_signal(
+    *,
+    existing_items: Iterable[Mapping[str, Any]],
+    style_contract: Mapping[str, Any] | None = None,
+) -> bool:
+    if _style_contract_payload_has_rules(style_contract):
+        return True
+    for item in existing_items:
+        logical_key = normalize_profile_slot(
+            item.get("slot") or item.get("stable_key") or ""
+        )
+        if logical_key in STYLE_AUTHORITY_PROFILE_SLOTS:
+            return True
+    return False
+
+
 def resolve_direct_identity_profile_slots(query: str) -> tuple[str, ...]:
     text = normalize_compare_text(query)
     if not text:
@@ -198,8 +250,14 @@ def derive_transcript_communication_profile_items(
     transcript_entries: Iterable[Mapping[str, Any]],
     *,
     existing_items: Iterable[Mapping[str, Any]],
+    style_contract: Mapping[str, Any] | None = None,
     source: str = "tier2_transcript_rule",
 ) -> List[Dict[str, Any]]:
+    if has_style_authority_signal(
+        existing_items=existing_items,
+        style_contract=style_contract,
+    ):
+        return []
     existing_slots = {str(item.get("slot") or "").strip() for item in existing_items}
     text = "\n".join(normalize_compare_text(row.get("content")) for row in transcript_entries if normalize_compare_text(row.get("content")))
     if not text:

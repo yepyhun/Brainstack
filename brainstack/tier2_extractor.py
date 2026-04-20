@@ -651,13 +651,13 @@ def extract_tier2_candidates(
                 "- hard caps: profile_items<=6, states<=2, relations<=1, inferred_relations<=1, typed_entities<=4, temporal_events<=4, decisions<=2\n"
                 "- keep content values short and factual; target <=12 words for each content/reason/decision string; if unsure, emit [] or \"\" instead of extra explanation\n"
                 "- use stable slots only when a profile fact has one obvious durable owner, such as identity:name\n"
-                "- when the user sets communication or assistant-behavior rules, emit them as separate durable profile_items instead of collapsing them into one generic sentence\n"
+                "- when the user sets short standalone communication or assistant-behavior rules and no overlapping style_contract is emitted, emit them as separate durable profile_items instead of collapsing them into one generic sentence\n"
                 "- for communication rules, prefer these stable slots when applicable: preference:response_language, preference:ai_name, preference:communication_style, preference:emoji_usage, preference:message_structure, preference:pronoun_capitalization, preference:dash_usage, preference:formatting_style\n"
                 "- prefer profile_items over states for user communication preferences and assistant naming rules\n"
                 "- do not bury communication rules inside continuity_summary or decisions when they can be emitted as separate profile_items\n"
                 "- when the user teaches a named long-form communication pack or multi-section rule set, emit that detailed pack in style_contract instead of trying to squeeze it into profile_items\n"
                 "- style_contract is optional; emit it only for durable multi-rule communication contracts the user wants remembered across sessions\n"
-                "- if style_contract is present, it must contain the full detailed rule pack, even if some compact operational rules are also emitted in profile_items\n"
+                "- if style_contract is present, it must contain the full detailed rule pack and overlapping communication rules must not be duplicated in profile_items\n"
                 "- when emitting style_contract, preserve the user's own section headings and rule lines as literally as possible; keep the original language, wording, numbering markers, and polarity unless the transcript itself later corrects them\n"
                 "- do not paraphrase, translate, merge, soften, invent, or normalize style_contract rules into generic summaries; only clean whitespace and place lines under the right section headings\n"
                 "- do not use a section heading as the style_contract title; set title only if the transcript explicitly names the pack, otherwise return an empty string\n"
@@ -713,6 +713,7 @@ def extract_tier2_candidates(
         derive_transcript_communication_profile_items(
             entries,
             existing_items=profile_items,
+            style_contract=style_contract,
         )
     )
     profile_items.extend(

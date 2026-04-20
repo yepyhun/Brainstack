@@ -1317,13 +1317,17 @@ class BrainstackStore:
             if not _annotate_principal_scope(item, principal_scope_key=scope_key):
                 continue
             logical_key = normalize_profile_slot(str(item.get("stable_key") or ""))
-            if logical_key != "preference:communication_rules":
+            if (
+                logical_key != "preference:communication_rules"
+                and logical_key not in COMMUNICATION_CANONICAL_SLOTS
+            ):
                 continue
             metadata = _merge_record_metadata(
                 row["metadata_json"],
                 {
                     "repair_action": "deactivated_style_authority_residue",
                     "repair_scope": scope_key,
+                    "repair_logical_key": logical_key,
                 },
                 source="behavior_contract_repair",
             )

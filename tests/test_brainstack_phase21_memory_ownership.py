@@ -147,14 +147,7 @@ def test_tier2_extractor_drops_internal_persona_and_skill_mechanics_but_keeps_re
             "confidence": 0.9,
             "source": "tier2_llm",
             "slot": "preference:communication_style",
-        },
-        {
-            "category": "preference",
-            "content": "Put each new thought on a new line.",
-            "confidence": 0.86,
-            "source": "tier2_transcript_rule",
-            "slot": "preference:message_structure",
-        },
+        }
     ]
     assert extracted["states"] == [
         {
@@ -379,7 +372,7 @@ def test_tier2_extractor_splits_bundled_communication_rules_into_canonical_slots
 
     slots = {item["slot"] for item in extracted["profile_items"]}
     assert "preference:response_language" in slots
-    assert "preference:ai_name" in slots
+    assert "preference:ai_name" not in slots
     assert "preference:communication_style" in slots
     assert "preference:emoji_usage" in slots
     assert "preference:message_structure" in slots
@@ -424,8 +417,8 @@ def test_tier2_extractor_derives_missing_pronoun_and_dash_rules_from_transcript(
     )
 
     slots = {item["slot"] for item in extracted["profile_items"]}
-    assert "preference:pronoun_capitalization" in slots
-    assert "preference:dash_usage" in slots
+    assert "preference:pronoun_capitalization" not in slots
+    assert "preference:dash_usage" not in slots
 
 
 def test_system_prompt_contract_promotes_broader_behavior_rules_and_filters_internal_noise(tmp_path):

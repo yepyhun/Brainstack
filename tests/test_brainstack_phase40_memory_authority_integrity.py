@@ -28,6 +28,7 @@ from brainstack.db import (  # noqa: E402
     BEHAVIOR_CONTRACT_SUPERSEDED_STATUS,
     STYLE_CONTRACT_SLOT,
 )
+from brainstack.tier2_extractor import extract_tier2_candidates  # noqa: E402
 
 
 def _make_provider(tmp_path: Path, session_id: str) -> BrainstackMemoryProvider:
@@ -205,6 +206,14 @@ def test_dirty_store_repair_reactivates_clean_generation_and_stops_style_residue
             confidence=0.8,
             metadata={"session_id": "phase40-dirty-repair", "principal_scope_key": provider._principal_scope_key},
         )
+        store.upsert_profile_item(
+            stable_key="preference:dash_usage",
+            category="preference",
+            content="Do not use dash punctuation in replies.",
+            source="tier2_transcript_rule",
+            confidence=0.8,
+            metadata={"session_id": "phase40-dirty-repair", "principal_scope_key": provider._principal_scope_key},
+        )
         store.conn.commit()
 
         repair = provider.repair_memory_authority()
@@ -212,7 +221,7 @@ def test_dirty_store_repair_reactivates_clean_generation_and_stops_style_residue
         assert repair["quarantined_ids"]
         assert repair["reactivated_id"] == int(clean["id"])
         assert repair["compiled_policy_rebuilt"] is True
-        assert repair["deactivated_profile_residue_count"] >= 1
+        assert repair["deactivated_profile_residue_count"] >= 2
 
         block = provider.prefetch("Mik az aktiv kommunikacios szabalyok?", session_id="phase40-dirty-repair")
         snapshot = provider.behavior_policy_snapshot()
@@ -223,3 +232,48 @@ def test_dirty_store_repair_reactivates_clean_generation_and_stops_style_residue
         assert snapshot["compiled_policy"]["source_revision_number"] == 1
     finally:
         provider.shutdown()
+
+
+def test_tier2_does_not_regenerate_style_atoms_when_style_contract_is_present() -> None:
+    transcript_entries = [
+        {
+            "turn_number": 1,
+            "role": "user",
+            "content": "Mostantol ez a szabalykeszlet el: ne hasznalj emojit es ne hasznalj dash jeleket.",
+        }
+    ]
+
+    def _fake_llm_caller(*, task: str, messages: list, timeout: float, max_tokens: int) -> str:
+        return json.dumps(
+            {
+                "profile_items": [],
+                "style_contract": {
+                    "title": "",
+                    "sections": [
+                        {
+                            "heading": "Rules",
+                            "lines": [
+                                "Ne hasznalj emojit.",
+                                "Ne hasznalj dash jeleket.",
+                            ],
+                        }
+                    ],
+                    "confidence": 0.98,
+                },
+                "states": [],
+                "relations": [],
+                "inferred_relations": [],
+                "typed_entities": [],
+                "temporal_events": [],
+                "continuity_summary": "",
+                "decisions": [],
+            }
+        )
+
+    result = extract_tier2_candidates(
+        transcript_entries,
+        llm_caller=_fake_llm_caller,
+    )
+
+    assert result["style_contract"] is not None
+    assert result["profile_items"] == []
