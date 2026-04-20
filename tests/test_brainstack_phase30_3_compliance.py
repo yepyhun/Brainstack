@@ -25,7 +25,12 @@ from brainstack import BrainstackMemoryProvider
 
 
 def _make_provider(tmp_path, session_id: str, **init_kwargs):
-    provider = BrainstackMemoryProvider(config={"db_path": str(Path(tmp_path) / "brainstack.db")})
+    provider = BrainstackMemoryProvider(
+        config={
+            "db_path": str(Path(tmp_path) / "brainstack.db"),
+            "ordinary_reply_output_validation_enabled": True,
+        }
+    )
     provider.initialize(session_id, hermes_home=str(tmp_path), **init_kwargs)
     return provider
 
@@ -66,7 +71,7 @@ def test_output_contract_repairs_mechanical_violations(tmp_path):
         provider.shutdown()
 
 
-def test_prefetch_records_committed_style_contract_receipt(tmp_path):
+def test_prefetch_remains_read_only_even_when_style_contract_candidate_is_detected(tmp_path):
     provider = _make_provider(
         tmp_path,
         "prefetch-receipt",
@@ -87,18 +92,16 @@ def test_prefetch_records_committed_style_contract_receipt(tmp_path):
         )
         trace = provider.memory_operation_trace()
 
-        assert "## Brainstack Memory Operation Receipt" in block
+        assert "## Brainstack Memory Operation Receipt" not in block
         assert trace is not None
         assert trace["barrier_clear"] is True
-        assert trace["last_write_receipt"]["status"] == "committed"
-        assert trace["last_write_receipt"]["write_class"] == "style_contract"
-        assert trace["last_write_receipt"]["owner"] == "brainstack.behavior_contract"
-        assert trace["last_write_receipt"]["source"] == "prefetch:style_contract"
+        assert trace["surface"] == "prefetch_lookup"
+        assert trace["last_write_receipt"] == {}
     finally:
         provider.shutdown()
 
 
-def test_on_memory_write_records_truthful_profile_receipt(tmp_path):
+def test_on_memory_write_does_not_claim_brainstack_receipt_for_non_bounded_native_mirror(tmp_path):
     provider = _make_provider(
         tmp_path,
         "profile-receipt",
@@ -113,15 +116,14 @@ def test_on_memory_write_records_truthful_profile_receipt(tmp_path):
 
         assert trace is not None
         assert trace["barrier_clear"] is True
-        assert trace["last_write_receipt"]["status"] == "committed"
-        assert trace["last_write_receipt"]["owner"] == "brainstack.profile_items"
-        assert trace["last_write_receipt"]["write_class"] == "profile_item"
-        assert trace["last_write_receipt"]["stable_key"].startswith("preference:")
+        assert trace["surface"] == "native_profile_mirror"
+        assert trace["last_write_receipt"] == {}
+        assert "no bounded Brainstack mirror candidates" in trace["note"]
     finally:
         provider.shutdown()
 
 
-def test_system_prompt_adds_truthful_memory_operation_contract(tmp_path):
+def test_system_prompt_stays_empty_for_ordinary_chat_after_non_bounded_native_write(tmp_path):
     provider = _make_provider(
         tmp_path,
         "prompt-contract",
@@ -134,9 +136,7 @@ def test_system_prompt_adds_truthful_memory_operation_contract(tmp_path):
         provider.on_memory_write("add", "user", "Mindig magyarul válaszolj.")
         block = provider.system_prompt_block()
 
-        assert "# Brainstack Truthful Memory Operations" in block
-        assert "Claim a durable Brainstack save only when the current turn includes a committed write receipt" in block
-        assert "committed Brainstack task records are authoritative" in block
+        assert block == ""
     finally:
         provider.shutdown()
 

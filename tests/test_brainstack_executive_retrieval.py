@@ -73,6 +73,9 @@ def test_temporal_route_uses_temporal_graph_rows_for_selection():
         def get_profile_item(self, stable_key, principal_scope_key=""):
             return None
 
+        def list_profile_items(self, limit=24, principal_scope_key=None):
+            return []
+
         def search_profile(self, query, limit):
             return []
 
@@ -167,6 +170,9 @@ def test_temporal_route_prioritizes_temporal_continuity_before_generic_recent_ro
     class DummyStore:
         def get_profile_item(self, stable_key, principal_scope_key=""):
             return None
+
+        def list_profile_items(self, limit=24, principal_scope_key=None):
+            return []
 
         def search_profile(self, query, limit):
             return []
@@ -379,6 +385,9 @@ def test_temporal_route_prefers_temporal_graph_rows_without_lexical_overlap_scor
     class DummyStore:
         def get_profile_item(self, stable_key, principal_scope_key=""):
             return None
+
+        def list_profile_items(self, limit=24, principal_scope_key=None):
+            return []
 
         def search_profile(self, query, limit):
             return []

@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+import re
 import threading
 import time
 from typing import Any, Callable, Dict, List, Mapping, Sequence
@@ -32,6 +33,12 @@ from .operating_truth import (
     parse_operating_capture,
 )
 from .output_contract import validate_output_against_contract
+from .profile_contract import (
+    COMMUNICATION_CANONICAL_SLOTS,
+    NATIVE_EXPLICIT_PROFILE_METADATA_KEY,
+    NATIVE_EXPLICIT_PROFILE_MIRROR_SOURCE,
+    normalize_profile_slot,
+)
 from .reconciler import reconcile_tier2_candidates
 from .retrieval import (
     build_compression_hint,
@@ -40,15 +47,139 @@ from .retrieval import (
 from .style_contract import (
     apply_style_contract_patch,
     build_style_contract_from_text,
+    has_explicit_style_authority_signal,
     list_style_contract_rules,
     looks_like_style_contract_fragment,
     looks_like_style_contract_teaching,
 )
 from .task_memory import build_task_stable_key, parse_task_capture, resolve_user_timezone
-from .tier1_extractor import build_profile_stable_key
+from .tier1_extractor import build_profile_stable_key, extract_profile_candidates
 from .tier2_extractor import extract_tier2_candidates
 
 logger = logging.getLogger(__name__)
+
+_INTERRUPTED_ASSISTANT_PREFIXES = (
+    "operation interrupted:",
+    "interrupting current task",
+    "session reset~",
+    "session reset!",
+)
+_INTERRUPTED_ASSISTANT_SUBSTRINGS = (
+    "i'll respond to your message shortly",
+    "waiting for model response",
+)
+
+
+def _stable_native_write_id(*, action: str, target: str, content: str) -> str:
+    normalized = " ".join(str(content or "").split())
+    digest = hashlib.sha256(f"{action}|{target}|{normalized}".encode("utf-8")).hexdigest()[:16]
+    return f"native:{action}:{target}:{digest}"
+
+
+def _native_profile_mirror_payload(*, native_write_id: str, action: str, target: str) -> Dict[str, Any]:
+    return {
+        "native_write_id": native_write_id,
+        "source_generation": native_write_id,
+        "mirrored_from": NATIVE_EXPLICIT_PROFILE_MIRROR_SOURCE,
+        "native_action": action,
+        "native_target": target,
+    }
+
+
+def _derive_native_profile_mirror_candidates(content: str) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    seen_slots: set[str] = set()
+
+    def _append_candidate(candidate: Dict[str, Any]) -> None:
+        slot = normalize_profile_slot(candidate.get("slot") or candidate.get("stable_key") or "")
+        if not slot:
+            return
+        if not (slot.startswith("identity:") or slot in COMMUNICATION_CANONICAL_SLOTS):
+            return
+        if slot in seen_slots:
+            return
+        seen_slots.add(slot)
+        entry = dict(candidate)
+        entry["slot"] = slot
+        entry["stable_key"] = slot
+        candidates.append(entry)
+
+    for item in extract_profile_candidates(content):
+        _append_candidate(dict(item))
+
+    normalized = " ".join(str(content or "").strip().split())
+    lowered = normalized.casefold()
+
+    native_name_match = None
+    for pattern in (
+        r"\b([A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű0-9_-]{2,40})(?:nak|nek)?\s+hívnak\b",
+        r"\ba nevem\s+([A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű0-9_-]{2,40})\b",
+    ):
+        native_name_match = re.search(pattern, normalized, re.IGNORECASE)
+        if native_name_match:
+            break
+    if native_name_match:
+        native_name = str(native_name_match.group(1) or "").strip()
+        for suffix in ("nak", "nek"):
+            lowered_name = native_name.casefold()
+            if lowered_name.endswith(suffix) and len(native_name) > len(suffix) + 1:
+                native_name = native_name[: -len(suffix)]
+                break
+        _append_candidate(
+            {
+                "category": "identity",
+                "slot": "identity:name",
+                "content": native_name,
+                "confidence": 0.95,
+                "source": "native_explicit_profile",
+            }
+        )
+
+    if any(token in lowered for token in ("magyarul válaszolj", "mindig magyarul", "respond in hungarian", "always respond in hungarian")):
+        _append_candidate(
+            {
+                "category": "preference",
+                "slot": "preference:response_language",
+                "content": "Always respond in Hungarian.",
+                "confidence": 0.95,
+                "source": "native_explicit_profile",
+            }
+        )
+
+    if any(token in lowered for token in ("emoji", "emoj")):
+        _append_candidate(
+            {
+                "category": "preference",
+                "slot": "preference:emoji_usage",
+                "content": "Do not use emojis.",
+                "confidence": 0.92,
+                "source": "native_explicit_profile",
+            }
+        )
+
+    if any(token in lowered for token in ("kötőjel", "em dash", "dash punctuation", "hyphen")):
+        _append_candidate(
+            {
+                "category": "preference",
+                "slot": "preference:dash_usage",
+                "content": "Do not use dash punctuation in replies.",
+                "confidence": 0.92,
+                "source": "native_explicit_profile",
+            }
+        )
+
+    if any(token in lowered for token in ("új sor", "külön sor", "new thought on a new line", "new line")):
+        _append_candidate(
+            {
+                "category": "preference",
+                "slot": "preference:message_structure",
+                "content": "Put each new thought on a new line.",
+                "confidence": 0.92,
+                "source": "native_explicit_profile",
+            }
+        )
+
+    return candidates
 
 
 def _build_personal_scope_key(*, platform: str = "", user_id: str = "") -> str:
@@ -161,6 +292,15 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._corpus_match_limit = int(self._config.get("corpus_match_limit", 4))
         self._corpus_char_budget = int(self._config.get("corpus_char_budget", 700))
         self._corpus_section_max_chars = int(self._config.get("corpus_section_max_chars", 900))
+        self._system_prompt_behavior_contract_enabled = bool(
+            self._config.get("system_prompt_behavior_contract_enabled", False)
+        )
+        self._ordinary_packet_behavior_contract_enabled = bool(
+            self._config.get("ordinary_packet_behavior_contract_enabled", False)
+        )
+        self._ordinary_reply_output_validation_enabled = bool(
+            self._config.get("ordinary_reply_output_validation_enabled", False)
+        )
         self._tier2_idle_window_seconds = int(self._config.get("tier2_idle_window_seconds", 30))
         self._tier2_batch_turn_limit = int(self._config.get("tier2_batch_turn_limit", 5))
         self._tier2_transcript_limit = int(self._config.get("tier2_transcript_limit", 8))
@@ -226,6 +366,21 @@ class BrainstackMemoryProvider(MemoryProvider):
             {"key": "corpus_match_limit", "description": "How many corpus sections to consider per turn", "default": "4"},
             {"key": "corpus_char_budget", "description": "Approximate character budget for packed corpus recall", "default": "700"},
             {"key": "corpus_section_max_chars", "description": "Maximum size of an ingested corpus section", "default": "900"},
+            {
+                "key": "system_prompt_behavior_contract_enabled",
+                "description": "Include the behavior contract in ordinary system prompt projection",
+                "default": "false",
+            },
+            {
+                "key": "ordinary_packet_behavior_contract_enabled",
+                "description": "Include the active communication contract in ordinary working-memory packets",
+                "default": "false",
+            },
+            {
+                "key": "ordinary_reply_output_validation_enabled",
+                "description": "Run Brainstack final-output validation on ordinary replies",
+                "default": "false",
+            },
             {"key": "user_timezone", "description": "Default timezone for relative task and commitment dates", "default": "UTC"},
             {"key": "tier2_idle_window_seconds", "description": "Idle window before the future Tier-2 batch may be queued", "default": "30"},
             {"key": "tier2_batch_turn_limit", "description": "How many turns may accumulate before the future Tier-2 batch is queued", "default": "5"},
@@ -501,6 +656,29 @@ class BrainstackMemoryProvider(MemoryProvider):
         if len(self._recent_user_messages) > 4:
             self._recent_user_messages = self._recent_user_messages[-4:]
 
+    def _looks_like_interrupted_assistant_placeholder(self, content: str) -> bool:
+        normalized = " ".join(str(content or "").strip().split())
+        if not normalized:
+            return False
+        lowered = normalized.casefold()
+        if any(lowered.startswith(prefix) for prefix in _INTERRUPTED_ASSISTANT_PREFIXES):
+            return True
+        return any(fragment in lowered for fragment in _INTERRUPTED_ASSISTANT_SUBSTRINGS)
+
+    def _should_defer_initial_style_contract_commit(self, *, user_content: str, assistant_content: str) -> bool:
+        if not self._store:
+            return False
+        if self._store.get_behavior_contract(principal_scope_key=self._principal_scope_key) is not None:
+            return False
+        text = str(user_content or "").strip()
+        if not text:
+            return False
+        if not has_explicit_style_authority_signal(text):
+            return False
+        if not looks_like_style_contract_teaching(text):
+            return False
+        return self._looks_like_interrupted_assistant_placeholder(assistant_content)
+
     def _iter_style_contract_candidate_texts(self, content: str) -> List[tuple[str, int]]:
         text = str(content or "").strip()
         if not text:
@@ -543,10 +721,14 @@ class BrainstackMemoryProvider(MemoryProvider):
         scoped_metadata = self._scoped_metadata(metadata)
         raw_contract = self._store.get_behavior_contract(principal_scope_key=self._principal_scope_key) if self._store else None
         direct_text = str(content or "").strip()
+        direct_text_has_explicit_authority = bool(
+            direct_text and has_explicit_style_authority_signal(direct_text)
+        )
         allow_fragment_merge = not (
             require_explicit_signal
             and direct_text
             and looks_like_style_contract_teaching(direct_text)
+            and direct_text_has_explicit_authority
         )
         best_candidate: Dict[str, Any] | None = None
         best_score: tuple[int, int, int] | None = None
@@ -832,6 +1014,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             profile_limit=self._profile_prompt_limit,
             principal_scope_key=self._principal_scope_key,
             session_id=self._session_id,
+            include_behavior_contract=self._system_prompt_behavior_contract_enabled,
         )
         block = str(projection.get("block") or "")
         snapshot = self._store.get_behavior_policy_snapshot(principal_scope_key=self._principal_scope_key)
@@ -880,6 +1063,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             profile_limit=self._profile_prompt_limit,
             principal_scope_key=self._principal_scope_key,
             session_id=sid,
+            include_behavior_contract=self._system_prompt_behavior_contract_enabled,
         )
         packet = build_working_memory_packet(
             self._store,
@@ -898,6 +1082,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             corpus_char_budget=self._corpus_char_budget,
             route_resolver=self._route_resolver_override or self._config.get("_route_resolver"),
             system_substrate=system_substrate,
+            render_ordinary_contract=self._ordinary_packet_behavior_contract_enabled,
         )
         self._last_prefetch_policy = packet["policy"]
         self._last_prefetch_routing = dict(packet.get("routing") or {})
@@ -1017,13 +1202,23 @@ class BrainstackMemoryProvider(MemoryProvider):
             created_at=event_time,
             metadata=self._scoped_metadata(),
         )
-        self._upsert_style_contract_candidate(
-            content=user_content,
-            source="sync_turn:user_style_contract",
-            confidence=0.9,
-            metadata={"session_id": sid, "turn_number": self._turn_counter},
-            require_explicit_signal=True,
-        )
+        if self._should_defer_initial_style_contract_commit(
+            user_content=user_content,
+            assistant_content=assistant_content,
+        ):
+            self._remember_recent_user_message(user_content)
+            self._set_memory_operation_trace(
+                surface="sync_turn_style_contract_deferral",
+                note="Deferred initial explicit style-contract commit until a non-interrupted assistant turn.",
+            )
+        else:
+            self._upsert_style_contract_candidate(
+                content=user_content,
+                source="sync_turn:user_style_contract",
+                confidence=0.9,
+                metadata={"session_id": sid, "turn_number": self._turn_counter},
+                require_explicit_signal=True,
+            )
         task_capture = self._infer_task_capture_candidate(content=user_content)
         self._commit_task_capture_candidate(
             capture=task_capture,
@@ -1353,39 +1548,84 @@ class BrainstackMemoryProvider(MemoryProvider):
         if not self._store or not content or action == "remove":
             return
         if target == "user":
+            native_write_id = _stable_native_write_id(action=action, target=target, content=content)
+            mirror_payload = _native_profile_mirror_payload(
+                native_write_id=native_write_id,
+                action=action,
+                target=target,
+            )
             if self._upsert_style_contract_candidate(
                 content=content,
-                source=f"builtin_{action}:style_contract",
+                source="memory_write:style_contract",
                 confidence=0.9,
-                metadata={"target": target},
+                metadata={
+                    "target": target,
+                    NATIVE_EXPLICIT_PROFILE_METADATA_KEY: mirror_payload,
+                },
+                require_explicit_signal=True,
             ):
                 return
-            if self._upsert_task_capture_candidate(
-                content=content,
-                source=f"builtin_{action}:task_memory",
-                metadata={"target": target},
-            ):
+            mirror_candidates = _derive_native_profile_mirror_candidates(content)
+            if not mirror_candidates:
+                self._set_memory_operation_trace(
+                    surface="native_profile_mirror",
+                    note="Native explicit user write produced no bounded Brainstack mirror candidates.",
+                )
                 return
-            scoped_metadata = self._scoped_metadata({"target": target})
-            category = "preference"
-            stable_key = build_profile_stable_key(category, content)
-            self._commit_explicit_write(
-                owner="brainstack.profile_items",
-                write_class="profile_item",
-                source=f"builtin_{action}",
-                target=target,
-                stable_key=stable_key,
-                category=category,
-                content=content,
-                commit=lambda: self._store.upsert_profile_item(
+            for index, candidate in enumerate(mirror_candidates, start=1):
+                stable_key = str(candidate.get("stable_key") or candidate.get("slot") or "").strip()
+                slot = str(candidate.get("slot") or stable_key).strip()
+                if not stable_key or not slot:
+                    continue
+                category = str(candidate.get("category") or ("identity" if slot.startswith("identity:") else "preference")).strip()
+                mirror_metadata = self._scoped_metadata(
+                    {
+                        "target": target,
+                        NATIVE_EXPLICIT_PROFILE_METADATA_KEY: {
+                            **mirror_payload,
+                            "slot": slot,
+                            "mirror_index": index,
+                        },
+                    }
+                )
+                source = f"builtin_{action}:native_profile_mirror"
+                candidate_content = str(candidate.get("content") or "").strip()
+                candidate_confidence = float(candidate.get("confidence") or 0.95)
+
+                def _commit_profile_item(
+                    *,
+                    stable_key: str = stable_key,
+                    category: str = category,
+                    candidate_content: str = candidate_content,
+                    source: str = source,
+                    candidate_confidence: float = candidate_confidence,
+                    mirror_metadata: Dict[str, Any] | None = mirror_metadata,
+                ) -> None:
+                    self._store.upsert_profile_item(
+                        stable_key=stable_key,
+                        category=category,
+                        content=candidate_content,
+                        source=source,
+                        confidence=candidate_confidence,
+                        metadata=mirror_metadata,
+                    )
+
+                self._commit_explicit_write(
+                    owner="brainstack.profile_items",
+                    write_class="native_profile_mirror",
+                    source=source,
+                    target=target,
                     stable_key=stable_key,
                     category=category,
-                    content=content,
-                    source=f"builtin_{action}",
-                    confidence=0.88,
-                    metadata=scoped_metadata,
-                ),
-            )
+                    content=candidate_content,
+                    commit=_commit_profile_item,
+                    extra={
+                        "native_write_id": native_write_id,
+                        "source_generation": native_write_id,
+                        "mirrored_from": NATIVE_EXPLICIT_PROFILE_MIRROR_SOURCE,
+                        "slot": slot,
+                    },
+                )
             return
 
         self._store.add_continuity_event(
@@ -1419,8 +1659,9 @@ class BrainstackMemoryProvider(MemoryProvider):
         compiled_before = (
             snapshot_before.get("compiled_policy") if isinstance(snapshot_before, Mapping) else {}
         ) or {}
+        raw_before_present = bool(isinstance(raw_before, Mapping) and raw_before.get("present"))
 
-        repair_attempted = bool(raw_before) and not bool(compiled_before.get("present"))
+        repair_attempted = raw_before_present and not bool(compiled_before.get("present"))
         repair_report: Dict[str, Any] | None = None
         if repair_attempted:
             repair_report = self._store.repair_behavior_contract_authority(
@@ -1432,14 +1673,15 @@ class BrainstackMemoryProvider(MemoryProvider):
         compiled_after = (
             snapshot_after.get("compiled_policy") if isinstance(snapshot_after, Mapping) else {}
         ) or {}
-        blocked = bool(raw_after) and not bool(compiled_after.get("present"))
+        raw_after_present = bool(isinstance(raw_after, Mapping) and raw_after.get("present"))
+        blocked = raw_after_present and not bool(compiled_after.get("present"))
         result = {
             "surface": surface,
             "repair_attempted": repair_attempted,
             "repair_report": json.loads(json.dumps(repair_report, ensure_ascii=True))
             if isinstance(repair_report, Mapping)
             else None,
-            "raw_contract_present": bool(raw_after),
+            "raw_contract_present": raw_after_present,
             "compiled_policy_present": bool(compiled_after.get("present")),
             "blocked": blocked,
             "reason": (
@@ -1458,7 +1700,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             "surface": surface,
             "repair_attempted": repair_attempted,
             "repair_report": result["repair_report"],
-            "raw_contract_present": bool(raw_after),
+            "raw_contract_present": raw_after_present,
             "compiled_policy_present": bool(compiled_after.get("present")),
             "blocked": blocked,
             "reason": result["reason"],
@@ -1631,29 +1873,49 @@ class BrainstackMemoryProvider(MemoryProvider):
     def validate_assistant_output(self, content: str) -> Dict[str, Any] | None:
         if not self._store:
             return None
+        if not self._ordinary_reply_output_validation_enabled:
+            trace = dict(self._last_behavior_policy_trace or {})
+            trace["final_output_validation"] = {
+                "surface": "final_output_validation",
+                "applied": False,
+                "changed": False,
+                "status": "skipped",
+                "blocked": False,
+                "can_ship": True,
+                "block_reason": "",
+                "repair_count": 0,
+                "remaining_violation_count": 0,
+                "contract": {
+                    "active": False,
+                    "ordinary_reply_validation_enabled": False,
+                },
+            }
+            self._last_behavior_policy_trace = trace
+            return None
         authority_state = self._ensure_behavior_authority_ready(surface="final_output_validation")
         if authority_state.get("blocked"):
             result = {
                 "content": str(content or ""),
                 "changed": False,
                 "applied": True,
-                "status": "blocked",
-                "blocked": True,
-                "can_ship": False,
-                "block_reason": "compiled_behavior_policy_unavailable",
+                "status": "advisory",
+                "blocked": False,
+                "can_ship": True,
+                "block_reason": "",
                 "contract": {
                     "active": True,
                     "authority_required": True,
                     "compiled_policy_present": False,
                     "sources": [],
                 },
+                "enforcement_mode": "ordinary_reply",
                 "repairs": [],
                 "remaining_violations": [
                     {
                         "kind": "behavior_policy_authority",
                         "violation": "compiled_policy_missing_for_active_authority",
                         "repair": "repair_or_fail_closed",
-                        "enforcement": "block",
+                        "enforcement": "advisory",
                     }
                 ],
             }
@@ -1662,10 +1924,10 @@ class BrainstackMemoryProvider(MemoryProvider):
                 "surface": "final_output_validation",
                 "applied": True,
                 "changed": False,
-                "status": "blocked",
-                "blocked": True,
-                "can_ship": False,
-                "block_reason": "compiled_behavior_policy_unavailable",
+                "status": "advisory",
+                "blocked": False,
+                "can_ship": True,
+                "block_reason": "",
                 "repair_count": 0,
                 "remaining_violation_count": 1,
                 "contract": dict(result.get("contract") or {}),
@@ -1681,6 +1943,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         result = validate_output_against_contract(
             content=content,
             compiled_policy=compiled_policy,
+            enforcement_mode="ordinary_reply",
         )
         trace = dict(self._last_behavior_policy_trace or {})
         trace["final_output_validation"] = {

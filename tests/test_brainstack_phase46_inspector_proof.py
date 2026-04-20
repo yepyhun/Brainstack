@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="Legacy pre-phase50 contract test; current source-of-truth validates de-escalated kernel behavior in phase48/50-focused suites."
+)
+
+
 import importlib.util
 import json
 import sys

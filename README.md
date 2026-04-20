@@ -30,7 +30,6 @@ Brainstack is built from three donor lines, then reshaped into one Hermes-native
 Additional patterns also shape the current code:
 
 - **Hermes-LCM** for bounded transcript evidence fallback
-- **RTK-style sidecar discipline** for token-aware auxiliary processing without taking memory ownership
 
 
 ## How a query flows through Brainstack
@@ -92,7 +91,7 @@ Transcript is evidence. Graph is truth. Corpus is corpus. Profile is profile. Th
 ## Current status
 
 - runs inside Hermes-Agent as a direct `MemoryProvider` plugin
-- is intended to be the single live memory path when Hermes builtin memory is disabled
+- augments Hermes through the native explicit-memory seam instead of replacing builtin user/profile writes
 - keeps runtime ownership in Brainstack while storage is split by responsibility
 - uses `SQLite` for shell, session, profile, transcript, and lexical fallback state
 - uses embedded `Kuzu` for L2 graph truth
@@ -142,7 +141,6 @@ This shows up as a strict internal separation of concerns:
 Additional patterns also influence the current code:
 
 - **Hermes-LCM transcript pattern** for bounded raw transcript retention and temporal evidence fallback
-- **RTK-style sidecar discipline** for token-aware auxiliary work without taking memory ownership
 
 ## What Brainstack adds on top
 
@@ -216,7 +214,6 @@ This repository is a focused Brainstack slice containing:
 - the Hermes-native Brainstack plugin code under `brainstack/`
 - donor boundaries and refresh logic under `brainstack/donors/` and `scripts/`
 - focused test slices under `tests/`
-- optional RTK sidecar integration surface in `rtk_sidecar.py`
 - proof artifacts under `reports/`
 
 ## Repo layout
@@ -230,7 +227,6 @@ scripts/
 tests/
 brainstack_doctor.py
 install_into_hermes.py
-rtk_sidecar.py
 update_hermes_with_brainstack.py
 ```
 
@@ -242,7 +238,6 @@ update_hermes_with_brainstack.py
 | `update_hermes_with_brainstack.py` | Refresh Hermes upstream and reinstall Brainstack |
 | `brainstack_doctor.py` | Validate install assumptions and fail closed when upstream changed something important |
 | `scripts/brainstack_refresh_donors.py` | Report donor state and run bounded refresh workflow |
-| `rtk_sidecar.py` | Optional token-aware sidecar surface |
 
 ## Installation into Hermes
 
@@ -271,9 +266,9 @@ What the installer does:
 | Area | Action |
 | :--- | :--- |
 | Plugin payload | Copies `brainstack/` into `plugins/memory/brainstack/` |
-| Host helper | Copies `agent/brainstack_mode.py` and `rtk_sidecar.py` when the target checkout supports them |
-| Host patching | Gates legacy `memory` and `session_search` tool exposure in Brainstack-only mode and routes session boundaries through a Brainstack-aware finalizer |
-| Config | Sets `memory.provider: brainstack`, disables builtin memory and builtin profile memory, and wires the `Kuzu` and `Chroma` paths |
+| Host helper | Copies only Brainstack-specific runtime helpers; RTK sidecar wiring is not installed because upstream Hermes already owns tool-result budgeting natively |
+| Host patching | Applies only additive runtime helpers that keep Hermes native delivery and explicit memory writes intact |
+| Config | Sets `memory.provider: brainstack`, keeps builtin memory and builtin user profile enabled, and wires the `Kuzu` and `Chroma` paths |
 | Docker support | Generates `scripts/hermes-brainstack-start.sh`, adds a readiness-aware healthcheck, and supports the same install flow as local mode |
 | Verification | Writes a sanitized install manifest and can run doctor checks immediately |
 
@@ -337,7 +332,7 @@ The helper is intentionally small:
 
 `brainstack_doctor.py` is designed to fail closed.
 
-It validates that the target checkout still looks like Hermes, that the provider/plugin loader surfaces exist, that Brainstack is present and importable, that Brainstack-only helpers are present, that legacy `memory` and `session_search` exposure is properly gated, and that config really selects Brainstack with builtin memory turned off. In `docker` mode it also checks the readiness-aware health wiring. In `local` mode it skips the Docker-specific assumptions.
+It validates that the target checkout still looks like Hermes, that the provider/plugin loader surfaces exist, that Brainstack is present and importable, that Hermes native explicit-memory surfaces remain enabled, and that config selects Brainstack without replacing the host's builtin profile write path. In `docker` mode it also checks the readiness-aware health wiring. In `local` mode it skips the Docker-specific assumptions.
 
 If Hermes upstream removes a required provider surface, the correct outcome is an explicit incompatibility report, not a silent partial install.
 

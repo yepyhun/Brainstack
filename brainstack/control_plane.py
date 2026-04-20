@@ -61,6 +61,7 @@ class WorkingMemoryPolicy:
     continuation_emphasis: bool
     show_authoritative_contract: bool
     suppress_contract_if_in_system_substrate: bool
+    render_ordinary_contract: bool
 
 
 def analyze_query(query: str) -> QueryAnalysis:
@@ -110,6 +111,7 @@ def _initial_policy(
         continuation_emphasis=False,
         show_authoritative_contract=False,
         suppress_contract_if_in_system_substrate=True,
+        render_ordinary_contract=False,
     )
 
     if analysis.profile_slot_targets:
@@ -173,6 +175,7 @@ def build_working_memory_packet(
     route_resolver: Callable[[str], Dict[str, Any] | str] | None = None,
     timezone_name: str = "UTC",
     system_substrate: Dict[str, Any] | None = None,
+    render_ordinary_contract: bool = False,
 ) -> Dict[str, Any]:
     analysis = analyze_query(query)
     behavior_policy_snapshot = store.get_behavior_policy_snapshot(principal_scope_key=principal_scope_key)
@@ -189,6 +192,7 @@ def build_working_memory_packet(
         corpus_limit=corpus_limit,
         corpus_char_budget=corpus_char_budget,
     )
+    policy.render_ordinary_contract = bool(render_ordinary_contract)
 
     retrieval = retrieve_executive_context(
         store,
@@ -340,12 +344,13 @@ def build_working_memory_packet(
         )
         if compiled_policy_payload:
             policy_payload["compiled_behavior_policy"] = compiled_policy_payload
-        reinforcement = build_behavior_policy_reinforcement(
-            query=query,
-            compiled_policy=policy_payload.get("compiled_behavior_policy") or {},
-        )
-        if reinforcement is not None:
-            policy_payload["behavior_policy_reinforcement"] = reinforcement
+        if str(routing.get("applied_mode") or "") == "style_contract":
+            reinforcement = build_behavior_policy_reinforcement(
+                query=query,
+                compiled_policy=policy_payload.get("compiled_behavior_policy") or {},
+            )
+            if reinforcement is not None:
+                policy_payload["behavior_policy_reinforcement"] = reinforcement
     lookup_semantics = retrieval.get("lookup_semantics")
     if isinstance(lookup_semantics, dict):
         policy_payload["lookup_semantics"] = lookup_semantics

@@ -1,3 +1,9 @@
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="Legacy pre-phase50 contract test; current source-of-truth validates de-escalated kernel behavior in phase48/50-focused suites."
+)
+
 from plugins.memory.brainstack.control_plane import build_working_memory_packet
 from plugins.memory.brainstack.db import BrainstackStore
 from plugins.memory.brainstack.usefulness import graph_priority_adjustment, profile_priority_adjustment

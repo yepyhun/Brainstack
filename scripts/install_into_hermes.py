@@ -22,7 +22,6 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PLUGIN = REPO_ROOT / "brainstack"
-SOURCE_RTK = REPO_ROOT / "rtk_sidecar.py"
 SOURCE_HOST_PAYLOAD = REPO_ROOT / "host_payload"
 BACKEND_DEPENDENCIES = {
     "kuzu": "kuzu",
@@ -144,583 +143,6 @@ def _replace_once_any(
         if old in text:
             return text.replace(old, new, 1)
     raise RuntimeError(f"Installer patch anchor missing for {label} in {path}")
-
-
-def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
-    text = path.read_text(encoding="utf-8")
-    applied: list[str] = []
-
-    if "from agent.rtk_sidecar import build_rtk_sidecar_config, RTKSidecarStats, maybe_preprocess_tool_result" not in text:
-        text = _replace_once_any(
-            text,
-            [
-                (
-                    "from agent.trajectory import (\n"
-                    "    convert_scratchpad_to_think, has_incomplete_scratchpad,\n"
-                    "    save_trajectory as _save_trajectory_to_file,\n"
-                    ")\n",
-                    "from agent.trajectory import (\n"
-                    "    convert_scratchpad_to_think, has_incomplete_scratchpad,\n"
-                    "    save_trajectory as _save_trajectory_to_file,\n"
-                    ")\n"
-                    "from agent.rtk_sidecar import build_rtk_sidecar_config, RTKSidecarStats, maybe_preprocess_tool_result\n",
-                ),
-            ],
-            label="run_agent rtk import",
-            path=path,
-        )
-        applied.append("run_agent:import_rtk_sidecar")
-
-    if "from agent.brainstack_mode import (" not in text:
-        text = _replace_once_any(
-            text,
-            [
-                (
-                    "from agent.memory_manager import build_memory_context_block\n",
-                    "from agent.memory_manager import build_memory_context_block\n"
-                    "from agent.brainstack_mode import (\n"
-                    "    LEGACY_MEMORY_TOOL_NAMES,\n"
-                    "    apply_brainstack_output_validation,\n"
-                    "    blocked_brainstack_only_tool_error,\n"
-                    "    filter_legacy_memory_tool_defs,\n"
-                    "    is_brainstack_only_mode,\n"
-                    ")\n",
-                ),
-                (
-                    "from agent.memory_manager import (\n"
-                    "    build_memory_context_block,\n"
-                    ")\n",
-                    "from agent.memory_manager import (\n"
-                    "    build_memory_context_block,\n"
-                    ")\n"
-                    "from agent.brainstack_mode import (\n"
-                    "    LEGACY_MEMORY_TOOL_NAMES,\n"
-                    "    apply_brainstack_output_validation,\n"
-                    "    blocked_brainstack_only_tool_error,\n"
-                    "    filter_legacy_memory_tool_defs,\n"
-                    "    is_brainstack_only_mode,\n"
-                    ")\n",
-                ),
-                (
-                    "from agent.memory_manager import build_memory_context_block, sanitize_context\n",
-                    "from agent.memory_manager import build_memory_context_block, sanitize_context\n"
-                    "from agent.brainstack_mode import (\n"
-                    "    LEGACY_MEMORY_TOOL_NAMES,\n"
-                    "    apply_brainstack_output_validation,\n"
-                    "    blocked_brainstack_only_tool_error,\n"
-                    "    filter_legacy_memory_tool_defs,\n"
-                    "    is_brainstack_only_mode,\n"
-                    ")\n",
-                ),
-            ],
-            label="run_agent import",
-            path=path,
-        )
-        applied.append("run_agent:import_brainstack_mode")
-
-    if "apply_brainstack_output_validation" not in text and "from agent.brainstack_mode import (" in text:
-        text = _replace_once_any(
-            text,
-            [
-                (
-                    "from agent.brainstack_mode import (\n"
-                    "    LEGACY_MEMORY_TOOL_NAMES,\n"
-                    "    blocked_brainstack_only_tool_error,\n"
-                    "    filter_legacy_memory_tool_defs,\n"
-                    "    is_brainstack_only_mode,\n"
-                    ")\n",
-                    "from agent.brainstack_mode import (\n"
-                    "    LEGACY_MEMORY_TOOL_NAMES,\n"
-                    "    apply_brainstack_output_validation,\n"
-                    "    blocked_brainstack_only_tool_error,\n"
-                    "    filter_legacy_memory_tool_defs,\n"
-                    "    is_brainstack_only_mode,\n"
-                    ")\n",
-                ),
-            ],
-            label="run_agent import brainstack output validator",
-            path=path,
-        )
-        applied.append("run_agent:import_output_validator")
-
-    if "self._rtk_sidecar = build_rtk_sidecar_config(_agent_cfg)" not in text:
-        text = _replace_once_any(
-            text,
-            [
-                (
-                    "        self._brainstack_only_mode = is_brainstack_only_mode(_agent_cfg)\n",
-                    "        self._rtk_sidecar = build_rtk_sidecar_config(_agent_cfg)\n"
-                    "        self._rtk_sidecar_stats = RTKSidecarStats()\n"
-                    "        self._brainstack_only_mode = is_brainstack_only_mode(_agent_cfg)\n",
-                ),
-                (
-                    "        except Exception:\n            _agent_cfg = {}\n",
-                    "        except Exception:\n"
-                    "            _agent_cfg = {}\n"
-                    "        self._rtk_sidecar = build_rtk_sidecar_config(_agent_cfg)\n"
-                    "        self._rtk_sidecar_stats = RTKSidecarStats()\n",
-                ),
-            ],
-            label="run_agent rtk init",
-            path=path,
-        )
-        applied.append("run_agent:init_rtk_sidecar")
-
-    cfg_anchor = "        except Exception:\n            _agent_cfg = {}\n"
-    cfg_inject = "        except Exception:\n            _agent_cfg = {}\n        self._brainstack_only_mode = is_brainstack_only_mode(_agent_cfg)\n"
-    if "self._brainstack_only_mode = is_brainstack_only_mode(_agent_cfg)" not in text:
-        text = _replace_once(text, cfg_anchor, cfg_inject, label="run_agent mode flag", path=path)
-        applied.append("run_agent:set_brainstack_only_flag")
-
-    filter_anchor = (
-        "        if self._memory_manager and self.tools is not None:\n"
-        "            for _schema in self._memory_manager.get_all_tool_schemas():\n"
-        "                _wrapped = {\"type\": \"function\", \"function\": _schema}\n"
-        "                self.tools.append(_wrapped)\n"
-        "                _tname = _schema.get(\"name\", \"\")\n"
-        "                if _tname:\n"
-        "                    self.valid_tool_names.add(_tname)\n"
-    )
-    filter_anchor_with_existing_names = (
-        "        if self._memory_manager and self.tools is not None:\n"
-        "            _existing_tool_names = {\n"
-        "                t.get(\"function\", {}).get(\"name\")\n"
-        "                for t in self.tools\n"
-        "                if isinstance(t, dict)\n"
-        "            }\n"
-        "            for _schema in self._memory_manager.get_all_tool_schemas():\n"
-        "                _tname = _schema.get(\"name\", \"\")\n"
-        "                if _tname and _tname in _existing_tool_names:\n"
-        "                    continue  # already registered via plugin path\n"
-        "                _wrapped = {\"type\": \"function\", \"function\": _schema}\n"
-        "                self.tools.append(_wrapped)\n"
-        "                if _tname:\n"
-        "                    self.valid_tool_names.add(_tname)\n"
-        "                    _existing_tool_names.add(_tname)\n"
-    )
-    filter_inject = filter_anchor + (
-        "        if self.tools is not None:\n"
-        "            filtered_tools = filter_legacy_memory_tool_defs(self.tools, config=_agent_cfg)\n"
-        "            if len(filtered_tools) != len(self.tools):\n"
-        "                self.tools = filtered_tools\n"
-        "                self.valid_tool_names = {\n"
-        "                    tool[\"function\"][\"name\"]\n"
-        "                    for tool in self.tools\n"
-        "                    if tool.get(\"function\", {}).get(\"name\")\n"
-        "                }\n"
-    )
-    if "filtered_tools = filter_legacy_memory_tool_defs(self.tools, config=_agent_cfg)" not in text:
-        text = _replace_once_any(
-            text,
-            [
-                (filter_anchor, filter_inject),
-                (
-                    filter_anchor_with_existing_names,
-                    filter_anchor_with_existing_names + (
-                        "        if self.tools is not None:\n"
-                        "            filtered_tools = filter_legacy_memory_tool_defs(self.tools, config=_agent_cfg)\n"
-                        "            if len(filtered_tools) != len(self.tools):\n"
-                        "                self.tools = filtered_tools\n"
-                        "                self.valid_tool_names = {\n"
-                        "                    tool[\"function\"][\"name\"]\n"
-                        "                    for tool in self.tools\n"
-                        "                    if tool.get(\"function\", {}).get(\"name\")\n"
-                        "                }\n"
-                    ),
-                ),
-            ],
-            label="run_agent tool filter",
-            path=path,
-        )
-        applied.append("run_agent:filter_legacy_tools")
-
-    guidance_replacements = [
-        (
-            "        if \"session_search\" in self.valid_tool_names:\n"
-            "            tool_guidance.append(SESSION_SEARCH_GUIDANCE)\n"
-            "        if \"skill_manage\" in self.valid_tool_names:\n"
-            "            tool_guidance.append(SKILLS_GUIDANCE)\n"
-        ),
-        (
-            "        if \"session_search\" in self.valid_tool_names:\n"
-            "            tool_guidance.append(SESSION_SEARCH_GUIDANCE)\n"
-            "        if \"skill_manage\" in self.valid_tool_names:\n"
-            "            if self._brainstack_only_mode:\n"
-            "                tool_guidance.append(\n"
-            "                    \"Use skill_manage only for reusable procedures or workflows. Never store personal profile, identity, communication style, or project memory there while Brainstack owns memory.\"\n"
-            "                )\n"
-            "            else:\n"
-            "                tool_guidance.append(SKILLS_GUIDANCE)\n"
-        ),
-    ]
-    guidance_inject = (
-        "        if \"session_search\" in self.valid_tool_names:\n"
-        "            tool_guidance.append(SESSION_SEARCH_GUIDANCE)\n"
-        "        if self._brainstack_only_mode:\n"
-        "            tool_guidance.append(\n"
-        "                \"Brainstack owns personal memory in this mode. Keep user identity, preferences, communication style, and project context inside Brainstack. Do not create or maintain notes files, MEMORY.md, USER.md, persona.md, or side skill files for that kind of memory. Do not use ad hoc code, terminal writes, file edits, cronjob scheduling, or other automation detours to persist or recover personal memory. Do not use secondary memory APIs from ad hoc code either. session_search may be used only as explicit conversation search, not as a second personal-memory system. Use skill_manage only for reusable procedures or workflows.\"\n"
-        "            )\n"
-        "        elif \"skill_manage\" in self.valid_tool_names:\n"
-        "            tool_guidance.append(SKILLS_GUIDANCE)\n"
-    )
-    if "Brainstack owns personal memory in this mode." not in text:
-        text = _replace_once_any(
-            text,
-            [(anchor, guidance_inject) for anchor in guidance_replacements],
-            label="run_agent skill guidance",
-            path=path,
-        )
-        applied.append("run_agent:scope_personal_memory_guidance")
-
-    nudge_anchor = (
-        "            if (self._skill_nudge_interval > 0\n"
-        "                    and \"skill_manage\" in self.valid_tool_names):\n"
-        "                self._iters_since_skill += 1\n"
-    )
-    nudge_inject = (
-        "            if (self._skill_nudge_interval > 0\n"
-        "                    and \"skill_manage\" in self.valid_tool_names\n"
-        "                    and not self._brainstack_only_mode):\n"
-        "                self._iters_since_skill += 1\n"
-    )
-    if "and not self._brainstack_only_mode):\n                self._iters_since_skill += 1" not in text:
-        text = _replace_once(text, nudge_anchor, nudge_inject, label="run_agent skill nudge counter", path=path)
-        applied.append("run_agent:disable_skill_nudge_counter_in_brainstack_only")
-
-    review_anchor = (
-        "        if (self._skill_nudge_interval > 0\n"
-        "                and self._iters_since_skill >= self._skill_nudge_interval\n"
-        "                and \"skill_manage\" in self.valid_tool_names):\n"
-        "            _should_review_skills = True\n"
-        "            self._iters_since_skill = 0\n"
-    )
-    review_inject = (
-        "        if (self._skill_nudge_interval > 0\n"
-        "                and self._iters_since_skill >= self._skill_nudge_interval\n"
-        "                and \"skill_manage\" in self.valid_tool_names\n"
-        "                and not self._brainstack_only_mode):\n"
-        "            _should_review_skills = True\n"
-        "            self._iters_since_skill = 0\n"
-    )
-    if "and not self._brainstack_only_mode):\n            _should_review_skills = True" not in text:
-        text = _replace_once(text, review_anchor, review_inject, label="run_agent skill nudge review gate", path=path)
-        applied.append("run_agent:disable_skill_nudge_review_in_brainstack_only")
-
-    invoke_anchor = (
-        "        Handles both agent-level tools (todo, memory, etc.) and registry-dispatched\n"
-        "        tools. Used by the concurrent execution path; the sequential path retains\n"
-        "        its own inline invocation for backward-compatible display handling.\n"
-        "        \"\"\"\n"
-    )
-    invoke_inject = invoke_anchor + (
-        "        brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)\n"
-        "        if self._brainstack_only_mode and brainstack_only_error:\n"
-        "            return json.dumps(\n"
-        "                {\n"
-        "                    \"success\": False,\n"
-        "                    \"error\": brainstack_only_error,\n"
-        "                }\n"
-        "            )\n"
-    )
-    if "brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)" not in text:
-        text = _replace_once(text, invoke_anchor, invoke_inject, label="run_agent invoke guard", path=path)
-        applied.append("run_agent:block_legacy_dispatch")
-
-    quiet_seq_anchor = (
-        "                try:\n"
-        "                    function_result = handle_function_call(\n"
-        "                        function_name, function_args, effective_task_id,\n"
-        "                        tool_call_id=tool_call.id,\n"
-        "                        session_id=self.session_id or \"\",\n"
-        "                        enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,\n"
-        "                        skip_pre_tool_call_hook=True,\n"
-        "                    )\n"
-        "                    _spinner_result = function_result\n"
-    )
-    quiet_seq_inject = (
-        "                try:\n"
-        "                    brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)\n"
-        "                    if self._brainstack_only_mode and brainstack_only_error:\n"
-        "                        function_result = json.dumps(\n"
-        "                            {\n"
-        "                                \"success\": False,\n"
-        "                                \"error\": brainstack_only_error,\n"
-        "                            }\n"
-        "                        )\n"
-        "                    else:\n"
-        "                        function_result = handle_function_call(\n"
-        "                            function_name, function_args, effective_task_id,\n"
-        "                            tool_call_id=tool_call.id,\n"
-        "                            session_id=self.session_id or \"\",\n"
-        "                            enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,\n"
-        "                            skip_pre_tool_call_hook=True,\n"
-        "                        )\n"
-        "                    _spinner_result = function_result\n"
-    )
-    quiet_seq_marker = (
-        "                    brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)\n"
-        "                    if self._brainstack_only_mode and brainstack_only_error:\n"
-        "                        function_result = json.dumps(\n"
-        "                            {\n"
-        "                                \"success\": False,\n"
-        "                                \"error\": brainstack_only_error,\n"
-        "                            }\n"
-        "                        )\n"
-        "                    else:\n"
-        "                        function_result = handle_function_call(\n"
-        "                            function_name, function_args, effective_task_id,\n"
-        "                            tool_call_id=tool_call.id,\n"
-        "                            session_id=self.session_id or \"\",\n"
-        "                            enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,\n"
-        "                            skip_pre_tool_call_hook=True,\n"
-        "                        )\n"
-        "                    _spinner_result = function_result\n"
-    )
-    if quiet_seq_marker not in text:
-        text = _replace_once(
-            text,
-            quiet_seq_anchor,
-            quiet_seq_inject,
-            label="run_agent quiet sequential guard",
-            path=path,
-        )
-        applied.append("run_agent:block_quiet_sequential_path")
-
-    seq_anchor = (
-        "                try:\n"
-        "                    function_result = handle_function_call(\n"
-        "                        function_name, function_args, effective_task_id,\n"
-        "                        tool_call_id=tool_call.id,\n"
-        "                        session_id=self.session_id or \"\",\n"
-        "                        enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,\n"
-        "                        skip_pre_tool_call_hook=True,\n"
-        "                    )\n"
-    )
-    seq_inject = (
-        "                try:\n"
-        "                    brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)\n"
-        "                    if self._brainstack_only_mode and brainstack_only_error:\n"
-        "                        function_result = json.dumps(\n"
-        "                            {\n"
-        "                                \"success\": False,\n"
-        "                                \"error\": brainstack_only_error,\n"
-        "                            }\n"
-        "                        )\n"
-        "                    else:\n"
-        "                        function_result = handle_function_call(\n"
-        "                            function_name, function_args, effective_task_id,\n"
-        "                            tool_call_id=tool_call.id,\n"
-        "                            session_id=self.session_id or \"\",\n"
-        "                            enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,\n"
-        "                            skip_pre_tool_call_hook=True,\n"
-        "                        )\n"
-    )
-    seq_marker = (
-        "                    brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)\n"
-        "                    if self._brainstack_only_mode and brainstack_only_error:\n"
-        "                        function_result = json.dumps(\n"
-            "                            {\n"
-            "                                \"success\": False,\n"
-            "                                \"error\": brainstack_only_error,\n"
-            "                            }\n"
-            "                        )\n"
-            "                    else:\n"
-            "                        function_result = handle_function_call(\n"
-            "                            function_name, function_args, effective_task_id,\n"
-            "                            tool_call_id=tool_call.id,\n"
-            "                            session_id=self.session_id or \"\",\n"
-            "                            enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,\n"
-            "                            skip_pre_tool_call_hook=True,\n"
-            "                        )\n"
-        "                except Exception as tool_error:\n"
-    )
-    if seq_marker not in text:
-        text = _replace_once(text, seq_anchor, seq_inject, label="run_agent sequential guard", path=path)
-        applied.append("run_agent:block_legacy_sequential_path")
-
-    if "self._rtk_sidecar_stats.record_preprocessing_effect(raw_result, preprocessed_result)" not in text:
-        text = _replace_once_any(
-            text,
-            [
-                (
-                    "            function_result = maybe_persist_tool_result(\n"
-                    "                content=function_result,\n"
-                    "                tool_name=name,\n"
-                    "                tool_use_id=tc.id,\n"
-                    "                env=get_active_env(effective_task_id),\n"
-                    "            )\n",
-                    "            raw_result = function_result\n"
-                    "            preprocessed_result = maybe_preprocess_tool_result(function_result, self._rtk_sidecar)\n"
-                    "            self._rtk_sidecar_stats.record_preprocessing_effect(raw_result, preprocessed_result)\n"
-                    "            function_result = maybe_persist_tool_result(\n"
-                    "                content=preprocessed_result,\n"
-                    "                tool_name=name,\n"
-                    "                tool_use_id=tc.id,\n"
-                    "                env=get_active_env(effective_task_id),\n"
-                    "                config=self._rtk_sidecar.budget,\n"
-                    "            )\n"
-                    "            self._rtk_sidecar_stats.record_result(raw_result, function_result)\n",
-                ),
-                (
-                    "            raw_result = function_result\n"
-                    "            function_result = maybe_persist_tool_result(\n"
-                    "                content=function_result,\n"
-                    "                tool_name=name,\n"
-                    "                tool_use_id=tc.id,\n"
-                    "                env=get_active_env(effective_task_id),\n"
-                    "                config=self._rtk_sidecar.budget,\n"
-                    "            )\n"
-                    "            self._rtk_sidecar_stats.record_result(raw_result, function_result)\n",
-                    "            raw_result = function_result\n"
-                    "            preprocessed_result = maybe_preprocess_tool_result(function_result, self._rtk_sidecar)\n"
-                    "            self._rtk_sidecar_stats.record_preprocessing_effect(raw_result, preprocessed_result)\n"
-                    "            function_result = maybe_persist_tool_result(\n"
-                    "                content=preprocessed_result,\n"
-                    "                tool_name=name,\n"
-                    "                tool_use_id=tc.id,\n"
-                    "                env=get_active_env(effective_task_id),\n"
-                    "                config=self._rtk_sidecar.budget,\n"
-                    "            )\n"
-                    "            self._rtk_sidecar_stats.record_result(raw_result, function_result)\n",
-                ),
-                (
-                    "            function_result = maybe_persist_tool_result(\n"
-                    "                content=function_result,\n"
-                    "                tool_name=function_name,\n"
-                    "                tool_use_id=tool_call.id,\n"
-                    "                env=get_active_env(effective_task_id),\n"
-                    "            )\n",
-                    "            raw_result = function_result\n"
-                    "            preprocessed_result = maybe_preprocess_tool_result(function_result, self._rtk_sidecar)\n"
-                    "            self._rtk_sidecar_stats.record_preprocessing_effect(raw_result, preprocessed_result)\n"
-                    "            function_result = maybe_persist_tool_result(\n"
-                    "                content=preprocessed_result,\n"
-                    "                tool_name=function_name,\n"
-                    "                tool_use_id=tool_call.id,\n"
-                    "                env=get_active_env(effective_task_id),\n"
-                    "                config=self._rtk_sidecar.budget,\n"
-                    "            )\n"
-                    "            self._rtk_sidecar_stats.record_result(raw_result, function_result)\n",
-                ),
-                (
-                    "            raw_result = function_result\n"
-                    "            function_result = maybe_persist_tool_result(\n"
-                    "                content=function_result,\n"
-                    "                tool_name=function_name,\n"
-                    "                tool_use_id=tool_call.id,\n"
-                    "                env=get_active_env(effective_task_id),\n"
-                    "                config=self._rtk_sidecar.budget,\n"
-                    "            )\n"
-                    "            self._rtk_sidecar_stats.record_result(raw_result, function_result)\n",
-                    "            raw_result = function_result\n"
-                    "            preprocessed_result = maybe_preprocess_tool_result(function_result, self._rtk_sidecar)\n"
-                    "            self._rtk_sidecar_stats.record_preprocessing_effect(raw_result, preprocessed_result)\n"
-                    "            function_result = maybe_persist_tool_result(\n"
-                    "                content=preprocessed_result,\n"
-                    "                tool_name=function_name,\n"
-                    "                tool_use_id=tool_call.id,\n"
-                    "                env=get_active_env(effective_task_id),\n"
-                    "                config=self._rtk_sidecar.budget,\n"
-                    "            )\n"
-                    "            self._rtk_sidecar_stats.record_result(raw_result, function_result)\n",
-                ),
-            ],
-            label="run_agent rtk preprocess path",
-            path=path,
-        )
-        applied.append("run_agent:rtk_preprocess_path")
-
-    if "self._rtk_sidecar_stats.record_turn_budget_effect(before_budget_total, after_budget_total)" not in text:
-        text = _replace_once_any(
-            text,
-            [
-                (
-                    "            enforce_turn_budget(turn_tool_msgs, env=get_active_env(effective_task_id))\n",
-                    "            before_budget_total = sum(len(msg.get(\"content\", \"\")) for msg in turn_tool_msgs)\n"
-                    "            enforce_turn_budget(\n"
-                    "                turn_tool_msgs,\n"
-                    "                env=get_active_env(effective_task_id),\n"
-                    "                config=self._rtk_sidecar.budget,\n"
-                    "            )\n"
-                    "            after_budget_total = sum(len(msg.get(\"content\", \"\")) for msg in turn_tool_msgs)\n"
-                    "            self._rtk_sidecar_stats.record_turn_budget_effect(before_budget_total, after_budget_total)\n",
-                ),
-                (
-                    "            enforce_turn_budget(messages[-num_tools_seq:], env=get_active_env(effective_task_id))\n",
-                    "            turn_tool_msgs = messages[-num_tools_seq:]\n"
-                    "            before_budget_total = sum(len(msg.get(\"content\", \"\")) for msg in turn_tool_msgs)\n"
-                    "            enforce_turn_budget(\n"
-                    "                turn_tool_msgs,\n"
-                    "                env=get_active_env(effective_task_id),\n"
-                    "                config=self._rtk_sidecar.budget,\n"
-                    "            )\n"
-                    "            after_budget_total = sum(len(msg.get(\"content\", \"\")) for msg in turn_tool_msgs)\n"
-                    "            self._rtk_sidecar_stats.record_turn_budget_effect(before_budget_total, after_budget_total)\n",
-                ),
-            ],
-            label="run_agent rtk turn budget",
-            path=path,
-        )
-        applied.append("run_agent:rtk_turn_budget")
-
-    summary_validation_anchor = (
-        "            if final_response:\n"
-        "                if \"<think>\" in final_response:\n"
-        "                    final_response = re.sub(r'<think>.*?</think>\\s*', '', final_response, flags=re.DOTALL).strip()\n"
-        "                if final_response:\n"
-        "                    messages.append({\"role\": \"assistant\", \"content\": final_response})\n"
-        "                else:\n"
-        "                    final_response = \"I reached the iteration limit and couldn't generate a summary.\"\n"
-        "            else:\n"
-    )
-    summary_validation_inject = (
-        "            if final_response:\n"
-        "                if \"<think>\" in final_response:\n"
-        "                    final_response = re.sub(r'<think>.*?</think>\\s*', '', final_response, flags=re.DOTALL).strip()\n"
-        "                final_response = apply_brainstack_output_validation(self._memory_manager, final_response)\n"
-        "                if final_response:\n"
-        "                    messages.append({\"role\": \"assistant\", \"content\": final_response})\n"
-        "                else:\n"
-        "                    final_response = \"I reached the iteration limit and couldn't generate a summary.\"\n"
-        "            else:\n"
-    )
-    if "final_response = apply_brainstack_output_validation(self._memory_manager, final_response)" not in text:
-        text = _replace_once(
-            text,
-            summary_validation_anchor,
-            summary_validation_inject,
-            label="run_agent summary output validation",
-            path=path,
-        )
-        applied.append("run_agent:validate_summary_output")
-
-    final_validation_anchor = (
-        "                    # Strip <think> blocks from user-facing response (keep raw in messages for trajectory)\n"
-        "                    final_response = self._strip_think_blocks(final_response).strip()\n"
-        "                    \n"
-        "                    final_msg = self._build_assistant_message(assistant_message, finish_reason)\n"
-    )
-    final_validation_inject = (
-        "                    # Strip <think> blocks from user-facing response (keep raw in messages for trajectory)\n"
-        "                    final_response = self._strip_think_blocks(final_response).strip()\n"
-        "                    final_response = apply_brainstack_output_validation(self._memory_manager, final_response)\n"
-        "                    \n"
-        "                    final_msg = self._build_assistant_message(assistant_message, finish_reason)\n"
-        "                    final_msg[\"content\"] = final_response\n"
-    )
-    if "final_msg[\"content\"] = final_response" not in text:
-        text = _replace_once(
-            text,
-            final_validation_anchor,
-            final_validation_inject,
-            label="run_agent final output validation",
-            path=path,
-        )
-        applied.append("run_agent:validate_final_output")
-
-    if applied and not dry_run:
-        path.write_text(text, encoding="utf-8")
-    return applied
 
 
 def _patch_memory_manager(path: Path, dry_run: bool) -> list[str]:
@@ -1381,8 +803,8 @@ def _patch_config(config_path: Path, dry_run: bool) -> dict[str, Any]:
     if not isinstance(config["memory"], dict):
         raise RuntimeError("config.yaml has non-object `memory` section")
     config["memory"]["provider"] = "brainstack"
-    config["memory"]["memory_enabled"] = False
-    config["memory"]["user_profile_enabled"] = False
+    config["memory"]["memory_enabled"] = True
+    config["memory"]["user_profile_enabled"] = True
     config.setdefault("plugins", {})
     if not isinstance(config["plugins"], dict):
         raise RuntimeError("config.yaml has non-object `plugins` section")
@@ -1414,24 +836,14 @@ def _patch_config(config_path: Path, dry_run: bool) -> dict[str, Any]:
     flush_provider = str(flush_memories.get("provider") or "").strip().lower()
     if not flush_provider or flush_provider == "auto":
         flush_memories["provider"] = "main"
-    config.setdefault("sidecars", {})
-    if not isinstance(config["sidecars"], dict):
-        raise RuntimeError("config.yaml has non-object `sidecars` section")
-    rtk = config["sidecars"].setdefault("rtk", {})
-    if not isinstance(rtk, dict):
-        rtk = {}
-        config["sidecars"]["rtk"] = rtk
-    rtk.setdefault("enabled", True)
-    rtk.setdefault("mode", "balanced")
     if not dry_run:
         _write_yaml(config_path, config)
     return {
         "config_path": str(config_path),
         "memory_provider": "brainstack",
-        "memory_enabled": False,
-        "user_profile_enabled": False,
+        "memory_enabled": True,
+        "user_profile_enabled": True,
         "flush_memories_provider": str(flush_memories.get("provider") or ""),
-        "rtk_sidecar_enabled": bool(rtk.get("enabled", False)),
     }
 
 
@@ -1938,7 +1350,11 @@ def main() -> int:
     parser.add_argument("--desktop-launcher", type=Path, help="Path to desktop launcher for doctor checks")
     parser.add_argument("--python", type=Path, help="Target Hermes Python interpreter for dependency install and doctor checks")
     parser.add_argument("--runtime", choices=["auto", "docker", "local"], default="auto", help="Target runtime mode")
-    parser.add_argument("--enable", action="store_true", help="Patch config.yaml to enable Brainstack and disable builtin memory")
+    parser.add_argument(
+        "--enable",
+        action="store_true",
+        help="Patch config.yaml to enable Brainstack while keeping Hermes builtin memory and user profile enabled",
+    )
     parser.add_argument("--skip-deps", action="store_true", help="Skip installing missing kuzu/chromadb into the target Hermes Python")
     parser.add_argument("--doctor", action="store_true", help="Run brainstack_doctor after install")
     parser.add_argument("--dry-run", action="store_true", help="Show planned actions without changing files")
@@ -1985,11 +1401,6 @@ def main() -> int:
     selected_python = args.python.expanduser() if args.python else _default_target_python(target)
     files = _copy_tree(SOURCE_PLUGIN, plugin_target, args.dry_run)
     helper_files: list[dict[str, str]] = []
-    if SOURCE_RTK.exists() and (target / "agent").is_dir():
-        helper_target = target / "agent" / "rtk_sidecar.py"
-        helper_files.append({"source": "rtk_sidecar.py", "target": str(helper_target), "sha256": _hash_file(SOURCE_RTK)})
-        if not args.dry_run:
-            shutil.copy2(SOURCE_RTK, helper_target)
 
     generated_files: list[dict[str, str]] = []
     if args.runtime == "docker":
@@ -2008,16 +1419,10 @@ def main() -> int:
     deps_result = _ensure_backend_dependencies(selected_python, dry_run=args.dry_run, skip_deps=args.skip_deps)
 
     host_helper_files: list[dict[str, str]] = []
-    if SOURCE_HOST_PAYLOAD.exists():
-        for src_file in _iter_payload_files(SOURCE_HOST_PAYLOAD):
-            rel = src_file.relative_to(SOURCE_HOST_PAYLOAD)
-            host_helper_files.append(_copy_file(src_file, target / rel, args.dry_run))
 
     host_patches: list[str] = []
-    host_patches.extend(_patch_run_agent(target / "run_agent.py", args.dry_run))
     host_patches.extend(_patch_auxiliary_client(target / "agent" / "auxiliary_client.py", args.dry_run))
     host_patches.extend(_patch_memory_manager(target / "agent" / "memory_manager.py", args.dry_run))
-    host_patches.extend(_patch_gateway_run(target / "gateway" / "run.py", args.dry_run))
     host_patches.extend(_patch_gateway_status(target / "gateway" / "status.py", args.dry_run))
     host_patches.extend(_patch_discord_platform(target / "gateway" / "platforms" / "discord.py", args.dry_run))
     if args.runtime == "docker":

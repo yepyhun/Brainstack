@@ -22,6 +22,8 @@ COMMUNICATION_CANONICAL_SLOTS = {
 STYLE_AUTHORITY_PROFILE_SLOTS = COMMUNICATION_CANONICAL_SLOTS | {
     "preference:communication_rules",
 }
+NATIVE_EXPLICIT_PROFILE_METADATA_KEY = "native_explicit_profile"
+NATIVE_EXPLICIT_PROFILE_MIRROR_SOURCE = "native_profile"
 
 PROFILE_SLOT_ALIASES = {
     "name": "identity:name",
@@ -100,8 +102,8 @@ _DIRECT_AGE_QUERY_PATTERNS = (
 _DIRECT_STYLE_CONTRACT_QUERY_PATTERNS = (
     re.compile(r"\bstyle contract\b", re.IGNORECASE),
     re.compile(r"\bcommunication contract\b", re.IGNORECASE),
-    re.compile(r"\bcommunication rules\b", re.IGNORECASE),
-    re.compile(r"\bkommunik[aá]ci[oó]s\s+szab[aá]ly", re.IGNORECASE),
+    re.compile(r"\bcommunication rules?\b", re.IGNORECASE),
+    re.compile(r"\bkommunik[aá]ci[oó]s\s+szab[aá]ly\w*", re.IGNORECASE),
 )
 
 _ASSISTANT_NAME_PATTERNS = (
@@ -173,6 +175,32 @@ def has_style_authority_signal(
         if logical_key in STYLE_AUTHORITY_PROFILE_SLOTS:
             return True
     return False
+
+
+def native_explicit_profile_payload(row: Mapping[str, Any]) -> Dict[str, Any] | None:
+    metadata = row.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    payload = metadata.get(NATIVE_EXPLICIT_PROFILE_METADATA_KEY)
+    if not isinstance(payload, Mapping):
+        return None
+    return {str(key): value for key, value in payload.items()}
+
+
+def is_native_explicit_profile_item(row: Mapping[str, Any]) -> bool:
+    payload = native_explicit_profile_payload(row)
+    if not isinstance(payload, Mapping):
+        return False
+    return str(payload.get("mirrored_from") or "").strip() == NATIVE_EXPLICIT_PROFILE_MIRROR_SOURCE
+
+
+def is_native_explicit_style_item(row: Mapping[str, Any]) -> bool:
+    if not is_native_explicit_profile_item(row):
+        return False
+    logical_key = normalize_profile_slot(row.get("slot") or row.get("stable_key") or "")
+    if logical_key == STYLE_CONTRACT_SLOT:
+        return True
+    return logical_key in STYLE_AUTHORITY_PROFILE_SLOTS
 
 
 def resolve_direct_identity_profile_slots(query: str) -> tuple[str, ...]:

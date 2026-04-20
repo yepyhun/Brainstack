@@ -3,8 +3,9 @@
 
 The doctor is intentionally explicit and fail-closed. It should tell an
 operator whether Brainstack is installed in the Hermes checkout that will
-actually run, whether Hermes builtin memory is disabled, and whether the
-Docker/desktop launcher is aimed at gateway mode rather than terminal chat.
+actually run, whether Hermes native builtin memory and user profile remain
+enabled alongside Brainstack, and whether the Docker/desktop launcher is aimed
+at gateway mode rather than terminal chat.
 """
 
 from __future__ import annotations
@@ -321,56 +322,42 @@ def _check_host_surfaces(target: Path) -> list[Check]:
         checks.append(Check("turn_start_hook", "pass", "run_agent calls memory provider on_turn_start"))
 
     if "LEGACY_MEMORY_TOOL_NAMES" in brainstack_mode and "is_brainstack_only_mode" in brainstack_mode:
-        checks.append(Check("brainstack_only_helper", "pass", "Brainstack-only host helper is present"))
+        checks.append(Check("brainstack_only_helper", "warn", "Legacy Brainstack-only host helper is still present; phase-52 installs no longer require it"))
     else:
-        checks.append(Check("brainstack_only_helper", "fail", "agent/brainstack_mode.py is missing or incomplete"))
+        checks.append(Check("brainstack_only_helper", "pass", "No Brainstack-only host helper is required for native-seam mode"))
 
-    if "apply_brainstack_output_validation" in brainstack_mode and "apply_brainstack_output_validation(" in run_agent:
-        checks.append(Check("final_output_validation", "pass", "run_agent routes final answers through the Brainstack output validator"))
+    if "apply_brainstack_output_validation(" in run_agent:
+        checks.append(Check("final_output_validation", "warn", "run_agent still routes final answers through a Brainstack-specific output gate"))
     else:
-        checks.append(Check("final_output_validation", "fail", "run_agent does not route final answers through the Brainstack output validator"))
+        checks.append(Check("final_output_validation", "pass", "No Brainstack-specific host reply gate detected"))
 
-    if "PERSONAL_MEMORY_FILE_TOOL_NAMES" in brainstack_mode and "side-memory files" in brainstack_mode:
-        checks.append(Check("personal_memory_file_boundary", "pass", "Brainstack-only helper blocks Hermes side-memory file detours"))
+    if "self._memory_manager.on_memory_write(" in run_agent:
+        checks.append(Check("native_profile_write_bridge", "pass", "run_agent bridges Hermes native explicit writes into external memory providers"))
     else:
-        checks.append(Check("personal_memory_file_boundary", "fail", "agent/brainstack_mode.py does not block Hermes side-memory file detours"))
-
-    if "PERSONAL_MEMORY_EXECUTION_TOOL_NAMES" in brainstack_mode and "secondary memory APIs" in brainstack_mode:
-        checks.append(Check("personal_memory_execution_boundary", "pass", "Brainstack-only helper blocks code and shell memory detours"))
-    else:
-        checks.append(Check("personal_memory_execution_boundary", "fail", "agent/brainstack_mode.py does not block code or shell detours into side memory"))
-
-    if "PERSONAL_MEMORY_AUTONOMY_TOOL_NAMES" in brainstack_mode and "automation jobs" in brainstack_mode:
-        checks.append(Check("personal_memory_autonomy_boundary", "pass", "Brainstack-only helper blocks automation jobs from becoming shadow memory"))
-    else:
-        checks.append(Check("personal_memory_autonomy_boundary", "fail", "agent/brainstack_mode.py does not block autonomy tools from storing personal memory"))
+        checks.append(Check("native_profile_write_bridge", "fail", "run_agent does not bridge Hermes native explicit writes into external memory providers"))
 
     if "filter_legacy_memory_tool_defs" in run_agent and "LEGACY_MEMORY_TOOL_NAMES" in run_agent:
-        checks.append(Check("legacy_tool_surface_gate", "pass", "run_agent gates legacy memory tool exposure for Brainstack-only mode"))
+        checks.append(Check("legacy_tool_surface_gate", "warn", "Legacy Brainstack-only tool gating is still present in run_agent"))
     else:
-        checks.append(Check("legacy_tool_surface_gate", "fail", "run_agent does not gate legacy memory tool surface for Brainstack-only mode"))
+        checks.append(Check("legacy_tool_surface_gate", "pass", "No Brainstack-only legacy tool gate is required"))
 
     if "Brainstack owns personal memory in this mode." in run_agent:
-        checks.append(Check("personal_memory_guidance", "pass", "run_agent injects explicit Brainstack-owned personal memory guidance"))
+        checks.append(Check("personal_memory_guidance", "warn", "run_agent still contains Brainstack-only personal-memory guidance"))
     else:
-        checks.append(Check("personal_memory_guidance", "fail", "run_agent still lacks explicit Brainstack-owned personal memory guidance"))
+        checks.append(Check("personal_memory_guidance", "pass", "run_agent is not injecting Brainstack-only personal-memory guidance"))
 
-    required_rtk_terms = [
-        "build_rtk_sidecar_config",
-        "RTKSidecarStats",
-        "maybe_preprocess_tool_result",
-        "config=self._rtk_sidecar.budget",
-    ]
-    missing_rtk = [term for term in required_rtk_terms if term not in run_agent]
-    if missing_rtk:
-        checks.append(Check("rtk_sidecar_wiring", "fail", f"run_agent is missing RTK sidecar wiring terms: {', '.join(missing_rtk)}"))
-    else:
-        checks.append(Check("rtk_sidecar_wiring", "pass", "run_agent wires RTK sidecar config, preprocessing, and budgeted persistence"))
-
-    if "_async_finalize_session_memory" in gateway_run and "_finalize_brainstack_session_memory" in gateway_run:
+    legacy_brainstack_boundary = "_async_finalize_session_memory" in gateway_run and "_finalize_brainstack_session_memory" in gateway_run
+    upstream_boundary = (
+        "on_session_finalize" in gateway_run
+        and "session:end" in gateway_run
+        and "self._memory_manager.on_session_end(" in run_agent
+    )
+    if legacy_brainstack_boundary:
         checks.append(Check("gateway_session_boundary_gate", "pass", "gateway routes session boundaries through a Brainstack-aware finalizer"))
+    elif upstream_boundary:
+        checks.append(Check("gateway_session_boundary_gate", "pass", "gateway and run_agent use upstream session-finalize and provider on_session_end hooks; no Brainstack-specific finalizer is required"))
     else:
-        checks.append(Check("gateway_session_boundary_gate", "fail", "gateway still lacks a Brainstack-aware session boundary finalizer"))
+        checks.append(Check("gateway_session_boundary_gate", "warn", "Gateway session boundaries do not show either the legacy Brainstack finalizer or the upstream provider-finalize path"))
 
     legacy_ready_flow = "_ensure_background_slash_sync" in discord_platform and "adapter_self._ensure_background_slash_sync()" in discord_platform
     modern_ready_flow = (
@@ -480,12 +467,12 @@ def _check_config(
     else:
         checks.append(Check("config_provider", "fail", f"memory.provider is {provider!r}, expected 'brainstack'"))
 
-    if memory_enabled is False and user_profile_enabled is False:
-        checks.append(Check("native_memory_disabled", "pass", "Hermes builtin memory and user profile are disabled"))
+    if memory_enabled is True and user_profile_enabled is True:
+        checks.append(Check("native_memory_enabled", "pass", "Hermes builtin memory and user profile are enabled"))
     elif planned_install:
-        checks.append(Check("native_memory_disabled", "pass", "Builtin memory flags are not both false yet, but installer will patch them"))
+        checks.append(Check("native_memory_enabled", "pass", "Builtin memory flags are not both true yet, but installer will patch them"))
     else:
-        checks.append(Check("native_memory_disabled", "fail", "memory_enabled and user_profile_enabled must both be false"))
+        checks.append(Check("native_memory_enabled", "fail", "memory_enabled and user_profile_enabled must both be true"))
 
     plugins = config.get("plugins", {}) if isinstance(config.get("plugins", {}), dict) else {}
     if isinstance(plugins.get("brainstack"), dict):
@@ -578,23 +565,6 @@ def _check_config(
         checks.append(Check("flush_memories_provider", "pass", "auxiliary.flush_memories.provider is not 'main' yet, but installer will patch it"))
     else:
         checks.append(Check("flush_memories_provider", "fail", "auxiliary.flush_memories.provider must be 'main' for reliable Brainstack Tier-2 writes"))
-
-    sidecars = config.get("sidecars", {}) if isinstance(config.get("sidecars", {}), dict) else {}
-    rtk = sidecars.get("rtk", {}) if isinstance(sidecars.get("rtk", {}), dict) else {}
-    if rtk.get("enabled") is True:
-        checks.append(Check("rtk_sidecar_config", "pass", "sidecars.rtk.enabled is true"))
-    elif planned_install:
-        checks.append(Check("rtk_sidecar_config", "pass", "sidecars.rtk.enabled is not true yet, but installer will patch it"))
-    else:
-        checks.append(Check("rtk_sidecar_config", "fail", "sidecars.rtk.enabled must be true for shipped RTK sidecar wiring"))
-
-    mode = str(rtk.get("mode") or "").strip().lower()
-    if mode in {"balanced", "aggressive"}:
-        checks.append(Check("rtk_sidecar_mode", "pass", f"sidecars.rtk.mode is {mode!r}"))
-    elif planned_install:
-        checks.append(Check("rtk_sidecar_mode", "pass", "sidecars.rtk.mode is absent or invalid yet, but installer will patch it"))
-    else:
-        checks.append(Check("rtk_sidecar_mode", "fail", "sidecars.rtk.mode must be 'balanced' or 'aggressive'"))
 
     return checks
 

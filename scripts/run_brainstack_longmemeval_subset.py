@@ -77,8 +77,6 @@ def _iter_payload_files(root: Path) -> List[Path]:
 def _verify_runtime_sync(hermes_root: Path) -> Dict[str, Any]:
     source_plugin = REPO_ROOT / "brainstack"
     target_plugin = hermes_root / "plugins" / "memory" / "brainstack"
-    source_rtk = REPO_ROOT / "rtk_sidecar.py"
-    target_rtk = hermes_root / "agent" / "rtk_sidecar.py"
     source_host_payload = REPO_ROOT / "host_payload"
     mismatches: List[Dict[str, Any]] = []
     compared_files = 0
@@ -108,30 +106,6 @@ def _verify_runtime_sync(hermes_root: Path) -> Dict[str, Any]:
                     "target_sha256": dst_hash,
                 }
             )
-
-    if source_rtk.exists():
-        compared_files += 1
-        if not target_rtk.exists():
-            mismatches.append(
-                {
-                    "reason": "missing_target",
-                    "source": str(source_rtk.relative_to(REPO_ROOT)),
-                    "target": str(target_rtk),
-                }
-            )
-        else:
-            src_hash = _hash_file(source_rtk)
-            dst_hash = _hash_file(target_rtk)
-            if src_hash != dst_hash:
-                mismatches.append(
-                    {
-                        "reason": "hash_mismatch",
-                        "source": str(source_rtk.relative_to(REPO_ROOT)),
-                        "target": str(target_rtk),
-                        "source_sha256": src_hash,
-                        "target_sha256": dst_hash,
-                    }
-                )
 
     for src_file in _iter_payload_files(source_host_payload):
         rel = src_file.relative_to(source_host_payload)

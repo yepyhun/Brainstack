@@ -12,7 +12,6 @@ from scripts.install_into_hermes import (
     _patch_config,
     _patch_gateway_run,
     _patch_memory_manager,
-    _patch_run_agent,
     _write_docker_compose_file,
     _write_docker_start_script,
 )
@@ -70,123 +69,6 @@ def test_gateway_run_patch_supports_multiline_platform_import(tmp_path: Path):
 
     assert "gateway:import_brainstack_mode" in applied
     assert "from agent.brainstack_mode import is_brainstack_only_mode" in content
-
-
-def test_run_agent_patch_supports_multiline_memory_manager_import(tmp_path: Path):
-    path = tmp_path / "run_agent.py"
-    path.write_text(
-        "from agent.trajectory import (\n"
-        "    convert_scratchpad_to_think, has_incomplete_scratchpad,\n"
-        "    save_trajectory as _save_trajectory_to_file,\n"
-        ")\n"
-        "from agent.memory_manager import (\n"
-        "    build_memory_context_block,\n"
-        ")\n"
-        "        except Exception:\n"
-        "            _agent_cfg = {}\n"
-        "        if self._memory_manager and self.tools is not None:\n"
-        "            for _schema in self._memory_manager.get_all_tool_schemas():\n"
-        "                _wrapped = {\"type\": \"function\", \"function\": _schema}\n"
-        "                self.tools.append(_wrapped)\n"
-        "                _tname = _schema.get(\"name\", \"\")\n"
-        "                if _tname:\n"
-        "                    self.valid_tool_names.add(_tname)\n"
-        "        if \"session_search\" in self.valid_tool_names:\n"
-        "            tool_guidance.append(SESSION_SEARCH_GUIDANCE)\n"
-        "        if \"skill_manage\" in self.valid_tool_names:\n"
-        "            tool_guidance.append(SKILLS_GUIDANCE)\n"
-        "            if (self._skill_nudge_interval > 0\n"
-        "                    and \"skill_manage\" in self.valid_tool_names):\n"
-        "                self._iters_since_skill += 1\n"
-        "        if (self._skill_nudge_interval > 0\n"
-        "                and self._iters_since_skill >= self._skill_nudge_interval\n"
-        "                and \"skill_manage\" in self.valid_tool_names):\n"
-        "            _should_review_skills = True\n"
-        "            self._iters_since_skill = 0\n"
-        "        Handles both agent-level tools (todo, memory, etc.) and registry-dispatched\n"
-        "        tools. Used by the concurrent execution path; the sequential path retains\n"
-        "        its own inline invocation for backward-compatible display handling.\n"
-        "        \"\"\"\n"
-        "            function_result = maybe_persist_tool_result(\n"
-        "                content=function_result,\n"
-        "                tool_name=name,\n"
-        "                tool_use_id=tc.id,\n"
-        "                env=get_active_env(effective_task_id),\n"
-        "            )\n"
-        "            enforce_turn_budget(turn_tool_msgs, env=get_active_env(effective_task_id))\n"
-        "            function_result = maybe_persist_tool_result(\n"
-        "                content=function_result,\n"
-        "                tool_name=function_name,\n"
-        "                tool_use_id=tool_call.id,\n"
-        "                env=get_active_env(effective_task_id),\n"
-        "            )\n"
-        "            enforce_turn_budget(messages[-num_tools_seq:], env=get_active_env(effective_task_id))\n"
-        "                try:\n"
-        "                    function_result = handle_function_call(\n"
-        "                        function_name, function_args, effective_task_id,\n"
-        "                        tool_call_id=tool_call.id,\n"
-        "                        session_id=self.session_id or \"\",\n"
-        "                        enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,\n"
-        "                        skip_pre_tool_call_hook=True,\n"
-        "                    )\n"
-        "                    _spinner_result = function_result\n"
-        "                except Exception as tool_error:\n"
-        "                    function_result = f\"Error executing tool '{function_name}': {tool_error}\"\n"
-        "                try:\n"
-        "                    function_result = handle_function_call(\n"
-        "                        function_name, function_args, effective_task_id,\n"
-        "                        tool_call_id=tool_call.id,\n"
-        "                        session_id=self.session_id or \"\",\n"
-        "                        enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,\n"
-        "                        skip_pre_tool_call_hook=True,\n"
-        "                    )\n"
-        "                except Exception as tool_error:\n"
-        "                    function_result = f\"Error executing tool '{function_name}': {tool_error}\"\n"
-        "            if final_response:\n"
-        "                if \"<think>\" in final_response:\n"
-        "                    final_response = re.sub(r'<think>.*?</think>\\s*', '', final_response, flags=re.DOTALL).strip()\n"
-        "                if final_response:\n"
-        "                    messages.append({\"role\": \"assistant\", \"content\": final_response})\n"
-        "                else:\n"
-        "                    final_response = \"I reached the iteration limit and couldn't generate a summary.\"\n"
-        "            else:\n"
-        "                final_response = \"fallback\"\n"
-        "                    # Strip <think> blocks from user-facing response (keep raw in messages for trajectory)\n"
-        "                    final_response = self._strip_think_blocks(final_response).strip()\n"
-        "                    \n"
-        "                    final_msg = self._build_assistant_message(assistant_message, finish_reason)\n",
-        encoding="utf-8",
-    )
-
-    applied = _patch_run_agent(path, dry_run=False)
-    content = path.read_text(encoding="utf-8")
-
-    assert "run_agent:import_brainstack_mode" in applied
-    assert (
-        "run_agent:import_output_validator" in applied
-        or "run_agent:import_brainstack_mode" in applied
-    )
-    assert "run_agent:import_rtk_sidecar" in applied
-    assert "run_agent:init_rtk_sidecar" in applied
-    assert "run_agent:rtk_preprocess_path" in applied
-    assert "run_agent:validate_summary_output" in applied
-    assert "run_agent:validate_final_output" in applied
-    assert "from agent.brainstack_mode import (" in content
-    assert "apply_brainstack_output_validation" in content
-    assert "from agent.rtk_sidecar import build_rtk_sidecar_config, RTKSidecarStats, maybe_preprocess_tool_result" in content
-    assert "self._rtk_sidecar = build_rtk_sidecar_config(_agent_cfg)" in content
-    assert "self._rtk_sidecar_stats = RTKSidecarStats()" in content
-    assert "preprocessed_result = maybe_preprocess_tool_result(function_result, self._rtk_sidecar)" in content
-    assert "config=self._rtk_sidecar.budget" in content
-    assert "record_turn_budget_effect(before_budget_total, after_budget_total)" in content
-    assert "final_response = apply_brainstack_output_validation(self._memory_manager, final_response)" in content
-    assert 'final_msg["content"] = final_response' in content
-    assert "Brainstack owns personal memory in this mode." in content
-    assert "persona.md, or side skill files" in content
-    assert "secondary memory APIs from ad hoc code" in content
-    assert "session_search may be used only as explicit conversation search" in content
-    assert content.count("brainstack_only_error = blocked_brainstack_only_tool_error(function_name, function_args)") >= 3
-    assert 'if self._brainstack_only_mode and brainstack_only_error:' in content
 
 
 def test_memory_manager_patch_hardens_private_recall_wrapper(tmp_path: Path):
@@ -252,10 +134,8 @@ def test_patch_config_sets_embedded_graph_and_corpus_defaults(tmp_path: Path):
     assert "auxiliary:" in content
     assert "flush_memories:" in content
     assert "provider: main" in content
-    assert "sidecars:" in content
-    assert "rtk:" in content
-    assert "enabled: true" in content
-    assert "mode: balanced" in content
+    assert "sidecars:" not in content
+    assert "rtk:" not in content
 
 
 def test_patch_config_upgrades_flush_memories_auto_to_main(tmp_path: Path):

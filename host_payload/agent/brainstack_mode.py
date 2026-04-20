@@ -1,8 +1,9 @@
-"""Brainstack-only host mode helpers.
+"""Legacy Brainstack-only host mode helpers.
 
-These helpers define when Hermes must treat Brainstack as the sole owner of
-durable personal memory while still allowing adjacent host capabilities that do
-not become shadow memory stores.
+These helpers were used by the older Brainstack-only host mode where Hermes
+builtin explicit memory and user-profile writes were disabled. Phase-52 native
+seam mode keeps these helpers as legacy compatibility code only; new installs do
+not copy them by default.
 """
 
 from __future__ import annotations

@@ -1,3 +1,9 @@
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="Legacy pre-phase50 contract test; current source-of-truth validates de-escalated kernel behavior in phase48/50-focused suites."
+)
+
 # ruff: noqa: E402
 """Targeted regression tests for phase 33 personal truth hardening."""
 

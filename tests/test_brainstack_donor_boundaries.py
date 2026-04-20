@@ -47,8 +47,13 @@ class TestBrainstackDonorBoundaries:
         finally:
             provider.shutdown()
 
-    def test_provider_sync_turn_uses_donor_graph_adapter(self, monkeypatch, tmp_path):
-        provider = _make_provider(tmp_path, "session-graph")
+    def test_provider_sync_turn_does_not_emit_graph_writes_from_untyped_raw_text(self, monkeypatch, tmp_path):
+        provider = _make_provider(
+            tmp_path,
+            "session-graph",
+            graph_backend="kuzu",
+            graph_db_path=str(Path(tmp_path) / "brainstack.kuzu"),
+        )
         calls = []
         original = graph_adapter.ingest_turn_graph_candidates
 
@@ -59,13 +64,9 @@ class TestBrainstackDonorBoundaries:
         monkeypatch.setattr(graph_adapter, "ingest_turn_graph_candidates", _wrapped)
         try:
             provider.sync_turn("Project Atlas is active now.", "Saved.", session_id="session-graph")
-            assert calls
-            assert calls[0]["source"] == "sync_turn:user"
-            assert "evidence_items" in calls[0]
-            assert calls[0]["evidence_items"]
-            assert "text" not in calls[0]
+            assert calls == []
             graph_rows = provider._store.search_graph(query="Project Atlas", limit=5)
-            assert graph_rows
+            assert graph_rows == []
         finally:
             provider.shutdown()
 
@@ -94,8 +95,13 @@ class TestBrainstackDonorBoundaries:
         finally:
             provider.shutdown()
 
-    def test_provider_on_session_end_uses_donor_snapshot_and_graph_adapters(self, monkeypatch, tmp_path):
-        provider = _make_provider(tmp_path, "session-end")
+    def test_provider_on_session_end_keeps_snapshot_write_but_skips_untyped_graph_scan(self, monkeypatch, tmp_path):
+        provider = _make_provider(
+            tmp_path,
+            "session-end",
+            graph_backend="kuzu",
+            graph_db_path=str(Path(tmp_path) / "brainstack.kuzu"),
+        )
         snapshot_calls = []
         graph_calls = []
         original_snapshot = continuity_adapter.write_snapshot_records
@@ -120,15 +126,11 @@ class TestBrainstackDonorBoundaries:
             )
             assert snapshot_calls
             assert snapshot_calls[0]["kind"] == "session_summary"
-            assert graph_calls
-            assert graph_calls[0]["source"] == "session_end_scan:user"
-            assert "evidence_items" in graph_calls[0]
-            assert graph_calls[0]["evidence_items"]
-            assert "text" not in graph_calls[0]
+            assert graph_calls == []
             rows = provider._store.recent_continuity(session_id="session-end", limit=10)
             assert any(row["kind"] == "session_summary" for row in rows)
             graph_rows = provider._store.search_graph(query="Project Atlas", limit=5)
-            assert graph_rows
+            assert graph_rows == []
         finally:
             provider.shutdown()
 

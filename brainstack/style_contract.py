@@ -41,6 +41,13 @@ def _normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
 
 
+def _strip_chat_framing_prefix(value: Any) -> str:
+    normalized = _normalize_text(value)
+    if not normalized:
+        return ""
+    return _CHAT_FRAMING_PREFIX_RE.sub("", normalized, count=1).strip()
+
+
 def _coerce_confidence(value: Any, *, default: float = 0.86) -> float:
     try:
         number = float(value)
@@ -127,6 +134,28 @@ def _contains_style_authority_marker(value: Any) -> bool:
     if not normalized:
         return False
     return any(marker in normalized for marker in _STYLE_AUTHORITY_MARKERS)
+
+
+def has_explicit_style_authority_signal(raw_text: Any) -> bool:
+    parsed = parse_style_contract_text(raw_text)
+    if parsed is None:
+        return False
+
+    normalized_lines = [_normalize_text(line) for line in str(raw_text or "").splitlines() if _normalize_text(line)]
+    has_leading_title = bool(
+        normalized_lines
+        and not _is_heading_line(normalized_lines[0])
+        and _extract_rule_bullet(normalized_lines[0]) is None
+    )
+    sections = [
+        section
+        for section in parsed.get("sections") or ()
+        if isinstance(section, Mapping)
+    ]
+    return (has_leading_title and _contains_style_authority_marker(parsed.get("title"))) or any(
+        _contains_style_authority_marker(section.get("heading"))
+        for section in sections
+    )
 
 
 def _style_contract_cleanliness_issues_for_parts(
@@ -321,7 +350,11 @@ def apply_style_contract_rule_correction(
 
 
 def parse_style_contract_patch_text(raw_text: Any) -> List[str]:
-    normalized_lines = [_normalize_text(line) for line in str(raw_text or "").splitlines() if _normalize_text(line)]
+    normalized_lines = [
+        _strip_chat_framing_prefix(line)
+        for line in str(raw_text or "").splitlines()
+        if _strip_chat_framing_prefix(line)
+    ]
     if not normalized_lines or len(normalized_lines) > 3:
         return []
     if len(normalized_lines) > 1 and any(_is_heading_line(line) for line in normalized_lines):
@@ -532,7 +565,11 @@ def parse_style_contract_text(raw_text: Any) -> Dict[str, Any] | None:
     if not text.strip() or "\n" not in text:
         return None
 
-    normalized_lines = [_normalize_text(line) for line in text.splitlines() if _normalize_text(line)]
+    normalized_lines = [
+        _strip_chat_framing_prefix(line)
+        for line in text.splitlines()
+        if _strip_chat_framing_prefix(line)
+    ]
     if not normalized_lines:
         return None
 
@@ -633,10 +670,7 @@ def looks_like_style_contract_teaching(raw_text: Any) -> bool:
     )
     section_count = len(sections)
     headed_section_count = sum(1 for section in sections if _normalize_text(section.get("heading")))
-    style_authority_present = (has_leading_title and _contains_style_authority_marker(parsed.get("title"))) or any(
-        _contains_style_authority_marker(section.get("heading"))
-        for section in sections
-    )
+    style_authority_present = has_explicit_style_authority_signal(raw_text)
 
     if style_authority_present and total_rules >= 3:
         return True

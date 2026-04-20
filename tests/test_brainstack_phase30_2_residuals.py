@@ -36,7 +36,7 @@ def _make_provider(tmp_path, session_id: str, **init_kwargs):
     return provider
 
 
-def test_numbered_rule_pack_is_accepted_as_explicit_style_contract():
+def test_numbered_rule_pack_builds_structured_payload_without_triggering_authority_teaching():
     raw_text = (
         "27 szabály:\n"
         "1. Mindig magyarul válaszolj.\n"
@@ -49,13 +49,13 @@ def test_numbered_rule_pack_is_accepted_as_explicit_style_contract():
     payload = build_style_contract_from_text(raw_text=raw_text, source="prefetch:style_contract")
 
     assert payload is not None
-    assert looks_like_style_contract_teaching(raw_text) is True
+    assert looks_like_style_contract_teaching(raw_text) is False
     assert payload["slot"] == STYLE_CONTRACT_SLOT
     assert "1. Mindig magyarul válaszolj." not in payload["content"]
     assert "Mindig magyarul válaszolj." in payload["content"]
 
 
-def test_prefetch_can_activate_structured_style_contract_before_first_answer(tmp_path):
+def test_prefetch_keeps_structured_style_contract_read_only_before_first_answer(tmp_path):
     provider = _make_provider(
         tmp_path,
         "prefetch-style-contract",
@@ -82,19 +82,17 @@ def test_prefetch_can_activate_structured_style_contract_before_first_answer(tmp
         )
         compiled = store.get_compiled_behavior_policy(principal_scope_key=provider._principal_scope_key)
 
-        assert row is not None
-        assert row["source"] == "prefetch:style_contract"
-        assert compiled is not None
-        assert compiled["policy"]["status"] == "active"
-        assert "## Brainstack Memory Operation Receipt" in block
-        assert provider.memory_operation_trace()["last_write_receipt"]["owner"] == "brainstack.behavior_contract"
-        assert "# Brainstack Active Communication Contract" in provider.system_prompt_block()
-        assert provider.behavior_policy_trace()["prefetch"]["style_contract_activated_before_prefetch"] is True
+        assert row is None
+        assert compiled is None
+        assert "## Brainstack Memory Operation Receipt" not in block
+        assert provider.memory_operation_trace()["last_write_receipt"] == {}
+        assert provider.system_prompt_block() == ""
+        assert provider.behavior_policy_trace()["prefetch"]["style_contract_activated_before_prefetch"] is False
     finally:
         provider.shutdown()
 
 
-def test_weaker_tier2_style_contract_cannot_overwrite_stronger_deterministic_row(tmp_path):
+def test_tier2_style_contract_payload_cannot_create_authoritative_row_without_native_anchor(tmp_path):
     provider = _make_provider(
         tmp_path,
         "style-precedence",
@@ -104,13 +102,6 @@ def test_weaker_tier2_style_contract_cannot_overwrite_stronger_deterministic_row
         agent_workspace="discord-main",
     )
     try:
-        deterministic_query = (
-            "User style contract\n"
-            "1. Mindig magyarul válaszolj.\n"
-            "2. Ne használj emojikat.\n"
-            "3. Ne kérdezz vissza feleslegesen.\n"
-        )
-        provider.prefetch(deterministic_query, session_id="style-precedence")
         store = provider._store
         assert store is not None
 
@@ -137,9 +128,9 @@ def test_weaker_tier2_style_contract_cannot_overwrite_stronger_deterministic_row
             stable_key=STYLE_CONTRACT_SLOT,
             principal_scope_key=provider._principal_scope_key,
         )
-        assert row is not None
-        assert row["source"] == "prefetch:style_contract"
-        assert "Ne kérdezz vissza feleslegesen." in row["content"]
+        compiled = store.get_compiled_behavior_policy(principal_scope_key=provider._principal_scope_key)
+        assert row is None
+        assert compiled is None
     finally:
         provider.shutdown()
 
@@ -202,10 +193,9 @@ def test_prefetch_surfaces_correction_reinforcement_for_same_session_rule_callou
         )
         trace = provider.behavior_policy_trace()
 
-        assert "## Brainstack Current Correction Reinforcement" in block
-        assert "U+2014 EM DASH" in block
-        assert trace["prefetch"]["correction_reinforcement_present"] is True
-        assert trace["prefetch"]["correction_reinforcement_mode"] == "session_reinforcement"
+        assert "## Brainstack Current Correction Reinforcement" not in block
+        assert trace["prefetch"]["correction_reinforcement_present"] is False
+        assert trace["prefetch"]["correction_reinforcement_mode"] == ""
     finally:
         provider.shutdown()
 

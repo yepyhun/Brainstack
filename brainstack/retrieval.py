@@ -6,7 +6,11 @@ from typing import Any, Dict, Iterable, List, Mapping
 from .behavior_policy import render_compiled_behavior_policy_section
 from .db import BrainstackStore
 from .operating_context import render_operating_context_section
-from .profile_contract import COMMUNICATION_CANONICAL_SLOTS, normalize_profile_slot
+from .profile_contract import (
+    COMMUNICATION_CANONICAL_SLOTS,
+    is_native_explicit_style_item,
+    normalize_profile_slot,
+)
 from .provenance import summarize_provenance
 from .style_contract import STYLE_CONTRACT_SLOT
 from .temporal import record_is_effective_at
@@ -238,6 +242,32 @@ def _is_style_authority_residue_profile_item(row: Dict[str, Any]) -> bool:
     return stable_key in STYLE_AUTHORITY_RESIDUE_SLOTS
 
 
+def _has_native_explicit_style_generation(profile_items: Iterable[Dict[str, Any]]) -> bool:
+    return any(is_native_explicit_style_item(row) for row in profile_items)
+
+
+def _build_native_explicit_style_contract(
+    *,
+    profile_items: Iterable[Dict[str, Any]],
+) -> tuple[List[str], set[str]]:
+    lines: List[str] = []
+    hidden_profile_keys: set[str] = set()
+    seen_text: set[str] = set()
+    for row in profile_items:
+        if not is_native_explicit_style_item(row):
+            continue
+        stable_key = str(row.get("stable_key") or "").strip()
+        if stable_key:
+            hidden_profile_keys.add(stable_key)
+        text = _render_communication_profile_contract_line(dict(row))
+        normalized = _normalize_compare_text(text)
+        if not normalized or normalized in seen_text:
+            continue
+        seen_text.add(normalized)
+        lines.append(text)
+    return lines, hidden_profile_keys
+
+
 def _build_active_communication_contract(
     *,
     profile_items: Iterable[Dict[str, Any]],
@@ -401,6 +431,7 @@ def build_system_prompt_projection(
     profile_limit: int,
     principal_scope_key: str = "",
     session_id: str = "",
+    include_behavior_contract: bool = True,
 ) -> Dict[str, Any]:
     fetch_limit = max(profile_limit * 3, 10)
     items = store.list_profile_items(limit=fetch_limit, principal_scope_key=principal_scope_key)
@@ -413,6 +444,7 @@ def build_system_prompt_projection(
         and isinstance(behavior_snapshot.get("raw_contract"), Mapping)
         and bool(behavior_snapshot.get("raw_contract", {}).get("present"))
     )
+    native_explicit_style_present = _has_native_explicit_style_generation(items)
     operating_context_snapshot = store.get_operating_context_snapshot(
         principal_scope_key=principal_scope_key,
         session_id=session_id,
@@ -420,7 +452,7 @@ def build_system_prompt_projection(
     contract_section = ""
     compiled_policy_active = False
     hidden_profile_keys: set[str] = set()
-    if compiled_policy:
+    if include_behavior_contract and compiled_policy:
         contract_section = render_compiled_behavior_policy_section(
             compiled_policy,
             title="# Brainstack Active Communication Contract",
@@ -429,7 +461,7 @@ def build_system_prompt_projection(
         compiled_policy_active = bool(contract_section)
     if compiled_policy_active:
         filtered_items = _filter_compiled_behavior_profile_items(items, route_mode="fact")
-    elif not canonical_style_present:
+    elif include_behavior_contract and not canonical_style_present and not native_explicit_style_present:
         graph_rows = store.list_current_graph_states(
             limit=8,
             attributes=COMMUNICATION_GRAPH_PREDICATES,
@@ -449,7 +481,7 @@ def build_system_prompt_projection(
     else:
         filtered_items = list(items)
 
-    if canonical_style_present:
+    if canonical_style_present or native_explicit_style_present:
         filtered_items = [item for item in filtered_items if not _is_style_authority_residue_profile_item(item)]
 
     operating_context_section = render_operating_context_section(operating_context_snapshot)
@@ -494,6 +526,7 @@ def build_system_prompt_projection(
         "rendered_profile_keys": tuple(rendered_profile_keys),
         "hidden_profile_keys": tuple(sorted(hidden_profile_keys)),
         "canonical_style_present": canonical_style_present,
+        "native_explicit_style_present": native_explicit_style_present,
         "active_lane_source_revision": int(compiled_policy_snapshot.get("source_revision_number") or 0)
         if compiled_policy_active
         else 0,
@@ -892,6 +925,7 @@ def build_system_prompt_block(
     profile_limit: int,
     principal_scope_key: str = "",
     session_id: str = "",
+    include_behavior_contract: bool = True,
 ) -> str:
     return str(
         build_system_prompt_projection(
@@ -899,6 +933,7 @@ def build_system_prompt_block(
             profile_limit=profile_limit,
             principal_scope_key=principal_scope_key,
             session_id=session_id,
+            include_behavior_contract=include_behavior_contract,
         ).get("block")
         or ""
     )
@@ -983,6 +1018,8 @@ def render_working_memory_block(
         str(key).strip() for key in (system_substrate.get("rendered_profile_keys") or ()) if str(key).strip()
     }
     style_contract_row = _extract_style_contract_profile_row(profile_items)
+    render_ordinary_contract = bool(policy.get("render_ordinary_contract", True))
+    native_explicit_style_present = _has_native_explicit_style_generation(profile_items)
     if route_mode == "style_contract":
         exact_contract_section = _render_exact_contract_section(
             "## Brainstack Canonical Behavior Contract",
@@ -990,7 +1027,16 @@ def render_working_memory_block(
             char_budget=max(480, int(policy.get("style_contract_char_budget", 2400))),
             provenance_mode=provenance_mode,
         )
-    if isinstance(compiled_policy, dict) and route_mode != "style_contract":
+        if not exact_contract_section and native_explicit_style_present:
+            native_contract_lines, native_hidden_keys = _build_native_explicit_style_contract(
+                profile_items=profile_items,
+            )
+            hidden_profile_keys.update(native_hidden_keys)
+            exact_contract_section = _render_contract_section(
+                "## Brainstack Mirrored Native Communication Contract",
+                native_contract_lines,
+            )
+    if isinstance(compiled_policy, dict) and route_mode != "style_contract" and render_ordinary_contract:
         if not suppress_contract_section:
             contract_section = render_compiled_behavior_policy_section(
                 compiled_policy,
@@ -1003,7 +1049,7 @@ def render_working_memory_block(
             graph_rows,
             profile_items=profile_items,
         )
-    elif not canonical_style_present:
+    elif not canonical_style_present and not native_explicit_style_present and render_ordinary_contract:
         contract_lines, hidden_profile_keys = _build_active_communication_contract(
             profile_items=profile_items,
             graph_rows=graph_rows,
@@ -1074,7 +1120,7 @@ def render_working_memory_block(
             filtered_profile_items = [
                 item for item in filtered_profile_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT
             ]
-    if canonical_style_present:
+    if canonical_style_present or native_explicit_style_present:
         filtered_profile_items = [
             item for item in filtered_profile_items if not _is_style_authority_residue_profile_item(item)
         ]

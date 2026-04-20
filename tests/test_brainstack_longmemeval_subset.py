@@ -421,14 +421,10 @@ def test_verify_runtime_sync_accepts_matching_payloads(tmp_path, monkeypatch):
     (source_root / "brainstack" / "executive_retrieval.py").write_text("alpha", encoding="utf-8")
     (source_root / "host_payload" / "gateway").mkdir(parents=True)
     (source_root / "host_payload" / "gateway" / "shim.py").write_text("beta", encoding="utf-8")
-    (source_root / "rtk_sidecar.py").write_text("gamma", encoding="utf-8")
-
     (hermes_root / "plugins" / "memory" / "brainstack").mkdir(parents=True)
     (hermes_root / "plugins" / "memory" / "brainstack" / "executive_retrieval.py").write_text("alpha", encoding="utf-8")
     (hermes_root / "gateway").mkdir(parents=True)
     (hermes_root / "gateway" / "shim.py").write_text("beta", encoding="utf-8")
-    (hermes_root / "agent").mkdir(parents=True)
-    (hermes_root / "agent" / "rtk_sidecar.py").write_text("gamma", encoding="utf-8")
 
     monkeypatch.setattr(module, "REPO_ROOT", source_root)
 
@@ -436,7 +432,7 @@ def test_verify_runtime_sync_accepts_matching_payloads(tmp_path, monkeypatch):
 
     assert snapshot["ok"] is True
     assert snapshot["mismatch_count"] == 0
-    assert snapshot["compared_files"] == 3
+    assert snapshot["compared_files"] == 2
 
 
 def test_verify_runtime_sync_reports_hash_mismatch(tmp_path, monkeypatch):

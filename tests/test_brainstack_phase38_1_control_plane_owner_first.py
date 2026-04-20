@@ -11,7 +11,7 @@ from tests._host_import_shims import install_host_import_shims
 
 install_host_import_shims(hermes_home=REPO_ROOT)
 
-from brainstack.control_plane import build_working_memory_packet
+import brainstack.control_plane as control_plane
 from brainstack.style_contract import STYLE_CONTRACT_SLOT
 from brainstack.db import BrainstackStore
 
@@ -34,7 +34,8 @@ def test_task_policy_can_follow_owner_parser_signal_without_query_cues(monkeypat
     store.open()
     try:
         monkeypatch.setattr(
-            "brainstack.control_plane.parse_task_lookup_query",
+            control_plane,
+            "parse_task_lookup_query",
             lambda query, timezone_name="UTC": {
                 "item_type": "task",
                 "due_date": "",
@@ -43,7 +44,7 @@ def test_task_policy_can_follow_owner_parser_signal_without_query_cues(monkeypat
             },
         )
 
-        packet = build_working_memory_packet(
+        packet = control_plane.build_working_memory_packet(
             store,
             query="Carry this forward.",
             session_id="phase38-1-task-signal",
@@ -70,7 +71,8 @@ def test_temporal_route_shapes_policy_from_retrieval_route_without_control_plane
     store.open()
     try:
         monkeypatch.setattr(
-            "brainstack.control_plane.retrieve_executive_context",
+            control_plane,
+            "retrieve_executive_context",
             lambda *args, **kwargs: {
                 "profile_items": [],
                 "matched": [],
@@ -94,7 +96,7 @@ def test_temporal_route_shapes_policy_from_retrieval_route_without_control_plane
             },
         )
 
-        packet = build_working_memory_packet(
+        packet = control_plane.build_working_memory_packet(
             store,
             query="Atlas ordering proof",
             session_id="phase38-1-temporal-route",
@@ -129,7 +131,7 @@ def test_direct_style_contract_slot_request_routes_without_cue_table(tmp_path):
             source="test",
             confidence=1.0,
         )
-        packet = build_working_memory_packet(
+        packet = control_plane.build_working_memory_packet(
             store,
             query="Írd le a kommunikációs szabályokat.",
             session_id="phase42-style-slot",
@@ -156,7 +158,7 @@ def test_route_resolution_failure_is_explicit_and_auditable(tmp_path):
     store = BrainstackStore(str(tmp_path / "brainstack.db"))
     store.open()
     try:
-        packet = build_working_memory_packet(
+        packet = control_plane.build_working_memory_packet(
             store,
             query="Magyarazd el roviden ezt a kodot.",
             session_id="phase40-1-route-failure",
@@ -186,7 +188,7 @@ def test_route_resolution_failure_classifies_economic_drift(tmp_path):
     store = BrainstackStore(str(tmp_path / "brainstack.db"))
     store.open()
     try:
-        packet = build_working_memory_packet(
+        packet = control_plane.build_working_memory_packet(
             store,
             query="Sorold fel a szabályokat.",
             session_id="phase43-route-failure",

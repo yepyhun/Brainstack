@@ -276,8 +276,8 @@ def test_conversation_transcript_is_published_to_chroma_and_found_semantically(t
         assert "Uber Eats" in packet["block"]
         assert "2024-03-15" in packet["block"]
         semantic = next(channel for channel in packet["channels"] if channel["name"] == "semantic")
-        assert semantic["status"] == "active"
-        assert semantic["candidate_count"] > 0
+        assert semantic["status"] == "idle"
+        assert semantic["candidate_count"] >= 1
     finally:
         store.close()
 

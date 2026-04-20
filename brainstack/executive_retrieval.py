@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 from .db import BrainstackStore
 from .operating_truth import OPERATING_RECORD_TYPES, parse_operating_lookup_query
+from .profile_contract import is_native_explicit_style_item
 from .style_contract import STYLE_CONTRACT_SLOT, extract_style_contract_parts
 from .task_memory import parse_task_lookup_query
 from .tier2_extractor import _default_llm_caller, _extract_json_object, _extract_text_content
@@ -1012,7 +1013,7 @@ def _route_limits(
             "graph": limits["graph_limit"],
         }
     elif route.applied_mode == ROUTE_STYLE_CONTRACT:
-        limits["profile_limit"] = max(1, min(limits["profile_limit"], 1))
+        limits["profile_limit"] = max(1, min(limits["profile_limit"], 4))
         limits["continuity_match_limit"] = 0
         limits["continuity_recent_limit"] = 0
         limits["transcript_limit"] = 0
@@ -1041,7 +1042,10 @@ def _route_has_support(route: RetrievalRoute, selected: Dict[str, List[Dict[str,
         }
         return len(anchors) >= 2
     if route.applied_mode == ROUTE_STYLE_CONTRACT:
-        return any(str(row.get("stable_key") or "").strip() == STYLE_CONTRACT_SLOT for row in selected.get("profile_items", ()))
+        return any(
+            str(row.get("stable_key") or "").strip() == STYLE_CONTRACT_SLOT or is_native_explicit_style_item(row)
+            for row in selected.get("profile_items", ())
+        )
     return True
 
 
@@ -1470,7 +1474,12 @@ def retrieve_executive_context(
         stable_key=STYLE_CONTRACT_SLOT,
         principal_scope_key=principal_scope_key,
     )
-    style_contract_available = style_contract_row is not None
+    native_explicit_style_rows = [
+        row
+        for row in store.list_profile_items(limit=24, principal_scope_key=principal_scope_key)
+        if is_native_explicit_style_item(row)
+    ]
+    style_contract_available = style_contract_row is not None or bool(native_explicit_style_rows)
     style_contract_parts = (
         extract_style_contract_parts(
             style_contract_row.get("content"),
@@ -1553,10 +1562,13 @@ def retrieve_executive_context(
         keyword_profile_rows = [
             row
             for row in keyword_profile_rows
-            if str(row.get("stable_key") or "").strip() == STYLE_CONTRACT_SLOT
+            if str(row.get("stable_key") or "").strip() == STYLE_CONTRACT_SLOT or is_native_explicit_style_item(row)
         ]
         if not keyword_profile_rows:
-            keyword_profile_rows = [_missing_style_contract_row(principal_scope_key=principal_scope_key)]
+            if native_explicit_style_rows:
+                keyword_profile_rows = list(native_explicit_style_rows)
+            else:
+                keyword_profile_rows = [_missing_style_contract_row(principal_scope_key=principal_scope_key)]
     keyword_continuity_rows = (
         _collect_query_rows(
             shelf="continuity_match",

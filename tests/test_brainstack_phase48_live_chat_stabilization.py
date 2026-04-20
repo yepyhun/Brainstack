@@ -135,7 +135,7 @@ def test_prefetch_bootstraps_authority_before_packet_build(tmp_path: Path) -> No
         provider.shutdown()
 
 
-def test_final_output_blocks_when_active_authority_cannot_rebuild(monkeypatch, tmp_path: Path) -> None:
+def test_final_output_validation_stays_disabled_without_ordinary_reply_gate(monkeypatch, tmp_path: Path) -> None:
     provider = _make_provider(tmp_path, "phase48-block-on-missing-compiled")
     try:
         store = provider._store
@@ -157,12 +157,14 @@ def test_final_output_blocks_when_active_authority_cannot_rebuild(monkeypatch, t
         )
 
         result = provider.validate_assistant_output("Szia 😊")
-        assert result is not None
-        assert result["status"] == "blocked"
-        assert result["blocked"] is True
-        assert result["can_ship"] is False
-        assert result["block_reason"] == "compiled_behavior_policy_unavailable"
-        assert result["remaining_violations"][0]["violation"] == "compiled_policy_missing_for_active_authority"
+        assert result is None
+        trace = provider.behavior_policy_trace()
+        assert trace is not None
+        final = trace["final_output_validation"]
+        assert final["status"] == "skipped"
+        assert final["blocked"] is False
+        assert final["can_ship"] is True
+        assert final["contract"]["ordinary_reply_validation_enabled"] is False
     finally:
         provider.shutdown()
 
@@ -178,24 +180,31 @@ def test_natural_hungarian_rule_recall_routes_to_style_authority(tmp_path: Path)
             source="test",
             confidence=1.0,
         )
-        packet = build_working_memory_packet(
-            store,
-            query="Miért nem tartod be a szabályokat? Nem emlékszel rájuk?",
-            session_id="phase48-natural-style-recall",
-            principal_scope_key="",
-            profile_match_limit=4,
-            continuity_recent_limit=4,
-            continuity_match_limit=4,
-            transcript_match_limit=2,
-            transcript_char_budget=560,
-            graph_limit=6,
-            corpus_limit=4,
-            corpus_char_budget=700,
-        )
+        for idx, query in enumerate(
+            (
+                "Miért nem tartod be a szabályokat? Nem emlékszel rájuk?",
+                "Emlékszel a 25 szabályra? El tudod nekem mondani?",
+            ),
+            start=1,
+        ):
+            packet = build_working_memory_packet(
+                store,
+                query=query,
+                session_id=f"phase48-natural-style-recall-{idx}",
+                principal_scope_key="",
+                profile_match_limit=4,
+                continuity_recent_limit=4,
+                continuity_match_limit=4,
+                transcript_match_limit=2,
+                transcript_char_budget=560,
+                graph_limit=6,
+                corpus_limit=4,
+                corpus_char_budget=700,
+            )
 
-        assert packet["routing"]["requested_mode"] == "style_contract"
-        assert packet["routing"]["applied_mode"] == "style_contract"
-        assert packet["routing"]["source"] == "deterministic_style_contract_hint"
-        assert packet["policy"]["show_authoritative_contract"] is True
+            assert packet["routing"]["requested_mode"] == "style_contract"
+            assert packet["routing"]["applied_mode"] == "style_contract"
+            assert packet["routing"]["source"] == "deterministic_style_contract_hint"
+            assert packet["policy"]["show_authoritative_contract"] is True
     finally:
         store.close()

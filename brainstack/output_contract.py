@@ -114,13 +114,19 @@ def build_output_contract(compiled_policy: Mapping[str, Any] | None) -> Dict[str
     }
 
 
+OUTPUT_ENFORCEMENT_MODE_ORDINARY_REPLY = "ordinary_reply"
+OUTPUT_ENFORCEMENT_MODE_STRICT = "strict_contract"
+
+
 def validate_output_against_contract(
     *,
     content: str,
     compiled_policy: Mapping[str, Any] | None,
+    enforcement_mode: str = OUTPUT_ENFORCEMENT_MODE_ORDINARY_REPLY,
 ) -> Dict[str, Any]:
     original = str(content or "")
     contract = build_output_contract(compiled_policy)
+    strict_mode = str(enforcement_mode or "").strip() == OUTPUT_ENFORCEMENT_MODE_STRICT
     if not contract["active"] or not original:
         return {
             "content": original,
@@ -131,6 +137,7 @@ def validate_output_against_contract(
             "can_ship": True,
             "block_reason": "",
             "contract": contract,
+            "enforcement_mode": enforcement_mode,
             "repairs": [],
             "remaining_violations": [],
         }
@@ -157,7 +164,7 @@ def validate_output_against_contract(
                 "kind": "punctuation_policy",
                 "violation": "dash_like_punctuation",
                 "repair": "none",
-                "enforcement": "block",
+                "enforcement": "block" if strict_mode else "advisory",
             }
         )
 
@@ -197,13 +204,21 @@ def validate_output_against_contract(
                     "violation": str(item.get("label") or "forbidden_phrase"),
                     "phrase": phrase,
                     "repair": "none",
-                    "enforcement": "block",
+                    "enforcement": "block" if strict_mode else "advisory",
                     "source_rule_id": str(item.get("source_rule_id") or ""),
                 }
             )
 
-    blocked = bool(remaining_violations)
-    status = "blocked" if blocked else "repaired" if repairs else "clean"
+    blocked = strict_mode and bool(remaining_violations)
+    status = (
+        "blocked"
+        if blocked
+        else "advisory"
+        if remaining_violations
+        else "repaired"
+        if repairs
+        else "clean"
+    )
     return {
         "content": current,
         "changed": current != original,
@@ -213,6 +228,7 @@ def validate_output_against_contract(
         "can_ship": not blocked,
         "block_reason": "non_repairable_typed_invariant_violation" if blocked else "",
         "contract": contract,
+        "enforcement_mode": enforcement_mode,
         "repairs": repairs,
         "remaining_violations": remaining_violations,
     }
