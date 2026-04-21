@@ -8,9 +8,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 from .logistics_contract import derive_transcript_logistics_typed_entities
 from .profile_contract import (
-    derive_transcript_communication_profile_items,
     derive_transcript_identity_profile_items,
-    expand_communication_profile_items,
     normalize_profile_slot,
 )
 from .style_contract import STYLE_CONTRACT_SLOT, normalize_style_contract_payload
@@ -81,22 +79,6 @@ def _normalize_slot(value: Any) -> str:
 
 def _normalize_compare_text(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().split())
-
-
-def _communication_bundle_items(
-    *,
-    category: str,
-    content: str,
-    slot: str,
-    confidence: float,
-) -> List[Dict[str, Any]]:
-    return expand_communication_profile_items(
-        category=category,
-        content=content,
-        slot=slot,
-        confidence=confidence,
-        source="tier2_llm",
-    )
 
 
 def _looks_like_internal_mechanics_text(value: Any) -> bool:
@@ -354,22 +336,15 @@ def _normalize_profile_items(items: Any) -> List[Dict[str, Any]]:
         if slot == STYLE_CONTRACT_SLOT:
             continue
         confidence = _coerce_confidence(raw.get("confidence"), default=0.78)
-        expanded = _communication_bundle_items(
-            category=category,
-            content=content,
-            slot=slot,
-            confidence=confidence,
-        )
-        if not expanded:
-            item = {
-                "category": category,
-                "content": content,
-                "confidence": confidence,
-                "source": "tier2_llm",
-            }
-            if slot:
-                item["slot"] = slot
-            expanded = [item]
+        item = {
+            "category": category,
+            "content": content,
+            "confidence": confidence,
+            "source": "tier2_llm",
+        }
+        if slot:
+            item["slot"] = slot
+        expanded = [item]
         for item in expanded:
             key = (
                 str(item.get("category") or ""),
@@ -651,20 +626,14 @@ def extract_tier2_candidates(
                 "- hard caps: profile_items<=6, states<=2, relations<=1, inferred_relations<=1, typed_entities<=4, temporal_events<=4, decisions<=2\n"
                 "- keep content values short and factual; target <=12 words for each content/reason/decision string; if unsure, emit [] or \"\" instead of extra explanation\n"
                 "- use stable slots only when a profile fact has one obvious durable owner, such as identity:name\n"
-                "- when the user sets short standalone communication or assistant-behavior rules and no overlapping style_contract is emitted, emit them as separate durable profile_items instead of collapsing them into one generic sentence\n"
-                "- for communication rules, prefer these stable slots when applicable: preference:response_language, preference:ai_name, preference:communication_style, preference:emoji_usage, preference:message_structure, preference:pronoun_capitalization, preference:dash_usage, preference:formatting_style\n"
-                "- prefer profile_items over states for user communication preferences and assistant naming rules\n"
-                "- do not bury communication rules inside continuity_summary or decisions when they can be emitted as separate profile_items\n"
                 "- when the user teaches a named long-form communication pack or multi-section rule set, emit that detailed pack in style_contract instead of trying to squeeze it into profile_items\n"
                 "- style_contract is optional; emit it only for durable multi-rule communication contracts the user wants remembered across sessions\n"
-                "- if style_contract is present, it must contain the full detailed rule pack and overlapping communication rules must not be duplicated in profile_items\n"
+                "- if style_contract is present, it must contain the full detailed rule pack and overlapping rule lines must not be duplicated in profile_items\n"
                 "- when emitting style_contract, preserve the user's own section headings and rule lines as literally as possible; keep the original language, wording, numbering markers, and polarity unless the transcript itself later corrects them\n"
                 "- do not paraphrase, translate, merge, soften, invent, or normalize style_contract rules into generic summaries; only clean whitespace and place lines under the right section headings\n"
                 "- do not use a section heading as the style_contract title; set title only if the transcript explicitly names the pack, otherwise return an empty string\n"
                 "- do not split one user rule into a heading plus a suffix line; if the transcript says 'konkrét tények nem jelentőségfelfújás', keep it as one rule line under the correct section heading\n"
                 "- if the transcript contains later corrections to an earlier rule, keep the latest corrected wording in style_contract and discard the superseded wording\n"
-                "- if the user specifies capitalization conventions such as uppercase pronouns (for example Én, Te, Ő), emit that as a separate durable profile_item\n"
-                "- if the user specifies punctuation constraints such as avoiding dash or em-dash punctuation, emit that as a separate durable profile_item\n"
                 "- never emit filesystem paths, prompt-loading claims, or skill/persona file mechanics as durable memory facts or states\n"
                 "- do not mention persona.md, SKILL.md, MEMORY.md, USER.md, ~/.hermes, or how prompts were loaded inside profile_items, states, decisions, or continuity_summary\n"
                 "- use explicit entity names when clear, otherwise use User\n"
@@ -709,13 +678,6 @@ def extract_tier2_candidates(
     payload, parse_status = _extract_json_object_with_status(raw_text, context=parse_context)
     profile_items = _normalize_profile_items(payload.get("profile_items"))
     style_contract = normalize_style_contract_payload(payload.get("style_contract"))
-    profile_items.extend(
-        derive_transcript_communication_profile_items(
-            entries,
-            existing_items=profile_items,
-            style_contract=style_contract,
-        )
-    )
     profile_items.extend(
         derive_transcript_identity_profile_items(
             entries,

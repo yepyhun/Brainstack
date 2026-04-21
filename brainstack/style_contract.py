@@ -14,15 +14,7 @@ _CHAT_FRAMING_PREFIX_RE = re.compile(r"^(?:\[[^\]]+\]\s+|(?:user|assistant|syste
 _STYLE_AUTHORITY_MARKERS = (
     "style contract",
     "communication contract",
-    "communication style",
-    "writing style",
-    "formatting style",
-    "style rules",
-    "communication rules",
-    "stílus",
-    "stilus",
-    "kommunikáció",
-    "kommunikacio",
+    "rule pack",
 )
 _STYLE_CONTRACT_SOURCE_RANKS = (
     ("behavior_policy_correction", 400),
@@ -674,8 +666,10 @@ def looks_like_style_contract_teaching(raw_text: Any) -> bool:
 
     if style_authority_present and total_rules >= 3:
         return True
-    if has_leading_title or headed_section_count >= 1 or section_count >= 2:
-        return False
+    if has_leading_title and total_rules >= 3:
+        return True
+    if headed_section_count >= 1 or section_count >= 2:
+        return True
     return structured_rule_lines >= 3 and inline_rule_count >= 2 and total_rules >= 3
 
 

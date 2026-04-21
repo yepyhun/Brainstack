@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Dict
 
-from .behavior_policy import build_behavior_policy_reinforcement
 from .db import BrainstackStore
 from .executive_retrieval import retrieve_executive_context
 from .operating_truth import parse_operating_lookup_query
@@ -344,13 +343,6 @@ def build_working_memory_packet(
         )
         if compiled_policy_payload:
             policy_payload["compiled_behavior_policy"] = compiled_policy_payload
-        if str(routing.get("applied_mode") or "") == "style_contract":
-            reinforcement = build_behavior_policy_reinforcement(
-                query=query,
-                compiled_policy=policy_payload.get("compiled_behavior_policy") or {},
-            )
-            if reinforcement is not None:
-                policy_payload["behavior_policy_reinforcement"] = reinforcement
     lookup_semantics = retrieval.get("lookup_semantics")
     if isinstance(lookup_semantics, dict):
         policy_payload["lookup_semantics"] = lookup_semantics

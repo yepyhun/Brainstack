@@ -34,10 +34,8 @@ from .operating_truth import (
 )
 from .output_contract import validate_output_against_contract
 from .profile_contract import (
-    COMMUNICATION_CANONICAL_SLOTS,
     NATIVE_EXPLICIT_PROFILE_METADATA_KEY,
     NATIVE_EXPLICIT_PROFILE_MIRROR_SOURCE,
-    normalize_profile_slot,
 )
 from .reconciler import reconcile_tier2_candidates
 from .retrieval import (
@@ -53,22 +51,10 @@ from .style_contract import (
     looks_like_style_contract_teaching,
 )
 from .task_memory import build_task_stable_key, parse_task_capture, resolve_user_timezone
-from .tier1_extractor import build_profile_stable_key, extract_profile_candidates
+from .tier1_extractor import build_profile_stable_key
 from .tier2_extractor import extract_tier2_candidates
 
 logger = logging.getLogger(__name__)
-
-_INTERRUPTED_ASSISTANT_PREFIXES = (
-    "operation interrupted:",
-    "interrupting current task",
-    "session reset~",
-    "session reset!",
-)
-_INTERRUPTED_ASSISTANT_SUBSTRINGS = (
-    "i'll respond to your message shortly",
-    "waiting for model response",
-)
-
 
 def _stable_native_write_id(*, action: str, target: str, content: str) -> str:
     normalized = " ".join(str(content or "").split())
@@ -86,100 +72,31 @@ def _native_profile_mirror_payload(*, native_write_id: str, action: str, target:
     }
 
 
-def _derive_native_profile_mirror_candidates(content: str) -> List[Dict[str, Any]]:
-    candidates: List[Dict[str, Any]] = []
-    seen_slots: set[str] = set()
+_NATIVE_EXPLICIT_ENTRY_SPLIT = re.compile(r"\n\s*§\s*\n|\n+")
 
-    def _append_candidate(candidate: Dict[str, Any]) -> None:
-        slot = normalize_profile_slot(candidate.get("slot") or candidate.get("stable_key") or "")
-        if not slot:
-            return
-        if not (slot.startswith("identity:") or slot in COMMUNICATION_CANONICAL_SLOTS):
-            return
-        if slot in seen_slots:
-            return
-        seen_slots.add(slot)
-        entry = dict(candidate)
-        entry["slot"] = slot
-        entry["stable_key"] = slot
-        candidates.append(entry)
 
-    for item in extract_profile_candidates(content):
-        _append_candidate(dict(item))
+def _iter_native_explicit_entries(content: str) -> List[str]:
+    return [
+        " ".join(part.strip().split())
+        for part in _NATIVE_EXPLICIT_ENTRY_SPLIT.split(str(content or ""))
+        if str(part or "").strip()
+    ]
 
-    normalized = " ".join(str(content or "").strip().split())
-    lowered = normalized.casefold()
 
-    native_name_match = None
-    for pattern in (
-        r"\b([A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű0-9_-]{2,40})(?:nak|nek)?\s+hívnak\b",
-        r"\ba nevem\s+([A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű0-9_-]{2,40})\b",
-    ):
-        native_name_match = re.search(pattern, normalized, re.IGNORECASE)
-        if native_name_match:
-            break
-    if native_name_match:
-        native_name = str(native_name_match.group(1) or "").strip()
-        for suffix in ("nak", "nek"):
-            lowered_name = native_name.casefold()
-            if lowered_name.endswith(suffix) and len(native_name) > len(suffix) + 1:
-                native_name = native_name[: -len(suffix)]
-                break
-        _append_candidate(
+def _derive_native_profile_mirror_entries(content: str) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    for index, entry in enumerate(_iter_native_explicit_entries(content), start=1):
+        stable_digest = hashlib.sha256(entry.encode("utf-8")).hexdigest()[:16]
+        entries.append(
             {
-                "category": "identity",
-                "slot": "identity:name",
-                "content": native_name,
-                "confidence": 0.95,
+                "category": "native_profile_mirror",
+                "stable_key": f"native_profile_mirror:{index}:{stable_digest}",
+                "content": entry,
+                "confidence": 1.0,
                 "source": "native_explicit_profile",
             }
         )
-
-    if any(token in lowered for token in ("magyarul válaszolj", "mindig magyarul", "respond in hungarian", "always respond in hungarian")):
-        _append_candidate(
-            {
-                "category": "preference",
-                "slot": "preference:response_language",
-                "content": "Always respond in Hungarian.",
-                "confidence": 0.95,
-                "source": "native_explicit_profile",
-            }
-        )
-
-    if any(token in lowered for token in ("emoji", "emoj")):
-        _append_candidate(
-            {
-                "category": "preference",
-                "slot": "preference:emoji_usage",
-                "content": "Do not use emojis.",
-                "confidence": 0.92,
-                "source": "native_explicit_profile",
-            }
-        )
-
-    if any(token in lowered for token in ("kötőjel", "em dash", "dash punctuation", "hyphen")):
-        _append_candidate(
-            {
-                "category": "preference",
-                "slot": "preference:dash_usage",
-                "content": "Do not use dash punctuation in replies.",
-                "confidence": 0.92,
-                "source": "native_explicit_profile",
-            }
-        )
-
-    if any(token in lowered for token in ("új sor", "külön sor", "new thought on a new line", "new line")):
-        _append_candidate(
-            {
-                "category": "preference",
-                "slot": "preference:message_structure",
-                "content": "Put each new thought on a new line.",
-                "confidence": 0.92,
-                "source": "native_explicit_profile",
-            }
-        )
-
-    return candidates
+    return entries
 
 
 def _build_personal_scope_key(*, platform: str = "", user_id: str = "") -> str:
@@ -301,6 +218,9 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._ordinary_reply_output_validation_enabled = bool(
             self._config.get("ordinary_reply_output_validation_enabled", False)
         )
+        self._tier2_session_end_flush_enabled = bool(
+            self._config.get("tier2_session_end_flush_enabled", False)
+        )
         self._tier2_idle_window_seconds = int(self._config.get("tier2_idle_window_seconds", 30))
         self._tier2_batch_turn_limit = int(self._config.get("tier2_batch_turn_limit", 5))
         self._tier2_transcript_limit = int(self._config.get("tier2_transcript_limit", 8))
@@ -368,23 +288,24 @@ class BrainstackMemoryProvider(MemoryProvider):
             {"key": "corpus_section_max_chars", "description": "Maximum size of an ingested corpus section", "default": "900"},
             {
                 "key": "system_prompt_behavior_contract_enabled",
-                "description": "Include the behavior contract in ordinary system prompt projection",
+                "description": "Legacy compatibility toggle for archived rule-pack projection; keep disabled for product-ready runtime",
                 "default": "false",
             },
             {
                 "key": "ordinary_packet_behavior_contract_enabled",
-                "description": "Include the active communication contract in ordinary working-memory packets",
+                "description": "Legacy compatibility toggle for ordinary-turn contract projection; keep disabled",
                 "default": "false",
             },
             {
                 "key": "ordinary_reply_output_validation_enabled",
-                "description": "Run Brainstack final-output validation on ordinary replies",
+                "description": "Legacy compatibility toggle for ordinary-reply validation; keep disabled",
                 "default": "false",
             },
             {"key": "user_timezone", "description": "Default timezone for relative task and commitment dates", "default": "UTC"},
             {"key": "tier2_idle_window_seconds", "description": "Idle window before the future Tier-2 batch may be queued", "default": "30"},
             {"key": "tier2_batch_turn_limit", "description": "How many turns may accumulate before the future Tier-2 batch is queued", "default": "5"},
             {"key": "tier2_transcript_limit", "description": "How many recent transcript turns Tier-2 may read per batch", "default": "8"},
+            {"key": "tier2_session_end_flush_enabled", "description": "Run synchronous Tier-2 extraction during on_session_end", "default": "false"},
             {"key": "tier2_timeout_seconds", "description": "Hard timeout for one Tier-2 background extraction run", "default": "15"},
             {"key": "tier2_max_tokens", "description": "Max output tokens for one Tier-2 extraction response", "default": "900"},
         ]
@@ -655,29 +576,6 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._recent_user_messages.append(text)
         if len(self._recent_user_messages) > 4:
             self._recent_user_messages = self._recent_user_messages[-4:]
-
-    def _looks_like_interrupted_assistant_placeholder(self, content: str) -> bool:
-        normalized = " ".join(str(content or "").strip().split())
-        if not normalized:
-            return False
-        lowered = normalized.casefold()
-        if any(lowered.startswith(prefix) for prefix in _INTERRUPTED_ASSISTANT_PREFIXES):
-            return True
-        return any(fragment in lowered for fragment in _INTERRUPTED_ASSISTANT_SUBSTRINGS)
-
-    def _should_defer_initial_style_contract_commit(self, *, user_content: str, assistant_content: str) -> bool:
-        if not self._store:
-            return False
-        if self._store.get_behavior_contract(principal_scope_key=self._principal_scope_key) is not None:
-            return False
-        text = str(user_content or "").strip()
-        if not text:
-            return False
-        if not has_explicit_style_authority_signal(text):
-            return False
-        if not looks_like_style_contract_teaching(text):
-            return False
-        return self._looks_like_interrupted_assistant_placeholder(assistant_content)
 
     def _iter_style_contract_candidate_texts(self, content: str) -> List[tuple[str, int]]:
         text = str(content or "").strip()
@@ -1023,7 +921,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         trace["system_prompt_block"] = {
             "surface": "system_prompt_block",
             "injected": bool(contract_title and contract_title in block),
-            "section_present": "# Brainstack Active Communication Contract" in block,
+            "section_present": bool(projection.get("contract_present")),
             "title_present": bool(contract_title and contract_title in block),
             "snapshot": snapshot,
             "projection": dict(projection),
@@ -1113,7 +1011,6 @@ class BrainstackMemoryProvider(MemoryProvider):
         projection_text = ""
         if isinstance(compiled_policy, dict):
             projection_text = str(compiled_policy.get("projection_text") or "").strip()
-        reinforcement = packet.get("policy", {}).get("behavior_policy_reinforcement")
         output_block = str(packet.get("block") or "")
         self._set_memory_operation_trace(surface="prefetch_lookup", note="Nominal read surface; no durable writes attempted.")
         trace["prefetch"] = {
@@ -1130,12 +1027,8 @@ class BrainstackMemoryProvider(MemoryProvider):
             "read_side_effect_count": 0,
             "compiled_policy_present_in_packet": bool(isinstance(compiled_policy, dict) and projection_text),
             "projection_present_in_block": bool(projection_text and projection_text in output_block),
-            "correction_reinforcement_present": bool(
-                isinstance(reinforcement, dict) and str(reinforcement.get("text") or "").strip()
-            ),
-            "correction_reinforcement_mode": str(reinforcement.get("mode") or "")
-            if isinstance(reinforcement, dict)
-            else "",
+            "correction_reinforcement_present": False,
+            "correction_reinforcement_mode": "",
             "snapshot": snapshot,
         }
         self._last_behavior_policy_trace = trace
@@ -1202,23 +1095,14 @@ class BrainstackMemoryProvider(MemoryProvider):
             created_at=event_time,
             metadata=self._scoped_metadata(),
         )
-        if self._should_defer_initial_style_contract_commit(
-            user_content=user_content,
-            assistant_content=assistant_content,
-        ):
-            self._remember_recent_user_message(user_content)
-            self._set_memory_operation_trace(
-                surface="sync_turn_style_contract_deferral",
-                note="Deferred initial explicit style-contract commit until a non-interrupted assistant turn.",
-            )
-        else:
-            self._upsert_style_contract_candidate(
-                content=user_content,
-                source="sync_turn:user_style_contract",
-                confidence=0.9,
-                metadata={"session_id": sid, "turn_number": self._turn_counter},
-                require_explicit_signal=True,
-            )
+        self._remember_recent_user_message(user_content)
+        self._set_memory_operation_trace(
+            surface="sync_turn_style_contract_disabled",
+            note=(
+                "Transcript turns do not create authoritative style contracts. "
+                "Explicit style/profile truth must arrive through the native explicit-memory write seam."
+            ),
+        )
         task_capture = self._infer_task_capture_candidate(content=user_content)
         self._commit_task_capture_candidate(
             capture=task_capture,
@@ -1468,7 +1352,11 @@ class BrainstackMemoryProvider(MemoryProvider):
         if not self._ensure_explicit_write_barrier_clear(surface="on_session_end"):
             return
         worker_finished = self._wait_for_tier2_worker(timeout=self._tier2_timeout_seconds + 2.0)
-        if worker_finished and (self._pending_tier2_turns > 0 or self._tier2_followup_requested):
+        if (
+            self._tier2_session_end_flush_enabled
+            and worker_finished
+            and (self._pending_tier2_turns > 0 or self._tier2_followup_requested)
+        ):
             try:
                 self._run_tier2_batch(session_id=self._session_id, turn_number=self._turn_counter, trigger_reason="session_end_flush")
             except Exception:
@@ -1477,6 +1365,10 @@ class BrainstackMemoryProvider(MemoryProvider):
                 with self._tier2_lock:
                     self._pending_tier2_turns = 0
                     self._tier2_followup_requested = False
+        else:
+            with self._tier2_lock:
+                self._pending_tier2_turns = 0
+                self._tier2_followup_requested = False
         snapshot_window = continuity_adapter.build_snapshot_source_window(messages, max_items=8)
         summary = continuity_adapter.write_snapshot_records(
             self._store,
@@ -1565,32 +1457,30 @@ class BrainstackMemoryProvider(MemoryProvider):
                 require_explicit_signal=True,
             ):
                 return
-            mirror_candidates = _derive_native_profile_mirror_candidates(content)
-            if not mirror_candidates:
+            mirror_entries = _derive_native_profile_mirror_entries(content)
+            if not mirror_entries:
                 self._set_memory_operation_trace(
                     surface="native_profile_mirror",
-                    note="Native explicit user write produced no bounded Brainstack mirror candidates.",
+                    note="Native explicit user write produced no bounded Brainstack mirror entries.",
                 )
                 return
-            for index, candidate in enumerate(mirror_candidates, start=1):
-                stable_key = str(candidate.get("stable_key") or candidate.get("slot") or "").strip()
-                slot = str(candidate.get("slot") or stable_key).strip()
-                if not stable_key or not slot:
+            for index, entry in enumerate(mirror_entries, start=1):
+                stable_key = str(entry.get("stable_key") or "").strip()
+                if not stable_key:
                     continue
-                category = str(candidate.get("category") or ("identity" if slot.startswith("identity:") else "preference")).strip()
+                category = str(entry.get("category") or "native_profile_mirror").strip()
                 mirror_metadata = self._scoped_metadata(
                     {
                         "target": target,
                         NATIVE_EXPLICIT_PROFILE_METADATA_KEY: {
                             **mirror_payload,
-                            "slot": slot,
                             "mirror_index": index,
                         },
                     }
                 )
                 source = f"builtin_{action}:native_profile_mirror"
-                candidate_content = str(candidate.get("content") or "").strip()
-                candidate_confidence = float(candidate.get("confidence") or 0.95)
+                candidate_content = str(entry.get("content") or "").strip()
+                candidate_confidence = float(entry.get("confidence") or 0.95)
 
                 def _commit_profile_item(
                     *,
@@ -1623,7 +1513,6 @@ class BrainstackMemoryProvider(MemoryProvider):
                         "native_write_id": native_write_id,
                         "source_generation": native_write_id,
                         "mirrored_from": NATIVE_EXPLICIT_PROFILE_MIRROR_SOURCE,
-                        "slot": slot,
                     },
                 )
             return

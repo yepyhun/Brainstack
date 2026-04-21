@@ -32,9 +32,9 @@ DONOR_REGISTRY: Dict[str, DonorSpec] = {
         local_adapter="plugins/memory/brainstack/donors/continuity_adapter.py",
         local_owner="Brainstack continuity shelf",
         smoke_tests=(
-            "tests/agent/test_brainstack_donor_boundaries.py::TestBrainstackDonorBoundaries::test_provider_sync_turn_uses_donor_continuity_adapter",
-            "tests/agent/test_brainstack_donor_boundaries.py::TestBrainstackDonorBoundaries::test_provider_on_pre_compress_uses_donor_snapshot_adapter",
-            "tests/agent/test_brainstack_transcript_shelf.py",
+            "provider sync_turn continuity adapter path",
+            "pre-compress continuity snapshot adapter path",
+            "bounded transcript shelf integration",
         ),
         notes="Pattern donor only. No parallel runtime is allowed.",
     ),
@@ -47,9 +47,9 @@ DONOR_REGISTRY: Dict[str, DonorSpec] = {
         local_adapter="plugins/memory/brainstack/donors/graph_adapter.py",
         local_owner="Brainstack graph-truth shelf",
         smoke_tests=(
-            "tests/agent/test_brainstack_donor_boundaries.py::TestBrainstackDonorBoundaries::test_provider_sync_turn_uses_donor_graph_adapter",
-            "tests/agent/test_brainstack_donor_boundaries.py::TestBrainstackDonorBoundaries::test_provider_on_session_end_uses_donor_snapshot_and_graph_adapters",
-            "tests/agent/test_memory_plugin_e2e.py -k graph",
+            "provider sync_turn graph adapter path",
+            "session-end graph and snapshot adapter path",
+            "graph-backed memory provider integration",
         ),
     ),
     "corpus": DonorSpec(
@@ -61,8 +61,8 @@ DONOR_REGISTRY: Dict[str, DonorSpec] = {
         local_adapter="plugins/memory/brainstack/donors/corpus_adapter.py",
         local_owner="Brainstack corpus shelf",
         smoke_tests=(
-            "tests/agent/test_brainstack_donor_boundaries.py::TestBrainstackDonorBoundaries::test_provider_ingest_corpus_document_uses_donor_corpus_adapter",
-            "tests/agent/test_memory_plugin_e2e.py -k corpus",
+            "provider corpus ingest adapter path",
+            "corpus-backed memory provider integration",
         ),
         notes="This layer is the strongest future candidate for fuller upstream alignment.",
     ),

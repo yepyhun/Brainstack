@@ -321,7 +321,13 @@ def _check_host_surfaces(target: Path) -> list[Check]:
     else:
         checks.append(Check("turn_start_hook", "pass", "run_agent calls memory provider on_turn_start"))
 
-    if "LEGACY_MEMORY_TOOL_NAMES" in brainstack_mode and "is_brainstack_only_mode" in brainstack_mode:
+    if (
+        "def is_brainstack_only_mode" in brainstack_mode
+        and "return False" in brainstack_mode
+        and "return list(tool_defs or [])" in brainstack_mode
+    ):
+        checks.append(Check("brainstack_only_helper", "pass", "Legacy host helper is present only as a no-op compatibility shim"))
+    elif "LEGACY_MEMORY_TOOL_NAMES" in brainstack_mode and "is_brainstack_only_mode" in brainstack_mode:
         checks.append(Check("brainstack_only_helper", "warn", "Legacy Brainstack-only host helper is still present; phase-52 installs no longer require it"))
     else:
         checks.append(Check("brainstack_only_helper", "pass", "No Brainstack-only host helper is required for native-seam mode"))

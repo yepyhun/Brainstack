@@ -158,11 +158,7 @@ def _sanitize_policy_surface(text: Any) -> str:
 
 
 def _resolve_punctuation_constraint(text: str) -> str:
-    lowered = _normalize_text(text).casefold()
-    if _contains_any(lowered, ("u+2014", "em dash", "u+2013", "en dash")):
-        return "forbid_em_dash_only"
-    if _contains_any(lowered, ("dash", "dashes", "kötőjel", "kotojel", "hyphen", "hyphen-minus")):
-        return "forbid_all_dash_like"
+    del text
     return "surface_text"
 
 
@@ -201,33 +197,7 @@ def _sections_from_metadata(metadata: Mapping[str, Any] | None) -> tuple[str, Li
 
 def _classify_rule(section: str, text: str) -> tuple[str, str]:
     section_lower = _normalize_text(section).casefold()
-    text_lower = _normalize_text(text).casefold()
-
-    if _contains_any(text_lower, ("magyar", "hungarian", "angol", "english")):
-        return "language_policy", "direct_language_match"
-    if _contains_any(
-        text_lower,
-        ("szólíts", "hívj", "hivatkozz magadra", "megnevezed magad", "tegez", "én, te, ő", "én te ő", "nagybetű"),
-    ):
-        return "addressing_policy", "direct_addressing_match"
-    if _contains_any(text_lower, ("knowledge cutoff", "chatbot maradvány", "emoji", "let's dive in", "lets dive in")):
-        return "forbidden_surface_form", "direct_forbidden_surface_match"
-    if _contains_any(text_lower, ("em dash", "dash", "kötőjel", "hyphen", "vessző", "pont", "zárójel", "idézőjel")):
-        return "punctuation_policy", "direct_punctuation_match"
-    if _contains_any(text_lower, ("boldface", "félkövér", "fejléces felsorolás", "kisbetűs fejlécek", "markdown")):
-        return "formatting_policy", "direct_formatting_match"
-    if _contains_any(text_lower, ("töltelék", "röviden", "pozitív zárás", "óvatoskodás")):
-        return "verbosity_policy", "direct_verbosity_match"
-    if _contains_any(text_lower, ("bizonytalan", "bizonytalanság", "hedge")):
-        return "uncertainty_policy", "direct_uncertainty_match"
-    if _contains_any(text_lower, ("kérdezz", "kérdés", "visszakér")):
-        return "question_policy", "direct_question_match"
-    if _contains_any(text_lower, ("szervilis", "hangnem", "szolga", "sub", "szerelmes", "autoritás", "direkt", "természetes")):
-        return "tone_policy", "direct_tone_match"
-    if _contains_any(text_lower, ("konkrét tény", "jelentőségfelfújás", "forrás", "hivatkozás", "elemzés", "kihívások szakasz")):
-        return "content_policy", "direct_content_match"
-    if _contains_any(text_lower, ("új sor", "külön sor", "hármas szabály", "szinonímacsere", "hamis skála", "töredékes fejlécek")):
-        return "structure_policy", "direct_structure_match"
+    del text
 
     for marker, kind in _SECTION_FALLBACK_KIND.items():
         if marker in section_lower:
@@ -237,46 +207,6 @@ def _classify_rule(section: str, text: str) -> tuple[str, str]:
 
 def _compile_short_form(*, kind: str, text: str) -> str:
     normalized = _normalize_text(text)
-    lowered = normalized.casefold()
-    if kind == "punctuation_policy":
-        constraint = _resolve_punctuation_constraint(normalized)
-        if constraint == "forbid_em_dash_only":
-            return (
-                "Ne írj U+2014 EM DASH karaktert a válaszba. "
-                "Ha dash kell, sima hyphen-minus `-` jelet használj."
-            )
-        if constraint == "forbid_all_dash_like":
-            return (
-                "Ne használj dash-szerű írásjelet a válaszban. "
-                "Fogalmazd át a mondatot kötőjel és dash nélkül."
-            )
-        return _sanitize_policy_surface(normalized)
-    if kind != "question_policy":
-        return _sanitize_policy_surface(normalized)
-
-    if _contains_any(lowered, ("köszönés", "koszones", "greeting", "hello", "hi")) and _contains_any(
-        lowered,
-        ("follow-up", "kérdés", "kerdes", "visszakér", "visszaker", "ask"),
-    ):
-        if _contains_any(lowered, ("köszönés", "koszones", "kérdés", "kerdes", "visszakér", "visszaker")):
-            return _sanitize_policy_surface(
-                "Egyszerű köszönésre közvetlenül válaszolj, és ne tegyél hozzá "
-                'generikus visszakérdezést vagy "Miben segíthetek?" jellegű kérdést.'
-            )
-        return _sanitize_policy_surface(
-            "Answer a simple greeting directly, without adding a generic follow-up question "
-            'such as "How can I help?".'
-        )
-
-    if _contains_any(lowered, ("feleslegesen", "szükség", "szukseg", "unnecessary", "clarification")):
-        if _contains_any(lowered, ("feleslegesen", "szükség", "szukseg")):
-            return _sanitize_policy_surface(
-                "Csak akkor kérdezz vissza, ha a helyes válaszhoz valódi tisztázás kell."
-            )
-        return _sanitize_policy_surface(
-            "Ask a follow-up question only when clarification is genuinely required."
-        )
-
     return _sanitize_policy_surface(normalized)
 
 

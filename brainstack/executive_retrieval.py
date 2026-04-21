@@ -44,6 +44,10 @@ TODAY_TASK_CUES = ("today", "ma", "mai")
 YESTERDAY_TASK_CUES = ("yesterday", "tegnap")
 DAY_BEFORE_TASK_CUES = ("day before yesterday", "tegnapelőtt", "tegnapelott")
 
+
+def _is_native_profile_mirror_receipt(row: Dict[str, Any]) -> bool:
+    return str(row.get("category") or "").strip() == "native_profile_mirror"
+
 @dataclass
 class RetrievalChannelStatus:
     name: str
@@ -311,7 +315,7 @@ def _llm_route_resolver(query: str) -> Dict[str, Any]:
                 "Return JSON only with the schema {\"mode\": \"fact|temporal|aggregate|style_contract\", \"reason\": \"...\"}.\n"
                 "Use temporal when the user needs ordering, before/after comparison, date difference, or change over time.\n"
                 "Use aggregate when the user needs totals, counts across multiple events, or exhaustive collection.\n"
-                "Use style_contract when the user is explicitly asking about their detailed communication rules, named style pack, rule list, or the full style contract itself.\n"
+                "Use style_contract when the user is explicitly asking about their detailed rule pack, named style pack, rule list, or the full style contract itself.\n"
                 "Use fact for ordinary fact lookup or if uncertain."
             ),
         },
@@ -1558,6 +1562,7 @@ def retrieve_executive_context(
         else []
     )
     keyword_profile_rows = _annotate_query_flags(keyword_profile_rows, query=query)
+    keyword_profile_rows = [row for row in keyword_profile_rows if not _is_native_profile_mirror_receipt(row)]
     if route.applied_mode == ROUTE_STYLE_CONTRACT:
         keyword_profile_rows = [
             row

@@ -192,47 +192,9 @@ def _patch_gateway_run(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
 
-    if "from agent.brainstack_mode import is_brainstack_only_mode" not in text:
-        text = _replace_once_any(
-            text,
-            [
-                (
-                    "from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType\n",
-                    "from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType\n"
-                    "from agent.brainstack_mode import is_brainstack_only_mode\n",
-                ),
-                (
-                    "from gateway.platforms.base import (\n"
-                    "    BasePlatformAdapter,\n"
-                    "    MessageEvent,\n"
-                    "    MessageType,\n"
-                    "    merge_pending_message_event,\n"
-                    ")\n",
-                    "from gateway.platforms.base import (\n"
-                    "    BasePlatformAdapter,\n"
-                    "    MessageEvent,\n"
-                    "    MessageType,\n"
-                    "    merge_pending_message_event,\n"
-                    ")\n"
-                    "from agent.brainstack_mode import is_brainstack_only_mode\n",
-                ),
-            ],
-            label="gateway import",
-            path=path,
-        )
-        applied.append("gateway:import_brainstack_mode")
-
     hooks_anchor = "    # -- Setup skill availability ----------------------------------------\n\n    def _has_setup_skill(self) -> bool:\n"
     hooks_inject = (
-        "    def _brainstack_only_mode_enabled(self) -> bool:\n"
-        "        try:\n"
-        "            return is_brainstack_only_mode(_load_gateway_config())\n"
-        "        except Exception:\n"
-        "            return False\n"
-        "\n"
         "    def _maintenance_agent_toolsets(self) -> list[str]:\n"
-        "        if self._brainstack_only_mode_enabled():\n"
-        "            return []\n"
         "        return [\"memory\"]\n"
         "\n"
         "    def _derive_gateway_runtime_state(self) -> str:\n"
@@ -268,56 +230,12 @@ def _patch_gateway_run(path: Path, dry_run: bool) -> list[str]:
         "        except Exception:\n"
         "            pass\n"
         "\n"
-        "    def _finalize_brainstack_session_memory(\n"
-        "        self,\n"
-        "        session_key: str,\n"
-        "        session_id: str,\n"
-        "    ) -> None:\n"
-        "        history = self.session_store.load_transcript(session_id)\n"
-        "        messages = [\n"
-        "            {\"role\": m.get(\"role\"), \"content\": m.get(\"content\")}\n"
-        "            for m in history or []\n"
-        "            if m.get(\"role\") in (\"user\", \"assistant\") and m.get(\"content\")\n"
-        "        ]\n"
-        "\n"
-        "        cached_agent = None\n"
-        "        lock = getattr(self, \"_agent_cache_lock\", None)\n"
-        "        cache = getattr(self, \"_agent_cache\", None)\n"
-        "        if lock and cache is not None:\n"
-        "            with lock:\n"
-        "                entry = cache.get(session_key)\n"
-        "                if entry and entry[0] is not None:\n"
-        "                    cached_agent = entry[0]\n"
-        "\n"
-        "        if cached_agent and hasattr(cached_agent, \"shutdown_memory_provider\"):\n"
-        "            cached_agent.shutdown_memory_provider(messages)\n"
-        "            return\n"
-        "\n"
-        "        runtime_kwargs = _resolve_runtime_agent_kwargs()\n"
-        "        if not runtime_kwargs.get(\"api_key\"):\n"
-        "            return\n"
-        "\n"
-        "        from run_agent import AIAgent\n"
-        "\n"
-        "        tmp_agent = AIAgent(\n"
-        "            **runtime_kwargs,\n"
-        "            model=_resolve_gateway_model(),\n"
-        "            max_iterations=1,\n"
-        "            quiet_mode=True,\n"
-        "            enabled_toolsets=[],\n"
-        "            session_id=session_id,\n"
-        "        )\n"
-        "        tmp_agent._print_fn = lambda *a, **kw: None\n"
-        "        tmp_agent.shutdown_memory_provider(messages)\n"
-        "\n"
         "    def _finalize_session_memory_sync(\n"
         "        self,\n"
         "        session_key: str,\n"
         "        session_id: str,\n"
         "    ) -> None:\n"
-        "        if self._brainstack_only_mode_enabled():\n"
-        "            self._finalize_brainstack_session_memory(session_key, session_id)\n"
-        "            return\n"
+        "        del session_key\n"
         "        self._flush_memories_for_session(session_id)\n"
         "\n"
         "    async def _async_finalize_session_memory(\n"
@@ -335,29 +253,9 @@ def _patch_gateway_run(path: Path, dry_run: bool) -> list[str]:
         "\n"
         + hooks_anchor
     )
-    if "def _brainstack_only_mode_enabled(self) -> bool:" not in text:
+    if "def _maintenance_agent_toolsets(self) -> list[str]:" not in text:
         text = _replace_once(text, hooks_anchor, hooks_inject, label="gateway helper block", path=path)
         applied.append("gateway:add_boundary_helpers")
-
-    flush_doc_anchor = (
-        "        Synchronous worker — meant to be called via run_in_executor from\n"
-        "        an async context so it doesn't block the event loop.\n"
-        "        \"\"\"\n"
-    )
-    flush_doc_inject = flush_doc_anchor + (
-        "        if self._brainstack_only_mode_enabled():\n"
-        "            logger.debug(\n"
-        "                \"Skipping legacy memory flush for session %s because Brainstack owns memory\",\n"
-        "                old_session_id,\n"
-        "            )\n"
-        "            return\n"
-    )
-    if (
-        "Skipping legacy memory flush for session %s because Brainstack owns memory" not in text
-        and flush_doc_anchor in text
-    ):
-        text = _replace_once(text, flush_doc_anchor, flush_doc_inject, label="gateway legacy flush guard", path=path)
-        applied.append("gateway:guard_legacy_flush")
 
     replacements = [
         (

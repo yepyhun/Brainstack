@@ -96,7 +96,7 @@ Transcript is evidence. Graph is truth. Corpus is corpus. Profile is profile. Th
 - uses `SQLite` for shell, session, profile, transcript, and lexical fallback state
 - uses embedded `Kuzu` for L2 graph truth
 - uses embedded `Chroma` for L3 semantic corpus retrieval
-- is experimental, working, and opinionated
+- is experimental and actively audited against the donor-first native-seam model
 
 ## Quickstart
 
@@ -174,29 +174,30 @@ Under those shelves, storage is split by responsibility:
 | L2 graph truth | `Kuzu` |
 | L3 semantic corpus retrieval | `Chroma` |
 
-On top of the shelves, Brainstack uses a risk-aware control plane:
+On top of the shelves, Brainstack uses owner-first evidence assembly:
 
 - high-stakes questions should not bluff from memory alone
-- preference-style questions should prefer compact profile recall
+- explicit profile questions should prefer compact native or mirrored profile recall
 - temporal and explanatory questions should expand continuity and graph evidence
 - transcript recall stays bounded and session-scoped
-- active communication rules are packed into a short internal contract and applied silently
 - graph recall keeps current truth, historical truth, inferred links, and conflicts separate instead of flattening them together
 
 ## What is already working
 
-This repo is past the "interesting architecture sketch" stage.
+This repo is no longer just an architecture sketch.
 
 What is currently true:
 
-- the broader deployed-live matrix is holding at `9 / 10`
-- the principal-isolation bug that polluted profile state across users was repaired and re-proven
-- the proactive carry-through seam was repaired enough to pass focused deterministic and live follow-up checks
-- provenance and lifecycle instrumentation landed without measured ordinary-turn token regression in the mirrored scenario
+- the plugin runs inside Hermes as a real `MemoryProvider`
+- native explicit writes stay host-owned and can be mirrored into Brainstack
+- ordinary turns no longer depend on a Brainstack-specific communication-governor lane
+- graph, transcript, continuity, and corpus shelves remain distinct instead of collapsing into one flat memory blob
 
-That does not mean every hard problem is solved. It means the core shape is already working as a real memory system, and the remaining gains are mostly about retrieval precision and packing quality, not basic ownership or identity correctness.
+What is not claimed:
 
-Proof artifacts for the current phases live under `reports/`.
+- that every retrieval or packing tradeoff is finished
+- that every donor refresh is zero-touch
+- that old benchmark artifacts remain a source of truth for the current runtime shape
 
 ## What this repo is not claiming
 
@@ -213,8 +214,8 @@ This repository is a focused Brainstack slice containing:
 
 - the Hermes-native Brainstack plugin code under `brainstack/`
 - donor boundaries and refresh logic under `brainstack/donors/` and `scripts/`
-- focused test slices under `tests/`
-- proof artifacts under `reports/`
+- minimal host-compatibility payload under `host_payload/agent/`
+- install and doctor tooling for Hermes checkouts
 
 ## Repo layout
 
@@ -222,9 +223,7 @@ This repository is a focused Brainstack slice containing:
 brainstack/
 docs/
 host_payload/agent/
-reports/
 scripts/
-tests/
 brainstack_doctor.py
 install_into_hermes.py
 update_hermes_with_brainstack.py

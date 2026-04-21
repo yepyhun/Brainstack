@@ -3,11 +3,14 @@ __pycache__/
 .pytest_cache/
 .venv
 .venv/
+.code-review-graph/
 logs/
+sessions/
+memories/
+cron/
 auth.lock
 SOUL.md
-reports/longmemeval/*.json
-reports/phase20/*.json
-reports/phase29/*.json
+reports/
+tests/
 brainstack.chroma/
 brainstack.kuzu
