@@ -3,7 +3,9 @@
 
 This installer copies the Brainstack provider payload and applies recognized
 config changes. It avoids blind host-code patching; compatibility is verified
-by ``brainstack_doctor.py``.
+by ``brainstack_doctor.py``. Hermes-native explicit truth capture, addressing
+precedence, and other host-owned chat-surface behavior remain upstream Hermes
+seams rather than Brainstack installer responsibilities.
 """
 
 from __future__ import annotations

@@ -97,6 +97,8 @@ Transcript is evidence. Graph is truth. Corpus is corpus. Profile is profile. Th
 - uses embedded `Kuzu` for L2 graph truth
 - uses embedded `Chroma` for L3 semantic corpus retrieval
 - is experimental and actively audited against the donor-first native-seam model
+- explicit user/addressing truth remains Hermes-host owned
+- transport-handle precedence and explicit-truth atomicity on live chat surfaces remain Hermes host seams, not Brainstack plugin seams
 
 ## Quickstart
 
@@ -216,6 +218,15 @@ This repository is a focused Brainstack slice containing:
 - donor boundaries and refresh logic under `brainstack/donors/` and `scripts/`
 - minimal host-compatibility payload under `host_payload/agent/`
 - install and doctor tooling for Hermes checkouts
+
+This repository intentionally does not ship Hermes host files like:
+
+- `run_agent.py`
+- `agent/prompt_builder.py`
+- `tools/memory_tool.py`
+- `gateway/session.py`
+
+If a live defect is rooted in explicit-truth capture, transport metadata precedence, or user-surface greeting behavior, the fix belongs on the Hermes host seam unless it can be shown to be a true Brainstack provider defect.
 
 ## Repo layout
 
