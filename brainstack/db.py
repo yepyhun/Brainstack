@@ -63,6 +63,11 @@ MIGRATION_STYLE_CONTRACT_PROFILE_LANE_V1 = "style_contract_profile_lane_v1"
 MIGRATION_BEHAVIOR_CONTRACT_STORAGE_V1 = "behavior_contract_storage_v1"
 MIGRATION_COMPILED_BEHAVIOR_POLICY_V1 = "compiled_behavior_policy_v1"
 MIGRATION_COMPILED_BEHAVIOR_POLICY_V2 = "compiled_behavior_policy_v2"
+MIGRATION_STYLE_CONTRACT_BEHAVIOR_DEMOTION_V1 = "style_contract_behavior_demotion_v1"
+TRANSCRIPT_HYGIENE_MARKERS = (
+    "Assistant: Operation interrupted:",
+    "Assistant: Session reset.",
+)
 BEHAVIOR_CONTRACT_ACTIVE_STATUS = "active"
 BEHAVIOR_CONTRACT_SUPERSEDED_STATUS = "superseded"
 BEHAVIOR_CONTRACT_QUARANTINED_STATUS = "quarantined"
@@ -623,16 +628,20 @@ class BrainstackStore:
         self._init_schema()
         self._backfill_legacy_principal_scoped_profiles_if_needed()
         self._run_compatibility_migrations_if_needed()
-        self._graph_backend = create_graph_backend(self._graph_backend_name, db_path=self._graph_db_path)
-        if self._graph_backend is not None:
-            try:
+        try:
+            self._graph_backend = create_graph_backend(self._graph_backend_name, db_path=self._graph_db_path)
+            if self._graph_backend is not None:
                 self._graph_backend.open()
-            except ModuleNotFoundError as exc:
-                self._graph_backend_error = str(exc)
-                self._graph_backend = None
-            else:
                 self._graph_backend_error = ""
                 self._bootstrap_graph_backend_if_needed()
+        except ModuleNotFoundError as exc:
+            self._disable_graph_backend(reason=str(exc))
+        except Exception as exc:
+            logger.warning(
+                "Brainstack graph backend unavailable; disabling graph backend and continuing with SQLite: %s",
+                exc,
+            )
+            self._disable_graph_backend(reason=str(exc))
         self._corpus_backend = create_corpus_backend(self._corpus_backend_name, db_path=self._corpus_db_path)
         if self._corpus_backend is not None:
             try:
@@ -656,6 +665,17 @@ class BrainstackStore:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+
+    def _disable_graph_backend(self, *, reason: str) -> None:
+        self._graph_backend_error = str(reason or "graph backend disabled")
+        backend = self._graph_backend
+        self._graph_backend = None
+        if backend is None:
+            return
+        try:
+            backend.close()
+        except Exception:
+            pass
 
     def _resolve_session_principal_scope(
         self,
@@ -790,6 +810,8 @@ class BrainstackStore:
             self._apply_compiled_behavior_policy_migration_v1()
         if not self._migration_applied(MIGRATION_COMPILED_BEHAVIOR_POLICY_V2):
             self._apply_compiled_behavior_policy_migration_v2()
+        if not self._migration_applied(MIGRATION_STYLE_CONTRACT_BEHAVIOR_DEMOTION_V1):
+            self._apply_style_contract_behavior_demotion_migration_v1()
 
     def _migration_applied(self, name: str) -> bool:
         row = self.conn.execute(
@@ -1150,51 +1172,78 @@ class BrainstackStore:
 
     @_locked
     def _apply_behavior_contract_storage_migration_v1(self) -> None:
-        rows = self.conn.execute(
-            """
-            SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at, active
-            FROM profile_items
-            WHERE active = 1
-            ORDER BY updated_at ASC, id ASC
-            """
-        ).fetchall()
-        migrated = 0
-        retired = 0
-        for row in rows:
-            item = _profile_row_to_dict(row)
-            if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT:
-                continue
-            self.upsert_behavior_contract(
-                stable_key=STYLE_CONTRACT_SLOT,
-                category=str(item.get("category") or "preference"),
-                content=str(item.get("content") or ""),
-                source=str(item.get("source") or ""),
-                confidence=float(item.get("confidence") or 0.9),
-                metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else None,
-                active=bool(item.get("active", True)),
-            )
-            storage_key = str(row["stable_key"] or "").strip()
-            self.conn.execute(
-                "UPDATE profile_items SET active = 0, updated_at = ? WHERE stable_key = ?",
-                (utc_now_iso(), storage_key),
-            )
-            self.conn.execute(
-                "DELETE FROM profile_fts WHERE rowid = ?",
-                (int(row["id"]),),
-            )
-            migrated += 1
-            retired += 1
-
         self._mark_migration_applied(MIGRATION_BEHAVIOR_CONTRACT_STORAGE_V1)
         self.conn.commit()
-        if migrated:
-            logger.info(
-                "Migrated %s canonical style contracts into first-class behavior-contract storage and retired %s profile rows",
-                migrated,
-                retired,
+        logger.info("Behavior-contract storage migration is disabled; style contracts remain in the profile lane")
+
+    @_locked
+    def _apply_style_contract_behavior_demotion_migration_v1(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT id, storage_key, principal_scope_key, stable_key, category, content, source, confidence,
+                   metadata_json, source_contract_hash, revision_number, parent_revision_id, status,
+                   committed_at, updated_at
+            FROM behavior_contracts
+            WHERE stable_key = ?
+            ORDER BY principal_scope_key ASC, revision_number DESC, id DESC
+            """,
+            (STYLE_CONTRACT_SLOT,),
+        ).fetchall()
+        grouped: Dict[str, List[sqlite3.Row]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["principal_scope_key"] or "").strip(), []).append(row)
+
+        migrated = 0
+        retired = 0
+        deleted_policies = 0
+        now = utc_now_iso()
+        for principal_scope_key, scoped_rows in grouped.items():
+            chosen_row: sqlite3.Row | None = None
+            for row in scoped_rows:
+                if str(row["status"] or "").strip() == BEHAVIOR_CONTRACT_ACTIVE_STATUS:
+                    chosen_row = row
+                    break
+            if chosen_row is None and scoped_rows:
+                chosen_row = scoped_rows[0]
+
+            if chosen_row is not None:
+                item = _behavior_contract_row_to_dict(chosen_row)
+                self.upsert_profile_item(
+                    stable_key=STYLE_CONTRACT_SLOT,
+                    category=str(item.get("category") or "preference"),
+                    content=str(item.get("content") or "").strip(),
+                    source=str(item.get("source") or "").strip(),
+                    confidence=float(item.get("confidence") or 0.9),
+                    metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else None,
+                    active=True,
+                )
+                migrated += 1
+
+            for row in scoped_rows:
+                if str(row["status"] or "").strip() != BEHAVIOR_CONTRACT_ACTIVE_STATUS:
+                    continue
+                self.conn.execute(
+                    "UPDATE behavior_contracts SET status = ?, updated_at = ? WHERE id = ?",
+                    (BEHAVIOR_CONTRACT_SUPERSEDED_STATUS, now, int(row["id"])),
+                )
+                retired += 1
+
+            deleted_policies += int(
+                self.conn.execute(
+                    "DELETE FROM compiled_behavior_policies WHERE principal_scope_key = ?",
+                    (principal_scope_key,),
+                ).rowcount
+                or 0
             )
-        else:
-            logger.info("Applied behavior-contract storage migration with no eligible canonical style-contract rows")
+
+        self._mark_migration_applied(MIGRATION_STYLE_CONTRACT_BEHAVIOR_DEMOTION_V1)
+        self.conn.commit()
+        logger.info(
+            "Demoted %s style-contract behavior authorities into the profile lane, retired %s active behavior contracts, deleted %s compiled policies",
+            migrated,
+            retired,
+            deleted_policies,
+        )
 
     def _upsert_compiled_behavior_policy_record(
         self,
@@ -1868,6 +1917,9 @@ class BrainstackStore:
     def _conversation_semantic_object_key(self, transcript_id: int) -> str:
         return f"transcript:{int(transcript_id)}"
 
+    def _conversation_document_stable_key(self, *, session_id: str, turn_number: int, transcript_id: int) -> str:
+        return f"conversation:{str(session_id or '').strip()}:{int(turn_number)}:{int(transcript_id)}"
+
     def _parse_conversation_object_key(self, object_key: str) -> int | None:
         text = str(object_key or "").strip()
         if not text.startswith("transcript:"):
@@ -1891,7 +1943,11 @@ class BrainstackStore:
         item = _row_to_dict(row)
         metadata = dict(item.get("metadata") or {})
         stable_key = (
-            f"conversation:{item['session_id']}:{int(item.get('turn_number') or 0)}:{int(item['id'])}"
+            self._conversation_document_stable_key(
+                session_id=str(item.get("session_id") or ""),
+                turn_number=int(item.get("turn_number") or 0),
+                transcript_id=int(item["id"]),
+            )
         )
         document = {
             "id": int(item["id"]),
@@ -2012,6 +2068,68 @@ class BrainstackStore:
             tuple(params + [limit]),
         ).fetchall()
         return [_row_to_dict(row) for row in rows]
+
+    @_locked
+    def scrub_transcript_hygiene_residue(self) -> Dict[str, Any]:
+        patterns = [f"%{marker}%" for marker in TRANSCRIPT_HYGIENE_MARKERS]
+        if not patterns:
+            return {"deleted_transcript_rows": 0, "deleted_publish_journal_rows": 0, "deleted_corpus_snapshots": 0, "deleted_ids": []}
+
+        where = " OR ".join("content LIKE ?" for _ in patterns)
+        rows = self.conn.execute(
+            f"""
+            SELECT id, session_id, turn_number
+            FROM transcript_entries
+            WHERE {where}
+            ORDER BY id ASC
+            """,
+            tuple(patterns),
+        ).fetchall()
+        if not rows:
+            return {"deleted_transcript_rows": 0, "deleted_publish_journal_rows": 0, "deleted_corpus_snapshots": 0, "deleted_ids": []}
+
+        deleted_publish_journal_rows = 0
+        deleted_corpus_snapshots = 0
+        deleted_ids: List[int] = []
+        for row in rows:
+            transcript_id = int(row["id"])
+            session_id = str(row["session_id"] or "")
+            turn_number = int(row["turn_number"] or 0)
+            stable_key = self._conversation_document_stable_key(
+                session_id=session_id,
+                turn_number=turn_number,
+                transcript_id=transcript_id,
+            )
+            if self._corpus_backend is not None:
+                self._corpus_backend.publish_document(
+                    {
+                        "document": {"stable_key": stable_key},
+                        "sections": [],
+                    }
+                )
+                deleted_corpus_snapshots += 1
+            object_key = self._conversation_semantic_object_key(transcript_id)
+            deleted_publish_journal_rows += int(
+                self.conn.execute(
+                    """
+                    DELETE FROM publish_journal
+                    WHERE object_kind = 'conversation_transcript' AND object_key = ?
+                    """,
+                    (object_key,),
+                ).rowcount
+                or 0
+            )
+            self.conn.execute("DELETE FROM transcript_fts WHERE rowid = ?", (transcript_id,))
+            self.conn.execute("DELETE FROM transcript_entries WHERE id = ?", (transcript_id,))
+            deleted_ids.append(transcript_id)
+
+        self.conn.commit()
+        return {
+            "deleted_transcript_rows": len(deleted_ids),
+            "deleted_publish_journal_rows": deleted_publish_journal_rows,
+            "deleted_corpus_snapshots": deleted_corpus_snapshots,
+            "deleted_ids": deleted_ids,
+        }
 
     def _entity_snapshot(self, entity_id: int) -> Dict[str, Any]:
         entity_row = self.conn.execute(
@@ -2186,7 +2304,12 @@ class BrainstackStore:
                 status="failed",
                 last_error=str(exc),
             )
-            raise
+            logger.warning(
+                "Brainstack graph publish failed; disabling graph backend and continuing with SQLite: %s",
+                exc,
+            )
+            self._disable_graph_backend(reason=str(exc))
+            return
         self._upsert_publish_journal(
             target_name=target_name,
             object_kind="entity_subgraph",
@@ -2988,16 +3111,6 @@ class BrainstackStore:
         metadata: Dict[str, Any] | None = None,
         active: bool = True,
     ) -> int:
-        if str(stable_key or "").strip() == STYLE_CONTRACT_SLOT:
-            return self.upsert_behavior_contract(
-                stable_key=stable_key,
-                category=category,
-                content=content,
-                source=source,
-                confidence=confidence,
-                metadata=metadata,
-                active=active,
-            )
         now = utc_now_iso()
         principal_scope_key = _principal_scope_key_from_metadata(metadata)
         storage_key = _profile_storage_key(
@@ -3630,11 +3743,6 @@ class BrainstackStore:
 
     @_locked
     def get_profile_item(self, *, stable_key: str, principal_scope_key: str = "") -> Dict[str, Any] | None:
-        if str(stable_key or "").strip() == STYLE_CONTRACT_SLOT:
-            return self.get_behavior_contract(
-                stable_key=stable_key,
-                principal_scope_key=principal_scope_key,
-            )
         storage_key = _profile_storage_key(
             stable_key=stable_key,
             principal_scope_key=principal_scope_key,
@@ -3821,6 +3929,83 @@ class BrainstackStore:
             )
         self.conn.commit()
         return report
+
+    @_locked
+    def purge_style_contract_behavior_residue(self) -> Dict[str, Any]:
+        rows = self.conn.execute(
+            """
+            SELECT id, storage_key, principal_scope_key, stable_key, category, content, source, confidence,
+                   metadata_json, source_contract_hash, revision_number, parent_revision_id, status,
+                   committed_at, updated_at
+            FROM behavior_contracts
+            WHERE stable_key = ?
+            ORDER BY principal_scope_key ASC, revision_number DESC, id DESC
+            """,
+            (STYLE_CONTRACT_SLOT,),
+        ).fetchall()
+        if not rows:
+            deleted_policies = int(
+                self.conn.execute("DELETE FROM compiled_behavior_policies WHERE source_storage_key LIKE ?", (f"{STYLE_CONTRACT_SLOT}%",)).rowcount
+                or 0
+            )
+            if deleted_policies:
+                self.conn.commit()
+            return {
+                "migrated_to_profile_lane": 0,
+                "deleted_behavior_contract_rows": 0,
+                "deleted_compiled_policies": deleted_policies,
+                "principal_scope_keys": [],
+            }
+
+        grouped: Dict[str, List[sqlite3.Row]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["principal_scope_key"] or "").strip(), []).append(row)
+
+        migrated = 0
+        deleted_behavior_rows = 0
+        deleted_compiled_policies = 0
+        principal_scope_keys: List[str] = []
+        for principal_scope_key, scoped_rows in grouped.items():
+            if principal_scope_key and principal_scope_key not in principal_scope_keys:
+                principal_scope_keys.append(principal_scope_key)
+            chosen_row = scoped_rows[0]
+            for row in scoped_rows:
+                if str(row["status"] or "").strip() == BEHAVIOR_CONTRACT_ACTIVE_STATUS:
+                    chosen_row = row
+                    break
+            item = _behavior_contract_row_to_dict(chosen_row)
+            self.upsert_profile_item(
+                stable_key=STYLE_CONTRACT_SLOT,
+                category=str(item.get("category") or "preference"),
+                content=str(item.get("content") or "").strip(),
+                source=str(item.get("source") or "").strip(),
+                confidence=float(item.get("confidence") or 0.9),
+                metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else None,
+                active=True,
+            )
+            migrated += 1
+            deleted_behavior_rows += int(
+                self.conn.execute(
+                    "DELETE FROM behavior_contracts WHERE principal_scope_key = ? AND stable_key = ?",
+                    (principal_scope_key, STYLE_CONTRACT_SLOT),
+                ).rowcount
+                or 0
+            )
+            deleted_compiled_policies += int(
+                self.conn.execute(
+                    "DELETE FROM compiled_behavior_policies WHERE principal_scope_key = ?",
+                    (principal_scope_key,),
+                ).rowcount
+                or 0
+            )
+
+        self.conn.commit()
+        return {
+            "migrated_to_profile_lane": migrated,
+            "deleted_behavior_contract_rows": deleted_behavior_rows,
+            "deleted_compiled_policies": deleted_compiled_policies,
+            "principal_scope_keys": principal_scope_keys,
+        }
 
     @_locked
     def record_profile_retrievals(self, *, rows: Iterable[Dict[str, Any]]) -> int:
@@ -4254,6 +4439,11 @@ class BrainstackStore:
     @_locked
     def graph_backend_channel_status(self) -> Dict[str, str]:
         if self._graph_backend is None:
+            if self._graph_backend_error:
+                return {
+                    "status": "degraded",
+                    "reason": f"Graph backend retrieval is unhealthy and fell back to SQLite: {self._graph_backend_error}",
+                }
             return {
                 "status": "degraded",
                 "reason": "Graph backend retrieval is disabled until a donor-aligned graph backend is configured.",
@@ -5134,7 +5324,7 @@ class BrainstackStore:
         try:
             rows = self._graph_backend.list_graph_conflicts(limit=limit)
         except Exception as exc:
-            self._graph_backend_error = str(exc)
+            self._disable_graph_backend(reason=str(exc))
             logger.warning("Brainstack graph conflict lookup failed; falling back to SQLite: %s", exc)
             return self._sqlite_list_graph_conflicts(limit=limit)
         self._graph_backend_error = ""
@@ -5148,7 +5338,7 @@ class BrainstackStore:
             try:
                 rows = self._graph_backend.search_graph(query=query, limit=max(limit * 8, 24))
             except Exception as exc:
-                self._graph_backend_error = str(exc)
+                self._disable_graph_backend(reason=str(exc))
                 logger.warning("Brainstack graph search failed; falling back to SQLite: %s", exc)
                 rows = self._sqlite_search_graph(query=query, limit=limit)
             else:
@@ -5193,7 +5383,7 @@ class BrainstackStore:
                 limit=max(1, int(limit)),
             )
         except Exception as exc:
-            self._graph_backend_error = str(exc)
+            self._disable_graph_backend(reason=str(exc))
             logger.warning("Brainstack native typed metric query failed: %s", exc)
             return None
         self._graph_backend_error = ""

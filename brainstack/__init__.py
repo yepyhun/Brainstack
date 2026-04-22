@@ -532,14 +532,14 @@ class BrainstackMemoryProvider(MemoryProvider):
             return None
 
         receipt = self._commit_explicit_write(
-            owner="brainstack.behavior_contract",
+            owner="brainstack.profile_archive",
             write_class="style_contract",
             source=str(style_contract["source"]),
             target="user",
             stable_key=str(style_contract["slot"]),
             category=str(style_contract["category"]),
             content=str(style_contract["content"]),
-            commit=lambda: self._store.upsert_behavior_contract(
+            commit=lambda: self._store.upsert_profile_item(
                 stable_key=style_contract["slot"],
                 category=style_contract["category"],
                 content=style_contract["content"],
@@ -556,13 +556,14 @@ class BrainstackMemoryProvider(MemoryProvider):
                 ),
             },
         )
-        raw_contract = self._store.get_behavior_contract(principal_scope_key=self._principal_scope_key)
-        snapshot = self._store.get_behavior_policy_snapshot(principal_scope_key=self._principal_scope_key)
-        compiled_policy = dict(snapshot.get("compiled_policy") or {})
-        receipt["behavior_contract_revision"] = int(raw_contract.get("revision_number") or 0) if raw_contract else 0
-        receipt["behavior_contract_storage_key"] = str(raw_contract.get("storage_key") or "") if raw_contract else ""
-        receipt["compiled_policy_active"] = bool(compiled_policy.get("active"))
-        receipt["compiled_policy_status"] = str(compiled_policy.get("status") or "")
+        profile_row = self._store.get_profile_item(
+            stable_key=str(style_contract["slot"]),
+            principal_scope_key=self._principal_scope_key,
+        )
+        receipt["profile_lane_active"] = bool(profile_row)
+        receipt["profile_storage_key"] = str(profile_row.get("stable_key") or "") if profile_row else ""
+        receipt["compiled_policy_active"] = False
+        receipt["compiled_policy_status"] = ""
         self._last_write_receipt = receipt
         self._set_memory_operation_trace(surface="style_contract_upsert")
         return receipt
@@ -1446,7 +1447,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                 action=action,
                 target=target,
             )
-            if self._upsert_style_contract_candidate(
+            self._upsert_style_contract_candidate(
                 content=content,
                 source="memory_write:style_contract",
                 confidence=0.9,
@@ -1455,8 +1456,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                     NATIVE_EXPLICIT_PROFILE_METADATA_KEY: mirror_payload,
                 },
                 require_explicit_signal=True,
-            ):
-                return
+            )
             mirror_entries = _derive_native_profile_mirror_entries(content)
             if not mirror_entries:
                 self._set_memory_operation_trace(

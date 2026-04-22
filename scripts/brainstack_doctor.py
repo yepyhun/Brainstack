@@ -14,6 +14,7 @@ import argparse
 import importlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -448,6 +449,106 @@ def _check_config(
             return _docker_python_can_import(module_name, compose_path)
         return _python_can_import(module_name, python_bin)
 
+    def runtime_db_hygiene_checks() -> list[Check]:
+        runtime_root = config_path.parent
+        db_path = runtime_root / "brainstack" / "brainstack.db"
+        if not db_path.exists():
+            status = "pass" if planned_install else "warn"
+            return [
+                Check(
+                    "runtime_brainstack_db_present",
+                    status,
+                    f"Runtime Brainstack DB is not present yet at {db_path}",
+                )
+            ]
+
+        try:
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+        except Exception as exc:
+            status = "pass" if planned_install else "fail"
+            return [
+                Check(
+                    "runtime_brainstack_db_present",
+                    status,
+                    f"Runtime Brainstack DB is not readable at {db_path}: {exc}",
+                )
+            ]
+
+        try:
+            checks_out = [
+                Check("runtime_brainstack_db_present", "pass", f"Runtime Brainstack DB is readable at {db_path}")
+            ]
+            interrupt_hits = int(
+                conn.execute(
+                    """
+                    SELECT count(*)
+                    FROM transcript_entries
+                    WHERE content LIKE '%Assistant: Operation interrupted:%'
+                       OR content LIKE '%Assistant: Session reset.%'
+                    """
+                ).fetchone()[0]
+            )
+            if interrupt_hits == 0:
+                checks_out.append(
+                    Check("runtime_transcript_hygiene", "pass", "Runtime transcript store has no internal assistant status residue")
+                )
+            else:
+                checks_out.append(
+                    Check(
+                        "runtime_transcript_hygiene",
+                        "fail",
+                        f"Runtime transcript store contains {interrupt_hits} internal assistant status rows",
+                    )
+                )
+
+            style_contract_rows = int(
+                conn.execute(
+                    "SELECT count(*) FROM behavior_contracts WHERE stable_key = ?",
+                    ("preference:style_contract",),
+                ).fetchone()[0]
+            )
+            if style_contract_rows == 0:
+                checks_out.append(
+                    Check("runtime_style_contract_behavior_residue", "pass", "No style-contract behavior rows remain in runtime DB")
+                )
+            else:
+                checks_out.append(
+                    Check(
+                        "runtime_style_contract_behavior_residue",
+                        "fail",
+                        f"Runtime DB still contains {style_contract_rows} style-contract behavior rows",
+                    )
+                )
+
+            compiled_policy_rows = int(
+                conn.execute("SELECT count(*) FROM compiled_behavior_policies").fetchone()[0]
+            )
+            if compiled_policy_rows == 0:
+                checks_out.append(
+                    Check("runtime_compiled_behavior_policies", "pass", "No compiled behavior policies remain in runtime DB")
+                )
+            else:
+                checks_out.append(
+                    Check(
+                        "runtime_compiled_behavior_policies",
+                        "fail",
+                        f"Runtime DB still contains {compiled_policy_rows} compiled behavior policies",
+                    )
+                )
+            return checks_out
+        except sqlite3.Error as exc:
+            status = "pass" if planned_install else "fail"
+            return [
+                Check(
+                    "runtime_brainstack_db_present",
+                    status,
+                    f"Runtime Brainstack DB query failed at {db_path}: {exc}",
+                )
+            ]
+        finally:
+            conn.close()
+
     if config_path.exists():
         config = _load_yaml(config_path)
     elif runtime == "docker" and compose_path and compose_path.exists():
@@ -562,6 +663,22 @@ def _check_config(
     else:
         checks.append(Check("route_hint_dependency", "fail", "Python openai package is missing for Brainstack route-hint LLM calls in the active runtime"))
 
+    dependency_state = dependency_import_ok("croniter")
+    if dependency_state is True:
+        checks.append(Check("cron_dependency", "pass", "Python croniter package is importable for cron-expression scheduling"))
+    elif dependency_state is None:
+        checks.append(
+            Check(
+                "cron_dependency",
+                "warn",
+                "Could not verify Python croniter package importability from this exec surface because Docker API access is unavailable",
+            )
+        )
+    elif planned_install:
+        checks.append(Check("cron_dependency", "pass", "Python croniter package is not present yet, but installer will add it"))
+    else:
+        checks.append(Check("cron_dependency", "fail", "Python croniter package is missing for cron-expression scheduling in the active runtime"))
+
     auxiliary = config.get("auxiliary", {}) if isinstance(config.get("auxiliary", {}), dict) else {}
     flush_memories = auxiliary.get("flush_memories", {}) if isinstance(auxiliary.get("flush_memories", {}), dict) else {}
     flush_provider = str(flush_memories.get("provider") or "").strip().lower()
@@ -572,6 +689,7 @@ def _check_config(
     else:
         checks.append(Check("flush_memories_provider", "fail", "auxiliary.flush_memories.provider must be 'main' for reliable Brainstack Tier-2 writes"))
 
+    checks.extend(runtime_db_hygiene_checks())
     return checks
 
 

@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -29,6 +30,7 @@ BACKEND_DEPENDENCIES = {
     "kuzu": "kuzu",
     "chromadb": "chromadb",
     "openai": "openai",
+    "croniter": "croniter",
 }
 
 
@@ -97,11 +99,26 @@ def _ensure_backend_dependencies(
     if dry_run:
         return {"status": "planned", "python": str(python_bin), "packages": missing}
 
-    cmd = [str(python_bin), "-m", "pip", "install", *missing]
-    proc = subprocess.run(cmd, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"Dependency install failed for {' '.join(missing)} using {python_bin}")
-    return {"status": "installed", "python": str(python_bin), "packages": missing}
+    attempts: list[tuple[str, list[str]]] = [
+        ("pip", [str(python_bin), "-m", "pip", "install", *missing]),
+    ]
+    uv_bin = shutil.which("uv")
+    if uv_bin:
+        attempts.append(("uv", [uv_bin, "pip", "install", "--python", str(python_bin), *missing]))
+
+    failures: list[str] = []
+    for label, cmd in attempts:
+        proc = subprocess.run(cmd, text=True, capture_output=True)
+        if proc.returncode == 0:
+            return {"status": "installed", "python": str(python_bin), "packages": missing, "installer": label}
+        stderr = (proc.stderr or "").strip()
+        stdout = (proc.stdout or "").strip()
+        failures.append(f"{label}: {stderr or stdout or 'unknown error'}")
+
+    raise RuntimeError(
+        f"Dependency install failed for {' '.join(missing)} using {python_bin}; "
+        + " | ".join(failures)
+    )
 
 
 def _copy_tree(src: Path, dst: Path, dry_run: bool) -> list[dict[str, str]]:
@@ -151,6 +168,12 @@ def _patch_memory_manager(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
 
+    if (
+        "When recalled memory provides a specific, non-conflicted factual user detail or committed " in text
+        and "over assistant suggestions or generic prior knowledge unless another recalled fact in this memory block conflicts with it.]\\n\\n" in text
+    ):
+        return applied
+
     old_note = (
         '        "[System note: The following is recalled memory context, "\n'
         '        "NOT new user input. Treat as informational background data.]\\n\\n"\n'
@@ -188,6 +211,734 @@ def _patch_memory_manager(path: Path, dry_run: bool) -> list[str]:
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
     return applied
+
+
+def _patch_prompt_builder(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    scheduler_guidance = (
+        '    "without acting are not acceptable.\\n"\n'
+        '    "If you claim that a reminder, cron job, or scheduled follow-up exists, that claim must be grounded in a real native scheduler record or a successful cronjob tool result from this run. A memory entry, todo note, or generic internal task list is not a scheduled job. Do not inspect OS-level cron or systemd timers as a substitute for Hermes scheduler state. If the cronjob tool is unavailable or the scheduler call fails, say that scheduling is unavailable or failed."\n'
+        ")\n"
+    )
+    old_tail = (
+        '    "without acting are not acceptable."\n'
+        ")\n"
+    )
+    weaker_tail = (
+        '    "without acting are not acceptable.\\n"\n'
+        '    "If you claim that a reminder, cron job, or scheduled follow-up exists, that claim must be grounded in a real native scheduler record or a successful cronjob tool result from this run. Memory alone is not a scheduled job. If scheduling fails or you did not verify the job exists, say so plainly."\n'
+        ")\n"
+    )
+    if "generic internal task list is not a scheduled job" not in text and weaker_tail in text:
+        text = _replace_once(
+            text,
+            weaker_tail,
+            scheduler_guidance,
+            label="prompt_builder stronger scheduler truth guidance",
+            path=path,
+        )
+        applied.append("prompt_builder:stronger_scheduler_truth_guidance")
+    elif "generic internal task list is not a scheduled job" not in text and old_tail in text:
+        text = _replace_once(
+            text,
+            old_tail,
+            scheduler_guidance,
+            label="prompt_builder scheduler truth guidance",
+            path=path,
+        )
+        applied.append("prompt_builder:scheduler_truth_guidance")
+
+    old_models = 'TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok")\n'
+    new_models = 'TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "minimax")\n'
+    if old_models in text and new_models not in text:
+        text = _replace_once(
+            text,
+            old_models,
+            new_models,
+            label="prompt_builder minimax tool enforcement",
+            path=path,
+        )
+        applied.append("prompt_builder:minimax_tool_enforcement")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_cron_jobs(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    old_block = (
+        "    # Default delivery to origin if available, otherwise local\n"
+        "    if deliver is None:\n"
+        "        deliver = \"origin\" if origin else \"local\"\n"
+        "\n"
+        "    job_id = uuid.uuid4().hex[:12]\n"
+        "    now = _hermes_now().isoformat()\n"
+    )
+    new_block = (
+        "    # Default delivery to origin if available, otherwise local\n"
+        "    if deliver is None:\n"
+        "        deliver = \"origin\" if origin else \"local\"\n"
+        "\n"
+        "    next_run_at = compute_next_run(parsed_schedule)\n"
+        "    if parsed_schedule[\"kind\"] == \"once\" and next_run_at is None:\n"
+        "        raise ValueError(\"Requested one-shot schedule is already in the past.\")\n"
+        "\n"
+        "    job_id = uuid.uuid4().hex[:12]\n"
+        "    now = _hermes_now().isoformat()\n"
+    )
+    if "Requested one-shot schedule is already in the past." not in text and old_block in text:
+        text = _replace_once(
+            text,
+            old_block,
+            new_block,
+            label="cron.jobs past one-shot rejection",
+            path=path,
+        )
+        applied.append("cron_jobs:reject_past_oneshot")
+
+    old_next_run = '        "next_run_at": compute_next_run(parsed_schedule),\n'
+    new_next_run = '        "next_run_at": next_run_at,\n'
+    if old_next_run in text and new_next_run not in text:
+        text = _replace_once(
+            text,
+            old_next_run,
+            new_next_run,
+            label="cron.jobs cached next_run_at",
+            path=path,
+        )
+        applied.append("cron_jobs:reuse_next_run_at")
+
+    old_delivery_status = (
+        '            job["last_status"] = "ok" if success else "error"\n'
+        '            job["last_error"] = error if not success else None\n'
+        '            # Track delivery failures separately — cleared on successful delivery\n'
+        '            job["last_delivery_error"] = delivery_error\n'
+        '            \n'
+        '            # Increment completed count\n'
+        '            if job.get("repeat"):\n'
+        '                job["repeat"]["completed"] = job["repeat"].get("completed", 0) + 1\n'
+        '                \n'
+        "                # Check if we've hit the repeat limit\n"
+        '                times = job["repeat"].get("times")\n'
+        '                completed = job["repeat"]["completed"]\n'
+        '                if times is not None and times > 0 and completed >= times:\n'
+        '                    # Remove the job (limit reached)\n'
+        '                    jobs.pop(i)\n'
+        '                    save_jobs(jobs)\n'
+        '                    return\n'
+    )
+    new_delivery_status = (
+        '            delivery_failed = bool(delivery_error)\n'
+        '            effective_success = success and not delivery_failed\n'
+        '            job["last_status"] = "ok" if effective_success else "error"\n'
+        '            job["last_error"] = error if error else (delivery_error if delivery_failed else None)\n'
+        '            # Track delivery failures separately — cleared on successful delivery\n'
+        '            job["last_delivery_error"] = delivery_error\n'
+        '            \n'
+        '            # Increment completed count\n'
+        '            if job.get("repeat"):\n'
+        '                job["repeat"]["completed"] = job["repeat"].get("completed", 0) + 1\n'
+        '                \n'
+        "                # Check if we've hit the repeat limit\n"
+        '                times = job["repeat"].get("times")\n'
+        '                completed = job["repeat"]["completed"]\n'
+        '                if effective_success and times is not None and times > 0 and completed >= times:\n'
+        '                    # Remove the job (limit reached)\n'
+        '                    jobs.pop(i)\n'
+        '                    save_jobs(jobs)\n'
+        '                    return\n'
+    )
+    if "effective_success = success and not delivery_failed" not in text and old_delivery_status in text:
+        text = _replace_once(
+            text,
+            old_delivery_status,
+            new_delivery_status,
+            label="cron.jobs fail_closed_delivery_status",
+            path=path,
+        )
+        applied.append("cron_jobs:fail_closed_delivery_status")
+
+    old_terminal_state = (
+        '            if job["next_run_at"] is None:\n'
+        '                job["enabled"] = False\n'
+        '                job["state"] = "completed"\n'
+    )
+    new_terminal_state = (
+        '            if job["next_run_at"] is None:\n'
+        '                job["enabled"] = False\n'
+        '                job["state"] = "completed" if effective_success else "error"\n'
+    )
+    if 'job["state"] = "completed" if effective_success else "error"' not in text and old_terminal_state in text:
+        text = _replace_once(
+            text,
+            old_terminal_state,
+            new_terminal_state,
+            label="cron.jobs terminal delivery state",
+            path=path,
+        )
+        applied.append("cron_jobs:terminal_delivery_state")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_cron_scheduler(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    old_live_adapter = (
+        "        runtime_adapter = (adapters or {}).get(platform)\n"
+        "        delivered = False\n"
+        "        if runtime_adapter is not None and loop is not None and getattr(loop, \"is_running\", lambda: False)():\n"
+    )
+    new_live_adapter = (
+        "        runtime_adapter = (adapters or {}).get(platform)\n"
+        "        gateway_delivery_mode = adapters is not None and loop is not None\n"
+        "        delivered = False\n"
+        "        if runtime_adapter is not None and loop is not None and getattr(loop, \"is_running\", lambda: False)():\n"
+    )
+    if "gateway_delivery_mode = adapters is not None and loop is not None" not in text and old_live_adapter in text:
+        text = _replace_once(
+            text,
+            old_live_adapter,
+            new_live_adapter,
+            label="cron.scheduler gateway delivery mode",
+            path=path,
+        )
+        applied.append("cron_scheduler:gateway_delivery_mode")
+
+    old_live_send_fail = (
+        "                        logger.warning(\n"
+        "                            \"Job '%s': live adapter send to %s:%s failed (%s), falling back to standalone\",\n"
+        "                            job[\"id\"], platform_name, chat_id, err,\n"
+        "                        )\n"
+        "                        adapter_ok = False  # fall through to standalone path\n"
+    )
+    new_live_send_fail = (
+        "                        msg = f\"live adapter send to {platform_name}:{chat_id} failed: {err}\"\n"
+        "                        logger.warning(\"Job '%s': %s\", job[\"id\"], msg)\n"
+        "                        delivery_errors.append(msg)\n"
+        "                        adapter_ok = False\n"
+    )
+    if "live adapter send to {platform_name}:{chat_id} failed:" not in text and old_live_send_fail in text:
+        text = _replace_once(
+            text,
+            old_live_send_fail,
+            new_live_send_fail,
+            label="cron.scheduler fail_closed_live_adapter_send",
+            path=path,
+        )
+        applied.append("cron_scheduler:fail_closed_live_adapter_send")
+
+    old_live_send_success = (
+        "                # Send extracted media files as native attachments via the live adapter\n"
+        "                if adapter_ok and media_files:\n"
+        "                    _send_media_via_adapter(runtime_adapter, chat_id, media_files, send_metadata, loop, job)\n"
+        "\n"
+        "                if adapter_ok:\n"
+        "                    logger.info(\"Job '%s': delivered to %s:%s via live adapter\", job[\"id\"], platform_name, chat_id)\n"
+        "                    delivered = True\n"
+        "            except Exception as e:\n"
+        "                logger.warning(\n"
+        "                    \"Job '%s': live adapter delivery to %s:%s failed (%s), falling back to standalone\",\n"
+        "                    job[\"id\"], platform_name, chat_id, e,\n"
+        "                )\n"
+    )
+    new_live_send_success = (
+        "                # Send extracted media files as native attachments via the live adapter\n"
+        "                if adapter_ok and media_files:\n"
+        "                    _send_media_via_adapter(runtime_adapter, chat_id, media_files, send_metadata, loop, job)\n"
+        "\n"
+        "                if adapter_ok:\n"
+        "                    logger.info(\"Job '%s': delivered to %s:%s via live adapter\", job[\"id\"], platform_name, chat_id)\n"
+        "                    delivered = True\n"
+        "                else:\n"
+        "                    continue\n"
+        "            except Exception as e:\n"
+        "                msg = f\"live adapter delivery to {platform_name}:{chat_id} failed: {e}\"\n"
+        "                logger.warning(\"Job '%s': %s\", job[\"id\"], msg)\n"
+        "                delivery_errors.append(msg)\n"
+        "                continue\n"
+    )
+    if "live adapter delivery to {platform_name}:{chat_id} failed:" not in text and old_live_send_success in text:
+        text = _replace_once(
+            text,
+            old_live_send_success,
+            new_live_send_success,
+            label="cron.scheduler fail_closed_live_adapter_delivery",
+            path=path,
+        )
+        applied.append("cron_scheduler:fail_closed_live_adapter_delivery")
+
+    old_standalone = (
+        "            # Standalone path: run the async send in a fresh event loop (safe from any thread)\n"
+        "            coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files)\n"
+        "            try:\n"
+        "                result = asyncio.run(coro)\n"
+        "            except RuntimeError:\n"
+        "                # asyncio.run() checks for a running loop before awaiting the coroutine;\n"
+        "                # when it raises, the original coro was never started — close it to\n"
+        "                # prevent \"coroutine was never awaited\" RuntimeWarning, then retry in a\n"
+        "                # fresh thread that has no running loop.\n"
+        "                coro.close()\n"
+        "                import concurrent.futures\n"
+        "                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:\n"
+        "                    future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files))\n"
+        "                    result = future.result(timeout=30)\n"
+        "            except Exception as e:\n"
+        "                msg = f\"delivery to {platform_name}:{chat_id} failed: {e}\"\n"
+        "                logger.error(\"Job '%s': %s\", job[\"id\"], msg)\n"
+        "                delivery_errors.append(msg)\n"
+        "                continue\n"
+    )
+    new_standalone = (
+        "            # Standalone path: always run in a bounded worker thread so a hung\n"
+        "            # network send cannot wedge the scheduler tick.\n"
+        "            import concurrent.futures\n"
+        "            _standalone_timeout = int(float(os.getenv(\"HERMES_CRON_DELIVERY_TIMEOUT\", \"30\")))\n"
+        "            _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)\n"
+        "            try:\n"
+        "                future = _pool.submit(\n"
+        "                    asyncio.run,\n"
+        "                    _send_to_platform(\n"
+        "                        platform,\n"
+        "                        pconfig,\n"
+        "                        chat_id,\n"
+        "                        cleaned_delivery_content,\n"
+        "                        thread_id=thread_id,\n"
+        "                        media_files=media_files,\n"
+        "                    ),\n"
+        "                )\n"
+        "                result = future.result(timeout=_standalone_timeout)\n"
+        "            except concurrent.futures.TimeoutError:\n"
+        "                msg = f\"delivery to {platform_name}:{chat_id} timed out after {_standalone_timeout}s\"\n"
+        "                logger.error(\"Job '%s': %s\", job[\"id\"], msg)\n"
+        "                delivery_errors.append(msg)\n"
+        "                _pool.shutdown(wait=False, cancel_futures=True)\n"
+        "                continue\n"
+        "            except Exception as e:\n"
+        "                msg = f\"delivery to {platform_name}:{chat_id} failed: {e}\"\n"
+        "                logger.error(\"Job '%s': %s\", job[\"id\"], msg)\n"
+        "                delivery_errors.append(msg)\n"
+        "                _pool.shutdown(wait=False, cancel_futures=True)\n"
+        "                continue\n"
+        "            finally:\n"
+        "                _pool.shutdown(wait=False, cancel_futures=True)\n"
+    )
+    if "HERMES_CRON_DELIVERY_TIMEOUT" not in text and old_standalone in text:
+        text = _replace_once(
+            text,
+            old_standalone,
+            new_standalone,
+            label="cron.scheduler bounded standalone delivery",
+            path=path,
+        )
+        applied.append("cron_scheduler:bounded_standalone_delivery")
+
+    old_mark = '                mark_job_run(job["id"], success, error, delivery_error=delivery_error)\n'
+    new_mark = (
+        '                mark_job_run(job["id"], success, error, delivery_error=delivery_error)\n'
+        '                logger.info(\n'
+        '                    "Job \'%s\': finalized success=%s delivery_error=%s",\n'
+        '                    job["id"],\n'
+        '                    success,\n'
+        '                    delivery_error,\n'
+        '                )\n'
+    )
+    if 'logger.info(\n                    "Job \'%s\': finalized success=%s delivery_error=%s"' not in text and old_mark in text:
+        text = _replace_once(
+            text,
+            old_mark,
+            new_mark,
+            label="cron.scheduler finalized logging",
+            path=path,
+        )
+        applied.append("cron_scheduler:finalized_logging")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_cron_tests(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    old_expectation = (
+        '        assert updated["last_status"] == "ok"\n'
+        '        assert updated["last_error"] is None\n'
+        "        assert updated[\"last_delivery_error\"] == \"platform 'telegram' not configured\"\n"
+    )
+    new_expectation = (
+        '        assert updated["last_status"] == "error"\n'
+        "        assert updated[\"last_error\"] == \"platform 'telegram' not configured\"\n"
+        "        assert updated[\"last_delivery_error\"] == \"platform 'telegram' not configured\"\n"
+    )
+    if old_expectation in text and new_expectation not in text:
+        text = _replace_once(
+            text,
+            old_expectation,
+            new_expectation,
+            label="cron tests fail_closed_delivery_expectation",
+            path=path,
+        )
+        applied.append("cron_tests:fail_closed_delivery_expectation")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    deterministic_index_impl = (
+        "    def _compile_user_profile_index(self) -> None:\n"
+        "        if not self._memory_store or not self._user_profile_enabled:\n"
+        "            return\n"
+        "        entries = [str(entry).strip() for entry in getattr(self._memory_store, \"user_entries\", []) if str(entry).strip()]\n"
+        "        if not entries:\n"
+        "            try:\n"
+        "                self._memory_store.save_user_profile_index({})\n"
+        "            except Exception:\n"
+        "                pass\n"
+        "            return\n"
+        "        normalized = self._memory_store._derive_user_profile_index_from_entries(entries)\n"
+        "        try:\n"
+        "            self._memory_store.save_user_profile_index(\n"
+        "                {\n"
+        "                    \"preferred_user_name\": str(normalized.get(\"preferred_user_name\") or \"\").strip(),\n"
+        "                    \"assistant_name\": str(normalized.get(\"assistant_name\") or \"\").strip(),\n"
+        "                }\n"
+        "            )\n"
+        "        except Exception:\n"
+        "            pass\n"
+    )
+    old_compile = (
+        "    def _compile_user_profile_index(self) -> None:\n"
+        "        if not self._memory_store or not self._user_profile_enabled:\n"
+        "            return\n"
+        "        entries = [str(entry).strip() for entry in getattr(self._memory_store, \"user_entries\", []) if str(entry).strip()]\n"
+        "        if not entries:\n"
+        "            try:\n"
+        "                self._memory_store.save_user_profile_index({})\n"
+        "            except Exception:\n"
+        "                pass\n"
+        "            return\n"
+        "        messages = [\n"
+        "            {\n"
+        "                \"role\": \"system\",\n"
+        "                \"content\": (\n"
+        "                    \"You compile a tiny reusable index from explicit user-taught profile truth. \"\n"
+        "                    \"Return JSON only with keys preferred_user_name and assistant_name. \"\n"
+        "                    \"Fill a key only when the explicit entries make it clearly usable later. \"\n"
+        "                    \"For preferred_user_name, return the direct reusable address form that should be used to address \"\n"
+        "                    \"the user in later replies, not an inflected sentence fragment. If a stored entry already uses a \"\n"
+        "                    \"canonical naming label but its value is still a sentence fragment or grammatically inflected \"\n"
+        "                    \"variant, repair it to the shortest reusable standalone name or address form. Do not return \"\n"
+        "                    \"surrounding teaching words, quoted clauses, or case-marked variants when a direct reusable form \"\n"
+        "                    \"is recoverable from the explicit entry. \"\n"
+        "                    \"For assistant_name, return the assistant's own name only if explicit user-taught truth makes it clear. \"\n"
+        "                    \"Do not infer age, language, style, or any other fields. \"\n"
+        "                    \"If unclear, return empty strings.\"\n"
+        "                ),\n"
+        "            },\n"
+        "            {\"role\": \"user\", \"content\": json.dumps({\"entries\": entries}, ensure_ascii=False)},\n"
+        "        ]\n"
+        "        try:\n"
+        "            from agent.auxiliary_client import get_text_auxiliary_client, _get_task_timeout\n"
+        "\n"
+        "            aux_client, aux_model = get_text_auxiliary_client(\"user_profile_index\")\n"
+        "            request_client = aux_client or self._ensure_primary_openai_client(reason=\"user_profile_index\")\n"
+        "            request_model = aux_model or self.model\n"
+        "            response = self._side_chat_completion(\n"
+        "                reason=\"user_profile_index\",\n"
+        "                client=request_client,\n"
+        "                timeout=_get_task_timeout(\"user_profile_index\"),\n"
+        "                model=request_model,\n"
+        "                messages=messages,\n"
+        "                temperature=0,\n"
+        "                **self._max_tokens_param(512),\n"
+        "            )\n"
+        "            content = \"\"\n"
+        "            if hasattr(response, \"choices\") and response.choices:\n"
+        "                content = str(getattr(response.choices[0].message, \"content\", \"\") or \"\")\n"
+        "            payload = self._extract_json_object(content)\n"
+        "            normalized = {\n"
+        "                \"preferred_user_name\": str(payload.get(\"preferred_user_name\") or \"\").strip(),\n"
+        "                \"assistant_name\": str(payload.get(\"assistant_name\") or \"\").strip(),\n"
+        "            }\n"
+        "            # Fail closed: do not erase an existing compiled index when the\n"
+        "            # model returns nothing usable for an otherwise populated profile.\n"
+        "            if not any(normalized.values()):\n"
+        "                return\n"
+        "            self._memory_store.save_user_profile_index(normalized)\n"
+        "        except Exception:\n"
+        "            pass\n"
+    )
+    if (
+        "self._memory_store._derive_user_profile_index_from_entries(entries)" not in text
+        and old_compile in text
+    ):
+        text = _replace_once(text, old_compile, deterministic_index_impl, label="run_agent deterministic user-profile index", path=path)
+        applied.append("run_agent:deterministic_user_profile_index")
+
+    sync_guard = "if self._memory_manager and final_response and original_user_message and not interrupted:"
+    if sync_guard not in text:
+        old_sync = (
+            "        if self._memory_manager and final_response and original_user_message:\n"
+            "            try:\n"
+            "                self._memory_manager.sync_all(original_user_message, final_response)\n"
+            "                self._memory_manager.queue_prefetch_all(original_user_message)\n"
+            "            except Exception:\n"
+            "                pass\n"
+        )
+        new_sync = (
+            "        if self._memory_manager and final_response and original_user_message and not interrupted:\n"
+            "            try:\n"
+            "                self._memory_manager.sync_all(original_user_message, final_response)\n"
+            "                self._memory_manager.queue_prefetch_all(original_user_message)\n"
+            "            except Exception:\n"
+            "                pass\n"
+        )
+        text = _replace_once(text, old_sync, new_sync, label="run_agent interrupted transcript hygiene", path=path)
+        applied.append("run_agent:skip_interrupted_transcript_sync")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _canonicalize_runtime_user_profile(config_path: Path, dry_run: bool) -> dict[str, Any]:
+    runtime_root = config_path.parent
+    user_path = runtime_root / "memories" / "USER.md"
+    index_path = runtime_root / "memories" / "USER_PROFILE_INDEX.json"
+    if not user_path.exists():
+        return {"status": "skipped", "reason": "user_profile_missing", "path": str(user_path)}
+
+    raw = user_path.read_text(encoding="utf-8")
+    delimiter = "\n§\n"
+    entries = [entry.strip() for entry in raw.split(delimiter) if entry.strip()]
+    if not entries:
+        return {"status": "no_entries", "path": str(user_path)}
+
+    legacy_name_re = re.compile(r"^User's Discord name is (?P<handle>.+?) but should be addressed as (?P<name>.+)$")
+    legacy_address_re = re.compile(r"^Address user as (?P<name>.+), not (?P<handle>.+)$")
+
+    def _rehydrate_rule_pack(text: str) -> str:
+        prefix = "Communication rules:"
+        if not text.startswith(prefix):
+            return text
+        body = text[len(prefix):].strip()
+        normalized_body = body.replace("\\n", "\n").strip()
+        if not normalized_body:
+            return text
+        if "\n" in normalized_body:
+            return prefix + "\n" + normalized_body
+        body = normalized_body
+        matches = list(re.finditer(r"(?<!\S)\d+\.\s", body))
+        if len(matches) < 2:
+            return text
+        parts: list[str] = []
+        for index, match in enumerate(matches):
+            start = match.start()
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
+            part = body[start:end].strip()
+            if part:
+                parts.append(part)
+        if len(parts) < 2:
+            return text
+        return prefix + "\n" + "\n".join(parts)
+
+    rewritten: list[str] = []
+    preferred_user_name = ""
+    assistant_name = ""
+    discord_handle = ""
+    changed = False
+
+    for entry in entries:
+        text = str(entry).strip()
+        if not text:
+            continue
+        if text.startswith("Preferred user name:"):
+            preferred_user_name = text.partition(":")[2].strip()
+            continue
+        if text.startswith("Assistant name:"):
+            assistant_name = text.partition(":")[2].strip()
+            continue
+        if text.startswith("Discord handle:"):
+            discord_handle = text.partition(":")[2].strip()
+            continue
+
+        match = legacy_name_re.match(text)
+        if match:
+            preferred_user_name = preferred_user_name or match.group("name").strip()
+            discord_handle = discord_handle or match.group("handle").strip()
+            changed = True
+            continue
+
+        match = legacy_address_re.match(text)
+        if match:
+            preferred_user_name = preferred_user_name or match.group("name").strip()
+            discord_handle = discord_handle or match.group("handle").strip()
+            changed = True
+            continue
+
+        canonical = _rehydrate_rule_pack(text)
+        if canonical != text:
+            changed = True
+        rewritten.append(canonical)
+
+    canonical_entries: list[str] = []
+    seen: set[str] = set()
+
+    def _append(entry: str) -> None:
+        normalized = str(entry).strip()
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        canonical_entries.append(normalized)
+
+    if preferred_user_name:
+        _append(f"Preferred user name: {preferred_user_name}")
+    if assistant_name:
+        _append(f"Assistant name: {assistant_name}")
+    if discord_handle:
+        _append(f"Discord handle: {discord_handle}")
+    for entry in rewritten:
+        _append(entry)
+
+    serialized = delimiter.join(canonical_entries)
+    current_index = {}
+    if index_path.exists():
+        try:
+            current_index = json.loads(index_path.read_text(encoding="utf-8").strip() or "{}")
+            if not isinstance(current_index, dict):
+                current_index = {}
+        except (OSError, json.JSONDecodeError):
+            current_index = {}
+    new_index = {
+        "preferred_user_name": preferred_user_name,
+        "assistant_name": assistant_name,
+    }
+    if canonical_entries != entries:
+        changed = True
+    if current_index != new_index:
+        changed = True
+
+    if changed and not dry_run:
+        user_path.write_text(serialized, encoding="utf-8")
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        index_path.write_text(json.dumps(new_index, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+    return {
+        "status": "updated" if changed else "already_canonical",
+        "path": str(user_path),
+        "index_path": str(index_path),
+        "entry_count": len(canonical_entries),
+        "preferred_user_name": preferred_user_name,
+        "assistant_name": assistant_name,
+        "discord_handle": discord_handle,
+    }
+
+
+def _canonicalize_runtime_brainstack_db(
+    target: Path,
+    config_path: Path,
+    *,
+    python_bin: Path | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    runtime_root = config_path.parent
+    db_path = runtime_root / "brainstack" / "brainstack.db"
+    if not db_path.exists():
+        return {"status": "skipped", "reason": "brainstack_db_missing", "path": str(db_path)}
+    if dry_run:
+        return {"status": "planned", "path": str(db_path)}
+
+    python_exec = str(python_bin or sys.executable)
+    script = f"""
+import json
+import sys
+sys.path.insert(0, {str(target)!r})
+from plugins.memory.brainstack.db import BrainstackStore
+
+store = BrainstackStore({str(db_path)!r})
+store.open()
+conn = store.conn
+before = {{
+    "style_contract_behavior_rows": conn.execute(
+        "select count(*) from behavior_contracts where stable_key = ?",
+        ("preference:style_contract",),
+    ).fetchone()[0],
+    "compiled_behavior_policies": conn.execute(
+        "select count(*) from compiled_behavior_policies"
+    ).fetchone()[0],
+    "interrupt_transcript_hits": conn.execute(
+        "select count(*) from transcript_entries where content like '%Assistant: Operation interrupted:%' or content like '%Assistant: Session reset.%'"
+    ).fetchone()[0],
+}}
+transcript_scrub = store.scrub_transcript_hygiene_residue()
+behavior_residue = store.purge_style_contract_behavior_residue()
+result = {{
+    "before": before,
+    "transcript_scrub": transcript_scrub,
+    "behavior_residue": behavior_residue,
+    "style_contract_behavior_rows": conn.execute(
+        "select count(*) from behavior_contracts where stable_key = ?",
+        ("preference:style_contract",),
+    ).fetchone()[0],
+    "active_behavior_contracts": conn.execute(
+        "select count(*) from behavior_contracts where stable_key = ? and status = ?",
+        ("preference:style_contract", "active"),
+    ).fetchone()[0],
+    "superseded_behavior_contracts": conn.execute(
+        "select count(*) from behavior_contracts where stable_key = ? and status = ?",
+        ("preference:style_contract", "superseded"),
+    ).fetchone()[0],
+    "quarantined_behavior_contracts": conn.execute(
+        "select count(*) from behavior_contracts where stable_key = ? and status = ?",
+        ("preference:style_contract", "quarantined"),
+    ).fetchone()[0],
+    "compiled_behavior_policies": conn.execute(
+        "select count(*) from compiled_behavior_policies"
+    ).fetchone()[0],
+    "interrupt_transcript_hits": conn.execute(
+        "select count(*) from transcript_entries where content like '%Assistant: Operation interrupted:%' or content like '%Assistant: Session reset.%'"
+    ).fetchone()[0],
+    "style_contract_profile_items": conn.execute(
+        "select count(*) from profile_items where stable_key like 'preference:style_contract%'"
+    ).fetchone()[0],
+    "applied_migrations": [
+        row[0]
+        for row in conn.execute(
+            "select name from applied_migrations where name like 'style_contract%' or name like 'behavior%' order by name"
+        ).fetchall()
+    ],
+}}
+store.close()
+print(json.dumps(result, ensure_ascii=False))
+"""
+    proc = subprocess.run([python_exec, "-c", script], capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Brainstack DB canonicalization failed for "
+            f"{db_path}: {proc.stderr.strip() or proc.stdout.strip() or 'unknown error'}"
+        )
+    payload = json.loads(proc.stdout.strip() or "{}")
+    payload["status"] = "updated"
+    payload["path"] = str(db_path)
+    return payload
 
 
 def _patch_gateway_run(path: Path, dry_run: bool) -> list[str]:
@@ -364,6 +1115,11 @@ def _patch_gateway_run(path: Path, dry_run: bool) -> list[str]:
             "                    logger.warning(\n                        \"Giving up reconnecting %s after %d attempts\",\n                        platform.value, info[\"attempts\"],\n                    )\n                    del self._failed_platforms[platform]\n                    continue\n",
             "                    logger.warning(\n                        \"Giving up reconnecting %s after %d attempts\",\n                        platform.value, info[\"attempts\"],\n                    )\n                    del self._failed_platforms[platform]\n                    self._write_gateway_runtime_status(\n                        gateway_state=\"degraded\" if self.adapters else \"startup_failed\",\n                        exit_reason=None if self.adapters else f\"{platform.value}: reconnect attempts exhausted\",\n                        platform=platform.value,\n                        platform_state=\"failed\",\n                        error_code=\"reconnect_exhausted\",\n                        error_message=f\"reconnect attempts exhausted after {info['attempts']} tries\",\n                    )\n                    continue\n",
             "gateway:reconnect_exhausted_status",
+        ),
+        (
+            '            header = "Session reset."\n',
+            '            header = "Fresh session started."\n',
+            "gateway:clean_reset_header",
         ),
     ]
     for old, new, label in replacements:
@@ -736,6 +1492,23 @@ def _patch_config(config_path: Path, dry_run: bool) -> dict[str, Any]:
     flush_provider = str(flush_memories.get("provider") or "").strip().lower()
     if not flush_provider or flush_provider == "auto":
         flush_memories["provider"] = "main"
+    config.setdefault("agent", {})
+    if not isinstance(config["agent"], dict):
+        raise RuntimeError("config.yaml has non-object `agent` section")
+    agent = config["agent"]
+
+    def _normalized_int(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    gateway_timeout = _normalized_int(agent.get("gateway_timeout"))
+    gateway_timeout_warning = _normalized_int(agent.get("gateway_timeout_warning"))
+    if gateway_timeout in {None, 1800}:
+        agent["gateway_timeout"] = 120
+    if gateway_timeout_warning in {None, 900}:
+        agent["gateway_timeout_warning"] = 30
     if not dry_run:
         _write_yaml(config_path, config)
     return {
@@ -744,6 +1517,8 @@ def _patch_config(config_path: Path, dry_run: bool) -> dict[str, Any]:
         "memory_enabled": True,
         "user_profile_enabled": True,
         "flush_memories_provider": str(flush_memories.get("provider") or ""),
+        "gateway_timeout": agent.get("gateway_timeout"),
+        "gateway_timeout_warning": agent.get("gateway_timeout_warning"),
     }
 
 
@@ -1020,12 +1795,20 @@ def _patch_dockerfile_backend_dependencies(path: Path, dry_run: bool) -> list[st
     install_line = f'uv pip install --no-cache-dir {backend_packages}'
     if install_line in text:
         return []
+    current_backend_line = "uv pip install --no-cache-dir chromadb kuzu"
+    upgraded_backend_line = "uv pip install --no-cache-dir chromadb croniter kuzu"
+    if current_backend_line in text and upgraded_backend_line not in text:
+        text = text.replace(current_backend_line, upgraded_backend_line, 1)
+        if not dry_run:
+            path.write_text(text, encoding="utf-8")
+        return ["dockerfile:install_runtime_dependencies"]
     if (
         "uv pip install --no-cache-dir -r /tmp/requirements.txt" in text
-        and "uv pip install --no-cache-dir chromadb kuzu" in text
+        and upgraded_backend_line in text
     ):
-        # Newer Hermes Dockerfiles already install openai from requirements and
-        # keep kuzu/chromadb in a dedicated backend layer, so no patch is needed.
+        # Newer Hermes Dockerfiles already install core requirements from the
+        # lock export and keep runtime extras that Brainstack depends on in a
+        # dedicated backend layer, so no further patch is needed.
         return []
     anchor = '    uv pip install --no-cache-dir -e ".[all]"\n'
     if anchor not in text:
@@ -1321,8 +2104,14 @@ def main() -> int:
     host_helper_files: list[dict[str, str]] = []
 
     host_patches: list[str] = []
+    host_patches.extend(_patch_run_agent(target / "run_agent.py", args.dry_run))
+    host_patches.extend(_patch_prompt_builder(target / "agent" / "prompt_builder.py", args.dry_run))
+    host_patches.extend(_patch_cron_jobs(target / "cron" / "jobs.py", args.dry_run))
+    host_patches.extend(_patch_cron_scheduler(target / "cron" / "scheduler.py", args.dry_run))
+    host_patches.extend(_patch_cron_tests(target / "tests" / "cron" / "test_jobs.py", args.dry_run))
     host_patches.extend(_patch_auxiliary_client(target / "agent" / "auxiliary_client.py", args.dry_run))
     host_patches.extend(_patch_memory_manager(target / "agent" / "memory_manager.py", args.dry_run))
+    host_patches.extend(_patch_gateway_run(target / "gateway" / "run.py", args.dry_run))
     host_patches.extend(_patch_gateway_status(target / "gateway" / "status.py", args.dry_run))
     host_patches.extend(_patch_discord_platform(target / "gateway" / "platforms" / "discord.py", args.dry_run))
     if args.runtime == "docker":
@@ -1332,6 +2121,14 @@ def main() -> int:
         host_patches.extend(_patch_dockerignore(target / ".dockerignore", args.dry_run))
         host_patches.extend(_patch_dockerfile_backend_dependencies(target / "Dockerfile", args.dry_run))
         host_patches.extend(_patch_docker_entrypoint(target / "docker" / "entrypoint.sh", args.dry_run))
+
+    runtime_state_canonicalization = _canonicalize_runtime_user_profile(config_path, args.dry_run)
+    runtime_db_canonicalization = _canonicalize_runtime_brainstack_db(
+        target,
+        config_path,
+        python_bin=selected_python,
+        dry_run=args.dry_run,
+    )
 
     manifest = {
         "installed_at": datetime.now(timezone.utc).isoformat(),
@@ -1347,6 +2144,8 @@ def main() -> int:
         "generated_files": generated_files,
         "config": config_result,
         "dependency_install": deps_result,
+        "runtime_state_canonicalization": runtime_state_canonicalization,
+        "runtime_db_canonicalization": runtime_db_canonicalization,
         "secrets_included": False,
     }
     _write_manifest(target, manifest, args.dry_run)
