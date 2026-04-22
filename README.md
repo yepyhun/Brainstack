@@ -251,12 +251,6 @@ update_hermes_with_brainstack.py
 | `brainstack_doctor.py` | Validate install assumptions and fail closed when upstream changed something important |
 | `scripts/brainstack_refresh_donors.py` | Report donor state and run bounded refresh workflow |
 
-## External contribution targets
-
-If you want to contribute a larger improvement without opening a new active phase first, see [docs/EXTERNAL_PR_CANDIDATES.md](docs/EXTERNAL_PR_CANDIDATES.md).
-
-That document records the maintainer-vetted external PR directions that are currently considered worth pursuing.
-
 ## Installation into Hermes
 
 Brainstack is meant to be installed into a fresh Hermes checkout, not copied around by hand.
