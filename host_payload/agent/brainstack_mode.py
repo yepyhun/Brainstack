@@ -1,9 +1,9 @@
 """Compatibility helpers for older host payload imports.
 
 These names remain importable so older Hermes checkouts do not explode on
-import, but Phase 52/53/54 native-seam mode does not use Brainstack-only tool
-gating, host-level output enforcement, or Brainstack-owned explicit-truth
-precedence.
+import, but Phase 52/53/54/55 native-seam mode does not use Brainstack-only
+tool gating, host-level output enforcement, Brainstack-owned explicit-truth
+precedence, or Brainstack-owned ordinary-turn compliance enforcement.
 """
 
 from __future__ import annotations

@@ -99,6 +99,7 @@ Transcript is evidence. Graph is truth. Corpus is corpus. Profile is profile. Th
 - is experimental and actively audited against the donor-first native-seam model
 - explicit user/addressing truth remains Hermes-host owned
 - transport-handle precedence and explicit-truth atomicity on live chat surfaces remain Hermes host seams, not Brainstack plugin seams
+- explicit multi-rule pack fidelity and ordinary-turn compliance are proven on the Hermes host path, not by reintroducing Brainstack-owned behavior governance
 
 ## Quickstart
 
@@ -192,6 +193,7 @@ What is currently true:
 
 - the plugin runs inside Hermes as a real `MemoryProvider`
 - native explicit writes stay host-owned and can be mirrored into Brainstack
+- explicit multi-rule packs can remain as raw archival truth without requiring compiled behavior-policy re-growth
 - ordinary turns no longer depend on a Brainstack-specific communication-governor lane
 - graph, transcript, continuity, and corpus shelves remain distinct instead of collapsing into one flat memory blob
 
