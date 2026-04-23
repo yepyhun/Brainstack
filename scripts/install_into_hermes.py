@@ -33,6 +33,129 @@ BACKEND_DEPENDENCIES = {
     "croniter": "croniter",
 }
 
+HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
+    {
+        "patcher": "_patch_run_agent",
+        "target": "run_agent.py",
+        "scope": "host-runtime-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Brainstack session-finalize wiring, transcript hygiene, and deterministic memory sync hooks.",
+        "why": "Needed until Hermes exposes a stable memory-finalization seam for Brainstack.",
+    },
+    {
+        "patcher": "_patch_prompt_builder",
+        "target": "agent/prompt_builder.py",
+        "scope": "prompt-projection-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Inject Brainstack-owned truth and memory guidance into the host prompt assembly path.",
+        "why": "Brainstack still needs a thin prompt projection seam instead of a parallel prompt stack.",
+    },
+    {
+        "patcher": "_patch_cron_jobs",
+        "target": "cron/jobs.py",
+        "scope": "cron-correctness-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Fail-closed job state and one-shot scheduling correctness for Brainstack-integrated reminder truth.",
+        "why": "Prevents scheduler-state illusions that would contaminate Brainstack recall and user-facing truth.",
+    },
+    {
+        "patcher": "_patch_cron_scheduler",
+        "target": "cron/scheduler.py",
+        "scope": "cron-delivery-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Delivery fail-closed behavior, bounded cron execution, and Brainstack-safe reminder semantics.",
+        "why": "Keeps reminder truth aligned with actual scheduler delivery instead of memory-only claims.",
+    },
+    {
+        "patcher": "_patch_cron_tests",
+        "target": "tests/cron/test_jobs.py",
+        "scope": "verification-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Extends host cron tests to cover the Brainstack-owned delivery/truth contract.",
+        "why": "Installer-applied host behavior must ship with explicit regression coverage.",
+    },
+    {
+        "patcher": "_patch_auxiliary_client",
+        "target": "agent/auxiliary_client.py",
+        "scope": "auxiliary-routing-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Expose Brainstack auxiliary task routing and provider control without forking the host client stack.",
+        "why": "Brainstack structured-understanding and flush paths need stable auxiliary task plumbing.",
+    },
+    {
+        "patcher": "_patch_memory_provider",
+        "target": "agent/memory_provider.py",
+        "scope": "memory-provider-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Add Brainstack-specific write-origin and provider bridge wiring.",
+        "why": "Preserves provenance/trust boundaries between host memory events and Brainstack durable state.",
+    },
+    {
+        "patcher": "_patch_memory_manager",
+        "target": "agent/memory_manager.py",
+        "scope": "memory-write-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Route host memory writes into Brainstack with explicit ownership and minimal shared contract.",
+        "why": "Needed until Hermes exposes a cleaner provider-owned write-origin seam.",
+    },
+    {
+        "patcher": "_patch_gateway_run",
+        "target": "gateway/run.py",
+        "scope": "gateway-lifecycle-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Brainstack lifecycle hooks that must execute at gateway runtime boundaries.",
+        "why": "Avoids a parallel runtime while keeping Brainstack synchronized with the single Hermes gateway.",
+    },
+    {
+        "patcher": "_patch_config",
+        "target": "hermes-config/<agent>/config.yaml",
+        "scope": "runtime-config-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Enable Brainstack provider and task-specific auxiliary/runtime configuration.",
+        "why": "The live runtime needs explicit config ownership separate from copied plugin payload files.",
+    },
+    {
+        "patcher": "_patch_compose_healthcheck",
+        "target": "docker-compose*.yml",
+        "scope": "docker-runtime-seam",
+        "runtime_modes": ("docker",),
+        "purpose": "Install Brainstack-aware gateway healthcheck behavior for Docker runtime verification.",
+        "why": "Docker installs need explicit health semantics to validate the integrated runtime, not just the container process.",
+    },
+    {
+        "patcher": "_patch_compose_runtime_identity",
+        "target": "docker-compose*.yml",
+        "scope": "docker-runtime-seam",
+        "runtime_modes": ("docker",),
+        "purpose": "Align runtime UID/GID and mounted state paths with the generated Brainstack Docker flow.",
+        "why": "Prevents permission drift and runtime ownership breakage in containerized installs.",
+    },
+    {
+        "patcher": "_patch_dockerignore",
+        "target": ".dockerignore",
+        "scope": "docker-build-seam",
+        "runtime_modes": ("docker",),
+        "purpose": "Ensure required Brainstack payload and runtime assets are available in Docker builds.",
+        "why": "Without this, Docker rebuilds can silently omit install-critical files.",
+    },
+    {
+        "patcher": "_patch_dockerfile_backend_dependencies",
+        "target": "Dockerfile",
+        "scope": "docker-build-seam",
+        "runtime_modes": ("docker",),
+        "purpose": "Install Brainstack backend dependencies inside the runtime image.",
+        "why": "The plugin payload alone is insufficient; the container image must contain its runtime deps.",
+    },
+    {
+        "patcher": "_patch_docker_entrypoint",
+        "target": "docker/entrypoint.sh",
+        "scope": "docker-runtime-seam",
+        "runtime_modes": ("docker",),
+        "purpose": "Preserve Brainstack runtime startup invariants in Docker mode.",
+        "why": "Keeps the container startup path aligned with the installed Brainstack-integrated runtime.",
+    },
+)
+
 
 def _hash_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -145,6 +268,25 @@ def _copy_file(src: Path, dst: Path, dry_run: bool) -> dict[str, str]:
     return copied
 
 
+def _selected_host_patch_inventory(runtime_mode: str) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    normalized = "docker" if runtime_mode == "docker" else "source"
+    for item in HOST_PATCH_INVENTORY:
+        runtime_modes = tuple(item.get("runtime_modes") or ())
+        if normalized in runtime_modes:
+            selected.append(
+                {
+                    "patcher": item["patcher"],
+                    "target": item["target"],
+                    "scope": item["scope"],
+                    "runtime_modes": list(runtime_modes),
+                    "purpose": item["purpose"],
+                    "why": item["why"],
+                }
+            )
+    return selected
+
+
 def _replace_once(text: str, old: str, new: str, *, label: str, path: Path) -> str:
     if old not in text:
         raise RuntimeError(f"Installer patch anchor missing for {label} in {path}")
@@ -207,6 +349,86 @@ def _patch_memory_manager(path: Path, dry_run: bool) -> list[str]:
             path=path,
         )
         applied.append("memory_manager:private_recall_note")
+
+    metadata_signature = "def on_memory_write(self, action: str, target: str, content: str, metadata: dict | None = None) -> None:"
+    if metadata_signature not in text:
+        old_signature = "def on_memory_write(self, action: str, target: str, content: str) -> None:"
+        new_signature = "def on_memory_write(self, action: str, target: str, content: str, metadata: dict | None = None) -> None:"
+        text = _replace_once(
+            text,
+            old_signature,
+            new_signature,
+            label="memory_manager memory-write metadata signature",
+            path=path,
+        )
+        applied.append("memory_manager:memory_write_metadata_signature")
+
+    metadata_bridge = (
+        "                if metadata:\n"
+        "                    try:\n"
+        "                        provider.on_memory_write(action, target, content, metadata=metadata)\n"
+        "                    except TypeError:\n"
+        "                        provider.on_memory_write(action, target, content)\n"
+        "                else:\n"
+        "                    provider.on_memory_write(action, target, content)\n"
+    )
+    if metadata_bridge not in text:
+        old_call = "                provider.on_memory_write(action, target, content)\n"
+        text = _replace_once(
+            text,
+            old_call,
+            metadata_bridge,
+            label="memory_manager memory-write metadata bridge",
+            path=path,
+        )
+        applied.append("memory_manager:memory_write_metadata_bridge")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_memory_provider(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    metadata_doc = "    def on_memory_write(self, action: str, target: str, content: str, metadata: dict[str, Any] | None = None) -> None:\n"
+    if metadata_doc not in text:
+        old_signature = "    def on_memory_write(self, action: str, target: str, content: str) -> None:\n"
+        new_signature = "    def on_memory_write(self, action: str, target: str, content: str, metadata: dict[str, Any] | None = None) -> None:\n"
+        text = _replace_once(
+            text,
+            old_signature,
+            new_signature,
+            label="memory_provider memory-write metadata signature",
+            path=path,
+        )
+        applied.append("memory_provider:memory_write_metadata_signature")
+
+    if "metadata: optional write-origin or trust metadata" not in text:
+        old_doc = (
+            "        action: 'add', 'replace', or 'remove'\n"
+            "        target: 'memory' or 'user'\n"
+            "        content: the entry content\n"
+            "\n"
+            "        Use to mirror built-in memory writes to your backend.\n"
+        )
+        new_doc = (
+            "        action: 'add', 'replace', or 'remove'\n"
+            "        target: 'memory' or 'user'\n"
+            "        content: the entry content\n"
+            "        metadata: optional write-origin or trust metadata\n"
+            "\n"
+            "        Use to mirror built-in memory writes to your backend.\n"
+        )
+        text = _replace_once(
+            text,
+            old_doc,
+            new_doc,
+            label="memory_provider memory-write metadata doc",
+            path=path,
+        )
+        applied.append("memory_provider:memory_write_metadata_doc")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -947,6 +1169,56 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
         )
         text = _replace_once(text, old_sync, new_sync, label="run_agent interrupted transcript hygiene", path=path)
         applied.append("run_agent:skip_interrupted_transcript_sync")
+
+    background_origin = '                    review_agent._brainstack_memory_write_origin = "background_review"\n'
+    if background_origin not in text:
+        old_review_setup = (
+            "                    review_agent._memory_store = self._memory_store\n"
+            "                    review_agent._memory_enabled = self._memory_enabled\n"
+            "                    review_agent._user_profile_enabled = self._user_profile_enabled\n"
+            "                    review_agent._memory_nudge_interval = 0\n"
+            "                    review_agent._skill_nudge_interval = 0\n"
+        )
+        new_review_setup = (
+            "                    review_agent._memory_store = self._memory_store\n"
+            "                    review_agent._memory_enabled = self._memory_enabled\n"
+            "                    review_agent._user_profile_enabled = self._user_profile_enabled\n"
+            "                    review_agent._brainstack_memory_write_origin = \"background_review\"\n"
+            "                    review_agent._memory_nudge_interval = 0\n"
+            "                    review_agent._skill_nudge_interval = 0\n"
+        )
+        text = _replace_once(
+            text,
+            old_review_setup,
+            new_review_setup,
+            label="run_agent background-review write origin tag",
+            path=path,
+        )
+        applied.append("run_agent:background_review_write_origin")
+
+    metadata_bridge_impl = (
+        "                    memory_write_metadata = None\n"
+        "                    write_origin = str(getattr(self, \"_brainstack_memory_write_origin\", \"\") or \"\").strip()\n"
+        "                    if write_origin:\n"
+        "                        memory_write_metadata = {\"write_origin\": write_origin}\n"
+        "                    self._memory_manager.on_memory_write(\n"
+        "                        function_args.get(\"action\", \"\"),\n"
+        "                        target,\n"
+        "                        function_args.get(\"content\", \"\"),\n"
+        "                        metadata=memory_write_metadata,\n"
+        "                    )\n"
+    )
+    if metadata_bridge_impl not in text:
+        old_bridge = (
+            "                    self._memory_manager.on_memory_write(\n"
+            "                        function_args.get(\"action\", \"\"),\n"
+            "                        target,\n"
+            "                        function_args.get(\"content\", \"\"),\n"
+            "                    )\n"
+        )
+        text = text.replace(old_bridge, metadata_bridge_impl, 2)
+        if metadata_bridge_impl in text:
+            applied.append("run_agent:memory_write_metadata_bridge")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -2299,6 +2571,7 @@ def main() -> int:
     host_patches.extend(_patch_cron_scheduler(target / "cron" / "scheduler.py", args.dry_run))
     host_patches.extend(_patch_cron_tests(target / "tests" / "cron" / "test_jobs.py", args.dry_run))
     host_patches.extend(_patch_auxiliary_client(target / "agent" / "auxiliary_client.py", args.dry_run))
+    host_patches.extend(_patch_memory_provider(target / "agent" / "memory_provider.py", args.dry_run))
     host_patches.extend(_patch_memory_manager(target / "agent" / "memory_manager.py", args.dry_run))
     host_patches.extend(_patch_gateway_run(target / "gateway" / "run.py", args.dry_run))
     if args.runtime == "docker":
@@ -2333,6 +2606,7 @@ def main() -> int:
         "helper_files": helper_files,
         "host_helper_files": host_helper_files,
         "host_patches": host_patches,
+        "host_patch_inventory": _selected_host_patch_inventory(args.runtime),
         "generated_files": generated_files,
         "config_path": str(config_path) if config_path is not None else None,
         "config": config_result,

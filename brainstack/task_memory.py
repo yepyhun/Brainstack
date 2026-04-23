@@ -1,93 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 import re
-from typing import Any, Dict, List
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from typing import Any, Dict, Mapping
+
+from .structured_understanding import (
+    current_local_date,
+    infer_capture_understanding,
+    infer_query_understanding,
+    resolve_user_timezone,
+)
 
 
-TASK_CAPTURE_CUES = (
-    "task",
-    "tasks",
-    "todo",
-    "to do",
-    "agenda",
-    "feladatom",
-    "feladataim",
-    "feladat",
-    "teendő",
-    "teendo",
-)
-COMMITMENT_CAPTURE_CUES = (
-    "commitment",
-    "commitments",
-    "vállalás",
-    "vallalas",
-    "elköteleződés",
-    "elkotelezodes",
-    "ígéretem",
-    "igeretem",
-)
-TASK_LOOKUP_CUES = TASK_CAPTURE_CUES + COMMITMENT_CAPTURE_CUES
-TASK_FOLLOWUP_DATE_CUES = (
-    "ma",
-    "mai",
-    "mára",
-    "mara",
-    "tegnap",
-    "tegnapra",
-    "tegnapelőtt",
-    "tegnapelott",
-    "tegnapelőttre",
-    "tegnapelottre",
-    "today",
-    "yesterday",
-    "day before yesterday",
-    "tomorrow",
-)
-TODAY_CUES = ("today", "ma", "mai", "mára", "mara")
-YESTERDAY_CUES = ("yesterday", "tegnap", "tegnapra", "tegnapi")
-DAY_BEFORE_CUES = ("day before yesterday", "tegnapelőtt", "tegnapelott", "tegnapelőtti", "tegnapelőttre", "tegnapelottre")
-TOMORROW_CUES = ("tomorrow", "holnap", "holnapra")
-OPTIONAL_PREFIXES = ("esetleg ", "talán ", "talan ", "maybe ", "optional ")
 STATUS_OPEN = "open"
 ITEM_TYPE_TASK = "task"
 ITEM_TYPE_COMMITMENT = "commitment"
-DATE_RE = re.compile(r"\b(20\d{2})[-./](\d{1,2})[-./](\d{1,2})\b")
-LIST_MARKER_RE = re.compile(r"^\s*(?:[-*•]|(?:\d+[\.\)])|(?:\d+\s*-\s*))\s*")
-
-
-def _normalize_text(value: Any) -> str:
-    return " ".join(str(value or "").strip().split())
-
-
-def _contains_bounded_cue(text: str, cue: str) -> bool:
-    normalized_text = _normalize_text(text).casefold()
-    normalized_cue = _normalize_text(cue).casefold()
-    if not normalized_text or not normalized_cue:
-        return False
-    pattern = r"(?<!\w)" + re.escape(normalized_cue) + r"(?!\w)"
-    return re.search(pattern, normalized_text, flags=re.UNICODE) is not None
-
-
-def _contains_any_bounded_cue(text: str, cues: tuple[str, ...]) -> bool:
-    return any(_contains_bounded_cue(text, cue) for cue in cues)
-
-
-def resolve_user_timezone(value: str | None) -> str:
-    candidate = str(value or "").strip() or "UTC"
-    try:
-        ZoneInfo(candidate)
-    except ZoneInfoNotFoundError:
-        return "UTC"
-    return candidate
-
-
-def current_local_date(*, timezone_name: str, now: datetime | None = None) -> date:
-    zone = ZoneInfo(resolve_user_timezone(timezone_name))
-    reference = now.astimezone(zone) if isinstance(now, datetime) else datetime.now(zone)
-    return reference.date()
 
 
 @dataclass
@@ -108,7 +36,7 @@ class TaskCapture:
     item_type: str
     due_date: str
     date_scope: str
-    items: List[TaskMemoryItem]
+    items: list[TaskMemoryItem]
 
     def to_dict(self) -> Dict[str, Any]:
         payload = asdict(self)
@@ -127,6 +55,10 @@ class TaskLookup:
         return asdict(self)
 
 
+def _normalize_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().split())
+
+
 def build_task_stable_key(*, principal_scope_key: str, item_type: str, due_date: str, title: str) -> str:
     normalized_title = re.sub(r"[^\w]+", "-", _normalize_text(title).casefold(), flags=re.UNICODE).strip("-")
     parts = [
@@ -139,137 +71,39 @@ def build_task_stable_key(*, principal_scope_key: str, item_type: str, due_date:
     return "::".join(parts)
 
 
-def _detect_item_type(text: str) -> str:
-    if _contains_any_bounded_cue(text, COMMITMENT_CAPTURE_CUES) and not _contains_any_bounded_cue(text, TASK_CAPTURE_CUES):
-        return ITEM_TYPE_COMMITMENT
-    return ITEM_TYPE_TASK
-
-
-def _extract_due_date(*, text: str, timezone_name: str, now: datetime | None = None) -> tuple[str, str]:
-    base = current_local_date(timezone_name=timezone_name, now=now)
-    match = DATE_RE.search(text)
-    if match:
-        year, month, day = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
-        try:
-            explicit = date(year, month, day)
-        except ValueError:
-            return "", "none"
-        return explicit.isoformat(), "explicit_date"
-    if _contains_any_bounded_cue(text, DAY_BEFORE_CUES):
-        return (base - timedelta(days=2)).isoformat(), "day_before_yesterday"
-    if _contains_any_bounded_cue(text, YESTERDAY_CUES):
-        return (base - timedelta(days=1)).isoformat(), "yesterday"
-    if _contains_any_bounded_cue(text, TOMORROW_CUES):
-        return (base + timedelta(days=1)).isoformat(), "tomorrow"
-    if _contains_any_bounded_cue(text, TODAY_CUES):
-        return base.isoformat(), "today"
-    return "", "none"
-
-
-def _strip_task_line(raw: str) -> tuple[str, bool]:
-    text = LIST_MARKER_RE.sub("", str(raw or "").strip())
-    lowered = text.casefold()
-    optional = False
-    for prefix in OPTIONAL_PREFIXES:
-        if lowered.startswith(prefix):
-            optional = True
-            text = text[len(prefix):].strip()
-            lowered = text.casefold()
-            break
-    for prefix in ("és ", "es ", "and "):
-        if lowered.startswith(prefix):
-            text = text[len(prefix):].strip()
-            lowered = text.casefold()
-            break
-    text = text.strip(" \t\r\n-:;,.!?")
-    return _normalize_text(text), optional
-
-
-def _looks_like_explicit_task_capture(text: str) -> bool:
-    normalized = _normalize_text(text)
-    if not normalized:
-        return False
-    has_task_cue = _contains_any_bounded_cue(normalized, TASK_CAPTURE_CUES)
-    has_commitment_cue = _contains_any_bounded_cue(normalized, COMMITMENT_CAPTURE_CUES)
-    if not has_task_cue and not has_commitment_cue:
-        return False
-    # Operating truth owns headed commitment/current-state blocks. Task memory capture
-    # stays on explicit task-like structures instead of competing for the same text.
-    if not has_task_cue:
-        return False
-    if "\n" in str(text or ""):
-        return True
-    return ":" in normalized
-
-
 def parse_task_capture(text: str, *, timezone_name: str, now: datetime | None = None) -> Dict[str, Any] | None:
-    raw_text = str(text or "")
-    if not _looks_like_explicit_task_capture(raw_text):
+    payload = infer_capture_understanding(text, timezone_name=timezone_name, now=now).get("task_capture")
+    if not isinstance(payload, Mapping):
         return None
-
-    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
-    if not lines:
-        return None
-
-    item_type = _detect_item_type(raw_text)
-    due_date, date_scope = _extract_due_date(text=raw_text, timezone_name=timezone_name, now=now)
-    items: List[TaskMemoryItem] = []
-
-    head = lines[0]
-    if ":" in head:
-        _, remainder = head.split(":", 1)
-        title, optional = _strip_task_line(remainder)
-        if title:
-            items.append(
-                TaskMemoryItem(
-                    title=title,
-                    item_type=item_type,
-                    due_date=due_date,
-                    date_scope=date_scope,
-                    optional=optional,
-                )
-            )
-        lines = lines[1:]
-    else:
-        lines = lines[1:]
-
-    for line in lines:
-        title, optional = _strip_task_line(line)
-        if not title:
-            continue
-        items.append(
-            TaskMemoryItem(
-                title=title,
-                item_type=item_type,
-                due_date=due_date,
-                date_scope=date_scope,
-                optional=optional,
-            )
+    items = [
+        TaskMemoryItem(
+            title=str(item.get("title") or "").strip(),
+            item_type=str(item.get("item_type") or payload.get("item_type") or ITEM_TYPE_TASK).strip() or ITEM_TYPE_TASK,
+            due_date=str(item.get("due_date") or payload.get("due_date") or "").strip(),
+            date_scope=str(item.get("date_scope") or payload.get("date_scope") or "").strip(),
+            optional=bool(item.get("optional")),
+            status=str(item.get("status") or STATUS_OPEN).strip() or STATUS_OPEN,
         )
-
+        for item in payload.get("items") or ()
+        if str((item or {}).get("title") or "").strip()
+    ]
     if not items:
         return None
-    capture = TaskCapture(item_type=item_type, due_date=due_date, date_scope=date_scope, items=items)
-    return capture.to_dict()
+    return TaskCapture(
+        item_type=str(payload.get("item_type") or ITEM_TYPE_TASK).strip() or ITEM_TYPE_TASK,
+        due_date=str(payload.get("due_date") or "").strip(),
+        date_scope=str(payload.get("date_scope") or "").strip(),
+        items=items,
+    ).to_dict()
 
 
 def parse_task_lookup_query(query: str, *, timezone_name: str, now: datetime | None = None) -> Dict[str, Any] | None:
-    normalized = _normalize_text(query)
-    if not normalized:
+    payload = infer_query_understanding(query, timezone_name=timezone_name, now=now).get("task_lookup")
+    if not isinstance(payload, Mapping):
         return None
-    explicit_due_date, date_scope = _extract_due_date(text=normalized, timezone_name=timezone_name, now=now)
-    cue_hit = _contains_any_bounded_cue(normalized, TASK_LOOKUP_CUES)
-    followup_only = False
-    if not cue_hit:
-        if _contains_any_bounded_cue(normalized, TASK_FOLLOWUP_DATE_CUES):
-            cue_hit = True
-            followup_only = True
-    if not cue_hit:
-        return None
-    item_type = _detect_item_type(normalized)
     return TaskLookup(
-        item_type=item_type,
-        due_date=explicit_due_date,
-        date_scope=date_scope,
-        followup_only=followup_only,
+        item_type=str(payload.get("item_type") or ITEM_TYPE_TASK).strip() or ITEM_TYPE_TASK,
+        due_date=str(payload.get("due_date") or "").strip(),
+        date_scope=str(payload.get("date_scope") or "").strip(),
+        followup_only=bool(payload.get("followup_only")),
     ).to_dict()

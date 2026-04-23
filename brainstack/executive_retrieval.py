@@ -7,11 +7,15 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 from .db import BrainstackStore
-from .operating_truth import OPERATING_RECORD_TYPES, parse_operating_lookup_query
+from .operating_truth import (
+    OPERATING_RECORD_TYPES,
+    RECENT_WORK_RECAP_RECORD_TYPES,
+)
 from .profile_contract import is_native_explicit_style_item
-from .style_contract import STYLE_CONTRACT_SLOT, extract_style_contract_parts
-from .task_memory import parse_task_lookup_query
+from .structured_understanding import infer_query_understanding
+from .style_contract import STYLE_CONTRACT_SLOT
 from .tier2_extractor import _default_llm_caller, _extract_json_object, _extract_text_content
+from .transcript import primary_user_turn_content, split_turn_content
 from .usefulness import graph_priority_adjustment, profile_priority_adjustment
 
 RRF_K = 60
@@ -44,21 +48,6 @@ FUSION_SHELF_WEIGHTS = {
 }
 
 logger = logging.getLogger(__name__)
-
-TASK_QUERY_CUES = (
-    "task",
-    "tasks",
-    "todo",
-    "to do",
-    "agenda",
-    "feladat",
-    "feladataim",
-    "teendő",
-    "teendo",
-)
-TODAY_TASK_CUES = ("today", "ma", "mai")
-YESTERDAY_TASK_CUES = ("yesterday", "tegnap")
-DAY_BEFORE_TASK_CUES = ("day before yesterday", "tegnapelőtt", "tegnapelott")
 
 
 def _is_native_profile_mirror_receipt(row: Dict[str, Any]) -> bool:
@@ -113,66 +102,9 @@ def _classify_route_resolution_error(exc: Exception) -> str:
     return "resolver_failure"
 
 
-def _contains_any_cue(normalized: str, cues: Iterable[str]) -> bool:
-    return any(cue in normalized for cue in cues)
-
-
 def _build_cross_session_search_queries(query: str) -> List[str]:
     normalized = _normalize_text(query)
-    lowered = f" {normalized.casefold()} "
-    queries = [normalized] if normalized else []
-    if not normalized or not _contains_any_cue(lowered, TASK_QUERY_CUES):
-        return queries
-
-    variants: List[str] = []
-    if _contains_any_cue(lowered, TODAY_TASK_CUES):
-        variants.extend(
-            [
-                "tasks for today",
-                "today task list",
-                "today todo list",
-                "mai feladatok",
-                "mai teendők",
-            ]
-        )
-    elif _contains_any_cue(lowered, YESTERDAY_TASK_CUES):
-        variants.extend(
-            [
-                "tasks for yesterday",
-                "yesterday task list",
-                "tegnapi feladatok",
-                "tegnapi teendők",
-            ]
-        )
-    elif _contains_any_cue(lowered, DAY_BEFORE_TASK_CUES):
-        variants.extend(
-            [
-                "tasks for the day before yesterday",
-                "day before yesterday task list",
-                "tegnapelőtti feladatok",
-                "tegnapelőtti teendők",
-            ]
-        )
-    else:
-        variants.extend(
-            [
-                "task list",
-                "todo list",
-                "feladatok",
-                "teendők",
-            ]
-        )
-
-    deduped: List[str] = []
-    seen: set[str] = set()
-    for candidate in [*queries, *variants]:
-        normalized_candidate = _normalize_text(candidate)
-        lowered_candidate = normalized_candidate.casefold()
-        if not normalized_candidate or lowered_candidate in seen:
-            continue
-        seen.add(lowered_candidate)
-        deduped.append(normalized_candidate)
-    return deduped
+    return [normalized] if normalized else []
 
 
 def _build_lookup_semantics(
@@ -184,6 +116,11 @@ def _build_lookup_semantics(
     operating_rows: List[Dict[str, Any]],
     selected: Mapping[str, Any],
 ) -> Dict[str, Any] | None:
+    recent_work_rows = [
+        row
+        for row in operating_rows
+        if str(row.get("record_type") or "").strip() in RECENT_WORK_RECAP_RECORD_TYPES
+    ]
     if isinstance(operating_lookup, Mapping):
         fallback_sources: List[str] = []
         if list(selected.get("matched") or []):
@@ -207,6 +144,28 @@ def _build_lookup_semantics(
             ],
             "fallback_sources": fallback_sources,
             "result_status": "committed_records" if operating_rows else "structured_miss",
+        }
+    if recent_work_rows:
+        fallback_sources = []
+        if list(selected.get("matched") or []):
+            fallback_sources.append("continuity_match")
+        if list(selected.get("recent") or []):
+            fallback_sources.append("continuity_recent")
+        if list(selected.get("transcript_rows") or []):
+            fallback_sources.append("transcript")
+        return {
+            "active": True,
+            "domain": "recent_work_recap",
+            "structured_owner_status": "brainstack.operating_truth",
+            "structured_lookup_performed": True,
+            "structured_record_count": len(recent_work_rows),
+            "record_types": [
+                str(row.get("record_type") or "").strip()
+                for row in recent_work_rows
+                if str(row.get("record_type") or "").strip()
+            ],
+            "fallback_sources": fallback_sources,
+            "result_status": "committed_records",
         }
     if not isinstance(task_lookup, Mapping):
         return None
@@ -244,7 +203,7 @@ def _build_lookup_semantics(
 
 
 def _looks_user_led(text: str) -> bool:
-    return _normalize_text(text).lower().startswith("user:")
+    return bool(_normalize_text(split_turn_content(text).get("user")))
 
 
 def _has_meaningful_transcript_signal(rows: Iterable[Dict[str, Any]]) -> bool:
@@ -268,6 +227,8 @@ def _candidate_text(candidate: EvidenceCandidate) -> str:
         return _graph_match_text(row)
     if candidate.shelf == "profile":
         return _normalize_text(row.get("content"))
+    if candidate.shelf == "transcript":
+        return _normalize_text(primary_user_turn_content(row.get("content")))
     return _normalize_text(row.get("content"))
 
 
@@ -366,22 +327,6 @@ def _llm_route_resolver(query: str) -> Dict[str, Any]:
     }
 
 
-def _extract_style_contract_route_signals(style_contract_parts: Mapping[str, Any] | None) -> Dict[str, Any]:
-    if not isinstance(style_contract_parts, Mapping):
-        return {"title": "", "headings": [], "rule_count": 0}
-    title = _normalize_text(style_contract_parts.get("title"))
-    headings: List[str] = []
-    rule_count = 0
-    for section in style_contract_parts.get("sections") or ():
-        if not isinstance(section, Mapping):
-            continue
-        heading = _normalize_text(section.get("heading"))
-        if heading:
-            headings.append(heading)
-        rule_count += len(section.get("lines") or [])
-    return {"title": title, "headings": headings, "rule_count": rule_count}
-
-
 def _missing_style_contract_row(*, principal_scope_key: str = "") -> Dict[str, Any]:
     scope_key = str(principal_scope_key or "").strip()
     return {
@@ -410,63 +355,10 @@ def _missing_style_contract_row(*, principal_scope_key: str = "") -> Dict[str, A
     }
 
 
-def _looks_like_style_contract_recall(
-    query: str,
-    *,
-    style_contract_parts: Mapping[str, Any] | None = None,
-) -> bool:
-    normalized_query = _normalize_text(query)
-    normalized = f" {normalized_query.lower()} "
-    signals = _extract_style_contract_route_signals(style_contract_parts)
-    title = str(signals.get("title") or "").casefold()
-    if title and len(title) >= 8 and f" {title} " in normalized:
-        return True
-
-    for heading in signals.get("headings") or ():
-        normalized_heading = _normalize_text(heading).casefold()
-        if len(normalized_heading) >= 8 and f" {normalized_heading} " in normalized:
-            return True
-
-    rule_count = int(signals.get("rule_count") or 0)
-    if rule_count > 0 and len(normalized_query.split()) <= 18:
-        number_token = f" {rule_count} "
-        if number_token in normalized and any(char in query for char in (".", "?", "!")):
-            return True
-    if len(normalized_query.split()) <= 18 and any(char in query for char in (".", "?", "!")):
-        for token in normalized_query.split():
-            stripped = token.strip("()[]{}<>:;,.!?")
-            if stripped.isdigit():
-                value = int(stripped)
-                if 5 <= value <= 99:
-                    return True
-    lowered_query = normalized_query.casefold()
-    rule_reference = any(
-        re.search(pattern, lowered_query)
-        for pattern in (
-            r"\b(?:kommunik[aá]ci[oó]s )?szab[aá]ly(?:ok(?:at|ra|r[oó]l|r[eé])?)?\b",
-            r"\balapszab[aá]ly(?:ok(?:at|ra|r[oó]l|r[eé])?)?\b",
-            r"\b(?:communication|style) rules?\b",
-        )
-    )
-    recall_or_obedience = any(
-        re.search(pattern, lowered_query)
-        for pattern in (
-            r"\beml[eé]ksz(?:el)?\b",
-            r"\b(?:be)?tart(?:od|ja|juk|ani)?\b",
-            r"\btart(?:od|ja|juk)? be\b",
-            r"\b(?:[íi]rd le|mondd el|sorold fel|mik|melyik|h[aá]ny)\b",
-            r"\b(?:remember|recall|follow|list|what are|which are|how many)\b",
-        )
-    )
-    if rule_reference and recall_or_obedience:
-        return True
-    return False
-
-
 def _default_route_resolver(query: str) -> Dict[str, Any]:
     return {
         "mode": ROUTE_FACT,
-        "reason": "fact route default: no owner-derived routing signal",
+        "reason": "fact route default",
         "source": "fact_default",
     }
 
@@ -475,37 +367,13 @@ def _resolve_route(
     query: str,
     *,
     route_resolver: Callable[[str], Dict[str, Any] | str] | None,
-    style_contract_available: bool = False,
-    style_contract_parts: Mapping[str, Any] | None = None,
-    profile_slot_targets: Iterable[str] = (),
 ) -> RetrievalRoute:
     normalized = _normalize_text(query)
     route = RetrievalRoute(reason="fact route default")
     if not normalized:
         return route
 
-    normalized_targets = {str(value or "").strip() for value in profile_slot_targets if str(value or "").strip()}
     deterministic = _default_route_resolver(normalized)
-    if style_contract_available and (
-        STYLE_CONTRACT_SLOT in normalized_targets
-        or _looks_like_style_contract_recall(
-        normalized,
-        style_contract_parts=style_contract_parts,
-        )
-    ):
-        route.requested_mode = ROUTE_STYLE_CONTRACT
-        route.applied_mode = ROUTE_STYLE_CONTRACT
-        route.source = (
-            "direct_profile_slot_match" if STYLE_CONTRACT_SLOT in normalized_targets else "deterministic_style_contract_hint"
-        )
-        route.reason = (
-            "direct style-contract slot request"
-            if STYLE_CONTRACT_SLOT in normalized_targets
-            else "deterministic style-contract recall cues"
-        )
-        route.resolution_status = "deterministic"
-        return route
-
     resolver = route_resolver
     source = "injected"
     if resolver is None:
@@ -797,93 +665,16 @@ def _aggregate_diverse_rows(
     return (primary + secondary)[:limit]
 
 
-def _query_mentions_any(query: str, phrases: Iterable[str]) -> bool:
-    normalized = _normalize_text(query).lower()
-    return any(phrase in normalized for phrase in phrases)
-
-
-def _plan_bounded_native_aggregate_sum(query: str) -> Dict[str, Any] | None:
-    normalized = _normalize_text(query).lower()
-    if not normalized:
-        return None
-    has_total = _query_mentions_any(normalized, ("in total", "total", "combined", "sum"))
-    has_distance = _query_mentions_any(normalized, ("mile", "miles", "distance"))
-    has_road_trip = _query_mentions_any(normalized, ("road trip", "road trips"))
-    if has_total and has_distance and has_road_trip:
-        return {
-            "aggregate_kind": "sum",
-            "entity_type": None,
-            "entity_type_contains": ("road_trip", "mileage_history"),
-            "entity_type_excludes": ("planned_",),
-            "metric_attribute": "distance_miles",
-            "owner_subject": None,
-            "unit": "miles",
-        }
-    return None
-
-
 def _native_aggregate_rows(
     store: BrainstackStore,
     *,
     query: str,
     session_id: str,
 ) -> List[Dict[str, Any]]:
-    plan = _plan_bounded_native_aggregate_sum(query)
-    if not plan:
-        return []
-    result = store.query_native_typed_metric_sum(
-        owner_subject=(str(plan["owner_subject"]) if plan.get("owner_subject") is not None else None),
-        entity_type=(str(plan["entity_type"]) if plan.get("entity_type") is not None else None),
-        entity_type_contains=plan.get("entity_type_contains"),
-        entity_type_excludes=plan.get("entity_type_excludes"),
-        metric_attribute=str(plan["metric_attribute"]),
-        limit=16,
-    )
-    if not result:
-        return []
-    total = float(result.get("total") or 0.0)
-    count = int(result.get("count") or 0)
-    matches = list(result.get("matches") or [])
-    entity_names = [str(item.get("entity_name") or "").strip() for item in matches if str(item.get("entity_name") or "").strip()]
-    unique_names = list(dict.fromkeys(entity_names))[:4]
-    if abs(total - round(total)) < 1e-9:
-        total_text = f"{int(round(total)):,}"
-    else:
-        total_text = f"{total:,.2f}".rstrip("0").rstrip(".")
-    unit = str(plan.get("unit") or "").strip()
-    label = f"{total_text} {unit}".strip()
-    support = ", ".join(unique_names)
-    if plan.get("entity_type_contains"):
-        entity_label = "/".join(str(item) for item in plan["entity_type_contains"])
-    else:
-        entity_label = str(plan.get("entity_type") or "typed")
-    content = f"Native graph sum: {label} across {count} {entity_label} events"
-    if support:
-        content += f" ({support})"
-    return [
-        {
-            "id": 0,
-            "session_id": session_id,
-            "turn_number": 0,
-            "kind": "native_aggregate",
-            "content": content,
-            "source": "graph.kuzu:native_sum",
-            "same_session": False,
-            "keyword_score": 0.0,
-            "semantic_score": 0.0,
-            "created_at": "",
-            "metadata": {
-                "aggregate_kind": plan["aggregate_kind"],
-                "entity_type": plan["entity_type"],
-                "metric_attribute": plan["metric_attribute"],
-                "owner_subject": plan["owner_subject"],
-                "count": count,
-                "total": total,
-                "unit": unit,
-                "supporting_entities": unique_names,
-            },
-        }
-    ]
+    _ = (store, query, session_id)
+    # Disabled until native aggregate plans come from structured understanding
+    # rather than phrase-matched query heuristics.
+    return []
 
 
 def _fact_transcript_row_priority(row: Dict[str, Any]) -> tuple[Any, ...]:
@@ -1531,21 +1322,19 @@ def retrieve_executive_context(
         for row in store.list_profile_items(limit=24, principal_scope_key=principal_scope_key)
         if is_native_explicit_style_item(row)
     ]
-    style_contract_available = style_contract_row is not None or bool(native_explicit_style_rows)
-    style_contract_parts = (
-        extract_style_contract_parts(
-            style_contract_row.get("content"),
-            metadata=style_contract_row.get("metadata"),
-        )
-        if isinstance(style_contract_row, Mapping)
-        else None
-    )
+    analysis_route_payload = analysis.get("route_payload")
+    effective_route_resolver = route_resolver
+    if effective_route_resolver is None and isinstance(analysis_route_payload, Mapping):
+        payload = dict(analysis_route_payload)
+        effective_route_resolver = lambda _query, _payload=payload: dict(_payload)
+    elif effective_route_resolver is None:
+        fallback_payload = infer_query_understanding(query, timezone_name=timezone_name).get("route")
+        if isinstance(fallback_payload, Mapping):
+            payload = dict(fallback_payload)
+            effective_route_resolver = lambda _query, _payload=payload: dict(_payload)
     route = _resolve_route(
         query,
-        route_resolver=route_resolver,
-        style_contract_available=style_contract_available,
-        style_contract_parts=style_contract_parts,
-        profile_slot_targets=tuple(str(slot) for slot in analysis.get("profile_slot_targets") or ()),
+        route_resolver=effective_route_resolver,
     )
     limits = _route_limits(
         route=route,
@@ -1559,8 +1348,8 @@ def retrieve_executive_context(
     )
     search_queries = [_normalize_text(query)]
     continuity_queries = _build_cross_session_search_queries(query)
-    task_lookup = parse_task_lookup_query(query, timezone_name=timezone_name)
-    operating_lookup = parse_operating_lookup_query(query)
+    task_lookup = analysis.get("task_lookup") if isinstance(analysis.get("task_lookup"), Mapping) else None
+    operating_lookup = analysis.get("operating_lookup") if isinstance(analysis.get("operating_lookup"), Mapping) else None
     task_rows = (
         store.list_task_items(
             principal_scope_key=principal_scope_key,
@@ -1684,6 +1473,20 @@ def retrieve_executive_context(
         else []
     )
     keyword_operating_rows = _annotate_query_flags(keyword_operating_rows, query=query)
+    recent_work_operating_rows = (
+        _operating_channel_rows(
+            store.search_operating_records(
+                query=query,
+                principal_scope_key=principal_scope_key,
+                record_types=RECENT_WORK_RECAP_RECORD_TYPES,
+                limit=max(operating_limit * 4, 8),
+            ),
+            limit=max(operating_limit * 3, 8),
+        )
+        if operating_limit > 0
+        else []
+    )
+    recent_work_operating_rows = _annotate_query_flags(recent_work_operating_rows, query=query)
     current_operating_rows = (
         store.list_operating_records(
             principal_scope_key=principal_scope_key,
@@ -1735,9 +1538,17 @@ def retrieve_executive_context(
         else []
     )
     semantic_corpus_rows = _annotate_query_flags(semantic_corpus_rows, query=query)
+    task_structured_authority = isinstance(task_lookup, Mapping) and route.applied_mode != ROUTE_TEMPORAL
+    if task_structured_authority:
+        keyword_continuity_rows = []
+        keyword_transcript_session_rows = []
+        keyword_transcript_global_rows = []
+        keyword_transcript_rows = []
+        semantic_conversation_rows = []
     keyword_rows = _round_robin(
         keyword_profile_rows,
         keyword_operating_rows,
+        recent_work_operating_rows,
         keyword_continuity_rows,
         keyword_transcript_rows,
         keyword_corpus_rows,
@@ -1781,6 +1592,9 @@ def retrieve_executive_context(
     )
     temporal_continuity_rows = _annotate_query_flags(temporal_continuity_rows, query=query)
     recent_rows = _annotate_query_flags(recent_rows, query=query)
+    if task_structured_authority:
+        recent_rows = []
+        temporal_continuity_rows = []
     temporal_support_requested = route.applied_mode == ROUTE_TEMPORAL or route.requested_mode == ROUTE_TEMPORAL
 
     temporal_graph_rows = []
@@ -1830,6 +1644,7 @@ def retrieve_executive_context(
     merged: Dict[str, EvidenceCandidate] = {}
     _merge_channel(merged, channel_name="keyword", rows=keyword_profile_rows, shelf="profile")
     _merge_channel(merged, channel_name="operating", rows=keyword_operating_rows, shelf="operating")
+    _merge_channel(merged, channel_name="operating", rows=recent_work_operating_rows, shelf="operating")
     _merge_channel(merged, channel_name="operating", rows=current_operating_rows, shelf="operating")
     _merge_channel(merged, channel_name="keyword", rows=keyword_continuity_rows, shelf="continuity_match")
     _merge_channel(merged, channel_name="keyword", rows=keyword_transcript_rows, shelf="transcript")
@@ -1915,9 +1730,9 @@ def retrieve_executive_context(
         ),
         _channel_status(
             "operating_truth",
-            keyword_operating_rows + current_operating_rows,
+            keyword_operating_rows + recent_work_operating_rows + current_operating_rows,
             reason="first-class operating truth",
-            status="active" if operating_lookup is not None else "idle",
+            status="active" if operating_lookup is not None or bool(recent_work_operating_rows) else "idle",
         ),
         _channel_status(
             "semantic",

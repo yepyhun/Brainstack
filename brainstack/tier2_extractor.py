@@ -6,12 +6,12 @@ import logging
 import re
 from typing import Any, Callable, Dict, Iterable, List, Mapping
 
-from .logistics_contract import derive_transcript_logistics_typed_entities
 from .profile_contract import (
     derive_transcript_identity_profile_items,
     normalize_profile_slot,
 )
 from .style_contract import STYLE_CONTRACT_SLOT, normalize_style_contract_payload
+from .transcript import split_turn_content
 
 
 logger = logging.getLogger(__name__)
@@ -318,7 +318,10 @@ def _format_transcript_batch(entries: Iterable[Mapping[str, Any]], *, limit: int
         content = str(row.get("content") or "").strip()
         if not content:
             continue
-        blocks.append(f"[Turn {turn_number} | {kind}]\n{content}")
+        user_content = _normalize_text(split_turn_content(content).get("user"))
+        if not user_content:
+            continue
+        blocks.append(f"[Turn {turn_number} | {kind}]\nUser evidence: {user_content}")
     return "\n\n".join(blocks)
 
 
@@ -620,7 +623,8 @@ def extract_tier2_candidates(
                 '  "decisions": ["durable decision", "..."]\n'
                 "}\n"
                 "Rules:\n"
-                "- prefer durable user facts and current project context\n"
+                "- the provided batch contains user-authored evidence only; assistant replies were intentionally omitted and must not be reconstructed\n"
+                "- prefer durable user facts and current project context grounded in the provided user-authored evidence only\n"
                 "- ignore markdown tables, quoted transcript dumps, code, wrappers, and assistant policy chatter\n"
                 "- keep the JSON compact; prefer the fewest useful items rather than broad coverage\n"
                 "- hard caps: profile_items<=6, states<=2, relations<=1, inferred_relations<=1, typed_entities<=4, temporal_events<=4, decisions<=2\n"
@@ -687,12 +691,6 @@ def extract_tier2_candidates(
     typed_entities = _normalize_typed_entities(
         payload.get("typed_entities"),
         transcript_entries=entries,
-    )
-    typed_entities.extend(
-        derive_transcript_logistics_typed_entities(
-            entries,
-            existing_entities=typed_entities,
-        )
     )
     return {
         "profile_items": profile_items[:8],

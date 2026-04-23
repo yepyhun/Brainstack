@@ -2468,6 +2468,57 @@ class BrainstackStore:
         return [_row_to_dict(row) for row in rows]
 
     @_locked
+    def recent_principal_continuity(
+        self,
+        *,
+        principal_scope_key: str,
+        session_id: str = "",
+        kinds: Iterable[str] | None = None,
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        requested_scope_key = str(principal_scope_key or "").strip()
+        candidate_limit = max(int(limit or 0) * 8, 24)
+        normalized_kinds = [
+            str(value or "").strip()
+            for value in (kinds or ())
+            if str(value or "").strip()
+        ]
+        params: List[Any] = []
+        sql = """
+            SELECT id, session_id, turn_number, kind, content, source, metadata_json, created_at
+            FROM continuity_events
+            WHERE 1 = 1
+        """
+        if normalized_kinds:
+            sql += f" AND kind IN ({','.join('?' for _ in normalized_kinds)})"
+            params.extend(normalized_kinds)
+        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(candidate_limit)
+        rows = self.conn.execute(sql, tuple(params)).fetchall()
+
+        output: List[Dict[str, Any]] = []
+        seen: set[tuple[str, int]] = set()
+        for row in rows:
+            item = _row_to_dict(row)
+            if not _annotate_principal_scope(
+                item,
+                principal_scope_key=requested_scope_key,
+                session_id=session_id,
+            ):
+                continue
+            key = (str(item.get("session_id") or ""), int(item.get("id") or 0))
+            if key in seen:
+                continue
+            seen.add(key)
+            item["same_session"] = str(item.get("session_id") or "").strip() == str(session_id or "").strip()
+            item["retrieval_source"] = "continuity.principal_recent"
+            item["match_mode"] = "recent"
+            output.append(item)
+            if len(output) >= max(int(limit or 0), 1):
+                break
+        return output
+
+    @_locked
     def get_continuity_lifecycle_state(self, *, session_id: str) -> Dict[str, Any] | None:
         row = self.conn.execute(
             """
@@ -3257,7 +3308,16 @@ class BrainstackStore:
             statuses=("open",),
             limit=8,
         )
-        continuity_rows = self.recent_continuity(session_id=sid, limit=max(continuity_limit, decision_limit * 2)) if sid else []
+        continuity_rows = (
+            self.recent_principal_continuity(
+                principal_scope_key=scope_key,
+                session_id=sid,
+                kinds=("tier2_summary", "decision", "session_summary"),
+                limit=max(continuity_limit, decision_limit * 2),
+            )
+            if scope_key
+            else (self.recent_continuity(session_id=sid, limit=max(continuity_limit, decision_limit * 2)) if sid else [])
+        )
         lifecycle_state = self.get_continuity_lifecycle_state(session_id=sid) if sid else None
         return build_operating_context_snapshot(
             principal_scope_key=scope_key,

@@ -11,7 +11,7 @@ from .profile_contract import (
 )
 from .provenance import summarize_provenance
 from .style_contract import STYLE_CONTRACT_SLOT
-from .transcript import trim_text_boundary
+from .transcript import primary_user_turn_content, trim_text_boundary
 
 
 def _trim(value: str, max_len: int = 220) -> str:
@@ -19,23 +19,7 @@ def _trim(value: str, max_len: int = 220) -> str:
 
 
 def _render_user_first_exchange(content: Any, *, max_len: int) -> str:
-    normalized = " ".join(str(content or "").split())
-    lowered = normalized.lower()
-    user_index = lowered.find("user:")
-    assistant_index = lowered.find("assistant:")
-    if user_index == -1 or assistant_index == -1 or assistant_index <= user_index:
-        return _trim(normalized, max_len=max_len)
-
-    user_part = normalized[user_index:assistant_index].strip()
-    assistant_part = normalized[assistant_index:].strip()
-    if len(user_part) >= max_len:
-        return _trim(user_part, max_len=max_len)
-    if len(user_part) + 24 >= max_len:
-        return _trim(user_part, max_len=max_len)
-    if not assistant_part:
-        return _trim(user_part, max_len=max_len)
-    combined = f"{user_part} {assistant_part}".strip()
-    return _trim(combined, max_len=max_len)
+    return _trim(primary_user_turn_content(content), max_len=max_len)
 
 
 def _render_items(items: Iterable[str]) -> str:
@@ -303,6 +287,22 @@ def _render_lookup_semantics_section(payload: Mapping[str, Any] | None) -> str:
             )
         else:
             lines.append("No committed Brainstack operating record matched this lookup.")
+    elif domain == "recent_work_recap":
+        record_types = [
+            str(value or "").strip().replace("_", " ")
+            for value in (payload.get("record_types") or ())
+            if str(value or "").strip()
+        ]
+        if str(payload.get("structured_owner_status") or "").strip() == "brainstack.operating_truth":
+            lines.append("Brainstack operating truth is carrying the restart-surviving recent-work summary in this runtime.")
+        if record_types:
+            lines.append("Recent-work record types present: " + ", ".join(record_types) + ".")
+        lines.append(
+            f"Use the committed Brainstack recent-work records below as the primary recap substrate ({int(payload.get('structured_record_count') or 0)} record(s))."
+        )
+        fallback_sources = list(payload.get("fallback_sources") or [])
+        if fallback_sources:
+            lines.append("Supporting shelves also contributed: " + ", ".join(str(source) for source in fallback_sources) + ".")
     elif domain == "task_like":
         owner_status = str(payload.get("structured_owner_status") or "").strip()
         result_status = str(payload.get("result_status") or "").strip()

@@ -4,10 +4,13 @@ from typing import Any, Dict, Iterable, List, Mapping
 
 from .operating_truth import (
     OPERATING_RECORD_ACTIVE_WORK,
+    OPERATING_RECORD_COMPLETED_OUTCOME,
     OPERATING_RECORD_CURRENT_COMMITMENT,
+    OPERATING_RECORD_DISCARDED_WORK,
     OPERATING_RECORD_EXTERNAL_OWNER_POINTER,
     OPERATING_RECORD_NEXT_STEP,
     OPERATING_RECORD_OPEN_DECISION,
+    OPERATING_RECORD_RECENT_WORK_SUMMARY,
 )
 
 
@@ -181,7 +184,15 @@ def build_operating_context_snapshot(
         record_type=OPERATING_RECORD_ACTIVE_WORK,
         limit=1,
     )
-    active_work_summary = active_work_candidates[0] if active_work_candidates else _build_active_work_summary(continuity_list)
+    active_work_summary = active_work_candidates[0] if active_work_candidates else ""
+    recent_work_candidates = _operating_record_lines(
+        operating_list,
+        record_type=OPERATING_RECORD_RECENT_WORK_SUMMARY,
+        limit=1,
+    )
+    recent_work_summary = recent_work_candidates[0] if recent_work_candidates else _build_active_work_summary(continuity_list)
+    if not active_work_summary and not recent_work_summary:
+        active_work_summary = _build_active_work_summary(continuity_list)
     open_decisions = _operating_record_lines(
         operating_list,
         record_type=OPERATING_RECORD_OPEN_DECISION,
@@ -195,8 +206,18 @@ def build_operating_context_snapshot(
     )
     session_state = _build_session_state(lifecycle_state)
     external_owner_pointers = _build_external_owner_pointers(operating_list, limit=4)
+    completed_outcomes = _operating_record_lines(
+        operating_list,
+        record_type=OPERATING_RECORD_COMPLETED_OUTCOME,
+        limit=4,
+    )
+    discarded_work = _operating_record_lines(
+        operating_list,
+        record_type=OPERATING_RECORD_DISCARDED_WORK,
+        limit=4,
+    )
     proactive_guidance = ""
-    if session_state["active"] and (active_work_summary or open_decisions or current_commitments or next_steps):
+    if active_work_summary or recent_work_summary or open_decisions or current_commitments or next_steps:
         proactive_guidance = (
             "If the user re-engages vaguely, resume the active work or open decisions below before falling back to generic small talk. "
             "Do not invent reminders or scheduling state that is not grounded in the committed records."
@@ -213,12 +234,17 @@ def build_operating_context_snapshot(
         "stable_profile_entries": stable_profile_entries,
         "stable_profile_entry_count": len(stable_profile_entries),
         "active_work_summary": active_work_summary,
+        "recent_work_summary": recent_work_summary,
         "open_decisions": open_decisions,
         "open_decision_count": len(open_decisions),
         "current_commitments": current_commitments,
         "current_commitment_count": len(current_commitments),
         "next_steps": next_steps,
         "next_step_count": len(next_steps),
+        "completed_outcomes": completed_outcomes,
+        "completed_outcome_count": len(completed_outcomes),
+        "discarded_work": discarded_work,
+        "discarded_work_count": len(discarded_work),
         "session_state": session_state,
         "operating_truth_rows": operating_list,
         "operating_truth_row_count": len(operating_list),
@@ -251,9 +277,12 @@ def render_operating_context_section(
 
     lines: List[str] = [title]
     active_work_summary = _normalize_text(snapshot.get("active_work_summary"))
+    recent_work_summary = _normalize_text(snapshot.get("recent_work_summary"))
     open_decisions = _unique_lines(snapshot.get("open_decisions") or [], limit=4)
     current_commitments = _unique_lines(snapshot.get("current_commitments") or [], limit=4)
     next_steps = _unique_lines(snapshot.get("next_steps") or [], limit=4)
+    completed_outcomes = _unique_lines(snapshot.get("completed_outcomes") or [], limit=4)
+    discarded_work = _unique_lines(snapshot.get("discarded_work") or [], limit=4)
     stable_profile_entries = list(snapshot.get("stable_profile_entries") or [])
     session_state = snapshot.get("session_state") if isinstance(snapshot.get("session_state"), Mapping) else {}
     proactive_guidance = _normalize_text(snapshot.get("proactive_guidance"))
@@ -269,6 +298,17 @@ def render_operating_context_section(
                 "",
                 "Current work:",
                 f"- {_trim(active_work_summary, 220)}",
+            ],
+            char_budget=char_budget,
+        ) or content_added
+
+    if recent_work_summary and recent_work_summary != active_work_summary:
+        content_added = _append_block(
+            lines,
+            [
+                "",
+                "Recent work checkpoint:",
+                f"- {_trim(recent_work_summary, 220)}",
             ],
             char_budget=char_budget,
         ) or content_added
@@ -290,6 +330,18 @@ def render_operating_context_section(
         for next_step in next_steps:
             next_step_lines.append(f"- {_trim(next_step, 180)}")
         content_added = _append_block(lines, next_step_lines, char_budget=char_budget) or content_added
+
+    if completed_outcomes:
+        outcome_lines = ["", "Completed outcomes:"]
+        for outcome in completed_outcomes:
+            outcome_lines.append(f"- {_trim(outcome, 180)}")
+        content_added = _append_block(lines, outcome_lines, char_budget=char_budget) or content_added
+
+    if discarded_work:
+        discarded_lines = ["", "Discarded or superseded work:"]
+        for item in discarded_work:
+            discarded_lines.append(f"- {_trim(item, 180)}")
+        content_added = _append_block(lines, discarded_lines, char_budget=char_budget) or content_added
 
     if stable_profile_entries:
         profile_lines = ["", "Stable project signals:"]

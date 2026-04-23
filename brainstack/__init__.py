@@ -29,6 +29,8 @@ from .donors.registry import get_donor_registry
 from .extraction_pipeline import build_session_message_ingest_plan, build_turn_ingest_plan
 from .operating_truth import (
     OPERATING_OWNER,
+    OPERATING_RECORD_OPEN_DECISION,
+    OPERATING_RECORD_RECENT_WORK_SUMMARY,
     build_operating_stable_key,
     parse_operating_capture,
 )
@@ -53,8 +55,13 @@ from .style_contract import (
 from .task_memory import build_task_stable_key, parse_task_capture, resolve_user_timezone
 from .tier1_extractor import build_profile_stable_key
 from .tier2_extractor import extract_tier2_candidates
+from .transcript import trim_text_boundary
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_compact_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().split())
 
 def _stable_native_write_id(*, action: str, target: str, content: str) -> str:
     normalized = " ".join(str(content or "").split())
@@ -816,7 +823,7 @@ class BrainstackMemoryProvider(MemoryProvider):
     ) -> Dict[str, Any] | None:
         if not content:
             return None
-        capture = parse_operating_capture(content)
+        capture = parse_operating_capture(content, timezone_name=self._user_timezone)
         if capture is None:
             return None
 
@@ -906,6 +913,118 @@ class BrainstackMemoryProvider(MemoryProvider):
             metadata=metadata,
         )
 
+    def _upsert_brainstack_operating_record(
+        self,
+        *,
+        record_type: str,
+        content: str,
+        source: str,
+        metadata: Dict[str, Any] | None = None,
+    ) -> bool:
+        if not self._store:
+            return False
+        normalized_content = _normalize_compact_text(content)
+        if not normalized_content:
+            return False
+        stable_key = build_operating_stable_key(
+            principal_scope_key=self._principal_scope_key,
+            record_type=record_type,
+            content=normalized_content,
+        )
+        scoped_metadata = self._scoped_metadata(metadata)
+        self._store.upsert_operating_record(
+            stable_key=stable_key,
+            principal_scope_key=self._principal_scope_key,
+            record_type=record_type,
+            content=normalized_content,
+            owner=OPERATING_OWNER,
+            source=source,
+            source_session_id=str((metadata or {}).get("session_id") or self._session_id or "").strip(),
+            source_turn_number=int((metadata or {}).get("turn_number") or self._turn_counter or 0),
+            metadata=scoped_metadata,
+        )
+        return True
+
+    def _promote_recent_work_summary(
+        self,
+        *,
+        content: str,
+        source: str,
+        metadata: Dict[str, Any] | None = None,
+    ) -> bool:
+        compact_summary = trim_text_boundary(_normalize_compact_text(content), max_len=280)
+        if not compact_summary:
+            return False
+        return self._upsert_brainstack_operating_record(
+            record_type=OPERATING_RECORD_RECENT_WORK_SUMMARY,
+            content=compact_summary,
+            source=source,
+            metadata=metadata,
+        )
+
+    def _promote_open_decisions(
+        self,
+        *,
+        decisions: Sequence[str] | None,
+        source: str,
+        metadata: Dict[str, Any] | None = None,
+    ) -> int:
+        promoted = 0
+        for decision in decisions or ():
+            normalized_decision = trim_text_boundary(_normalize_compact_text(decision), max_len=220)
+            if not normalized_decision:
+                continue
+            if self._upsert_brainstack_operating_record(
+                record_type=OPERATING_RECORD_OPEN_DECISION,
+                content=normalized_decision,
+                source=source,
+                metadata=metadata,
+            ):
+                promoted += 1
+        return promoted
+
+    def _consolidate_recent_work_operating_truth(
+        self,
+        *,
+        session_id: str,
+        turn_number: int,
+        source: str,
+    ) -> Dict[str, Any]:
+        if not self._store or not session_id:
+            return {"recent_work_promoted": False, "open_decisions_promoted": 0}
+        continuity_rows = self._store.recent_continuity(session_id=session_id, limit=12)
+        summary_row = next(
+            (
+                row
+                for row in continuity_rows
+                if str(row.get("kind") or "").strip() == "tier2_summary"
+                and _normalize_compact_text(row.get("content"))
+            ),
+            None,
+        )
+        promoted_summary = False
+        metadata = {"session_id": session_id, "turn_number": turn_number}
+        if isinstance(summary_row, dict):
+            promoted_summary = self._promote_recent_work_summary(
+                content=str(summary_row.get("content") or ""),
+                source=source,
+                metadata=metadata,
+            )
+        decision_rows = [
+            str(row.get("content") or "")
+            for row in continuity_rows
+            if str(row.get("kind") or "").strip() == "decision"
+        ]
+        promoted_decisions = self._promote_open_decisions(
+            decisions=decision_rows,
+            source=source,
+            metadata=metadata,
+        )
+        return {
+            "recent_work_promoted": promoted_summary,
+            "open_decisions_promoted": promoted_decisions,
+        }
+
     def system_prompt_block(self) -> str:
         if not self._store:
             return ""
@@ -939,6 +1058,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             "surface": "system_prompt_block",
             "section_present": "# Brainstack Operating Context" in block,
             "active_work_present": bool(str(operating_snapshot.get("active_work_summary") or "").strip()),
+            "recent_work_present": bool(str(operating_snapshot.get("recent_work_summary") or "").strip()),
             "open_decisions_present": bool(list(operating_snapshot.get("open_decisions") or [])),
             "snapshot": operating_snapshot,
         }
@@ -957,8 +1077,6 @@ class BrainstackMemoryProvider(MemoryProvider):
             metadata={"session_id": sid},
             require_explicit_signal=True,
         )
-        task_capture = self._infer_task_capture_candidate(content=query)
-        operating_truth_capture = self._infer_operating_truth_candidate(content=query)
         system_substrate = build_system_prompt_projection(
             self._store,
             profile_limit=self._profile_prompt_limit,
@@ -1024,8 +1142,8 @@ class BrainstackMemoryProvider(MemoryProvider):
             "task_capture_activated_before_prefetch": False,
             "operating_truth_activated_before_prefetch": False,
             "style_contract_candidate_detected": bool(style_contract_candidate),
-            "task_capture_candidate_detected": bool(task_capture),
-            "operating_truth_candidate_detected": bool(operating_truth_capture),
+            "task_capture_candidate_detected": False,
+            "operating_truth_candidate_detected": False,
             "write_receipt_present": False,
             "write_receipt_status": "",
             "read_side_effect_count": 0,
@@ -1043,15 +1161,15 @@ class BrainstackMemoryProvider(MemoryProvider):
             "write_receipts_in_packet": False,
             "candidate_writes": {
                 "style_contract": bool(style_contract_candidate),
-                "task_memory": bool(task_capture),
-                "operating_truth": bool(operating_truth_capture),
+                "task_memory": False,
+                "operating_truth": False,
             },
             "candidate_write_modes": {
                 "style_contract": str(
                     ((style_contract_candidate or {}).get("metadata") or {}).get("style_contract_write_mode") or ""
                 ),
-                "task_memory": "explicit_structure" if isinstance(task_capture, dict) else "",
-                "operating_truth": "explicit_structure" if isinstance(operating_truth_capture, dict) else "",
+                "task_memory": "",
+                "operating_truth": "",
             },
             "behavior_policy_snapshot": snapshot,
             "packet_route_mode": str(packet.get("routing", {}).get("applied_mode") or "fact"),
@@ -1394,6 +1512,15 @@ class BrainstackMemoryProvider(MemoryProvider):
                 input_message_count=int(snapshot_window.get("input_message_count") or 0),
                 digest=str(snapshot_window.get("window_digest") or ""),
             )
+        session_end_operating_consolidation = self._consolidate_recent_work_operating_truth(
+            session_id=self._session_id,
+            turn_number=self._turn_counter,
+            source="on_session_end:recent_work_consolidation",
+        )
+        self._last_operating_context_trace = {
+            **dict(self._last_operating_context_trace or {}),
+            "session_end_consolidation": session_end_operating_consolidation,
+        }
         self._store.finalize_continuity_session_state(
             session_id=self._session_id,
             turn_number=self._turn_counter,
@@ -1440,8 +1567,25 @@ class BrainstackMemoryProvider(MemoryProvider):
                     "reason": "no explicit producer-aligned graph evidence items",
                 }
 
-    def on_memory_write(self, action: str, target: str, content: str) -> None:
+    def on_memory_write(
+        self,
+        action: str,
+        target: str,
+        content: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
         if not self._store or not content or action == "remove":
+            return
+        write_metadata = dict(metadata or {})
+        write_origin = str(write_metadata.get("write_origin") or "").strip()
+        if write_origin == "background_review":
+            self._set_memory_operation_trace(
+                surface="native_memory_write_reflection_skip",
+                note=(
+                    "Skipped Brainstack durable mirroring for a reflection-generated built-in memory write "
+                    "to avoid treating background review output as ordinary user-established truth."
+                ),
+            )
             return
         if target == "user":
             native_write_id = _stable_native_write_id(action=action, target=target, content=content)
@@ -1456,6 +1600,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                 confidence=0.9,
                 metadata={
                     "target": target,
+                    **write_metadata,
                     NATIVE_EXPLICIT_PROFILE_METADATA_KEY: mirror_payload,
                 },
                 require_explicit_signal=True,
@@ -1475,6 +1620,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                 mirror_metadata = self._scoped_metadata(
                     {
                         "target": target,
+                        **write_metadata,
                         NATIVE_EXPLICIT_PROFILE_METADATA_KEY: {
                             **mirror_payload,
                             "mirror_index": index,
@@ -1526,7 +1672,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             kind="builtin_memory",
             content=content,
             source=f"on_memory_write:{action}:{target}",
-            metadata=self._scoped_metadata({"target": target}),
+            metadata=self._scoped_metadata({"target": target, **write_metadata}),
         )
 
     def behavior_policy_snapshot(self) -> Dict[str, Any] | None:
@@ -2045,8 +2191,29 @@ class BrainstackMemoryProvider(MemoryProvider):
             action_counts[action_name] = action_counts.get(action_name, 0) + 1
             if action_name != "NONE":
                 writes_performed += 1
+        operating_promotions = {
+            "recent_work_promoted": self._promote_recent_work_summary(
+                content=str(extracted.get("continuity_summary") or ""),
+                source=f"tier2:{trigger_reason}:recent_work",
+                metadata={
+                    "session_id": session_id,
+                    "turn_number": turn_number,
+                    "batch_reason": trigger_reason,
+                },
+            ),
+            "open_decisions_promoted": self._promote_open_decisions(
+                decisions=list(extracted.get("decisions", []) or []),
+                source=f"tier2:{trigger_reason}:open_decision",
+                metadata={
+                    "session_id": session_id,
+                    "turn_number": turn_number,
+                    "batch_reason": trigger_reason,
+                },
+            ),
+        }
         result["action_counts"] = action_counts
         result["writes_performed"] = writes_performed
+        result["operating_promotions"] = operating_promotions
         result["status"] = "ok"
         self._record_tier2_batch_result(result)
         return result

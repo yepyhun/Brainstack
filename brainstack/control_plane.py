@@ -1,26 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Mapping
 
 from .db import BrainstackStore
 from .executive_retrieval import retrieve_executive_context
-from .operating_truth import parse_operating_lookup_query
 from .profile_contract import resolve_direct_identity_profile_slots
 from .retrieval import render_working_memory_block
-from .task_memory import parse_task_lookup_query
-
-
-def _query_requests_graph_history(query: str) -> bool:
-    """Bounded query-hygiene seam for explicit change-over-time graph questions."""
-    normalized = " ".join(str(query or "").strip().lower().split())
-    if not normalized:
-        return False
-    change_markers = ("when did", "change ", " changed", "mikor", "valtoz", "változ")
-    current_markers = ("now", "current", "currently", "most", "jelenleg")
-    return any(marker in normalized for marker in change_markers) and any(
-        marker in normalized for marker in current_markers
-    )
+from .structured_understanding import infer_query_understanding
 
 
 def _has_current_and_prior_graph_states(graph_rows: list[dict[str, Any]]) -> bool:
@@ -34,6 +21,9 @@ class QueryAnalysis:
     operating_like: bool
     task_like: bool
     profile_slot_targets: tuple[str, ...]
+    task_lookup: Dict[str, Any] | None
+    operating_lookup: Dict[str, Any] | None
+    route_payload: Dict[str, Any] | None
 
 
 @dataclass
@@ -64,14 +54,19 @@ class WorkingMemoryPolicy:
     render_ordinary_contract: bool
 
 
-def analyze_query(query: str) -> QueryAnalysis:
+def analyze_query(query: str, *, timezone_name: str = "UTC") -> QueryAnalysis:
     profile_slot_targets = resolve_direct_identity_profile_slots(query)
-    operating_lookup = parse_operating_lookup_query(query)
-    task_lookup = parse_task_lookup_query(query, timezone_name="UTC")
+    understanding = infer_query_understanding(query, timezone_name=timezone_name)
+    task_lookup = understanding.get("task_lookup")
+    operating_lookup = understanding.get("operating_lookup")
+    route_payload = understanding.get("route")
     return QueryAnalysis(
         operating_like=isinstance(operating_lookup, dict),
         task_like=isinstance(task_lookup, dict),
         profile_slot_targets=profile_slot_targets,
+        task_lookup=dict(task_lookup) if isinstance(task_lookup, Mapping) else None,
+        operating_lookup=dict(operating_lookup) if isinstance(operating_lookup, Mapping) else None,
+        route_payload=dict(route_payload) if isinstance(route_payload, Mapping) else None,
     )
 
 
@@ -183,7 +178,7 @@ def build_working_memory_packet(
     system_substrate: Dict[str, Any] | None = None,
     render_ordinary_contract: bool = False,
 ) -> Dict[str, Any]:
-    analysis = analyze_query(query)
+    analysis = analyze_query(query, timezone_name=timezone_name)
     behavior_policy_snapshot = store.get_behavior_policy_snapshot(principal_scope_key=principal_scope_key)
     compiled_behavior_policy = store.get_compiled_behavior_policy(principal_scope_key=principal_scope_key)
     policy = _initial_policy(
@@ -303,7 +298,7 @@ def build_working_memory_packet(
         policy.show_graph_history = True
         policy.conflict_escalation = True
         policy.show_policy = True
-    elif _has_current_and_prior_graph_states(graph_rows) and _query_requests_graph_history(query):
+    elif _has_current_and_prior_graph_states(graph_rows) and routing.get("applied_mode") == "temporal":
         policy.show_graph_history = True
         policy.graph_limit = max(policy.graph_limit, min(graph_limit, 4))
         policy.continuity_match_limit = max(policy.continuity_match_limit, min(continuity_match_limit, 3))

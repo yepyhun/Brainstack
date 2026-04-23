@@ -6,6 +6,15 @@ from typing import Any, Dict, List
 ROLE_PREFIX_RE = re.compile(r"^\s*(user|assistant|system|tool)\s*:\s*", re.IGNORECASE)
 
 
+def normalize_multiline_text(value: Any) -> str:
+    lines = []
+    for raw_line in str(value or "").splitlines():
+        cleaned = " ".join(raw_line.split())
+        if cleaned:
+            lines.append(cleaned)
+    return "\n".join(lines).strip()
+
+
 def trim_text_boundary(text: Any, *, max_len: int = 220, soft_overshoot: int = 24) -> str:
     normalized = " ".join(str(text or "").split())
     if len(normalized) <= max_len:
@@ -41,17 +50,45 @@ def trim_text_boundary(text: Any, *, max_len: int = 220, soft_overshoot: int = 2
     return fallback if len(fallback) >= len(normalized) else f"{fallback}..."
 
 
-def format_turn_content(user_content: str, assistant_content: str) -> str:
-    def _normalize_multiline(value: Any) -> str:
-        lines = []
-        for raw_line in str(value or "").splitlines():
-            cleaned = " ".join(raw_line.split())
-            if cleaned:
-                lines.append(cleaned)
-        return "\n".join(lines).strip()
+def split_turn_content(content: Any) -> Dict[str, str]:
+    parts: Dict[str, List[str]] = {
+        "user": [],
+        "assistant": [],
+        "system": [],
+        "tool": [],
+        "other": [],
+    }
+    current = "other"
+    for raw_line in str(content or "").splitlines():
+        cleaned = " ".join(raw_line.split())
+        if not cleaned:
+            continue
+        matched_role = None
+        for role in ("user", "assistant", "system", "tool"):
+            prefix = f"{role}:"
+            if cleaned.casefold().startswith(prefix):
+                matched_role = role
+                body = cleaned[len(prefix):].strip()
+                current = role
+                if body:
+                    parts[role].append(body)
+                break
+        if matched_role is None:
+            parts[current].append(cleaned)
+    return {key: "\n".join(lines).strip() for key, lines in parts.items()}
 
-    user = _normalize_multiline(user_content)
-    assistant = _normalize_multiline(assistant_content)
+
+def primary_user_turn_content(content: Any) -> str:
+    parts = split_turn_content(content)
+    user = parts.get("user", "").strip()
+    if user:
+        return user
+    return normalize_multiline_text(content)
+
+
+def format_turn_content(user_content: str, assistant_content: str) -> str:
+    user = normalize_multiline_text(user_content)
+    assistant = normalize_multiline_text(assistant_content)
     return f"User: {user}\nAssistant: {assistant}".strip()
 
 
