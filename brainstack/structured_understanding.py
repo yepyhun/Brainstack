@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 import logging
+import threading
+import time
 from datetime import date, datetime, timedelta
 from functools import lru_cache
 from typing import Any, Dict, List, Mapping
@@ -57,6 +59,27 @@ OPERATING_RECORD_TYPES = (
 )
 OPERATING_RECORD_TYPE_SET = set(OPERATING_RECORD_TYPES)
 
+UNDERSTANDING_QUERY = "query"
+UNDERSTANDING_CAPTURE = "capture"
+UNDERSTANDING_KINDS = {
+    UNDERSTANDING_QUERY,
+    UNDERSTANDING_CAPTURE,
+}
+TRANSIENT_FAILURE_THRESHOLD = 2
+TRANSIENT_COOLDOWN_SECONDS = 90.0
+HARD_FAILURE_COOLDOWN_SECONDS = 300.0
+
+_AVAILABILITY_LOCK = threading.Lock()
+_AVAILABILITY_STATE: Dict[str, Dict[str, Any]] = {
+    kind: {
+        "disabled_until": 0.0,
+        "consecutive_failures": 0,
+        "last_error": "",
+        "last_error_class": "",
+    }
+    for kind in UNDERSTANDING_KINDS
+}
+
 
 def _structured_llm_caller(*, task: str, messages: list, timeout: float, max_tokens: int) -> Any:
     from agent.auxiliary_client import call_llm  # type: ignore[import-not-found,import-untyped]
@@ -72,6 +95,140 @@ def _structured_llm_caller(*, task: str, messages: list, timeout: float, max_tok
 
 def _normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
+
+
+def _classify_understanding_error(exc: Exception) -> str:
+    text = _normalize_text(exc).casefold()
+    status_code = getattr(exc, "status_code", None)
+    if status_code == 402 or any(term in text for term in ("payment required", "credits", "can only afford", "billing")):
+        return "economic_drift"
+    if status_code == 401 or any(term in text for term in ("auth", "unauthorized", "refresh token", "access token")):
+        return "auth_drift"
+    if status_code == 400 or "invalid input" in text:
+        return "invalid_request"
+    if any(term in text for term in ("timed out", "timeout", "time out")):
+        return "timeout"
+    return "resolver_failure"
+
+
+def _availability_payload(
+    *,
+    kind: str,
+    status: str,
+    reason: str,
+    error_class: str = "",
+    disabled_until_monotonic: float = 0.0,
+) -> Dict[str, Any]:
+    return {
+        "kind": kind,
+        "status": status,
+        "reason": reason,
+        "error_class": error_class,
+        "disabled_until_monotonic": float(disabled_until_monotonic or 0.0),
+    }
+
+
+def _empty_lookup_payload(
+    *,
+    reference_date_iso: str,
+    reason: str,
+    source: str,
+    availability: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    payload = _normalize_lookup_payload({}, reference_date_iso=reference_date_iso)
+    payload["route"] = {
+        "mode": ROUTE_FACT,
+        "reason": reason,
+        "source": source,
+    }
+    if isinstance(availability, Mapping):
+        payload["availability"] = dict(availability)
+    return payload
+
+
+def _empty_capture_payload(
+    *,
+    reference_date_iso: str,
+    reason: str,
+    source: str,
+    availability: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    payload = _normalize_capture_payload({}, reference_date_iso=reference_date_iso)
+    payload["source"] = source
+    payload["reason"] = reason
+    if isinstance(availability, Mapping):
+        payload["availability"] = dict(availability)
+    return payload
+
+
+def _current_availability(kind: str) -> Dict[str, Any] | None:
+    with _AVAILABILITY_LOCK:
+        state = _AVAILABILITY_STATE.get(kind)
+        if not isinstance(state, dict):
+            return None
+        disabled_until = float(state.get("disabled_until") or 0.0)
+        if disabled_until <= time.monotonic():
+            return None
+        return _availability_payload(
+            kind=kind,
+            status="circuit_open",
+            reason="structured understanding temporarily unavailable; degraded mode active",
+            error_class=str(state.get("last_error_class") or "").strip(),
+            disabled_until_monotonic=disabled_until,
+        )
+
+
+def _record_success(kind: str) -> None:
+    with _AVAILABILITY_LOCK:
+        state = _AVAILABILITY_STATE.get(kind)
+        if not isinstance(state, dict):
+            return
+        state["disabled_until"] = 0.0
+        state["consecutive_failures"] = 0
+        state["last_error"] = ""
+        state["last_error_class"] = ""
+
+
+def _record_failure(kind: str, exc: Exception) -> Dict[str, Any]:
+    error_class = _classify_understanding_error(exc)
+    now = time.monotonic()
+    with _AVAILABILITY_LOCK:
+        state = _AVAILABILITY_STATE.setdefault(
+            kind,
+            {
+                "disabled_until": 0.0,
+                "consecutive_failures": 0,
+                "last_error": "",
+                "last_error_class": "",
+            },
+        )
+        consecutive_failures = int(state.get("consecutive_failures") or 0) + 1
+        state["consecutive_failures"] = consecutive_failures
+        state["last_error"] = _normalize_text(exc)
+        state["last_error_class"] = error_class
+        if error_class in {"economic_drift", "auth_drift", "invalid_request"}:
+            cooldown = HARD_FAILURE_COOLDOWN_SECONDS
+        elif consecutive_failures >= TRANSIENT_FAILURE_THRESHOLD:
+            cooldown = TRANSIENT_COOLDOWN_SECONDS
+        else:
+            cooldown = 0.0
+        disabled_until = now + cooldown if cooldown > 0.0 else 0.0
+        state["disabled_until"] = disabled_until
+    if disabled_until > 0.0:
+        return _availability_payload(
+            kind=kind,
+            status="circuit_open",
+            reason="structured understanding temporarily unavailable; degraded mode active",
+            error_class=error_class,
+            disabled_until_monotonic=disabled_until,
+        )
+    return _availability_payload(
+        kind=kind,
+        status="transient_failure",
+        reason="structured understanding failed; degraded mode used for this call",
+        error_class=error_class,
+        disabled_until_monotonic=0.0,
+    )
 
 
 def resolve_user_timezone(value: str | None) -> str:
@@ -240,10 +397,14 @@ def _normalize_capture_payload(payload: Mapping[str, Any] | None, *, reference_d
 
 
 @lru_cache(maxsize=256)
-def _infer_lookup_payload_cached(query: str, timezone_name: str, reference_date_iso: str) -> Dict[str, Any]:
+def _infer_lookup_payload_success_cached(query: str, timezone_name: str, reference_date_iso: str) -> Dict[str, Any]:
     normalized_query = _normalize_text(query)
     if not normalized_query:
-        return _normalize_lookup_payload({}, reference_date_iso=reference_date_iso)
+        return _empty_lookup_payload(
+            reference_date_iso=reference_date_iso,
+            reason="empty query; fact route default",
+            source="brainstack.structured_query_understanding.empty",
+        )
     messages = [
         {
             "role": "system",
@@ -271,25 +432,25 @@ def _infer_lookup_payload_cached(query: str, timezone_name: str, reference_date_
         },
         {"role": "user", "content": normalized_query},
     ]
-    try:
-        response = _structured_llm_caller(
-            task="brainstack_query_understanding",
-            messages=messages,
-            timeout=4.5,
-            max_tokens=260,
-        )
-        payload = _extract_json_object(_extract_text_content(response))
-        return _normalize_lookup_payload(payload, reference_date_iso=reference_date_iso)
-    except Exception as exc:
-        logger.warning("Brainstack structured query understanding failed: %s", exc)
-        return _normalize_lookup_payload({}, reference_date_iso=reference_date_iso)
+    response = _structured_llm_caller(
+        task="brainstack_query_understanding",
+        messages=messages,
+        timeout=4.5,
+        max_tokens=260,
+    )
+    payload = _extract_json_object(_extract_text_content(response))
+    return _normalize_lookup_payload(payload, reference_date_iso=reference_date_iso)
 
 
 @lru_cache(maxsize=256)
-def _infer_capture_payload_cached(content: str, timezone_name: str, reference_date_iso: str) -> Dict[str, Any]:
+def _infer_capture_payload_success_cached(content: str, timezone_name: str, reference_date_iso: str) -> Dict[str, Any]:
     normalized_content = _normalize_text(content)
     if not normalized_content:
-        return _normalize_capture_payload({}, reference_date_iso=reference_date_iso)
+        return _empty_capture_payload(
+            reference_date_iso=reference_date_iso,
+            reason="empty content; no structured capture",
+            source="brainstack.structured_capture_understanding.empty",
+        )
     messages = [
         {
             "role": "system",
@@ -313,18 +474,14 @@ def _infer_capture_payload_cached(content: str, timezone_name: str, reference_da
         },
         {"role": "user", "content": str(content or "")},
     ]
-    try:
-        response = _structured_llm_caller(
-            task="brainstack_capture_understanding",
-            messages=messages,
-            timeout=5.5,
-            max_tokens=360,
-        )
-        payload = _extract_json_object(_extract_text_content(response))
-        return _normalize_capture_payload(payload, reference_date_iso=reference_date_iso)
-    except Exception as exc:
-        logger.warning("Brainstack structured capture understanding failed: %s", exc)
-        return _normalize_capture_payload({}, reference_date_iso=reference_date_iso)
+    response = _structured_llm_caller(
+        task="brainstack_capture_understanding",
+        messages=messages,
+        timeout=5.5,
+        max_tokens=360,
+    )
+    payload = _extract_json_object(_extract_text_content(response))
+    return _normalize_capture_payload(payload, reference_date_iso=reference_date_iso)
 
 
 def infer_query_understanding(
@@ -334,13 +491,38 @@ def infer_query_understanding(
     now: datetime | None = None,
 ) -> Dict[str, Any]:
     reference_date_iso = _reference_date_iso(timezone_name=timezone_name, now=now)
-    return copy.deepcopy(
-        _infer_lookup_payload_cached(
-            _normalize_text(query),
+    normalized_query = _normalize_text(query)
+    if not normalized_query:
+        return _empty_lookup_payload(
+            reference_date_iso=reference_date_iso,
+            reason="empty query; fact route default",
+            source="brainstack.structured_query_understanding.empty",
+        )
+    availability = _current_availability(UNDERSTANDING_QUERY)
+    if isinstance(availability, Mapping):
+        return _empty_lookup_payload(
+            reference_date_iso=reference_date_iso,
+            reason="structured query understanding temporarily unavailable; degraded fact mode",
+            source="brainstack.structured_query_understanding.degraded",
+            availability=availability,
+        )
+    try:
+        payload = _infer_lookup_payload_success_cached(
+            normalized_query,
             resolve_user_timezone(timezone_name),
             reference_date_iso,
         )
-    )
+        _record_success(UNDERSTANDING_QUERY)
+        return copy.deepcopy(payload)
+    except Exception as exc:
+        availability = _record_failure(UNDERSTANDING_QUERY, exc)
+        logger.warning("Brainstack structured query understanding failed: %s", exc)
+        return _empty_lookup_payload(
+            reference_date_iso=reference_date_iso,
+            reason="structured query understanding unavailable; degraded fact mode",
+            source="brainstack.structured_query_understanding.degraded",
+            availability=availability,
+        )
 
 
 def infer_capture_understanding(
@@ -350,10 +532,35 @@ def infer_capture_understanding(
     now: datetime | None = None,
 ) -> Dict[str, Any]:
     reference_date_iso = _reference_date_iso(timezone_name=timezone_name, now=now)
-    return copy.deepcopy(
-        _infer_capture_payload_cached(
-            str(content or ""),
+    normalized_content = _normalize_text(content)
+    if not normalized_content:
+        return _empty_capture_payload(
+            reference_date_iso=reference_date_iso,
+            reason="empty content; no structured capture",
+            source="brainstack.structured_capture_understanding.empty",
+        )
+    availability = _current_availability(UNDERSTANDING_CAPTURE)
+    if isinstance(availability, Mapping):
+        return _empty_capture_payload(
+            reference_date_iso=reference_date_iso,
+            reason="structured capture understanding temporarily unavailable; degraded no-capture mode",
+            source="brainstack.structured_capture_understanding.degraded",
+            availability=availability,
+        )
+    try:
+        payload = _infer_capture_payload_success_cached(
+            normalized_content,
             resolve_user_timezone(timezone_name),
             reference_date_iso,
         )
-    )
+        _record_success(UNDERSTANDING_CAPTURE)
+        return copy.deepcopy(payload)
+    except Exception as exc:
+        availability = _record_failure(UNDERSTANDING_CAPTURE, exc)
+        logger.warning("Brainstack structured capture understanding failed: %s", exc)
+        return _empty_capture_payload(
+            reference_date_iso=reference_date_iso,
+            reason="structured capture understanding unavailable; degraded no-capture mode",
+            source="brainstack.structured_capture_understanding.degraded",
+            availability=availability,
+        )

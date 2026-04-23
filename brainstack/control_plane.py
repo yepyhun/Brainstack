@@ -5,9 +5,9 @@ from typing import Any, Callable, Dict, Mapping
 
 from .db import BrainstackStore
 from .executive_retrieval import retrieve_executive_context
+from .local_typed_understanding import analyze_local_query
 from .profile_contract import resolve_direct_identity_profile_slots
 from .retrieval import render_working_memory_block
-from .structured_understanding import infer_query_understanding
 
 
 def _has_current_and_prior_graph_states(graph_rows: list[dict[str, Any]]) -> bool:
@@ -54,12 +54,23 @@ class WorkingMemoryPolicy:
     render_ordinary_contract: bool
 
 
-def analyze_query(query: str, *, timezone_name: str = "UTC") -> QueryAnalysis:
+def analyze_query(
+    store: BrainstackStore,
+    query: str,
+    *,
+    principal_scope_key: str = "",
+    timezone_name: str = "UTC",
+) -> QueryAnalysis:
     profile_slot_targets = resolve_direct_identity_profile_slots(query)
-    understanding = infer_query_understanding(query, timezone_name=timezone_name)
+    understanding = analyze_local_query(
+        store,
+        query=query,
+        principal_scope_key=principal_scope_key,
+        timezone_name=timezone_name,
+    )
     task_lookup = understanding.get("task_lookup")
     operating_lookup = understanding.get("operating_lookup")
-    route_payload = understanding.get("route")
+    route_payload = understanding.get("route_payload")
     return QueryAnalysis(
         operating_like=isinstance(operating_lookup, dict),
         task_like=isinstance(task_lookup, dict),
@@ -178,7 +189,12 @@ def build_working_memory_packet(
     system_substrate: Dict[str, Any] | None = None,
     render_ordinary_contract: bool = False,
 ) -> Dict[str, Any]:
-    analysis = analyze_query(query, timezone_name=timezone_name)
+    analysis = analyze_query(
+        store,
+        query,
+        principal_scope_key=principal_scope_key,
+        timezone_name=timezone_name,
+    )
     behavior_policy_snapshot = store.get_behavior_policy_snapshot(principal_scope_key=principal_scope_key)
     compiled_behavior_policy = store.get_compiled_behavior_policy(principal_scope_key=principal_scope_key)
     policy = _initial_policy(

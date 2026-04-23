@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import re
-from typing import Any, Dict, Iterable, List, Mapping
-
-from .structured_understanding import infer_capture_understanding, infer_query_understanding
+from typing import Any, Dict, Iterable, List
 
 
 OPERATING_RECORD_ACTIVE_WORK = "active_work"
+OPERATING_RECORD_LIVE_SYSTEM_STATE = "live_system_state"
 OPERATING_RECORD_RECENT_WORK_SUMMARY = "recent_work_summary"
 OPERATING_RECORD_COMPLETED_OUTCOME = "completed_outcome"
 OPERATING_RECORD_DISCARDED_WORK = "discarded_work"
@@ -18,6 +17,7 @@ OPERATING_RECORD_EXTERNAL_OWNER_POINTER = "external_owner_pointer"
 
 OPERATING_RECORD_TYPES = (
     OPERATING_RECORD_ACTIVE_WORK,
+    OPERATING_RECORD_LIVE_SYSTEM_STATE,
     OPERATING_RECORD_RECENT_WORK_SUMMARY,
     OPERATING_RECORD_COMPLETED_OUTCOME,
     OPERATING_RECORD_DISCARDED_WORK,
@@ -53,6 +53,7 @@ def _normalize_text(value: Any) -> str:
 def _record_type_label(record_type: str) -> str:
     labels = {
         OPERATING_RECORD_ACTIVE_WORK: "active work",
+        OPERATING_RECORD_LIVE_SYSTEM_STATE: "live system state",
         OPERATING_RECORD_RECENT_WORK_SUMMARY: "recent work summary",
         OPERATING_RECORD_COMPLETED_OUTCOME: "completed outcome",
         OPERATING_RECORD_DISCARDED_WORK: "discarded work",
@@ -104,36 +105,17 @@ class OperatingTruthLookup:
 
 
 def parse_operating_capture(text: str, *, timezone_name: str = "UTC") -> Dict[str, Any] | None:
-    payload = infer_capture_understanding(text, timezone_name=timezone_name).get("operating_capture")
-    if not isinstance(payload, Mapping):
-        return None
-    items = [
-        OperatingTruthItem(
-            record_type=str(item.get("record_type") or "").strip(),
-            content=str(item.get("content") or "").strip(),
-        )
-        for item in payload.get("items") or ()
-        if str((item or {}).get("record_type") or "").strip() in OPERATING_RECORD_TYPES
-        and str((item or {}).get("content") or "").strip()
-    ]
-    if not items:
-        return None
-    return OperatingTruthCapture(items=items).to_dict()
+    del timezone_name
+    from .local_typed_understanding import parse_local_operating_capture
+
+    return parse_local_operating_capture(text)
 
 
 def parse_operating_lookup_query(query: str, *, timezone_name: str = "UTC") -> Dict[str, Any] | None:
-    payload = infer_query_understanding(query, timezone_name=timezone_name).get("operating_lookup")
-    if not isinstance(payload, Mapping):
-        return None
-    record_types = [
-        str(value or "").strip()
-        for value in (payload.get("record_types") or ())
-        if str(value or "").strip() in OPERATING_RECORD_TYPES
-    ]
-    if not record_types:
-        return None
-    deduped = list(dict.fromkeys(record_types))
-    return OperatingTruthLookup(record_types=deduped).to_dict()
+    del timezone_name
+    from .local_typed_understanding import parse_local_operating_lookup_query
+
+    return parse_local_operating_lookup_query(query)
 
 
 def ordered_record_types(record_types: Iterable[str]) -> List[str]:

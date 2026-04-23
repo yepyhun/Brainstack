@@ -748,6 +748,10 @@ class BrainstackMemoryProvider(MemoryProvider):
 
         def commit() -> None:
             scoped_metadata = self._scoped_metadata(metadata)
+            input_excerpt = trim_text_boundary(_normalize_compact_text(content), max_len=220)
+            write_metadata = dict(scoped_metadata)
+            if input_excerpt:
+                write_metadata["input_excerpt"] = input_excerpt
             for item in items:
                 title = str(item.get("title") or "").strip()
                 item_due_date = str(item.get("due_date") or due_date).strip()
@@ -771,7 +775,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                     source=source,
                     source_session_id=str((metadata or {}).get("session_id") or self._session_id or "").strip(),
                     source_turn_number=int((metadata or {}).get("turn_number") or self._turn_counter or 0),
-                    metadata=scoped_metadata,
+                    metadata=write_metadata,
                 )
 
         receipt = self._commit_explicit_write(
@@ -857,6 +861,10 @@ class BrainstackMemoryProvider(MemoryProvider):
 
         def commit() -> None:
             scoped_metadata = self._scoped_metadata(metadata)
+            input_excerpt = trim_text_boundary(_normalize_compact_text(content), max_len=220)
+            write_metadata = dict(scoped_metadata)
+            if input_excerpt:
+                write_metadata["input_excerpt"] = input_excerpt
             for item in items:
                 record_type = str(item.get("record_type") or "").strip()
                 content_text = str(item.get("content") or "").strip()
@@ -876,7 +884,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                     source=source,
                     source_session_id=str((metadata or {}).get("session_id") or self._session_id or "").strip(),
                     source_turn_number=int((metadata or {}).get("turn_number") or self._turn_counter or 0),
-                    metadata=scoped_metadata,
+                    metadata=write_metadata,
                 )
 
         receipt = self._commit_explicit_write(
@@ -1057,6 +1065,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         operating_trace["system_prompt_block"] = {
             "surface": "system_prompt_block",
             "section_present": "# Brainstack Operating Context" in block,
+            "live_system_state_present": bool(list(operating_snapshot.get("live_system_state") or [])),
             "active_work_present": bool(str(operating_snapshot.get("active_work_summary") or "").strip()),
             "recent_work_present": bool(str(operating_snapshot.get("recent_work_summary") or "").strip()),
             "open_decisions_present": bool(list(operating_snapshot.get("open_decisions") or [])),
@@ -1100,7 +1109,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             graph_limit=self._graph_match_limit,
             corpus_limit=self._corpus_match_limit,
             corpus_char_budget=self._corpus_char_budget,
-            route_resolver=self._route_resolver_override or self._config.get("_route_resolver"),
+            route_resolver=self._route_resolver_override,
             system_substrate=system_substrate,
             render_ordinary_contract=self._ordinary_packet_behavior_contract_enabled,
         )

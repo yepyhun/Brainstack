@@ -8,6 +8,7 @@ from .operating_truth import (
     OPERATING_RECORD_CURRENT_COMMITMENT,
     OPERATING_RECORD_DISCARDED_WORK,
     OPERATING_RECORD_EXTERNAL_OWNER_POINTER,
+    OPERATING_RECORD_LIVE_SYSTEM_STATE,
     OPERATING_RECORD_NEXT_STEP,
     OPERATING_RECORD_OPEN_DECISION,
     OPERATING_RECORD_RECENT_WORK_SUMMARY,
@@ -198,6 +199,11 @@ def build_operating_context_snapshot(
         record_type=OPERATING_RECORD_OPEN_DECISION,
         limit=decision_limit,
     ) or _build_open_decisions(continuity_list, limit=decision_limit)
+    live_system_state = _operating_record_lines(
+        operating_list,
+        record_type=OPERATING_RECORD_LIVE_SYSTEM_STATE,
+        limit=6,
+    )
     current_commitments = _build_current_commitments(operating_list, task_rows, limit=4)
     next_steps = _operating_record_lines(
         operating_list,
@@ -217,7 +223,7 @@ def build_operating_context_snapshot(
         limit=4,
     )
     proactive_guidance = ""
-    if active_work_summary or recent_work_summary or open_decisions or current_commitments or next_steps:
+    if live_system_state or active_work_summary or recent_work_summary or open_decisions or current_commitments or next_steps:
         proactive_guidance = (
             "If the user re-engages vaguely, resume the active work or open decisions below before falling back to generic small talk. "
             "Do not invent reminders or scheduling state that is not grounded in the committed records."
@@ -237,6 +243,8 @@ def build_operating_context_snapshot(
         "recent_work_summary": recent_work_summary,
         "open_decisions": open_decisions,
         "open_decision_count": len(open_decisions),
+        "live_system_state": live_system_state,
+        "live_system_state_count": len(live_system_state),
         "current_commitments": current_commitments,
         "current_commitment_count": len(current_commitments),
         "next_steps": next_steps,
@@ -279,6 +287,7 @@ def render_operating_context_section(
     active_work_summary = _normalize_text(snapshot.get("active_work_summary"))
     recent_work_summary = _normalize_text(snapshot.get("recent_work_summary"))
     open_decisions = _unique_lines(snapshot.get("open_decisions") or [], limit=4)
+    live_system_state = _unique_lines(snapshot.get("live_system_state") or [], limit=6)
     current_commitments = _unique_lines(snapshot.get("current_commitments") or [], limit=4)
     next_steps = _unique_lines(snapshot.get("next_steps") or [], limit=4)
     completed_outcomes = _unique_lines(snapshot.get("completed_outcomes") or [], limit=4)
@@ -290,6 +299,15 @@ def render_operating_context_section(
     external_owner_pointers = list(snapshot.get("external_owner_pointers") or [])
 
     content_added = False
+
+    if live_system_state:
+        live_state_lines = ["", "Current live system state:"]
+        for item in live_system_state:
+            live_state_lines.append(f"- {_trim(item, 180)}")
+        live_state_lines.append(
+            "- Only the live runtime state listed here is authoritative for currently active autonomous mechanisms."
+        )
+        content_added = _append_block(lines, live_state_lines, char_budget=char_budget) or content_added
 
     if active_work_summary:
         content_added = _append_block(

@@ -20,6 +20,7 @@ from .behavior_policy import (
 from .corpus_backend import CorpusBackend, create_corpus_backend
 from .graph_backend import GraphBackend, create_graph_backend
 from .logistics_contract import derive_transcript_logistics_typed_entities
+from .live_system_state import list_live_system_state_rows, search_live_system_state_rows
 from .profile_contract import (
     COMMUNICATION_CANONICAL_SLOTS,
     derive_transcript_identity_profile_items,
@@ -210,6 +211,53 @@ def _task_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
         "created_at": str(row["created_at"] or ""),
         "updated_at": str(row["updated_at"] or ""),
     }
+
+
+def _task_search_projection(row: Mapping[str, Any]) -> str:
+    metadata = _decode_json_object(row.get("metadata"))
+    parts = [
+        str(row.get("title") or "").strip(),
+        str(row.get("item_type") or "").strip(),
+        str(row.get("due_date") or "").strip(),
+        str(row.get("date_scope") or "").strip(),
+        str(row.get("status") or "").strip(),
+        str(row.get("owner") or "").strip(),
+        str(row.get("source") or "").strip(),
+        str(metadata.get("input_excerpt") or "").strip(),
+    ]
+    return " ".join(part for part in parts if part)
+
+
+def _task_match_score(
+    row: Mapping[str, Any],
+    *,
+    query_tokens: Iterable[str],
+    numeric_tokens: Iterable[str],
+) -> tuple[float, int]:
+    projection = _task_search_projection(row).casefold()
+    if not projection:
+        return 0.0, 0
+
+    overlap = 0
+    score = 0.0
+    for token in query_tokens:
+        if token and token in projection:
+            overlap += 1
+            score += 1.0
+
+    numeric_matches = 0
+    if numeric_tokens:
+        row_numeric_tokens = set(NUMERIC_TOKEN_RE.findall(projection))
+        for token in numeric_tokens:
+            if token and token in row_numeric_tokens:
+                numeric_matches += 1
+        score += numeric_matches * 0.75
+
+    if str(row.get("status") or "").strip() == "open":
+        score += 0.15
+    if str(row.get("due_date") or "").strip():
+        score += 0.05
+    return score, overlap + numeric_matches
 
 
 def _operating_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
@@ -3503,6 +3551,96 @@ class BrainstackStore:
         return [_task_row_to_dict(row) for row in rows]
 
     @_locked
+    def search_task_items(
+        self,
+        *,
+        query: str,
+        principal_scope_key: str,
+        item_type: str = "",
+        statuses: Iterable[str] | None = None,
+        limit: int = 8,
+    ) -> List[Dict[str, Any]]:
+        requested_scope_key = str(principal_scope_key or "").strip()
+        query_tokens = _extract_query_terms(query, limit=8)
+        if not query_tokens:
+            return []
+
+        candidate_limit = max(int(limit or 0) * 8, 24)
+        normalized_item_type = str(item_type or "").strip()
+        normalized_statuses = [str(value or "").strip() for value in (statuses or ()) if str(value or "").strip()]
+
+        params: list[Any] = [requested_scope_key]
+        sql = """
+            SELECT
+                id, stable_key, principal_scope_key, item_type, title, due_date, date_scope,
+                optional, status, owner, source, source_session_id, source_turn_number,
+                metadata_json, created_at, updated_at
+            FROM task_items
+            WHERE principal_scope_key = ?
+        """
+        if normalized_item_type:
+            sql += " AND item_type = ?"
+            params.append(normalized_item_type)
+        if normalized_statuses:
+            sql += f" AND status IN ({','.join('?' for _ in normalized_statuses)})"
+            params.extend(normalized_statuses)
+
+        like_tokens = build_like_tokens(query, limit=8)
+        if like_tokens:
+            clauses: List[str] = []
+            for _ in like_tokens:
+                clauses.append(
+                    "("
+                    "lower(title) LIKE ? OR lower(item_type) LIKE ? OR lower(due_date) LIKE ? "
+                    "OR lower(date_scope) LIKE ? OR lower(status) LIKE ? OR lower(metadata_json) LIKE ?"
+                    ")"
+                )
+            sql += " AND (" + " OR ".join(clauses) + ")"
+            for token in like_tokens:
+                params.extend([token, token, token, token, token, token])
+
+        sql += " ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, due_date ASC, optional ASC, updated_at DESC, id DESC LIMIT ?"
+        params.append(candidate_limit)
+        rows = self.conn.execute(sql, tuple(params)).fetchall()
+
+        numeric_tokens = NUMERIC_TOKEN_RE.findall(str(query or ""))
+        ranked: List[Dict[str, Any]] = []
+        for row in (_task_row_to_dict(item) for item in rows):
+            if not _annotate_principal_scope(row, principal_scope_key=requested_scope_key):
+                continue
+            match_score, token_overlap = _task_match_score(
+                row,
+                query_tokens=query_tokens,
+                numeric_tokens=numeric_tokens,
+            )
+            if match_score <= 0.0:
+                continue
+            row["_task_match_score"] = match_score
+            row["_brainstack_query_token_overlap"] = token_overlap
+            ranked.append(row)
+
+        ranked.sort(
+            key=lambda item: (
+                _scoped_row_priority(item, principal_scope_key=requested_scope_key),
+                float(item.get("_task_match_score") or 0.0),
+                str(item.get("updated_at") or ""),
+                int(item.get("id") or 0),
+            ),
+            reverse=True,
+        )
+        output: List[Dict[str, Any]] = []
+        for row in _attach_keyword_scores(ranked):
+            item = dict(row)
+            item["keyword_score"] = max(
+                float(item.get("keyword_score") or 0.0),
+                float(item.pop("_task_match_score", 0.0) or 0.0),
+            )
+            item["retrieval_source"] = "task.keyword"
+            item["match_mode"] = "keyword"
+            output.append(item)
+        return output[: max(int(limit or 0), 1)]
+
+    @_locked
     def upsert_operating_record(
         self,
         *,
@@ -3649,7 +3787,15 @@ class BrainstackStore:
             ),
             reverse=True,
         )
-        return output[: max(int(limit or 0), 1)]
+        live_rows = [
+            dict(row)
+            for row in list_live_system_state_rows(
+                principal_scope_key=requested_scope_key,
+                limit=max(int(limit or 0), 1),
+            )
+            if not normalized_record_types or str(row.get("record_type") or "").strip() in normalized_record_types
+        ]
+        return (live_rows + output)[: max(int(limit or 0), 1)]
 
     @_locked
     def search_operating_records(
@@ -3707,7 +3853,25 @@ class BrainstackStore:
             ),
             reverse=True,
         )
-        return filtered[: max(int(limit or 0), 1)]
+        live_rows = [
+            dict(row)
+            for row in search_live_system_state_rows(
+                query=query,
+                principal_scope_key=requested_scope_key,
+                limit=max(int(limit or 0), 1),
+            )
+            if not normalized_record_types or str(row.get("record_type") or "").strip() in normalized_record_types
+        ]
+        merged = _attach_keyword_scores(live_rows + filtered)
+        merged.sort(
+            key=lambda item: (
+                _scoped_row_priority(item, principal_scope_key=requested_scope_key),
+                float(item.get("keyword_score") or 0.0),
+                str(item.get("updated_at") or ""),
+            ),
+            reverse=True,
+        )
+        return merged[: max(int(limit or 0), 1)]
 
     @_locked
     def list_profile_items(

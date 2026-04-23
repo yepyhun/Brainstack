@@ -1,17 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import datetime
 import re
-from typing import Any, Dict, Mapping
+from typing import Any, Dict
 
-from .structured_understanding import (
-    current_local_date,
-    infer_capture_understanding,
-    infer_query_understanding,
-    resolve_user_timezone,
-)
-
+from .structured_understanding import resolve_user_timezone
 
 STATUS_OPEN = "open"
 ITEM_TYPE_TASK = "task"
@@ -72,38 +66,14 @@ def build_task_stable_key(*, principal_scope_key: str, item_type: str, due_date:
 
 
 def parse_task_capture(text: str, *, timezone_name: str, now: datetime | None = None) -> Dict[str, Any] | None:
-    payload = infer_capture_understanding(text, timezone_name=timezone_name, now=now).get("task_capture")
-    if not isinstance(payload, Mapping):
-        return None
-    items = [
-        TaskMemoryItem(
-            title=str(item.get("title") or "").strip(),
-            item_type=str(item.get("item_type") or payload.get("item_type") or ITEM_TYPE_TASK).strip() or ITEM_TYPE_TASK,
-            due_date=str(item.get("due_date") or payload.get("due_date") or "").strip(),
-            date_scope=str(item.get("date_scope") or payload.get("date_scope") or "").strip(),
-            optional=bool(item.get("optional")),
-            status=str(item.get("status") or STATUS_OPEN).strip() or STATUS_OPEN,
-        )
-        for item in payload.get("items") or ()
-        if str((item or {}).get("title") or "").strip()
-    ]
-    if not items:
-        return None
-    return TaskCapture(
-        item_type=str(payload.get("item_type") or ITEM_TYPE_TASK).strip() or ITEM_TYPE_TASK,
-        due_date=str(payload.get("due_date") or "").strip(),
-        date_scope=str(payload.get("date_scope") or "").strip(),
-        items=items,
-    ).to_dict()
+    del timezone_name, now
+    from .local_typed_understanding import parse_local_task_capture
+
+    return parse_local_task_capture(text)
 
 
 def parse_task_lookup_query(query: str, *, timezone_name: str, now: datetime | None = None) -> Dict[str, Any] | None:
-    payload = infer_query_understanding(query, timezone_name=timezone_name, now=now).get("task_lookup")
-    if not isinstance(payload, Mapping):
-        return None
-    return TaskLookup(
-        item_type=str(payload.get("item_type") or ITEM_TYPE_TASK).strip() or ITEM_TYPE_TASK,
-        due_date=str(payload.get("due_date") or "").strip(),
-        date_scope=str(payload.get("date_scope") or "").strip(),
-        followup_only=bool(payload.get("followup_only")),
-    ).to_dict()
+    del timezone_name, now
+    from .local_typed_understanding import parse_local_task_lookup_query
+
+    return parse_local_task_lookup_query(query)

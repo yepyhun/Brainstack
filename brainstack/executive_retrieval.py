@@ -12,7 +12,6 @@ from .operating_truth import (
     RECENT_WORK_RECAP_RECORD_TYPES,
 )
 from .profile_contract import is_native_explicit_style_item
-from .structured_understanding import infer_query_understanding
 from .style_contract import STYLE_CONTRACT_SLOT
 from .tier2_extractor import _default_llm_caller, _extract_json_object, _extract_text_content
 from .transcript import primary_user_turn_content, split_turn_content
@@ -1327,11 +1326,6 @@ def retrieve_executive_context(
     if effective_route_resolver is None and isinstance(analysis_route_payload, Mapping):
         payload = dict(analysis_route_payload)
         effective_route_resolver = lambda _query, _payload=payload: dict(_payload)
-    elif effective_route_resolver is None:
-        fallback_payload = infer_query_understanding(query, timezone_name=timezone_name).get("route")
-        if isinstance(fallback_payload, Mapping):
-            payload = dict(fallback_payload)
-            effective_route_resolver = lambda _query, _payload=payload: dict(_payload)
     route = _resolve_route(
         query,
         route_resolver=effective_route_resolver,
@@ -1350,8 +1344,20 @@ def retrieve_executive_context(
     continuity_queries = _build_cross_session_search_queries(query)
     task_lookup = analysis.get("task_lookup") if isinstance(analysis.get("task_lookup"), Mapping) else None
     operating_lookup = analysis.get("operating_lookup") if isinstance(analysis.get("operating_lookup"), Mapping) else None
+    task_lookup_rows = (
+        [dict(row) for row in (task_lookup.get("matched_rows") or []) if isinstance(row, Mapping)]
+        if isinstance(task_lookup, Mapping)
+        else []
+    )
+    operating_lookup_rows = (
+        [dict(row) for row in (operating_lookup.get("matched_rows") or []) if isinstance(row, Mapping)]
+        if isinstance(operating_lookup, Mapping)
+        else []
+    )
     task_rows = (
-        store.list_task_items(
+        _dedupe_rows(task_lookup_rows)
+        if task_lookup_rows
+        else store.list_task_items(
             principal_scope_key=principal_scope_key,
             due_date=str(task_lookup.get("due_date") or "").strip(),
             item_type=str(task_lookup.get("item_type") or "").strip(),
@@ -1361,6 +1367,7 @@ def retrieve_executive_context(
         if isinstance(task_lookup, Mapping)
         else []
     )
+    task_rows = _annotate_query_flags(task_rows, query=query)
     operating_target_types = (
         [
             str(value or "").strip()
@@ -1370,6 +1377,7 @@ def retrieve_executive_context(
         if isinstance(operating_lookup, Mapping)
         else []
     )
+    explicit_operating_lookup = isinstance(operating_lookup, Mapping) and not operating_lookup_rows
     profile_limit = limits["profile_limit"]
     continuity_match_limit = limits["continuity_match_limit"]
     continuity_recent_limit = limits["continuity_recent_limit"]
@@ -1459,14 +1467,21 @@ def retrieve_executive_context(
         keyword_transcript_session_rows,
         keyword_transcript_global_rows,
     )
+    keyword_operating_source_rows = (
+        operating_lookup_rows
+        if operating_lookup_rows
+        else store.search_operating_records(
+            query=query,
+            principal_scope_key=principal_scope_key,
+            record_types=operating_target_types or None,
+            limit=max(operating_limit * 4, 8),
+        )
+        if operating_limit > 0
+        else []
+    )
     keyword_operating_rows = (
         _operating_channel_rows(
-            store.search_operating_records(
-                query=query,
-                principal_scope_key=principal_scope_key,
-                record_types=operating_target_types or None,
-                limit=max(operating_limit * 4, 8),
-            ),
+            keyword_operating_source_rows,
             limit=max(operating_limit * 3, 8),
         )
         if operating_limit > 0
@@ -1493,7 +1508,7 @@ def retrieve_executive_context(
             record_types=operating_target_types or None,
             limit=max(operating_limit * 2, 6),
         )
-        if operating_limit > 0 and isinstance(operating_lookup, Mapping)
+        if operating_limit > 0 and explicit_operating_lookup
         else []
     )
     current_operating_rows = _annotate_query_flags(current_operating_rows, query=query)

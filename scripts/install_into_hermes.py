@@ -67,6 +67,14 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "why": "Keeps reminder truth aligned with actual scheduler delivery instead of memory-only claims.",
     },
     {
+        "patcher": "_patch_cron_scheduler_tests",
+        "target": "tests/cron/test_scheduler.py",
+        "scope": "verification-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Align cron scheduler regression tests with the narrowed discord tool disable set and resolved runtime credential-pool contract.",
+        "why": "Installer-applied cron scheduler behavior must ship with explicit regression coverage to prevent drift across Hermes updates.",
+    },
+    {
         "patcher": "_patch_cron_tests",
         "target": "tests/cron/test_jobs.py",
         "scope": "verification-seam",
@@ -81,6 +89,22 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_modes": ("source", "docker"),
         "purpose": "Expose Brainstack auxiliary task routing and provider control without forking the host client stack.",
         "why": "Brainstack structured-understanding and flush paths need stable auxiliary task plumbing.",
+    },
+    {
+        "patcher": "_patch_credential_pool",
+        "target": "agent/credential_pool.py",
+        "scope": "provider-auth-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Prevent stale Nous agent-key entries from being selected by the host credential pool during live runtime execution.",
+        "why": "Without this, cron and other runtime paths can randomly fall onto expired Nous entries and appear logged out despite valid credentials.",
+    },
+    {
+        "patcher": "_patch_credential_pool_tests",
+        "target": "tests/agent/test_credential_pool.py",
+        "scope": "verification-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Add regression coverage for skipping stale Nous credential-pool entries and keep time-sensitive fixtures valid.",
+        "why": "The credential-pool seam is host-owned runtime behavior and must keep an explicit, reproducible test contract.",
     },
     {
         "patcher": "_patch_memory_provider",
@@ -773,10 +797,60 @@ def _patch_cron_scheduler(path: Path, dry_run: bool) -> list[str]:
         applied.append("cron_scheduler:gateway_delivery_mode")
 
     old_disabled = '            disabled_toolsets=["cronjob", "messaging", "clarify"],\n'
-    new_disabled = '            disabled_toolsets=["cronjob", "messaging", "clarify", "hermes-discord"],\n'
+    new_disabled = '            disabled_toolsets=["cronjob", "messaging", "clarify", "discord"],\n'
     if old_disabled in text and new_disabled not in text:
-        text = _replace_once(text, old_disabled, new_disabled, label="cron.scheduler disable hermes-discord tools", path=path)
+        text = _replace_once(text, old_disabled, new_disabled, label="cron.scheduler disable discord admin tool", path=path)
+    legacy_disabled = '            disabled_toolsets=["cronjob", "messaging", "clarify", "hermes-discord"],\n'
+    if legacy_disabled in text:
+        text = _replace_once(text, legacy_disabled, new_disabled, label="cron.scheduler replace over-broad hermes-discord disable", path=path)
         applied.append("cron_scheduler:disable_hermes_discord")
+
+    old_pool_block = (
+        "        fallback_model = _cfg.get(\"fallback_providers\") or _cfg.get(\"fallback_model\") or None\n"
+        "        credential_pool = None\n"
+        "        runtime_provider = str(runtime.get(\"provider\") or \"\").strip().lower()\n"
+        "        if runtime_provider:\n"
+        "            try:\n"
+        "                from agent.credential_pool import load_pool\n"
+        "                pool = load_pool(runtime_provider)\n"
+        "                if pool.has_credentials():\n"
+        "                    credential_pool = pool\n"
+        "                    logger.info(\n"
+        "                        \"Job '%s': loaded credential pool for provider %s with %d entries\",\n"
+        "                        job_id,\n"
+        "                        runtime_provider,\n"
+        "                        len(pool.entries()),\n"
+        "                    )\n"
+        "            except Exception as e:\n"
+        "                logger.debug(\"Job '%s': failed to load credential pool for %s: %s\", job_id, runtime_provider, e)\n"
+    )
+    new_pool_block = (
+        "        fallback_model = _cfg.get(\"fallback_providers\") or _cfg.get(\"fallback_model\") or None\n"
+        "        credential_pool = runtime.get(\"credential_pool\")\n"
+        "        runtime_provider = str(runtime.get(\"provider\") or \"\").strip().lower()\n"
+        "        if credential_pool is not None:\n"
+        "            try:\n"
+        "                if credential_pool.has_credentials():\n"
+        "                    logger.info(\n"
+        "                        \"Job '%s': using resolved credential pool for provider %s with %d entries\",\n"
+        "                        job_id,\n"
+        "                        runtime_provider,\n"
+        "                        len(credential_pool.entries()),\n"
+        "                    )\n"
+        "                else:\n"
+        "                    credential_pool = None\n"
+        "            except Exception as e:\n"
+        "                logger.debug(\n"
+        "                    \"Job '%s': resolved credential pool unusable for %s: %s\",\n"
+        "                    job_id,\n"
+        "                    runtime_provider,\n"
+        "                    e,\n"
+        "                )\n"
+        "                credential_pool = None\n"
+    )
+    if old_pool_block in text and new_pool_block not in text:
+        text = _replace_once(text, old_pool_block, new_pool_block, label="cron.scheduler resolved credential pool", path=path)
+        applied.append("cron_scheduler:resolved_credential_pool")
 
     old_ctx = (
         "    _ctx_tokens = set_session_vars(\n"
@@ -1048,6 +1122,171 @@ def _patch_cron_tests(path: Path, dry_run: bool) -> list[str]:
             path=path,
         )
         applied.append("cron_tests:fail_closed_delivery_expectation")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_cron_scheduler_tests(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    old_disabled_expectation = '        assert "hermes-discord" in (kwargs["disabled_toolsets"] or [])\n'
+    new_disabled_expectation = '        assert "discord" in (kwargs["disabled_toolsets"] or [])\n'
+    if old_disabled_expectation in text and new_disabled_expectation not in text:
+        text = _replace_once(
+            text,
+            old_disabled_expectation,
+            new_disabled_expectation,
+            label="cron scheduler tests narrow discord disabled toolset expectation",
+            path=path,
+        )
+        applied.append("cron_scheduler_tests:disable_discord_expectation")
+
+    old_pool_test = (
+        "        assert kwargs[\"credential_pool\"] is pool\n"
+        "        mock_load_pool.assert_called_once_with(\"nous\")\n"
+    )
+    new_pool_test = (
+        "        assert kwargs[\"credential_pool\"] is pool\n"
+        "        mock_load_pool.assert_not_called()\n"
+    )
+    if old_pool_test in text and new_pool_test not in text:
+        text = _replace_once(
+            text,
+            old_pool_test,
+            new_pool_test,
+            label="cron scheduler tests resolved credential pool expectation",
+            path=path,
+        )
+        applied.append("cron_scheduler_tests:resolved_credential_pool")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_credential_pool(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    old_available_block = (
+        "            if refresh and self._entry_needs_refresh(entry):\n"
+        "                refreshed = self._refresh_entry(entry, force=False)\n"
+        "                if refreshed is None:\n"
+        "                    continue\n"
+        "                entry = refreshed\n"
+        "            available.append(entry)\n"
+    )
+    new_available_block = (
+        "            if refresh and self._entry_needs_refresh(entry):\n"
+        "                refreshed = self._refresh_entry(entry, force=False)\n"
+        "                if refreshed is None:\n"
+        "                    continue\n"
+        "                entry = refreshed\n"
+        "            if self.provider == \"nous\":\n"
+        "                nous_state = {\n"
+        "                    \"agent_key\": entry.agent_key,\n"
+        "                    \"agent_key_expires_at\": entry.agent_key_expires_at,\n"
+        "                }\n"
+        "                if not auth_mod._agent_key_is_usable(\n"
+        "                    nous_state,\n"
+        "                    DEFAULT_AGENT_KEY_MIN_TTL_SECONDS,\n"
+        "                ):\n"
+        "                    continue\n"
+        "            available.append(entry)\n"
+    )
+    if old_available_block in text and new_available_block not in text:
+        text = _replace_once(
+            text,
+            old_available_block,
+            new_available_block,
+            label="credential pool skip stale nous agent keys",
+            path=path,
+        )
+        applied.append("credential_pool:skip_stale_nous_entries")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_credential_pool_tests(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    old_fixture_dates = [
+        ("                    \"expires_at\": \"2026-03-24T12:00:00+00:00\",\n", "                    \"expires_at\": \"2027-03-24T12:00:00+00:00\",\n"),
+        ("                    \"agent_key_expires_at\": \"2026-03-24T13:30:00+00:00\",\n", "                    \"agent_key_expires_at\": \"2027-03-24T13:30:00+00:00\",\n"),
+    ]
+    fixture_patched = False
+    for old_line, new_line in old_fixture_dates:
+        if old_line in text:
+            text = text.replace(old_line, new_line)
+            fixture_patched = True
+    if fixture_patched:
+        applied.append("credential_pool_tests:refresh_nous_fixture_dates")
+
+    marker = "def test_singleton_seed_does_not_clobber_manual_oauth_entry"
+    new_test = (
+        "\n\ndef test_select_skips_stale_nous_agent_keys(tmp_path, monkeypatch):\n"
+        "    monkeypatch.setenv(\"HERMES_HOME\", str(tmp_path / \"hermes\"))\n"
+        "    _write_auth_store(\n"
+        "        tmp_path,\n"
+        "        {\n"
+        "            \"version\": 1,\n"
+        "            \"credential_pool\": {\n"
+        "                \"nous\": [\n"
+        "                    {\n"
+        "                        \"id\": \"stale\",\n"
+        "                        \"label\": \"stale-manual\",\n"
+        "                        \"auth_type\": \"oauth\",\n"
+        "                        \"priority\": 0,\n"
+        "                        \"source\": \"manual:device_code\",\n"
+        "                        \"access_token\": \"portal-token-stale\",\n"
+        "                        \"refresh_token\": \"refresh-stale\",\n"
+        "                        \"agent_key\": \"agent-key-stale\",\n"
+        "                        \"agent_key_expires_at\": \"2026-04-11T19:06:29.675Z\",\n"
+        "                        \"inference_base_url\": \"https://inference-api.nousresearch.com/v1\",\n"
+        "                    },\n"
+        "                    {\n"
+        "                        \"id\": \"fresh\",\n"
+        "                        \"label\": \"fresh-device\",\n"
+        "                        \"auth_type\": \"oauth\",\n"
+        "                        \"priority\": 1,\n"
+        "                        \"source\": \"device_code\",\n"
+        "                        \"access_token\": \"portal-token-fresh\",\n"
+        "                        \"refresh_token\": \"refresh-fresh\",\n"
+        "                        \"agent_key\": \"agent-key-fresh\",\n"
+        "                        \"agent_key_expires_at\": \"2026-04-24T00:04:33.001Z\",\n"
+        "                        \"inference_base_url\": \"https://inference-api.nousresearch.com/v1\",\n"
+        "                    },\n"
+        "                ]\n"
+        "            },\n"
+        "        },\n"
+        "    )\n"
+        "\n"
+        "    from agent.credential_pool import load_pool\n"
+        "\n"
+        "    pool = load_pool(\"nous\")\n"
+        "    entry = pool.select()\n"
+        "\n"
+        "    assert entry is not None\n"
+        "    assert entry.id == \"fresh\"\n"
+    )
+    if "def test_select_skips_stale_nous_agent_keys" not in text and marker in text:
+        text = text.replace(marker, new_test + "\n\n" + marker)
+        applied.append("credential_pool_tests:skip_stale_nous_entries")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -2569,8 +2808,11 @@ def main() -> int:
     host_patches.extend(_patch_prompt_builder(target / "agent" / "prompt_builder.py", args.dry_run))
     host_patches.extend(_patch_cron_jobs(target / "cron" / "jobs.py", args.dry_run))
     host_patches.extend(_patch_cron_scheduler(target / "cron" / "scheduler.py", args.dry_run))
+    host_patches.extend(_patch_cron_scheduler_tests(target / "tests" / "cron" / "test_scheduler.py", args.dry_run))
     host_patches.extend(_patch_cron_tests(target / "tests" / "cron" / "test_jobs.py", args.dry_run))
     host_patches.extend(_patch_auxiliary_client(target / "agent" / "auxiliary_client.py", args.dry_run))
+    host_patches.extend(_patch_credential_pool(target / "agent" / "credential_pool.py", args.dry_run))
+    host_patches.extend(_patch_credential_pool_tests(target / "tests" / "agent" / "test_credential_pool.py", args.dry_run))
     host_patches.extend(_patch_memory_provider(target / "agent" / "memory_provider.py", args.dry_run))
     host_patches.extend(_patch_memory_manager(target / "agent" / "memory_manager.py", args.dry_run))
     host_patches.extend(_patch_gateway_run(target / "gateway" / "run.py", args.dry_run))

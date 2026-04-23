@@ -62,6 +62,13 @@ Each host patch entry records:
 - `purpose`: what the patch does
 - `why`: why Brainstack still owns that seam today
 
+Current high-risk host-owned seams include:
+
+- cron scheduler delivery/runtime integration
+- credential-pool runtime auth safety for Nous-backed cron execution
+- memory-provider/write-origin bridge wiring
+- gateway lifecycle hooks
+
 This is the minimum required to answer these questions quickly:
 
 - What did Brainstack touch in this checkout?
