@@ -250,18 +250,6 @@ def _patch_prompt_builder(path: Path, dry_run: bool) -> list[str]:
         )
         applied.append("prompt_builder:scheduler_truth_guidance")
 
-    old_models = 'TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok")\n'
-    new_models = 'TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "minimax")\n'
-    if old_models in text and new_models not in text:
-        text = _replace_once(
-            text,
-            old_models,
-            new_models,
-            label="prompt_builder minimax tool enforcement",
-            path=path,
-        )
-        applied.append("prompt_builder:minimax_tool_enforcement")
-
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
     return applied
@@ -270,6 +258,34 @@ def _patch_prompt_builder(path: Path, dry_run: bool) -> list[str]:
 def _patch_cron_jobs(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
+
+    helper_anchor = "ONESHOT_GRACE_SECONDS = 120\n\n\n"
+    helper_block = (
+        "ONESHOT_GRACE_SECONDS = 120\n\n\n"
+        "def _request_active_job_cancel(job_id: str, reason: str) -> None:\n"
+        "    \"\"\"Best-effort interrupt for an in-flight cron job running in this process.\"\"\"\n"
+        "    try:\n"
+        "        from cron.scheduler import request_cancel  # Lazy import avoids module cycle at import time\n"
+        "        request_cancel(job_id, reason)\n"
+        "    except Exception:\n"
+        "        pass\n\n\n"
+        "def _request_scheduler_wake(reason: str) -> None:\n"
+        "    \"\"\"Best-effort wake-up hint for the in-process cron ticker.\"\"\"\n"
+        "    try:\n"
+        "        from cron.scheduler import request_tick_wake  # Lazy import avoids module cycle at import time\n"
+        "        request_tick_wake(reason)\n"
+        "    except Exception:\n"
+        "        pass\n\n\n"
+    )
+    if "def _request_scheduler_wake(reason: str) -> None:" not in text and helper_anchor in text:
+        text = _replace_once(
+            text,
+            helper_anchor,
+            helper_block,
+            label="cron.jobs wake/cancel helpers",
+            path=path,
+        )
+        applied.append("cron_jobs:wake_cancel_helpers")
 
     old_block = (
         "    # Default delivery to origin if available, otherwise local\n"
@@ -292,96 +308,161 @@ def _patch_cron_jobs(path: Path, dry_run: bool) -> list[str]:
         "    now = _hermes_now().isoformat()\n"
     )
     if "Requested one-shot schedule is already in the past." not in text and old_block in text:
-        text = _replace_once(
-            text,
-            old_block,
-            new_block,
-            label="cron.jobs past one-shot rejection",
-            path=path,
-        )
+        text = _replace_once(text, old_block, new_block, label="cron.jobs past one-shot rejection", path=path)
         applied.append("cron_jobs:reject_past_oneshot")
 
     old_next_run = '        "next_run_at": compute_next_run(parsed_schedule),\n'
     new_next_run = '        "next_run_at": next_run_at,\n'
     if old_next_run in text and new_next_run not in text:
-        text = _replace_once(
-            text,
-            old_next_run,
-            new_next_run,
-            label="cron.jobs cached next_run_at",
-            path=path,
-        )
+        text = _replace_once(text, old_next_run, new_next_run, label="cron.jobs cached next_run_at", path=path)
         applied.append("cron_jobs:reuse_next_run_at")
+
+    old_create_save = (
+        "    jobs = load_jobs()\n"
+        "    jobs.append(job)\n"
+        "    save_jobs(jobs)\n"
+        "\n"
+        "    return job\n"
+    )
+    new_create_save = (
+        "    jobs = load_jobs()\n"
+        "    jobs.append(job)\n"
+        "    save_jobs(jobs)\n"
+        "    _request_scheduler_wake(f\"cron job created: {job_id}\")\n"
+        "\n"
+        "    return job\n"
+    )
+    if "_request_scheduler_wake(f\"cron job created: {job_id}\")" not in text and old_create_save in text:
+        text = _replace_once(text, old_create_save, new_create_save, label="cron.jobs wake after create", path=path)
+        applied.append("cron_jobs:wake_after_create")
+
+    old_update_intro = (
+        "        updated = _apply_skill_fields({**job, **updates})\n"
+        "        schedule_changed = \"schedule\" in updates\n"
+        "\n"
+        "        if \"skills\" in updates or \"skill\" in updates:\n"
+    )
+    new_update_intro = (
+        "        updated = _apply_skill_fields({**job, **updates})\n"
+        "        schedule_changed = \"schedule\" in updates\n"
+        "        update_keys = set(updates)\n"
+        "        should_cancel_active = bool(\n"
+        "            update_keys.intersection(\n"
+        "                {\n"
+        "                    \"schedule\",\n"
+        "                    \"enabled\",\n"
+        "                    \"state\",\n"
+        "                    \"next_run_at\",\n"
+        "                    \"prompt\",\n"
+        "                    \"skill\",\n"
+        "                    \"skills\",\n"
+        "                    \"script\",\n"
+        "                    \"model\",\n"
+        "                    \"provider\",\n"
+        "                    \"base_url\",\n"
+        "                    \"deliver\",\n"
+        "                    \"origin\",\n"
+        "                }\n"
+        "            )\n"
+        "        )\n"
+        "        should_wake_scheduler = bool(\n"
+        "            update_keys.intersection({\"schedule\", \"enabled\", \"state\", \"next_run_at\"})\n"
+        "        )\n"
+        "\n"
+        "        if \"skills\" in updates or \"skill\" in updates:\n"
+    )
+    if "should_wake_scheduler = bool(" not in text and old_update_intro in text:
+        text = _replace_once(text, old_update_intro, new_update_intro, label="cron.jobs update control flags", path=path)
+        applied.append("cron_jobs:update_control_flags")
+
+    old_update_save = (
+        "        jobs[i] = updated\n"
+        "        save_jobs(jobs)\n"
+        "        return _apply_skill_fields(jobs[i])\n"
+    )
+    new_update_save = (
+        "        jobs[i] = updated\n"
+        "        save_jobs(jobs)\n"
+        "        if should_cancel_active:\n"
+        "            _request_active_job_cancel(job_id, \"Cron job updated while running\")\n"
+        "        if should_wake_scheduler:\n"
+        "            _request_scheduler_wake(f\"cron job updated: {job_id}\")\n"
+        "        return _apply_skill_fields(jobs[i])\n"
+    )
+    if "Cron job updated while running" not in text and old_update_save in text:
+        text = _replace_once(text, old_update_save, new_update_save, label="cron.jobs update wake/cancel", path=path)
+        applied.append("cron_jobs:update_wake_cancel")
+
+    old_remove = (
+        "    if len(jobs) < original_len:\n"
+        "        save_jobs(jobs)\n"
+        "        return True\n"
+    )
+    new_remove = (
+        "    if len(jobs) < original_len:\n"
+        "        save_jobs(jobs)\n"
+        "        _request_active_job_cancel(job_id, \"Cron job removed\")\n"
+        "        _request_scheduler_wake(f\"cron job removed: {job_id}\")\n"
+        "        return True\n"
+    )
+    if "_request_scheduler_wake(f\"cron job removed: {job_id}\")" not in text and old_remove in text:
+        text = _replace_once(text, old_remove, new_remove, label="cron.jobs remove wake/cancel", path=path)
+        applied.append("cron_jobs:remove_wake_cancel")
 
     old_delivery_status = (
         '            job["last_status"] = "ok" if success else "error"\n'
         '            job["last_error"] = error if not success else None\n'
         '            # Track delivery failures separately — cleared on successful delivery\n'
         '            job["last_delivery_error"] = delivery_error\n'
-        '            \n'
-        '            # Increment completed count\n'
-        '            if job.get("repeat"):\n'
-        '                job["repeat"]["completed"] = job["repeat"].get("completed", 0) + 1\n'
-        '                \n'
-        "                # Check if we've hit the repeat limit\n"
-        '                times = job["repeat"].get("times")\n'
-        '                completed = job["repeat"]["completed"]\n'
-        '                if times is not None and times > 0 and completed >= times:\n'
-        '                    # Remove the job (limit reached)\n'
-        '                    jobs.pop(i)\n'
-        '                    save_jobs(jobs)\n'
-        '                    return\n'
     )
     new_delivery_status = (
         '            delivery_failed = bool(delivery_error)\n'
-        '            effective_success = success and not delivery_failed\n'
-        '            job["last_status"] = "ok" if effective_success else "error"\n'
+        '            job["last_status"] = "error" if (not success or delivery_failed) else "ok"\n'
         '            job["last_error"] = error if error else (delivery_error if delivery_failed else None)\n'
-        '            # Track delivery failures separately — cleared on successful delivery\n'
         '            job["last_delivery_error"] = delivery_error\n'
-        '            \n'
-        '            # Increment completed count\n'
-        '            if job.get("repeat"):\n'
-        '                job["repeat"]["completed"] = job["repeat"].get("completed", 0) + 1\n'
-        '                \n'
-        "                # Check if we've hit the repeat limit\n"
-        '                times = job["repeat"].get("times")\n'
-        '                completed = job["repeat"]["completed"]\n'
-        '                if effective_success and times is not None and times > 0 and completed >= times:\n'
-        '                    # Remove the job (limit reached)\n'
-        '                    jobs.pop(i)\n'
-        '                    save_jobs(jobs)\n'
-        '                    return\n'
     )
-    if "effective_success = success and not delivery_failed" not in text and old_delivery_status in text:
-        text = _replace_once(
-            text,
-            old_delivery_status,
-            new_delivery_status,
-            label="cron.jobs fail_closed_delivery_status",
-            path=path,
-        )
+    if 'job["last_status"] = "error" if (not success or delivery_failed) else "ok"' not in text and old_delivery_status in text:
+        text = _replace_once(text, old_delivery_status, new_delivery_status, label="cron.jobs fail_closed_delivery_status", path=path)
         applied.append("cron_jobs:fail_closed_delivery_status")
 
-    old_terminal_state = (
-        '            if job["next_run_at"] is None:\n'
-        '                job["enabled"] = False\n'
-        '                job["state"] = "completed"\n'
+    seconds_helper_anchor = "def save_job_output(job_id: str, output: str):\n"
+    seconds_helper_block = (
+        "def seconds_until_next_run(max_wait: float = 60.0) -> float:\n"
+        "    \"\"\"Return seconds until the next due job, bounded by ``max_wait``.\"\"\"\n"
+        "    now = _hermes_now()\n"
+        "    soonest = max_wait\n"
+        "\n"
+        "    for job in [_apply_skill_fields(j) for j in copy.deepcopy(load_jobs())]:\n"
+        "        if not job.get(\"enabled\", True):\n"
+        "            continue\n"
+        "\n"
+        "        next_run = job.get(\"next_run_at\")\n"
+        "        if not next_run:\n"
+        "            next_run = _recoverable_oneshot_run_at(\n"
+        "                job.get(\"schedule\", {}),\n"
+        "                now,\n"
+        "                last_run_at=job.get(\"last_run_at\"),\n"
+        "            )\n"
+        "        if not next_run:\n"
+        "            continue\n"
+        "\n"
+        "        try:\n"
+        "            next_dt = _ensure_aware(datetime.fromisoformat(next_run))\n"
+        "        except Exception:\n"
+        "            continue\n"
+        "\n"
+        "        delay = (next_dt - now).total_seconds()\n"
+        "        if delay <= 0:\n"
+        "            return 0.0\n"
+        "        if delay < soonest:\n"
+        "            soonest = delay\n"
+        "\n"
+        "    return max(0.0, min(max_wait, soonest))\n\n\n"
+        "def save_job_output(job_id: str, output: str):\n"
     )
-    new_terminal_state = (
-        '            if job["next_run_at"] is None:\n'
-        '                job["enabled"] = False\n'
-        '                job["state"] = "completed" if effective_success else "error"\n'
-    )
-    if 'job["state"] = "completed" if effective_success else "error"' not in text and old_terminal_state in text:
-        text = _replace_once(
-            text,
-            old_terminal_state,
-            new_terminal_state,
-            label="cron.jobs terminal delivery state",
-            path=path,
-        )
-        applied.append("cron_jobs:terminal_delivery_state")
+    if "def seconds_until_next_run(max_wait: float = 60.0) -> float:" not in text and seconds_helper_anchor in text:
+        text = _replace_once(text, seconds_helper_anchor, seconds_helper_block, label="cron.jobs next-run delay helper", path=path)
+        applied.append("cron_jobs:seconds_until_next_run")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -392,6 +473,67 @@ def _patch_cron_scheduler(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
 
+    import_anchor = "from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run\n"
+    import_block = (
+        "from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run\n\n"
+        "_ACTIVE_JOBS_LOCK = threading.Lock()\n"
+        "_ACTIVE_JOBS: dict[str, dict] = {}\n"
+        "_TICK_WAKE_EVENT = threading.Event()\n\n\n"
+        "def _set_active_job_field(job_id: str, **updates) -> None:\n"
+        "    with _ACTIVE_JOBS_LOCK:\n"
+        "        entry = _ACTIVE_JOBS.setdefault(\n"
+        "            job_id,\n"
+        "            {\n"
+        "                \"agent\": None,\n"
+        "                \"future\": None,\n"
+        "                \"cancel_requested\": False,\n"
+        "                \"cancel_reason\": None,\n"
+        "            },\n"
+        "        )\n"
+        "        entry.update(updates)\n\n\n"
+        "def _clear_active_job(job_id: str) -> None:\n"
+        "    with _ACTIVE_JOBS_LOCK:\n"
+        "        _ACTIVE_JOBS.pop(job_id, None)\n\n\n"
+        "def _is_cancel_requested(job_id: str) -> tuple[bool, Optional[str]]:\n"
+        "    with _ACTIVE_JOBS_LOCK:\n"
+        "        entry = _ACTIVE_JOBS.get(job_id) or {}\n"
+        "        return bool(entry.get(\"cancel_requested\")), entry.get(\"cancel_reason\")\n\n\n"
+        "def request_cancel(job_id: str, reason: str = \"Cron job cancelled\") -> bool:\n"
+        "    with _ACTIVE_JOBS_LOCK:\n"
+        "        entry = _ACTIVE_JOBS.get(job_id)\n"
+        "        if not entry:\n"
+        "            return False\n"
+        "        entry[\"cancel_requested\"] = True\n"
+        "        entry[\"cancel_reason\"] = reason\n"
+        "        agent = entry.get(\"agent\")\n"
+        "        future = entry.get(\"future\")\n\n"
+        "    if agent is not None and hasattr(agent, \"interrupt\"):\n"
+        "        try:\n"
+        "            agent.interrupt(reason)\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "    if future is not None:\n"
+        "        try:\n"
+        "            future.cancel()\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "    return True\n\n\n"
+        "def request_tick_wake(reason: Optional[str] = None) -> None:\n"
+        "    if reason:\n"
+        "        logger.debug(\"Cron scheduler wake requested: %s\", reason)\n"
+        "    _TICK_WAKE_EVENT.set()\n\n\n"
+        "def wait_for_tick_wake(stop_event: threading.Event, timeout: float) -> None:\n"
+        "    if timeout <= 0:\n"
+        "        return\n"
+        "    if stop_event.is_set():\n"
+        "        return\n"
+        "    _TICK_WAKE_EVENT.wait(timeout=timeout)\n"
+        "    _TICK_WAKE_EVENT.clear()\n"
+    )
+    if "def request_tick_wake(reason: Optional[str] = None) -> None:" not in text and import_anchor in text:
+        text = _replace_once(text, import_anchor, import_block, label="cron.scheduler active job registry", path=path)
+        applied.append("cron_scheduler:active_job_registry")
+
     old_live_adapter = (
         "        runtime_adapter = (adapters or {}).get(platform)\n"
         "        delivered = False\n"
@@ -401,56 +543,109 @@ def _patch_cron_scheduler(path: Path, dry_run: bool) -> list[str]:
         "        runtime_adapter = (adapters or {}).get(platform)\n"
         "        gateway_delivery_mode = adapters is not None and loop is not None\n"
         "        delivered = False\n"
+        "        live_adapter_error = None\n"
         "        if runtime_adapter is not None and loop is not None and getattr(loop, \"is_running\", lambda: False)():\n"
     )
-    if "gateway_delivery_mode = adapters is not None and loop is not None" not in text and old_live_adapter in text:
-        text = _replace_once(
-            text,
-            old_live_adapter,
-            new_live_adapter,
-            label="cron.scheduler gateway delivery mode",
-            path=path,
-        )
+    if "live_adapter_error = None" not in text and old_live_adapter in text:
+        text = _replace_once(text, old_live_adapter, new_live_adapter, label="cron.scheduler gateway delivery mode", path=path)
         applied.append("cron_scheduler:gateway_delivery_mode")
 
-    old_live_send_fail = (
-        "                        logger.warning(\n"
-        "                            \"Job '%s': live adapter send to %s:%s failed (%s), falling back to standalone\",\n"
-        "                            job[\"id\"], platform_name, chat_id, err,\n"
-        "                        )\n"
-        "                        adapter_ok = False  # fall through to standalone path\n"
+    old_disabled = '            disabled_toolsets=["cronjob", "messaging", "clarify"],\n'
+    new_disabled = '            disabled_toolsets=["cronjob", "messaging", "clarify", "hermes-discord"],\n'
+    if old_disabled in text and new_disabled not in text:
+        text = _replace_once(text, old_disabled, new_disabled, label="cron.scheduler disable hermes-discord tools", path=path)
+        applied.append("cron_scheduler:disable_hermes_discord")
+
+    old_ctx = (
+        "    _ctx_tokens = set_session_vars(\n"
+        "        platform=origin[\"platform\"] if origin else \"\",\n"
+        "        chat_id=str(origin[\"chat_id\"]) if origin else \"\",\n"
+        "        chat_name=origin.get(\"chat_name\", \"\") if origin else \"\",\n"
+        "    )\n"
     )
-    new_live_send_fail = (
+    new_ctx = old_ctx + "    _set_active_job_field(job_id)\n"
+    if "_set_active_job_field(job_id)" not in text and old_ctx in text:
+        text = _replace_once(text, old_ctx, new_ctx, label="cron.scheduler mark active job", path=path)
+        applied.append("cron_scheduler:mark_active_job")
+
+    old_future = "        _cron_future = _cron_pool.submit(_cron_context.run, agent.run_conversation, prompt)\n"
+    new_future = (
+        "        _cron_future = _cron_pool.submit(_cron_context.run, agent.run_conversation, prompt)\n"
+        "        _set_active_job_field(job_id, agent=agent, future=_cron_future)\n"
+    )
+    if "_set_active_job_field(job_id, agent=agent, future=_cron_future)" not in text and old_future in text:
+        text = _replace_once(text, old_future, new_future, label="cron.scheduler track cron future", path=path)
+        applied.append("cron_scheduler:track_future")
+
+    old_wait_loop = (
+        "                while True:\n"
+        "                    done, _ = concurrent.futures.wait(\n"
+        "                        {_cron_future}, timeout=_POLL_INTERVAL,\n"
+        "                    )\n"
+    )
+    new_wait_loop = (
+        "                while True:\n"
+        "                    _cancelled, _cancel_reason = _is_cancel_requested(job_id)\n"
+        "                    if _cancelled:\n"
+        "                        if hasattr(agent, \"interrupt\"):\n"
+        "                            try:\n"
+        "                                agent.interrupt(_cancel_reason or \"Cron job cancelled\")\n"
+        "                            except Exception:\n"
+        "                                pass\n"
+        "                        raise RuntimeError(_cancel_reason or \"Cron job cancelled\")\n"
+        "                    done, _ = concurrent.futures.wait(\n"
+        "                        {_cron_future}, timeout=_POLL_INTERVAL,\n"
+        "                    )\n"
+    )
+    if "_cancelled, _cancel_reason = _is_cancel_requested(job_id)" not in text and old_wait_loop in text:
+        text = _replace_once(text, old_wait_loop, new_wait_loop, label="cron.scheduler cancel while waiting", path=path)
+        applied.append("cron_scheduler:cancel_while_waiting")
+
+    old_final_response = '        final_response = result.get("final_response", "") or ""\n'
+    new_final_response = (
+        "        _cancelled, _cancel_reason = _is_cancel_requested(job_id)\n"
+        "        if _cancelled:\n"
+        "            raise RuntimeError(_cancel_reason or \"Cron job cancelled\")\n\n"
+        '        final_response = result.get("final_response", "") or ""\n'
+    )
+    if "_cancelled, _cancel_reason = _is_cancel_requested(job_id)" in text:
+        pass
+    elif old_final_response in text:
+        text = _replace_once(text, old_final_response, new_final_response, label="cron.scheduler cancel before final response", path=path)
+        applied.append("cron_scheduler:cancel_before_final_response")
+
+    old_run_finally = (
+        "    finally:\n"
+        "        # Clean up ContextVar session/delivery state for this job.\n"
+        "        clear_session_vars(_ctx_tokens)\n"
+    )
+    new_run_finally = (
+        "    finally:\n"
+        "        _clear_active_job(job_id)\n"
+        "        # Clean up ContextVar session/delivery state for this job.\n"
+        "        clear_session_vars(_ctx_tokens)\n"
+    )
+    if "_clear_active_job(job_id)" not in text and old_run_finally in text:
+        text = _replace_once(text, old_run_finally, new_run_finally, label="cron.scheduler clear active job", path=path)
+        applied.append("cron_scheduler:clear_active_job")
+
+    old_live_send_fail = (
         "                        msg = f\"live adapter send to {platform_name}:{chat_id} failed: {err}\"\n"
         "                        logger.warning(\"Job '%s': %s\", job[\"id\"], msg)\n"
         "                        delivery_errors.append(msg)\n"
         "                        adapter_ok = False\n"
     )
-    if "live adapter send to {platform_name}:{chat_id} failed:" not in text and old_live_send_fail in text:
-        text = _replace_once(
-            text,
-            old_live_send_fail,
-            new_live_send_fail,
-            label="cron.scheduler fail_closed_live_adapter_send",
-            path=path,
-        )
-        applied.append("cron_scheduler:fail_closed_live_adapter_send")
+    new_live_send_fail = (
+        "                        msg = f\"live adapter send to {platform_name}:{chat_id} failed: {err}\"\n"
+        "                        logger.warning(\"Job '%s': %s\", job[\"id\"], msg)\n"
+        "                        live_adapter_error = msg\n"
+        "                        adapter_ok = False\n"
+    )
+    if old_live_send_fail in text and new_live_send_fail not in text:
+        text = _replace_once(text, old_live_send_fail, new_live_send_fail, label="cron.scheduler retain live send error for fallback", path=path)
+        applied.append("cron_scheduler:live_send_error_buffer")
 
     old_live_send_success = (
-        "                # Send extracted media files as native attachments via the live adapter\n"
-        "                if adapter_ok and media_files:\n"
-        "                    _send_media_via_adapter(runtime_adapter, chat_id, media_files, send_metadata, loop, job)\n"
-        "\n"
-        "                if adapter_ok:\n"
-        "                    logger.info(\"Job '%s': delivered to %s:%s via live adapter\", job[\"id\"], platform_name, chat_id)\n"
-        "                    delivered = True\n"
-        "            except Exception as e:\n"
-        "                logger.warning(\n"
-        "                    \"Job '%s': live adapter delivery to %s:%s failed (%s), falling back to standalone\",\n"
-        "                    job[\"id\"], platform_name, chat_id, e,\n"
-        "                )\n"
-    )
-    new_live_send_success = (
         "                # Send extracted media files as native attachments via the live adapter\n"
         "                if adapter_ok and media_files:\n"
         "                    _send_media_via_adapter(runtime_adapter, chat_id, media_files, send_metadata, loop, job)\n"
@@ -466,15 +661,42 @@ def _patch_cron_scheduler(path: Path, dry_run: bool) -> list[str]:
         "                delivery_errors.append(msg)\n"
         "                continue\n"
     )
-    if "live adapter delivery to {platform_name}:{chat_id} failed:" not in text and old_live_send_success in text:
-        text = _replace_once(
-            text,
-            old_live_send_success,
-            new_live_send_success,
-            label="cron.scheduler fail_closed_live_adapter_delivery",
-            path=path,
-        )
-        applied.append("cron_scheduler:fail_closed_live_adapter_delivery")
+    new_live_send_success = (
+        "                # Send extracted media files as native attachments via the live adapter\n"
+        "                if adapter_ok and media_files:\n"
+        "                    _send_media_via_adapter(runtime_adapter, chat_id, media_files, send_metadata, loop, job)\n"
+        "\n"
+        "                if adapter_ok:\n"
+        "                    logger.info(\"Job '%s': delivered to %s:%s via live adapter\", job[\"id\"], platform_name, chat_id)\n"
+        "                    delivered = True\n"
+        "            except Exception as e:\n"
+        "                msg = f\"live adapter delivery to {platform_name}:{chat_id} failed: {e}\"\n"
+        "                logger.warning(\"Job '%s': %s\", job[\"id\"], msg)\n"
+        "                live_adapter_error = msg\n"
+    )
+    if old_live_send_success in text and new_live_send_success not in text:
+        text = _replace_once(text, old_live_send_success, new_live_send_success, label="cron.scheduler fallback after live adapter failure", path=path)
+        applied.append("cron_scheduler:live_delivery_fallback")
+
+    old_platform_disabled = (
+        "            if not pconfig or not pconfig.enabled:\n"
+        "                msg = f\"platform '{platform_name}' not configured/enabled\"\n"
+        "                logger.warning(\"Job '%s': %s\", job[\"id\"], msg)\n"
+        "                delivery_errors.append(msg)\n"
+        "                continue\n"
+    )
+    new_platform_disabled = (
+        "            if not pconfig or not pconfig.enabled:\n"
+        "                if live_adapter_error:\n"
+        "                    delivery_errors.append(live_adapter_error)\n"
+        "                msg = f\"platform '{platform_name}' not configured/enabled\"\n"
+        "                logger.warning(\"Job '%s': %s\", job[\"id\"], msg)\n"
+        "                delivery_errors.append(msg)\n"
+        "                continue\n"
+    )
+    if "if live_adapter_error:\n                    delivery_errors.append(live_adapter_error)" not in text and old_platform_disabled in text:
+        text = _replace_once(text, old_platform_disabled, new_platform_disabled, label="cron.scheduler preserve live adapter error when fallback unavailable", path=path)
+        applied.append("cron_scheduler:preserve_live_error_on_disabled_platform")
 
     old_standalone = (
         "            # Standalone path: run the async send in a fresh event loop (safe from any thread)\n"
@@ -517,12 +739,16 @@ def _patch_cron_scheduler(path: Path, dry_run: bool) -> list[str]:
         "                )\n"
         "                result = future.result(timeout=_standalone_timeout)\n"
         "            except concurrent.futures.TimeoutError:\n"
+        "                if live_adapter_error:\n"
+        "                    delivery_errors.append(live_adapter_error)\n"
         "                msg = f\"delivery to {platform_name}:{chat_id} timed out after {_standalone_timeout}s\"\n"
         "                logger.error(\"Job '%s': %s\", job[\"id\"], msg)\n"
         "                delivery_errors.append(msg)\n"
         "                _pool.shutdown(wait=False, cancel_futures=True)\n"
         "                continue\n"
         "            except Exception as e:\n"
+        "                if live_adapter_error:\n"
+        "                    delivery_errors.append(live_adapter_error)\n"
         "                msg = f\"delivery to {platform_name}:{chat_id} failed: {e}\"\n"
         "                logger.error(\"Job '%s': %s\", job[\"id\"], msg)\n"
         "                delivery_errors.append(msg)\n"
@@ -532,14 +758,28 @@ def _patch_cron_scheduler(path: Path, dry_run: bool) -> list[str]:
         "                _pool.shutdown(wait=False, cancel_futures=True)\n"
     )
     if "HERMES_CRON_DELIVERY_TIMEOUT" not in text and old_standalone in text:
-        text = _replace_once(
-            text,
-            old_standalone,
-            new_standalone,
-            label="cron.scheduler bounded standalone delivery",
-            path=path,
-        )
+        text = _replace_once(text, old_standalone, new_standalone, label="cron.scheduler bounded standalone delivery", path=path)
         applied.append("cron_scheduler:bounded_standalone_delivery")
+
+    old_result_error = (
+        "            if result and result.get(\"error\"):\n"
+        "                msg = f\"delivery error: {result['error']}\"\n"
+        "                logger.error(\"Job '%s': %s\", job[\"id\"], msg)\n"
+        "                delivery_errors.append(msg)\n"
+        "                continue\n"
+    )
+    new_result_error = (
+        "            if result and result.get(\"error\"):\n"
+        "                if live_adapter_error:\n"
+        "                    delivery_errors.append(live_adapter_error)\n"
+        "                msg = f\"delivery error: {result['error']}\"\n"
+        "                logger.error(\"Job '%s': %s\", job[\"id\"], msg)\n"
+        "                delivery_errors.append(msg)\n"
+        "                continue\n"
+    )
+    if "if live_adapter_error:\n                    delivery_errors.append(live_adapter_error)" not in text[text.find("if result and result.get(\"error\")") - 120:text.find("if result and result.get(\"error\")") + 240] and old_result_error in text:
+        text = _replace_once(text, old_result_error, new_result_error, label="cron.scheduler retain live adapter error on fallback error", path=path)
+        applied.append("cron_scheduler:retain_live_error_on_fallback_error")
 
     old_mark = '                mark_job_run(job["id"], success, error, delivery_error=delivery_error)\n'
     new_mark = (
@@ -552,13 +792,7 @@ def _patch_cron_scheduler(path: Path, dry_run: bool) -> list[str]:
         '                )\n'
     )
     if 'logger.info(\n                    "Job \'%s\': finalized success=%s delivery_error=%s"' not in text and old_mark in text:
-        text = _replace_once(
-            text,
-            old_mark,
-            new_mark,
-            label="cron.scheduler finalized logging",
-            path=path,
-        )
+        text = _replace_once(text, old_mark, new_mark, label="cron.scheduler finalized logging", path=path)
         applied.append("cron_scheduler:finalized_logging")
 
     if applied and not dry_run:
@@ -1127,83 +1361,122 @@ def _patch_gateway_run(path: Path, dry_run: bool) -> list[str]:
             text = _replace_once(text, old, new, label=label, path=path)
             applied.append(label)
 
-    if applied and not dry_run:
-        path.write_text(text, encoding="utf-8")
-    return applied
-
-
-def _patch_gateway_status(path: Path, dry_run: bool) -> list[str]:
-    text = path.read_text(encoding="utf-8")
-    applied: list[str] = []
-
-    constant_anchor = '_IS_WINDOWS = sys.platform == "win32"\n'
-    constant_inject = constant_anchor + "_UNSET = object()\n"
-    if "_UNSET = object()" not in text:
-        text = _replace_once(text, constant_anchor, constant_inject, label="gateway status unset sentinel", path=path)
-        applied.append("gateway_status:add_unset")
-
-    old_signature = (
-        "def write_runtime_status(\n"
-        "    *,\n"
-        "    gateway_state: Optional[str] = None,\n"
-        "    exit_reason: Optional[str] = None,\n"
-        "    platform: Optional[str] = None,\n"
-        "    platform_state: Optional[str] = None,\n"
-        "    error_code: Optional[str] = None,\n"
-        "    error_message: Optional[str] = None,\n"
-        ") -> None:\n"
+    old_cron_ticker = (
+        "def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60):\n"
+        "    \"\"\"\n"
+        "    Background thread that ticks the cron scheduler at a regular interval.\n"
+        "    \n"
+        "    Runs inside the gateway process so cronjobs fire automatically without\n"
+        "    needing a separate `hermes cron daemon` or system cron entry.\n"
+        "\n"
+        "    When ``adapters`` and ``loop`` are provided, passes them through to the\n"
+        "    cron delivery path so live adapters can be used for E2EE rooms.\n"
+        "\n"
+        "    Also refreshes the channel directory every 5 minutes and prunes the\n"
+        "    image/audio/document cache once per hour.\n"
+        "    \"\"\"\n"
+        "    from cron.scheduler import tick as cron_tick\n"
+        "    from gateway.platforms.base import cleanup_image_cache, cleanup_document_cache\n"
+        "\n"
+        "    IMAGE_CACHE_EVERY = 60   # ticks — once per hour at default 60s interval\n"
+        "    CHANNEL_DIR_EVERY = 5    # ticks — every 5 minutes\n"
+        "\n"
+        "    logger.info(\"Cron ticker started (interval=%ds)\", interval)\n"
+        "    tick_count = 0\n"
+        "    while not stop_event.is_set():\n"
+        "        try:\n"
+        "            cron_tick(verbose=False, adapters=adapters, loop=loop)\n"
+        "        except Exception as e:\n"
+        "            logger.debug(\"Cron tick error: %s\", e)\n"
+        "\n"
+        "        tick_count += 1\n"
+        "\n"
+        "        if tick_count % CHANNEL_DIR_EVERY == 0 and adapters:\n"
+        "            try:\n"
+        "                from gateway.channel_directory import build_channel_directory\n"
+        "                build_channel_directory(adapters)\n"
+        "            except Exception as e:\n"
+        "                logger.debug(\"Channel directory refresh error: %s\", e)\n"
+        "\n"
+        "        if tick_count % IMAGE_CACHE_EVERY == 0:\n"
+        "            try:\n"
+        "                removed = cleanup_image_cache(max_age_hours=24)\n"
+        "                if removed:\n"
+        "                    logger.info(\"Image cache cleanup: removed %d stale file(s)\", removed)\n"
+        "            except Exception as e:\n"
+        "                logger.debug(\"Image cache cleanup error: %s\", e)\n"
+        "            try:\n"
+        "                removed = cleanup_document_cache(max_age_hours=24)\n"
+        "                if removed:\n"
+        "                    logger.info(\"Document cache cleanup: removed %d stale file(s)\", removed)\n"
+        "            except Exception as e:\n"
+        "                logger.debug(\"Document cache cleanup error: %s\", e)\n"
+        "\n"
+        "        stop_event.wait(timeout=interval)\n"
+        "    logger.info(\"Cron ticker stopped\")\n"
     )
-    new_signature = (
-        "def write_runtime_status(\n"
-        "    *,\n"
-        "    gateway_state: Any = _UNSET,\n"
-        "    exit_reason: Any = _UNSET,\n"
-        "    platform: Optional[str] = None,\n"
-        "    platform_state: Any = _UNSET,\n"
-        "    error_code: Any = _UNSET,\n"
-        "    error_message: Any = _UNSET,\n"
-        ") -> None:\n"
+    new_cron_ticker = (
+        "def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60):\n"
+        "    \"\"\"\n"
+        "    Background thread that ticks the cron scheduler at a regular interval.\n"
+        "    \n"
+        "    Runs inside the gateway process so cronjobs fire automatically without\n"
+        "    needing a separate `hermes cron daemon` or system cron entry.\n"
+        "\n"
+        "    When ``adapters`` and ``loop`` are provided, passes them through to the\n"
+        "    cron delivery path so live adapters can be used for E2EE rooms.\n"
+        "\n"
+        "    Also refreshes the channel directory every 5 minutes and prunes the\n"
+        "    image/audio/document cache once per hour.\n"
+        "    \"\"\"\n"
+        "    from cron.jobs import seconds_until_next_run\n"
+        "    from cron.scheduler import tick as cron_tick, wait_for_tick_wake\n"
+        "    from gateway.platforms.base import cleanup_image_cache, cleanup_document_cache\n"
+        "\n"
+        "    IMAGE_CACHE_INTERVAL = 60 * 60\n"
+        "    CHANNEL_DIR_INTERVAL = 5 * 60\n"
+        "\n"
+        "    logger.info(\"Cron ticker started (interval=%ds)\", interval)\n"
+        "    last_channel_refresh = time.monotonic()\n"
+        "    last_cache_cleanup = time.monotonic()\n"
+        "    while not stop_event.is_set():\n"
+        "        try:\n"
+        "            cron_tick(verbose=False, adapters=adapters, loop=loop)\n"
+        "        except Exception as e:\n"
+        "            logger.debug(\"Cron tick error: %s\", e)\n"
+        "\n"
+        "        now_mono = time.monotonic()\n"
+        "\n"
+        "        if adapters and (now_mono - last_channel_refresh) >= CHANNEL_DIR_INTERVAL:\n"
+        "            try:\n"
+        "                from gateway.channel_directory import build_channel_directory\n"
+        "                build_channel_directory(adapters)\n"
+        "                last_channel_refresh = now_mono\n"
+        "            except Exception as e:\n"
+        "                logger.debug(\"Channel directory refresh error: %s\", e)\n"
+        "\n"
+        "        if (now_mono - last_cache_cleanup) >= IMAGE_CACHE_INTERVAL:\n"
+        "            try:\n"
+        "                removed = cleanup_image_cache(max_age_hours=24)\n"
+        "                if removed:\n"
+        "                    logger.info(\"Image cache cleanup: removed %d stale file(s)\", removed)\n"
+        "            except Exception as e:\n"
+        "                logger.debug(\"Image cache cleanup error: %s\", e)\n"
+        "            try:\n"
+        "                removed = cleanup_document_cache(max_age_hours=24)\n"
+        "                if removed:\n"
+        "                    logger.info(\"Document cache cleanup: removed %d stale file(s)\", removed)\n"
+        "            except Exception as e:\n"
+        "                logger.debug(\"Document cache cleanup error: %s\", e)\n"
+        "            last_cache_cleanup = now_mono\n"
+        "\n"
+        "        wait_timeout = seconds_until_next_run(max_wait=float(interval))\n"
+        "        wait_for_tick_wake(stop_event, timeout=wait_timeout)\n"
+        "    logger.info(\"Cron ticker stopped\")\n"
     )
-    current_signature = (
-        "def write_runtime_status(\n"
-        "    *,\n"
-        "    gateway_state: Any = _UNSET,\n"
-        "    exit_reason: Any = _UNSET,\n"
-        "    restart_requested: Any = _UNSET,\n"
-        "    active_agents: Any = _UNSET,\n"
-        "    platform: Any = _UNSET,\n"
-        "    platform_state: Any = _UNSET,\n"
-        "    error_code: Any = _UNSET,\n"
-        "    error_message: Any = _UNSET,\n"
-        ") -> None:\n"
-    )
-    if new_signature not in text and current_signature not in text:
-        text = _replace_once(text, old_signature, new_signature, label="gateway status signature", path=path)
-        applied.append("gateway_status:signature")
-
-    replacements = [
-        ("    if gateway_state is not None:\n", "    if gateway_state is not _UNSET:\n", "gateway_status:gateway_state_clear"),
-        ("    if exit_reason is not None:\n", "    if exit_reason is not _UNSET:\n", "gateway_status:exit_reason_clear"),
-        (
-            "        if platform_state is not None:\n            platform_payload[\"state\"] = platform_state\n",
-            "        if platform_state is not _UNSET:\n            if platform_state is None:\n                platform_payload.pop(\"state\", None)\n            else:\n                platform_payload[\"state\"] = platform_state\n",
-            "gateway_status:platform_state_clear",
-        ),
-        (
-            "        if error_code is not None:\n            platform_payload[\"error_code\"] = error_code\n",
-            "        if error_code is not _UNSET:\n            if error_code is None:\n                platform_payload.pop(\"error_code\", None)\n            else:\n                platform_payload[\"error_code\"] = error_code\n",
-            "gateway_status:error_code_clear",
-        ),
-        (
-            "        if error_message is not None:\n            platform_payload[\"error_message\"] = error_message\n",
-            "        if error_message is not _UNSET:\n            if error_message is None:\n                platform_payload.pop(\"error_message\", None)\n            else:\n                platform_payload[\"error_message\"] = error_message\n",
-            "gateway_status:error_message_clear",
-        ),
-    ]
-    for old, new, label in replacements:
-        if new not in text and old in text:
-            text = _replace_once(text, old, new, label=label, path=path)
-            applied.append(label)
+    if "from cron.jobs import seconds_until_next_run" not in text and old_cron_ticker in text:
+        text = _replace_once(text, old_cron_ticker, new_cron_ticker, label="gateway:cron_wake_aware_ticker", path=path)
+        applied.append("gateway:cron_wake_aware_ticker")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -1236,107 +1509,6 @@ def _patch_auxiliary_client(path: Path, dry_run: bool) -> list[str]:
             path=path,
         )
         applied.append("auxiliary_client:inherit_main_model")
-
-    if applied and not dry_run:
-        path.write_text(text, encoding="utf-8")
-    return applied
-
-
-def _patch_discord_platform(path: Path, dry_run: bool) -> list[str]:
-    text = path.read_text(encoding="utf-8")
-    applied: list[str] = []
-    modern_post_connect_flow = (
-        "self._post_connect_task: Optional[asyncio.Task] = None" in text
-        and "async def _run_post_connect_initialization(self) -> None:" in text
-    )
-
-    init_anchor = "        self._typing_tasks: Dict[str, asyncio.Task] = {}\n        self._bot_task: Optional[asyncio.Task] = None\n"
-    init_inject = (
-        "        self._typing_tasks: Dict[str, asyncio.Task] = {}\n"
-        "        self._bot_task: Optional[asyncio.Task] = None\n"
-        "        self._slash_sync_task: Optional[asyncio.Task] = None\n"
-    )
-    if "self._slash_sync_task: Optional[asyncio.Task] = None" not in text:
-        text = _replace_once(text, init_anchor, init_inject, label="discord slash sync task field", path=path)
-        applied.append("discord:add_slash_sync_task_field")
-
-    helper_anchor = "        self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'\n\n    async def connect(self) -> bool:\n"
-    helper_inject = (
-        "        self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'\n"
-        "\n"
-        "    async def _sync_slash_commands_background(self) -> None:\n"
-        "        \"\"\"Sync slash commands without blocking Discord readiness.\"\"\"\n"
-        "        if not self._client:\n"
-        "            return\n"
-        "        try:\n"
-        "            synced = await asyncio.wait_for(self._client.tree.sync(), timeout=120)\n"
-        "            logger.info(\"[%s] Synced %d slash command(s)\", self.name, len(synced))\n"
-        "        except asyncio.TimeoutError:\n"
-        "            logger.warning(\"[%s] Slash command sync timed out after startup\", self.name, exc_info=True)\n"
-        "        except Exception as e:  # pragma: no cover - defensive logging\n"
-        "            logger.warning(\"[%s] Slash command sync failed: %s\", self.name, e, exc_info=True)\n"
-        "        finally:\n"
-        "            self._slash_sync_task = None\n"
-        "\n"
-        "    def _ensure_background_slash_sync(self) -> None:\n"
-        "        if self._slash_sync_task and not self._slash_sync_task.done():\n"
-        "            return\n"
-        "        self._slash_sync_task = asyncio.create_task(self._sync_slash_commands_background())\n"
-        "\n"
-        "    async def connect(self) -> bool:\n"
-    )
-    if "async def _sync_slash_commands_background(self) -> None:" not in text and not modern_post_connect_flow:
-        text = _replace_once(text, helper_anchor, helper_inject, label="discord slash sync helpers", path=path)
-        applied.append("discord:add_background_slash_sync")
-
-    ready_old = (
-        "                # Sync slash commands with Discord\n"
-        "                try:\n"
-        "                    synced = await adapter_self._client.tree.sync()\n"
-        "                    logger.info(\"[%s] Synced %d slash command(s)\", adapter_self.name, len(synced))\n"
-        "                except Exception as e:  # pragma: no cover - defensive logging\n"
-        "                    logger.warning(\"[%s] Slash command sync failed: %s\", adapter_self.name, e, exc_info=True)\n"
-        "                adapter_self._ready_event.set()\n"
-    )
-    ready_new = (
-        "                adapter_self._ready_event.set()\n"
-        "                adapter_self._ensure_background_slash_sync()\n"
-    )
-    if "adapter_self._ensure_background_slash_sync()" not in text and not modern_post_connect_flow:
-        text = _replace_once(text, ready_old, ready_new, label="discord ready before slash sync", path=path)
-        applied.append("discord:decouple_ready_from_slash_sync")
-
-    disconnect_anchor = (
-        "        if self._client:\n"
-        "            try:\n"
-        "                await self._client.close()\n"
-        "            except Exception as e:  # pragma: no cover - defensive logging\n"
-        "                logger.warning(\"[%s] Error during disconnect: %s\", self.name, e, exc_info=True)\n"
-        "\n"
-        "        self._running = False\n"
-    )
-    disconnect_inject = (
-        "        if self._client:\n"
-        "            try:\n"
-        "                await self._client.close()\n"
-        "            except Exception as e:  # pragma: no cover - defensive logging\n"
-        "                logger.warning(\"[%s] Error during disconnect: %s\", self.name, e, exc_info=True)\n"
-        "\n"
-        "        if self._slash_sync_task:\n"
-        "            self._slash_sync_task.cancel()\n"
-        "            try:\n"
-        "                await self._slash_sync_task\n"
-        "            except asyncio.CancelledError:\n"
-        "                pass\n"
-        "            except Exception as e:  # pragma: no cover - defensive logging\n"
-        "                logger.debug(\"[%s] Slash sync task cleanup: %s\", self.name, e)\n"
-        "            self._slash_sync_task = None\n"
-        "\n"
-        "        self._running = False\n"
-    )
-    if "Slash sync task cleanup" not in text and not modern_post_connect_flow:
-        text = _replace_once(text, disconnect_anchor, disconnect_inject, label="discord slash sync cleanup", path=path)
-        applied.append("discord:cleanup_background_slash_sync")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -2050,12 +2222,19 @@ def main() -> int:
     if not SOURCE_PLUGIN.exists():
         print(f"FAIL Brainstack payload missing: {SOURCE_PLUGIN}", file=sys.stderr)
         return 2
+    config_path: Path | None
     try:
         config_path = args.config.expanduser().resolve() if args.config else _default_config_path(target)
     except RuntimeError as exc:
-        print(f"FAIL {exc}", file=sys.stderr)
-        return 2
-    if not config_path.exists():
+        config_path = None
+        if args.enable or args.doctor or args.runtime == "docker":
+            print(f"FAIL {exc}", file=sys.stderr)
+            return 2
+        print(
+            "INFO no Hermes agent config found; continuing in source-only install mode "
+            "(payload + host patches only, no config enablement, runtime canonicalization, or doctor)."
+        )
+    if config_path is not None and not config_path.exists():
         print(
             f"FAIL config not found: {config_path}. Create or select an agent first, then rerun the installer.",
             file=sys.stderr,
@@ -2064,6 +2243,12 @@ def main() -> int:
 
     compose_path: Path | None = None
     if args.runtime == "docker" or args.compose_file or args.doctor:
+        if config_path is None and not args.compose_file:
+            print(
+                "FAIL Docker runtime install requires a concrete agent config or an explicit --compose-file.",
+                file=sys.stderr,
+            )
+            return 2
         if args.compose_file:
             compose_path = args.compose_file.expanduser().resolve()
         else:
@@ -2087,6 +2272,9 @@ def main() -> int:
 
     generated_files: list[dict[str, str]] = []
     if args.runtime == "docker":
+        if config_path is None:
+            print("FAIL Docker runtime install requires a concrete agent config.", file=sys.stderr)
+            return 2
         assert compose_path is not None
         if not compose_path.exists():
             generated_compose = _write_docker_compose_file(target, config_path, compose_path, args.dry_run)
@@ -2098,6 +2286,7 @@ def main() -> int:
 
     config_result = None
     if args.enable:
+        assert config_path is not None
         config_result = _patch_config(config_path, args.dry_run)
     deps_result = _ensure_backend_dependencies(selected_python, dry_run=args.dry_run, skip_deps=args.skip_deps)
 
@@ -2112,8 +2301,6 @@ def main() -> int:
     host_patches.extend(_patch_auxiliary_client(target / "agent" / "auxiliary_client.py", args.dry_run))
     host_patches.extend(_patch_memory_manager(target / "agent" / "memory_manager.py", args.dry_run))
     host_patches.extend(_patch_gateway_run(target / "gateway" / "run.py", args.dry_run))
-    host_patches.extend(_patch_gateway_status(target / "gateway" / "status.py", args.dry_run))
-    host_patches.extend(_patch_discord_platform(target / "gateway" / "platforms" / "discord.py", args.dry_run))
     if args.runtime == "docker":
         assert compose_path is not None
         host_patches.extend(_patch_compose_healthcheck(compose_path, args.dry_run))
@@ -2122,13 +2309,17 @@ def main() -> int:
         host_patches.extend(_patch_dockerfile_backend_dependencies(target / "Dockerfile", args.dry_run))
         host_patches.extend(_patch_docker_entrypoint(target / "docker" / "entrypoint.sh", args.dry_run))
 
-    runtime_state_canonicalization = _canonicalize_runtime_user_profile(config_path, args.dry_run)
-    runtime_db_canonicalization = _canonicalize_runtime_brainstack_db(
-        target,
-        config_path,
-        python_bin=selected_python,
-        dry_run=args.dry_run,
-    )
+    if config_path is not None:
+        runtime_state_canonicalization = _canonicalize_runtime_user_profile(config_path, args.dry_run)
+        runtime_db_canonicalization = _canonicalize_runtime_brainstack_db(
+            target,
+            config_path,
+            python_bin=selected_python,
+            dry_run=args.dry_run,
+        )
+    else:
+        runtime_state_canonicalization = {"status": "skipped", "reason": "source_only_install"}
+        runtime_db_canonicalization = {"status": "skipped", "reason": "source_only_install"}
 
     manifest = {
         "installed_at": datetime.now(timezone.utc).isoformat(),
@@ -2136,12 +2327,14 @@ def main() -> int:
         "source_repo": str(REPO_ROOT),
         "target_hermes": str(target),
         "runtime_mode": args.runtime,
+        "source_only_install": config_path is None,
         "plugin_target": str(plugin_target),
         "files": files,
         "helper_files": helper_files,
         "host_helper_files": host_helper_files,
         "host_patches": host_patches,
         "generated_files": generated_files,
+        "config_path": str(config_path) if config_path is not None else None,
         "config": config_result,
         "dependency_install": deps_result,
         "runtime_state_canonicalization": runtime_state_canonicalization,
@@ -2161,6 +2354,8 @@ def main() -> int:
         print(f"{action} generated files: {len(generated_files)}")
     if config_result:
         print(f"{action} config: {config_result['config_path']}")
+    elif config_path is None:
+        print(f"{action} config: source-only (no agent config)")
     if deps_result.get("status") in {"planned", "installed", "already_satisfied"}:
         print(f"{action} backend deps: {deps_result['status']}")
     elif deps_result.get("status") == "skipped":

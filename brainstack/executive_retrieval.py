@@ -26,6 +26,22 @@ TEMPORAL_GRAPH_CAP = 3
 AGGREGATE_CONTINUITY_CAP = 6
 AGGREGATE_TRANSCRIPT_CAP = 6
 AGGREGATE_GRAPH_CAP = 2
+FUSION_CHANNEL_WEIGHTS = {
+    "keyword": 1.0,
+    "operating": 1.05,
+    "semantic": 1.12,
+    "graph": 1.08,
+    "temporal": 1.04,
+}
+FUSION_SHELF_WEIGHTS = {
+    "profile": 1.12,
+    "operating": 1.08,
+    "graph": 1.05,
+    "continuity_match": 1.0,
+    "continuity_recent": 0.96,
+    "transcript": 1.0,
+    "corpus": 0.94,
+}
 
 logger = logging.getLogger(__name__)
 
@@ -262,11 +278,11 @@ def _candidate_priority_bonus(candidate: EvidenceCandidate) -> float:
     query_has_digits = bool(row.get("_brainstack_query_has_digits"))
 
     if candidate.shelf == "transcript":
-        bonus += 0.08
+        bonus += 0.05
         if "keyword" in candidate.channel_ranks:
-            bonus += 0.04
+            bonus += 0.03
         if _looks_user_led(text):
-            bonus += 0.06
+            bonus += 0.04
     elif candidate.shelf == "operating":
         bonus += 0.07
     elif candidate.shelf == "continuity_match":
@@ -304,6 +320,19 @@ def _candidate_priority_bonus(candidate: EvidenceCandidate) -> float:
             bonus -= 0.04
 
     return bonus
+
+
+def _agreement_bonus(candidate: EvidenceCandidate) -> float:
+    channel_count = len(candidate.channel_ranks)
+    if channel_count <= 1:
+        return 0.0
+    return min(0.15, 0.05 * (channel_count - 1))
+
+
+def _fusion_rank_contribution(*, channel_name: str, shelf: str, rank: int) -> float:
+    channel_weight = float(FUSION_CHANNEL_WEIGHTS.get(channel_name, 1.0))
+    shelf_weight = float(FUSION_SHELF_WEIGHTS.get(shelf, 1.0))
+    return (channel_weight * shelf_weight) / (RRF_K + rank)
 
 
 def _llm_route_resolver(query: str) -> Dict[str, Any]:
@@ -963,8 +992,10 @@ def _fact_transcript_rows(
 
 def _fact_sort_key(candidate: EvidenceCandidate) -> tuple[Any, ...]:
     bonus = _candidate_priority_bonus(candidate)
+    agreement_bonus = _agreement_bonus(candidate)
     return (
-        candidate.rrf_score + bonus,
+        candidate.rrf_score + bonus + agreement_bonus,
+        agreement_bonus,
         bonus,
         len(candidate.channel_ranks),
         1 if candidate.shelf == "operating" else 0,
@@ -1347,7 +1378,11 @@ def _merge_channel(
         else:
             candidate.shelf = _merge_shelf(candidate.shelf, shelf)
         candidate.seen_in(channel_name, rank)
-        candidate.rrf_score += 1.0 / (RRF_K + rank)
+        candidate.rrf_score += _fusion_rank_contribution(
+            channel_name=channel_name,
+            shelf=shelf,
+            rank=rank,
+        )
 
 
 def _channel_status(name: str, rows: List[Dict[str, Any]], *, reason: str = "", status: str = "active") -> Dict[str, Any]:
@@ -1371,6 +1406,7 @@ def _select_rows(
     operating_limit: int,
     graph_limit: int,
     corpus_limit: int,
+    evidence_item_budget: int,
 ) -> Dict[str, List[Dict[str, Any]]]:
     profile_items: List[Dict[str, Any]] = []
     matched: List[Dict[str, Any]] = []
@@ -1386,6 +1422,8 @@ def _select_rows(
     seen_operating_keys: set[str] = set()
     seen_graph_keys: set[tuple[str, int]] = set()
     seen_corpus_keys: set[tuple[int, int]] = set()
+    evidence_items_used = 0
+    shared_budget_enabled = evidence_item_budget > 0
 
     def materialize(candidate: EvidenceCandidate) -> Dict[str, Any]:
         row = dict(candidate.row)
@@ -1403,11 +1441,15 @@ def _select_rows(
                 profile_items.append(row)
             continue
 
+        if shared_budget_enabled and evidence_items_used >= evidence_item_budget:
+            continue
+
         if candidate.shelf == "continuity_match" and len(matched) < continuity_match_limit:
             row_id = int(row.get("id") or 0)
             if row_id > 0 and row_id not in seen_continuity_ids:
                 seen_continuity_ids.add(row_id)
                 matched.append(row)
+                evidence_items_used += 1
             continue
 
         if candidate.shelf == "continuity_recent" and len(recent) < continuity_recent_limit:
@@ -1415,6 +1457,7 @@ def _select_rows(
             if row_id > 0 and row_id not in seen_continuity_ids:
                 seen_continuity_ids.add(row_id)
                 recent.append(row)
+                evidence_items_used += 1
             continue
 
         if candidate.shelf == "transcript" and len(transcript_rows) < transcript_limit:
@@ -1422,6 +1465,7 @@ def _select_rows(
             if row_id > 0 and row_id not in seen_transcript_ids:
                 seen_transcript_ids.add(row_id)
                 transcript_rows.append(row)
+                evidence_items_used += 1
             continue
 
         if candidate.shelf == "operating" and len(operating_rows) < operating_limit:
@@ -1429,6 +1473,7 @@ def _select_rows(
             if stable_key and stable_key not in seen_operating_keys:
                 seen_operating_keys.add(stable_key)
                 operating_rows.append(row)
+                evidence_items_used += 1
             continue
 
         if candidate.shelf == "graph" and len(graph_rows) < graph_limit:
@@ -1436,6 +1481,7 @@ def _select_rows(
             if row_key[1] > 0 and row_key not in seen_graph_keys:
                 seen_graph_keys.add(row_key)
                 graph_rows.append(row)
+                evidence_items_used += 1
             continue
 
         if candidate.shelf == "corpus" and len(corpus_rows) < corpus_limit:
@@ -1443,6 +1489,7 @@ def _select_rows(
             if corpus_row_key[0] > 0 and corpus_row_key not in seen_corpus_keys:
                 seen_corpus_keys.add(corpus_row_key)
                 corpus_rows.append(row)
+                evidence_items_used += 1
             continue
 
     return {
@@ -1471,6 +1518,7 @@ def retrieve_executive_context(
     continuity_match_limit = max(int(policy.get("continuity_match_limit", 0)), 0)
     continuity_recent_limit = max(int(policy.get("continuity_recent_limit", 0)), 0)
     transcript_limit = max(int(policy.get("transcript_limit", 0)), 0)
+    evidence_item_budget = max(int(policy.get("evidence_item_budget", 0)), 0)
     operating_limit = max(int(policy.get("operating_limit", 0)), 0)
     graph_limit = max(int(policy.get("graph_limit", 0)), 0)
     corpus_limit = max(int(policy.get("corpus_limit", 0)), 0)
@@ -1805,6 +1853,7 @@ def retrieve_executive_context(
         operating_limit=operating_limit,
         graph_limit=graph_limit,
         corpus_limit=corpus_limit,
+        evidence_item_budget=evidence_item_budget,
     )
     fused_transcript_rows = [candidate.row for candidate in fused if candidate.shelf == "transcript"]
     fact_selected["transcript_rows"] = _fact_transcript_rows(
@@ -1904,6 +1953,7 @@ def retrieve_executive_context(
                 "key": candidate.key,
                 "shelf": candidate.shelf,
                 "rrf_score": candidate.rrf_score,
+                "agreement_bonus": _agreement_bonus(candidate),
                 "priority_bonus": _candidate_priority_bonus(candidate),
                 "channel_ranks": dict(candidate.channel_ranks),
                 "id": int(candidate.row.get("id") or 0),

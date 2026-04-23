@@ -204,6 +204,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._compression_snapshot_limit = int(self._config.get("compression_snapshot_limit", 6))
         self._transcript_match_limit = int(self._config.get("transcript_match_limit", 2))
         self._transcript_char_budget = int(self._config.get("transcript_char_budget", 560))
+        self._evidence_item_budget = int(self._config.get("evidence_item_budget", 8))
         self._operating_match_limit = int(self._config.get("operating_match_limit", 3))
         self._graph_match_limit = int(self._config.get("graph_match_limit", 6))
         self._corpus_match_limit = int(self._config.get("corpus_match_limit", 4))
@@ -281,6 +282,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             {"key": "continuity_match_limit", "description": "How many query-matched continuity items to inject", "default": "4"},
             {"key": "transcript_match_limit", "description": "How many transcript evidence lines may be injected when strongly supported", "default": "2"},
             {"key": "transcript_char_budget", "description": "Approximate character budget for transcript evidence when it is allowed", "default": "560"},
+            {"key": "evidence_item_budget", "description": "Shared cross-shelf cap for selected evidence rows per turn", "default": "8"},
             {"key": "operating_match_limit", "description": "How many operating-truth items to consider per turn", "default": "3"},
             {"key": "graph_match_limit", "description": "How many graph-truth items to inject per turn", "default": "6"},
             {"key": "corpus_match_limit", "description": "How many corpus sections to consider per turn", "default": "4"},
@@ -975,6 +977,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             continuity_match_limit=self._continuity_match_limit,
             transcript_match_limit=self._transcript_match_limit,
             transcript_char_budget=self._transcript_char_budget,
+            evidence_item_budget=self._evidence_item_budget,
             operating_match_limit=self._operating_match_limit,
             graph_limit=self._graph_match_limit,
             corpus_limit=self._corpus_match_limit,

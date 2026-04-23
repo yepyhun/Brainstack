@@ -53,6 +53,7 @@ class WorkingMemoryPolicy:
     transcript_limit: int
     transcript_char_budget: int
     style_contract_char_budget: int
+    evidence_item_budget: int
     operating_limit: int
     graph_limit: int
     corpus_limit: int
@@ -82,6 +83,7 @@ def _initial_policy(
     continuity_match_limit: int,
     transcript_match_limit: int,
     transcript_char_budget: int,
+    evidence_item_budget: int,
     graph_limit: int,
     corpus_limit: int,
     corpus_char_budget: int,
@@ -103,6 +105,7 @@ def _initial_policy(
         transcript_limit=min(transcript_match_limit, 2),
         transcript_char_budget=min(transcript_char_budget, 520),
         style_contract_char_budget=0,
+        evidence_item_budget=max(1, min(evidence_item_budget, 6)),
         operating_limit=min(operating_match_limit, 2),
         graph_limit=min(graph_limit, 2),
         corpus_limit=min(corpus_limit, 2),
@@ -121,6 +124,7 @@ def _initial_policy(
         policy.continuity_recent_limit = max(1, min(continuity_recent_limit, 1))
         policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
         policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 560))
+        policy.evidence_item_budget = max(policy.evidence_item_budget, min(evidence_item_budget, 5))
         policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 2))
         policy.graph_limit = max(policy.graph_limit, min(graph_limit, 1))
         policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 1))
@@ -134,6 +138,7 @@ def _initial_policy(
         policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
         policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
         policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 640))
+        policy.evidence_item_budget = max(policy.evidence_item_budget, min(evidence_item_budget, 7))
         policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 4))
         policy.graph_limit = max(policy.graph_limit, min(graph_limit, 2))
         policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 2))
@@ -147,6 +152,7 @@ def _initial_policy(
         policy.continuity_recent_limit = max(1, min(continuity_recent_limit, 1))
         policy.transcript_limit = max(1, min(transcript_match_limit, 1))
         policy.transcript_char_budget = min(max(policy.transcript_char_budget, 220), 320)
+        policy.evidence_item_budget = max(1, min(evidence_item_budget, 3))
         policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 2))
         policy.graph_limit = 0
         policy.corpus_limit = 0
@@ -167,6 +173,7 @@ def build_working_memory_packet(
     continuity_match_limit: int,
     transcript_match_limit: int,
     transcript_char_budget: int,
+    evidence_item_budget: int,
     graph_limit: int,
     corpus_limit: int,
     corpus_char_budget: int,
@@ -186,6 +193,7 @@ def build_working_memory_packet(
         continuity_match_limit=continuity_match_limit,
         transcript_match_limit=transcript_match_limit,
         transcript_char_budget=transcript_char_budget,
+        evidence_item_budget=evidence_item_budget,
         operating_match_limit=operating_match_limit,
         graph_limit=graph_limit,
         corpus_limit=corpus_limit,
@@ -223,6 +231,7 @@ def build_working_memory_packet(
         policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
         policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
         policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 2))
+        policy.evidence_item_budget = max(policy.evidence_item_budget, min(evidence_item_budget, 8))
     elif routing.get("applied_mode") == "aggregate":
         policy.transcript_char_budget = max(policy.transcript_char_budget, 960)
         policy.show_graph_history = True
@@ -232,6 +241,7 @@ def build_working_memory_packet(
         policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
         policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
         policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 3))
+        policy.evidence_item_budget = max(policy.evidence_item_budget, min(evidence_item_budget, 9))
     elif routing.get("applied_mode") == "style_contract":
         policy.style_contract_char_budget = max(policy.style_contract_char_budget, 2400)
         policy.show_authoritative_contract = True
