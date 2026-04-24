@@ -1,6 +1,6 @@
 [project]
 name = "brainstack-hermes-plugin"
-version = "1.0.24"
+version = "1.0.25"
 description = "Brainstack memory-kernel plugin for Hermes."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -201,6 +201,7 @@ What is currently true:
 - release hygiene tooling rejects tracked private runtime state, local planning state, and high-confidence secret-shaped payloads
 - recent-work operating truth is workstream-scoped so project status and agent assignments do not collapse into one canonical memory
 - workstream recap evidence is typed and scoped, so compact operating state can anchor recap answers before broad continuity or corpus fallback
+- explicit scoped workstream recap capture can create idempotent operating anchors without guessing workstream identity from prose
 
 What is not claimed:
 

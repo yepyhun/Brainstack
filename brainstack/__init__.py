@@ -46,6 +46,11 @@ from .operating_truth import (
     OPERATING_RECORD_OPEN_DECISION,
     OPERATING_RECORD_RECENT_WORK_SUMMARY,
     OPERATING_RECORD_RUNTIME_APPROVAL_POLICY,
+    RECENT_WORK_AUTHORITY_CANONICAL,
+    RECENT_WORK_OWNER_AGENT_ASSIGNMENT,
+    RECENT_WORK_OWNER_USER_PROJECT,
+    RECENT_WORK_SOURCE_EXPLICIT,
+    RECENT_WORK_SOURCE_MANUAL_MIGRATION,
     build_operating_stable_key,
     normalize_recent_work_metadata,
     parse_operating_capture,
@@ -1405,6 +1410,37 @@ class BrainstackMemoryProvider(MemoryProvider):
             },
         }
 
+    def _workstream_recap_tool_schema(self) -> Dict[str, Any]:
+        return {
+            "name": "brainstack_workstream_recap",
+            "description": (
+                "Commit an explicit, scoped workstream recap summary into Brainstack operating truth. "
+                "Requires a typed workstream_id; does not infer workstream identity from prose."
+            ),
+            "x_brainstack_tool_class": "explicit_workstream_recap_write",
+            "x_brainstack_capture_schema": "brainstack.workstream_recap_capture.v1",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "workstream_id": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "source_role": {"type": "string", "enum": ["user", "operator"]},
+                    "owner_role": {
+                        "type": "string",
+                        "enum": [RECENT_WORK_OWNER_USER_PROJECT, RECENT_WORK_OWNER_AGENT_ASSIGNMENT],
+                    },
+                    "source_kind": {
+                        "type": "string",
+                        "enum": [RECENT_WORK_SOURCE_EXPLICIT, RECENT_WORK_SOURCE_MANUAL_MIGRATION],
+                    },
+                    "source": {"type": "string"},
+                    "metadata": {"type": "object"},
+                },
+                "required": ["workstream_id", "summary", "source_role", "owner_role", "source_kind"],
+                "additionalProperties": False,
+            },
+        }
+
     def _explicit_capture_tool_schema(self, *, name: str, operation: str) -> Dict[str, Any]:
         properties: Dict[str, Any] = {
             "shelf": {"type": "string", "enum": ["profile", "operating", "task"]},
@@ -1493,6 +1529,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             },
             self._explicit_capture_tool_schema(name="brainstack_remember", operation="remember"),
             self._explicit_capture_tool_schema(name="brainstack_supersede", operation="supersede"),
+            self._workstream_recap_tool_schema(),
             {
                 "name": "brainstack_consolidate",
                 "description": (
@@ -1531,6 +1568,8 @@ class BrainstackMemoryProvider(MemoryProvider):
             return json.dumps(self._handle_brainstack_explicit_capture("remember", args), ensure_ascii=False)
         if tool_name == "brainstack_supersede":
             return json.dumps(self._handle_brainstack_explicit_capture("supersede", args), ensure_ascii=False)
+        if tool_name == "brainstack_workstream_recap":
+            return json.dumps(self._handle_brainstack_workstream_recap(args), ensure_ascii=False)
         if tool_name == "brainstack_consolidate":
             return json.dumps(self._handle_brainstack_consolidate(args), ensure_ascii=False)
         if tool_name == "runtime_handoff_update":
@@ -1555,6 +1594,126 @@ class BrainstackMemoryProvider(MemoryProvider):
             },
             ensure_ascii=False,
         )
+
+    def _handle_brainstack_workstream_recap(self, args: Mapping[str, Any]) -> Dict[str, Any]:
+        tool_name = "brainstack_workstream_recap"
+        if self._store is None:
+            return {
+                "schema": "brainstack.tool_error.v1",
+                "tool_name": tool_name,
+                "error_code": "store_unavailable",
+                "error": "Brainstack store is not initialized.",
+                "read_only": False,
+            }
+        if not isinstance(args, Mapping):
+            return {
+                "schema": "brainstack.tool_error.v1",
+                "tool_name": tool_name,
+                "error_code": "invalid_payload",
+                "error": "brainstack_workstream_recap requires an object payload.",
+                "read_only": False,
+            }
+
+        summary = trim_text_boundary(_normalize_compact_text(args.get("summary")), max_len=280)
+        workstream_id = _normalize_compact_text(args.get("workstream_id"))
+        source_role = _normalize_compact_text(args.get("source_role")).lower()
+        owner_role = _normalize_compact_text(args.get("owner_role")).replace("-", "_")
+        source_kind = _normalize_compact_text(args.get("source_kind")).replace("-", "_")
+        stable_key = recent_work_stable_key(
+            principal_scope_key=self._principal_scope_key,
+            workstream_id=workstream_id,
+        )
+        errors: List[Dict[str, str]] = []
+        if not stable_key:
+            errors.append({"code": "missing_workstream_id", "message": "workstream_id is required."})
+        if not summary:
+            errors.append({"code": "missing_summary", "message": "summary is required."})
+        if source_role not in {"user", "operator"}:
+            errors.append({"code": "invalid_source_role", "message": "source_role must be user or operator."})
+        if owner_role not in {RECENT_WORK_OWNER_USER_PROJECT, RECENT_WORK_OWNER_AGENT_ASSIGNMENT}:
+            errors.append({"code": "invalid_owner_role", "message": "owner_role must be user_project or agent_assignment."})
+        if source_kind not in {RECENT_WORK_SOURCE_EXPLICIT, RECENT_WORK_SOURCE_MANUAL_MIGRATION}:
+            errors.append(
+                {
+                    "code": "invalid_source_kind",
+                    "message": "source_kind must be explicit_operating_truth or manual_migration.",
+                }
+            )
+        raw_metadata = args.get("metadata")
+        if raw_metadata is not None and not isinstance(raw_metadata, Mapping):
+            errors.append({"code": "invalid_metadata", "message": "metadata must be an object when provided."})
+        if errors:
+            rejection = {
+                "schema": "brainstack.workstream_recap_capture.v1",
+                "tool_name": tool_name,
+                "status": "rejected",
+                "read_only": False,
+                "errors": errors,
+                "principal_scope_key": self._principal_scope_key,
+                "session_id": self._session_id,
+                "turn_number": int(self._turn_counter),
+            }
+            self._last_write_receipt = dict(rejection)
+            self._set_memory_operation_trace(
+                surface="workstream_recap_rejected",
+                note="Scoped workstream recap rejected by schema validation.",
+            )
+            return rejection
+
+        source = _normalize_compact_text(args.get("source")) or f"{tool_name}:operating"
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+        metadata.update(
+            {
+                "workstream_id": workstream_id,
+                "owner_role": owner_role,
+                "source_kind": source_kind,
+                "authority_level": RECENT_WORK_AUTHORITY_CANONICAL,
+                "source_role": source_role,
+                "workstream_recap_capture_schema": "brainstack.workstream_recap_capture.v1",
+            }
+        )
+        metadata = normalize_recent_work_metadata(
+            stable_key=stable_key,
+            source=source,
+            metadata=metadata,
+        )
+
+        def _commit() -> None:
+            assert self._store is not None
+            self._store.upsert_operating_record(
+                stable_key=stable_key,
+                principal_scope_key=self._principal_scope_key,
+                record_type=OPERATING_RECORD_RECENT_WORK_SUMMARY,
+                content=summary,
+                owner=OPERATING_OWNER,
+                source=source,
+                source_session_id=self._session_id,
+                source_turn_number=int(self._turn_counter),
+                metadata=self._scoped_metadata(metadata),
+            )
+
+        receipt = self._commit_explicit_write(
+            owner=OPERATING_OWNER,
+            write_class="workstream_recap",
+            source=source,
+            target="operating",
+            stable_key=stable_key,
+            category=OPERATING_RECORD_RECENT_WORK_SUMMARY,
+            content=summary,
+            commit=_commit,
+            extra={
+                "schema": "brainstack.workstream_recap_capture.v1",
+                "tool_name": tool_name,
+                "read_only": False,
+                "workstream_id": str(metadata.get("workstream_id") or ""),
+                "owner_role": str(metadata.get("owner_role") or ""),
+                "source_kind": str(metadata.get("source_kind") or ""),
+                "authority_level": str(metadata.get("authority_level") or ""),
+                "content_excerpt": receipt_excerpt(summary),
+            },
+        )
+        receipt["read_only"] = False
+        return receipt
 
     def _handle_brainstack_explicit_capture(self, operation: str, args: Mapping[str, Any]) -> Dict[str, Any]:
         tool_name = f"brainstack_{operation}"
