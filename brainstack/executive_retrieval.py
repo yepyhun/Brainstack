@@ -19,6 +19,7 @@ from .style_contract import STYLE_CONTRACT_SLOT
 from .tier2_extractor import _default_llm_caller, _extract_json_object, _extract_text_content
 from .transcript import primary_user_turn_content, split_turn_content
 from .usefulness import graph_priority_adjustment, profile_priority_adjustment
+from .workstream_recap import annotate_workstream_recap_row
 
 RRF_K = 60
 ROUTE_FACT = "fact"
@@ -262,6 +263,11 @@ def _candidate_priority_bonus(candidate: EvidenceCandidate) -> float:
 
     if bool(row.get("same_session")):
         bonus += 0.03
+
+    if bool(row.get("_brainstack_recap_surface")):
+        bonus += 0.12
+    if bool(row.get("_brainstack_supporting_evidence_only")):
+        bonus -= 0.08
 
     if candidate.shelf == "graph":
         fact_class = _graph_fact_class(row)
@@ -1210,6 +1216,7 @@ def _merge_channel(
     shelf: str,
 ) -> None:
     for rank, row in enumerate(rows, start=1):
+        row = annotate_workstream_recap_row(row, shelf=shelf)
         key = _candidate_key(shelf, row)
         candidate = merged.get(key)
         if candidate is None:
@@ -1264,6 +1271,10 @@ def _select_rows(
     seen_corpus_keys: set[tuple[int, int]] = set()
     evidence_items_used = 0
     shared_budget_enabled = evidence_item_budget > 0
+    has_scoped_recap_anchor = any(
+        candidate.shelf == "operating" and bool(candidate.row.get("_brainstack_recap_surface"))
+        for candidate in candidates
+    )
 
     def materialize(candidate: EvidenceCandidate) -> Dict[str, Any]:
         row = dict(candidate.row)
@@ -1277,6 +1288,16 @@ def _select_rows(
         suppression_reason = _weak_cross_session_keyword_residue_reason(candidate)
         if suppression_reason:
             candidate.row["_brainstack_suppression_reason"] = suppression_reason
+            continue
+        if (
+            has_scoped_recap_anchor
+            and candidate.shelf in {"continuity_match", "continuity_recent"}
+            and bool(candidate.row.get("_brainstack_supporting_evidence_only"))
+        ):
+            candidate.row["_brainstack_suppression_reason"] = str(
+                candidate.row.get("_brainstack_workstream_recap_reason")
+                or "supporting_only_unscoped_workstream_recap_evidence"
+            )
             continue
         if str(candidate.row.get("_brainstack_suppression_reason") or ""):
             continue
@@ -1968,6 +1989,9 @@ def retrieve_executive_context(
                 "query_token_overlap": int(candidate.row.get("_brainstack_query_token_overlap") or 0),
                 "query_token_count": int(candidate.row.get("_brainstack_query_token_count") or 0),
                 "same_session": bool(candidate.row.get("same_session")),
+                "recap_surface": bool(candidate.row.get("_brainstack_recap_surface")),
+                "supporting_evidence_only": bool(candidate.row.get("_brainstack_supporting_evidence_only")),
+                "workstream_recap_reason": str(candidate.row.get("_brainstack_workstream_recap_reason") or ""),
                 "operating_authority_level": str(
                     (candidate.row.get("metadata") or {}).get("authority_level")
                     if isinstance(candidate.row.get("metadata"), dict)
