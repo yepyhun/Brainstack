@@ -4,6 +4,7 @@ __pycache__/
 .venv
 .venv/
 .code-review-graph/
+.planning/
 logs/
 sessions/
 memories/
