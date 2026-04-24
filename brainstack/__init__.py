@@ -75,6 +75,7 @@ from .style_contract import (
     looks_like_style_contract_teaching,
 )
 from .structured_understanding import resolve_user_timezone
+from .scope_identity import build_memory_scope_identity
 from .task_memory import build_task_stable_key, parse_task_capture
 from .tier2_extractor import extract_tier2_candidates
 from .tool_schemas import (
@@ -209,33 +210,13 @@ def _debug_row_snapshot(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _build_principal_scope(**kwargs: Any) -> Dict[str, str]:
-    user_id = str(kwargs.get("user_id") or "").strip()
-    if not user_id:
+def _build_principal_scope(**kwargs: Any) -> Dict[str, Any]:
+    scope = build_memory_scope_identity(**kwargs)
+    if not scope:
         return {}
-    platform = str(kwargs.get("platform") or "").strip()
-    agent_identity = str(kwargs.get("agent_identity") or "").strip()
-    agent_workspace = str(kwargs.get("agent_workspace") or "").strip()
     timezone_name = resolve_user_timezone(kwargs.get("timezone"))
-    scope: Dict[str, str] = {"user_id": user_id}
-    if platform:
-        scope["platform"] = platform
-    if agent_identity:
-        scope["agent_identity"] = agent_identity
-    if agent_workspace:
-        scope["agent_workspace"] = agent_workspace
     if timezone_name and timezone_name != "UTC":
         scope["timezone"] = timezone_name
-    personal_scope_key = _build_personal_scope_key(platform=platform, user_id=user_id)
-    if personal_scope_key:
-        scope["personal_scope_key"] = personal_scope_key
-    key_parts: List[str] = []
-    for key in ("platform", "user_id", "agent_identity", "agent_workspace"):
-        value = str(scope.get(key) or "").strip()
-        if value:
-            key_parts.append(f"{key}:{value}")
-    if key_parts:
-        scope["principal_scope_key"] = "|".join(key_parts)
     return scope
 
 

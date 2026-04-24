@@ -25,7 +25,7 @@ Brainstack is built from three donor lines, then reshaped into one Hermes-native
 | :--- | :--- | :--- |
 | **L1** | **[Hindsight](https://github.com/vectorize-io/hindsight)** | temporal carry-through, bounded recent history, after-turn continuity |
 | **L2** | **[Graphiti](https://github.com/getzep/graphiti)** | entity/relation memory, temporal truth, conflict-aware graph state |
-| **L3** | **[MemPalace](https://github.com/yepyhun/MemPalace)** | large-corpus retrieval, FTS/semantic fusion, packed evidence recall |
+| **L3** | **[MemPalace](https://github.com/MemPalace/mempalace)** | large-corpus retrieval, source/chunk identity, packed cited evidence recall |
 
 Additional patterns also shape the current code:
 
@@ -85,7 +85,7 @@ Transcript is evidence. Graph is truth. Corpus is corpus. Profile is profile. Th
 
 - be one of the strongest practical local-first memory stacks for always-on Hermes agents
 - combine temporal continuity, graph truth, and corpus retrieval in one system
-- keep runtime ownership inside Brainstack instead of letting three half-systems fight each other
+- keep memory ownership inside Brainstack instead of letting three half-systems fight each other
 - stay useful in real deployed runs, not just in architecture diagrams
 
 ## Current status

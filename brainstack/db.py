@@ -53,6 +53,12 @@ from .semantic_evidence import (
     semantic_evidence_fingerprint,
     semantic_similarity,
 )
+from .scope_identity import (
+    PERSONAL_SCOPE_KEY_FIELDS,
+    PRINCIPAL_SCOPE_KEY_FIELDS,
+    scope_key_from_payload,
+    scope_payload_from_key,
+)
 from .style_contract import (
     STYLE_CONTRACT_DOC_KIND,
     STYLE_CONTRACT_SLOT,
@@ -77,8 +83,6 @@ NUMERIC_TOKEN_RE = re.compile(r"\d+(?::\d+)?(?:\.\d+)?")
 QUERY_TOKEN_RE = re.compile(r"[^\W_]+(?:[-_][^\W_]+)*", re.UNICODE)
 PROFILE_SCOPE_DELIMITER = "::principal_scope::"
 PRINCIPAL_SCOPED_PROFILE_CATEGORIES = {"identity", "preference"}
-PRINCIPAL_SCOPE_KEY_FIELDS = ("platform", "user_id", "agent_identity", "agent_workspace")
-PERSONAL_SCOPE_KEY_FIELDS = ("platform", "user_id")
 VOLATILE_OPERATING_RECORD_TYPES = {"session_state"}
 VOLATILE_OPERATING_MIN_SEMANTIC_SCORE = 0.5
 MIGRATION_CANONICAL_COMMUNICATION_ROWS_V1 = "canonical_communication_rows_v1"
@@ -430,28 +434,11 @@ def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
 
 
 def _scope_payload_from_key(scope_key: str) -> Dict[str, str]:
-    payload: Dict[str, str] = {}
-    for raw_part in str(scope_key or "").split("|"):
-        part = str(raw_part or "").strip()
-        if not part or ":" not in part:
-            continue
-        key, value = part.split(":", 1)
-        normalized_key = str(key or "").strip()
-        normalized_value = str(value or "").strip()
-        if normalized_key and normalized_value:
-            payload[normalized_key] = normalized_value
-    return payload
+    return scope_payload_from_key(scope_key)
 
 
 def _scope_key_from_payload(payload: Mapping[str, Any] | None, *, fields: Iterable[str]) -> str:
-    if not isinstance(payload, Mapping):
-        return ""
-    parts: List[str] = []
-    for key in fields:
-        value = str(payload.get(key) or "").strip()
-        if value:
-            parts.append(f"{key}:{value}")
-    return "|".join(parts)
+    return scope_key_from_payload(payload, fields=fields)
 
 
 def _principal_scope_key_from_metadata(metadata: Mapping[str, Any] | None) -> str:
@@ -525,6 +512,7 @@ def _annotate_principal_scope(
     *,
     principal_scope_key: str,
     session_id: str | None = None,
+    allow_personal_scope_fallback: bool = True,
 ) -> bool:
     current_principal_scope_key = str(principal_scope_key or "").strip()
     current_personal_scope_key = _personal_scope_key_from_principal_scope_key(current_principal_scope_key)
@@ -550,7 +538,7 @@ def _annotate_principal_scope(
         )
     if item_scope_key == current_principal_scope_key:
         return True
-    if current_personal_scope_key and item_personal_scope_key == current_personal_scope_key:
+    if allow_personal_scope_fallback and current_personal_scope_key and item_personal_scope_key == current_personal_scope_key:
         return True
     if session_id is not None and str(item.get("session_id") or "") == session_id:
         return True
@@ -2519,6 +2507,8 @@ class BrainstackStore:
         if not document_row:
             raise RuntimeError(f"Missing corpus document for snapshot: {document_id}")
         document = _row_to_dict(document_row)
+        if not bool(document.get("active")):
+            return {"document": document, "sections": []}
         section_rows = self.conn.execute(
             """
             SELECT
@@ -2696,6 +2686,7 @@ class BrainstackStore:
                 item,
                 principal_scope_key=requested_scope_key,
                 session_id=session_id,
+                allow_personal_scope_fallback=False,
             ):
                 continue
             key = (str(item.get("session_id") or ""), int(item.get("id") or 0))
@@ -2895,6 +2886,7 @@ class BrainstackStore:
                 item,
                 principal_scope_key=current_principal_scope_key,
                 session_id=session_id,
+                allow_personal_scope_fallback=False,
             ):
                 continue
             metadata = dict(item.get("metadata") or {})
@@ -2992,6 +2984,7 @@ class BrainstackStore:
                 item,
                 principal_scope_key=current_principal_scope_key,
                 session_id=session_id,
+                allow_personal_scope_fallback=False,
             ):
                 continue
             item["same_session"] = item["session_id"] == session_id
@@ -4748,6 +4741,87 @@ class BrainstackStore:
         }
 
     @_locked
+    def deactivate_corpus_source(self, *, stable_key: str) -> Dict[str, Any]:
+        normalized_key = str(stable_key or "").strip()
+        if not normalized_key:
+            raise ValueError("corpus source stable_key is required")
+        row = self.conn.execute(
+            """
+            SELECT id, stable_key, title, doc_kind, source, active, metadata_json, updated_at
+            FROM corpus_documents
+            WHERE stable_key = ?
+            """,
+            (normalized_key,),
+        ).fetchone()
+        if row is None:
+            return {
+                "schema": "brainstack.corpus_lifecycle_receipt.v1",
+                "status": "not_found",
+                "stable_key": normalized_key,
+                "document_id": None,
+                "semantic_backend_status": "not_applicable",
+            }
+
+        document_id = int(row["id"])
+        was_active = bool(row["active"])
+        semantic_backend_status = "not_configured"
+        if self._corpus_backend is not None:
+            delete_snapshot = {
+                "document": {
+                    "id": document_id,
+                    "stable_key": str(row["stable_key"] or normalized_key),
+                    "title": str(row["title"] or ""),
+                    "doc_kind": str(row["doc_kind"] or ""),
+                    "source": str(row["source"] or ""),
+                    "metadata": _decode_json_object(row["metadata_json"]),
+                    "updated_at": str(row["updated_at"] or ""),
+                    "active": False,
+                },
+                "sections": [],
+            }
+            try:
+                self._publish_semantic_snapshot(
+                    object_kind="corpus_document",
+                    object_key=normalized_key,
+                    snapshot=delete_snapshot,
+                    raise_on_error=True,
+                )
+            except Exception as exc:
+                self._corpus_backend_error = str(exc)
+                semantic_backend_status = "failed"
+                return {
+                    "schema": "brainstack.corpus_lifecycle_receipt.v1",
+                    "status": "degraded",
+                    "stable_key": normalized_key,
+                    "document_id": document_id,
+                    "active": False,
+                    "semantic_backend_status": semantic_backend_status,
+                    "error": str(exc),
+                }
+            semantic_backend_status = "deleted"
+
+        if was_active:
+            now = utc_now_iso()
+            self.conn.execute(
+                "UPDATE corpus_documents SET active = 0, updated_at = ? WHERE id = ?",
+                (now, document_id),
+            )
+            self.conn.commit()
+
+        self._refresh_semantic_evidence_shelf(
+            shelf="corpus",
+            metadata=_decode_json_object(row["metadata_json"]),
+        )
+        return {
+            "schema": "brainstack.corpus_lifecycle_receipt.v1",
+            "status": "deactivated" if was_active else "unchanged",
+            "stable_key": normalized_key,
+            "document_id": document_id,
+            "active": False,
+            "semantic_backend_status": semantic_backend_status,
+        }
+
+    @_locked
     def corpus_ingest_status(self, *, principal_scope_key: str = "") -> Dict[str, Any]:
         requested_scope = str(principal_scope_key or "").strip()
         versions = corpus_ingest_versions()
@@ -4832,6 +4906,16 @@ class BrainstackStore:
             "stale_count": len(stale_documents),
             "missing_metadata_count": missing_metadata_count,
             "stale_documents": stale_documents[:20],
+            "capabilities": {
+                "add": True,
+                "update": True,
+                "delete": True,
+                "reingest": True,
+                "idempotency": True,
+                "bounded_recall": True,
+                "citation_projection": True,
+                "semantic_backend": self._corpus_backend is not None,
+            },
         }
 
     @_locked
@@ -4984,6 +5068,7 @@ class BrainstackStore:
                 item,
                 principal_scope_key=principal_scope_key,
                 session_id=session_id,
+                allow_personal_scope_fallback=False,
             ):
                 continue
             output.append(item)

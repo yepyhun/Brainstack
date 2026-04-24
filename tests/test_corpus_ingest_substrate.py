@@ -70,6 +70,27 @@ def test_corpus_reingest_replaces_stale_sections_without_duplicate_documents(tmp
         store.close()
 
 
+def test_corpus_lifecycle_deactivate_hides_document_and_allows_reingest(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        inserted = store.ingest_corpus_source(_source_payload("Retire me.", stable_key="doc:lifecycle"))
+        receipt = store.deactivate_corpus_source(stable_key="doc:lifecycle")
+
+        assert receipt["status"] == "deactivated"
+        assert receipt["document_id"] == inserted["document_id"]
+        assert receipt["semantic_backend_status"] == "not_configured"
+        assert store.search_corpus(query="Retire me", limit=3) == []
+        status = store.corpus_ingest_status(principal_scope_key=PRINCIPAL_SCOPE)
+        assert status["capabilities"]["delete"] is True
+
+        reingested = store.ingest_corpus_source(_source_payload("Restored body.", stable_key="doc:lifecycle"))
+        assert reingested["document_id"] == inserted["document_id"]
+        assert reingested["status"] == "updated"
+        assert store.search_corpus(query="Restored body", limit=3)
+    finally:
+        store.close()
+
+
 def test_corpus_ingest_status_detects_stale_legacy_document_metadata(tmp_path: Path) -> None:
     store = _open_store(tmp_path)
     try:
