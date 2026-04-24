@@ -12,6 +12,5 @@ cron/
 auth.lock
 SOUL.md
 reports/
-tests/
 brainstack.chroma/
 brainstack.kuzu

@@ -251,6 +251,23 @@ update_hermes_with_brainstack.py
 | `brainstack_doctor.py` | Validate install assumptions and fail closed when upstream changed something important |
 | `scripts/brainstack_refresh_donors.py` | Report donor state and run bounded refresh workflow |
 
+## Reproducible quality gates
+
+Use these gates before publishing a release or changing memory-kernel behavior:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m ruff check brainstack scripts tests
+python -m mypy brainstack scripts
+python -m pytest tests
+python scripts/brainstack_golden_recall_eval.py
+python scripts/brainstack_multilingual_multimodal_gate.py
+python install_into_hermes.py --help
+python brainstack_doctor.py --help
+```
+
+The tracked test suite is intentionally host-shimmed where needed. Brainstack remains a Hermes plugin, so install and doctor smoke checks are part of release readiness; passing local unit tests alone is not a production-readiness claim.
+
 ## Installation into Hermes
 
 Brainstack is meant to be installed into a fresh Hermes checkout, not copied around by hand.
