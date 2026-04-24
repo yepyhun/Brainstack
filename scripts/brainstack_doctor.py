@@ -257,6 +257,19 @@ def _check_target_shape(target: Path) -> list[Check]:
     return checks
 
 
+def _has_private_recall_wrapper(memory_manager: str) -> bool:
+    legacy_private_instruction = (
+        "Apply it silently in your reply." in memory_manager
+        and "unless the user explicitly asks about memory behavior or debugging" in memory_manager
+    )
+    fenced_context_wrapper = (
+        "<memory-context>" in memory_manager
+        and "NOT new user input" in memory_manager
+        and "sanitize_context" in memory_manager
+    )
+    return legacy_private_instruction or fenced_context_wrapper
+
+
 def _check_host_surfaces(target: Path) -> list[Check]:
     checks: list[Check] = []
     memory_provider = _read(target / "agent" / "memory_provider.py")
@@ -295,7 +308,7 @@ def _check_host_surfaces(target: Path) -> list[Check]:
     else:
         checks.append(Check("memory_manager_surface", "pass", "MemoryManager can load, prefetch, sync, and run lifecycle hooks"))
 
-    if "Apply it silently in your reply." in memory_manager and "unless the user explicitly asks about memory behavior or debugging" in memory_manager:
+    if _has_private_recall_wrapper(memory_manager):
         checks.append(Check("private_recall_wrapper", "pass", "MemoryManager wraps recalled context as private internal guidance"))
     else:
         checks.append(Check("private_recall_wrapper", "fail", "agent/memory_manager.py still exposes recalled context too weakly"))
@@ -614,6 +627,8 @@ def _check_config(
                     "Could not verify Python kuzu package importability from this exec surface because Docker API access is unavailable",
                 )
             )
+        elif planned_install:
+            checks.append(Check("graph_backend_dependency", "pass", "Python kuzu package is not present yet, but installer will add it"))
         else:
             checks.append(Check("graph_backend_dependency", "fail", "Python kuzu package is missing for graph_backend='kuzu' in the active runtime"))
     elif planned_install:
@@ -640,6 +655,8 @@ def _check_config(
                     "Could not verify Python chromadb package importability from this exec surface because Docker API access is unavailable",
                 )
             )
+        elif planned_install:
+            checks.append(Check("corpus_backend_dependency", "pass", "Python chromadb package is not present yet, but installer will add it"))
         else:
             checks.append(Check("corpus_backend_dependency", "fail", "Python chromadb package is missing for corpus_backend='chroma' in the active runtime"))
     elif planned_install:
@@ -865,7 +882,14 @@ def _check_docker_helpers(target: Path, planned_install: bool) -> list[Check]:
 def run_doctor(args: argparse.Namespace) -> tuple[int, list[Check]]:
     target = Path(args.target).expanduser().resolve()
     config_path = Path(args.config).expanduser().resolve() if args.config else _default_config_path(target)
-    compose_path = Path(args.compose_file).expanduser().resolve() if args.compose_file else _default_compose_path(target, config_path)
+    compose_path: Path | None = None
+    if args.compose_file:
+        compose_path = Path(args.compose_file).expanduser().resolve()
+    elif args.runtime != "local":
+        try:
+            compose_path = _default_compose_path(target, config_path)
+        except RuntimeError:
+            compose_path = None
     launcher = Path(args.desktop_launcher).expanduser().resolve() if args.desktop_launcher else _default_desktop_launcher(target)
     python_bin = Path(args.python).expanduser() if args.python else _default_target_python(target)
     runtime = _infer_runtime(target, args.runtime, compose_path, launcher)

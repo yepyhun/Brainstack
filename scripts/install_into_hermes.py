@@ -2696,7 +2696,7 @@ def _run_doctor(
         python=str(args.python or _default_target_python(target)) if (args.python or _default_target_python(target)) else None,
         runtime=args.runtime,
         planned_install=planned_install,
-        check_docker=True,
+        check_docker=args.runtime != "local",
         check_desktop_launcher=True,
         json=False,
     )
@@ -2753,7 +2753,7 @@ def main() -> int:
         return 2
 
     compose_path: Path | None = None
-    if args.runtime == "docker" or args.compose_file or args.doctor:
+    if args.runtime == "docker" or args.compose_file:
         if config_path is None and not args.compose_file:
             print(
                 "FAIL Docker runtime install requires a concrete agent config or an explicit --compose-file.",
