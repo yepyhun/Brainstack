@@ -11,6 +11,7 @@ upstream Hermes seams rather than Brainstack installer responsibilities.
 from __future__ import annotations
 
 import argparse
+import ast
 import fnmatch
 import hashlib
 import importlib.util
@@ -627,9 +628,44 @@ def _replace_once_any(
     raise RuntimeError(f"Installer patch anchor missing for {label} in {path}")
 
 
+def _memory_write_signature_accepts_metadata(text: str) -> bool:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "on_memory_write":
+            arg_names = {arg.arg for arg in [*node.args.args, *node.args.kwonlyargs]}
+            return "metadata" in arg_names
+    return False
+
+
+def _memory_manager_forwards_write_metadata(text: str) -> bool:
+    if not _memory_write_signature_accepts_metadata(text):
+        return False
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute) or func.attr != "on_memory_write":
+            continue
+        if any(keyword.arg == "metadata" for keyword in node.keywords):
+            return True
+        if len(node.args) >= 4:
+            return True
+    return False
+
+
 def _patch_memory_manager_required_seam(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
+
+    if _memory_manager_forwards_write_metadata(text):
+        return []
 
     metadata_signature = "def on_memory_write(self, action: str, target: str, content: str, metadata: dict | None = None) -> None:"
     if metadata_signature not in text:
@@ -717,6 +753,9 @@ def _patch_memory_manager(path: Path, dry_run: bool) -> list[str]:
 def _patch_memory_provider(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
+
+    if _memory_write_signature_accepts_metadata(text):
+        return []
 
     metadata_doc = "    def on_memory_write(self, action: str, target: str, content: str, metadata: dict[str, Any] | None = None) -> None:\n"
     if metadata_doc not in text:
@@ -1712,7 +1751,8 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
         applied.append("run_agent:skip_interrupted_transcript_sync")
 
     background_origin = '                    review_agent._brainstack_memory_write_origin = "background_review"\n'
-    if background_origin not in text:
+    native_background_origin = 'review_agent._memory_write_origin = "background_review"'
+    if background_origin not in text and native_background_origin not in text:
         old_review_setup = (
             "                    review_agent._memory_store = self._memory_store\n"
             "                    review_agent._memory_enabled = self._memory_enabled\n"
