@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from typing import Any, Dict, Mapping
 
-from .operating_truth import OPERATING_RECORD_TYPES
+from .operating_truth import OPERATING_RECORD_TYPES, recent_work_authority_rank
 from .semantic_evidence import normalize_semantic_terms, semantic_similarity
 from .structured_understanding import (
     ROUTE_MODES,
@@ -316,7 +316,7 @@ def _operating_projection(row: Mapping[str, Any]) -> str:
 def _operating_record_type_priority(row: Mapping[str, Any]) -> float:
     record_type = str(row.get("record_type") or "").strip()
     if record_type == "recent_work_summary":
-        return 1.0
+        return 1.0 if recent_work_authority_rank(dict(row)) >= 200 else 0.1
     if record_type in {
         "completed_outcome",
         "discarded_work",

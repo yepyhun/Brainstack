@@ -33,7 +33,11 @@ from .profile_contract import (
     normalize_profile_slot,
 )
 from .operating_context import build_operating_context_snapshot
-from .operating_truth import OPERATING_RECORD_TYPES
+from .operating_truth import (
+    OPERATING_RECORD_RECENT_WORK_SUMMARY,
+    OPERATING_RECORD_TYPES,
+    normalize_operating_record_metadata,
+)
 from .provenance import merge_provenance
 from .semantic_evidence import (
     SEMANTIC_EVIDENCE_INDEX_VERSION,
@@ -79,6 +83,7 @@ MIGRATION_BEHAVIOR_CONTRACT_STORAGE_V1 = "behavior_contract_storage_v1"
 MIGRATION_COMPILED_BEHAVIOR_POLICY_V1 = "compiled_behavior_policy_v1"
 MIGRATION_COMPILED_BEHAVIOR_POLICY_V2 = "compiled_behavior_policy_v2"
 MIGRATION_STYLE_CONTRACT_BEHAVIOR_DEMOTION_V1 = "style_contract_behavior_demotion_v1"
+MIGRATION_RECENT_WORK_AUTHORITY_V1 = "recent_work_authority_v1"
 TRANSCRIPT_HYGIENE_MARKERS = (
     "Assistant: Operation interrupted:",
     "Assistant: Session reset.",
@@ -344,17 +349,26 @@ def _task_match_score(
 
 
 def _operating_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    record_type = str(row["record_type"] or "")
+    stable_key = str(row["stable_key"] or "")
+    source = str(row["source"] or "")
+    metadata = normalize_operating_record_metadata(
+        record_type=record_type,
+        stable_key=stable_key,
+        source=source,
+        metadata=_decode_json_object(row["metadata_json"]),
+    )
     return {
         "id": int(row["id"]),
-        "stable_key": str(row["stable_key"] or ""),
+        "stable_key": stable_key,
         "principal_scope_key": str(row["principal_scope_key"] or ""),
-        "record_type": str(row["record_type"] or ""),
+        "record_type": record_type,
         "content": str(row["content"] or ""),
         "owner": str(row["owner"] or ""),
-        "source": str(row["source"] or ""),
+        "source": source,
         "source_session_id": str(row["source_session_id"] or ""),
         "source_turn_number": int(row["source_turn_number"] or 0),
-        "metadata": _decode_json_object(row["metadata_json"]),
+        "metadata": metadata,
         "created_at": str(row["created_at"] or ""),
         "updated_at": str(row["updated_at"] or ""),
     }
@@ -944,6 +958,8 @@ class BrainstackStore:
             self._apply_compiled_behavior_policy_migration_v2()
         if not self._migration_applied(MIGRATION_STYLE_CONTRACT_BEHAVIOR_DEMOTION_V1):
             self._apply_style_contract_behavior_demotion_migration_v1()
+        if not self._migration_applied(MIGRATION_RECENT_WORK_AUTHORITY_V1):
+            self._apply_recent_work_authority_migration_v1()
 
     def _migration_applied(self, name: str) -> bool:
         row = self.conn.execute(
@@ -964,6 +980,45 @@ class BrainstackStore:
             """,
             (migration_name, utc_now_iso()),
         )
+
+    @_locked
+    def _apply_recent_work_authority_migration_v1(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT id, stable_key, record_type, source, metadata_json
+            FROM operating_records
+            WHERE record_type = ?
+            ORDER BY id ASC
+            """,
+            (OPERATING_RECORD_RECENT_WORK_SUMMARY,),
+        ).fetchall()
+        migrated = 0
+        for row in rows:
+            metadata = normalize_operating_record_metadata(
+                record_type=str(row["record_type"] or ""),
+                stable_key=str(row["stable_key"] or ""),
+                source=str(row["source"] or ""),
+                metadata=_decode_json_object(row["metadata_json"]),
+            )
+            previous = _decode_json_object(row["metadata_json"])
+            if metadata == previous:
+                continue
+            self.conn.execute(
+                "UPDATE operating_records SET metadata_json = ?, updated_at = updated_at WHERE id = ?",
+                (
+                    json.dumps(metadata, ensure_ascii=True, sort_keys=True),
+                    int(row["id"]),
+                ),
+            )
+            migrated += 1
+        self._mark_migration_applied(MIGRATION_RECENT_WORK_AUTHORITY_V1)
+        self.conn.commit()
+        if migrated:
+            self._refresh_semantic_evidence_shelf(
+                shelf="operating",
+                principal_scope_key="",
+                metadata={"migration": MIGRATION_RECENT_WORK_AUTHORITY_V1},
+            )
 
     @_locked
     def _apply_canonical_communication_rows_migration_v1(self) -> None:
@@ -3827,12 +3882,18 @@ class BrainstackStore:
             "SELECT id, metadata_json FROM operating_records WHERE stable_key = ?",
             (str(stable_key or "").strip(),),
         ).fetchone()
-        meta_json = json.dumps(
-            _merge_record_metadata(
+        merged_metadata = normalize_operating_record_metadata(
+            record_type=str(record_type or "").strip(),
+            stable_key=str(stable_key or "").strip(),
+            source=str(source or "").strip(),
+            metadata=_merge_record_metadata(
                 existing["metadata_json"] if existing else None,
                 metadata,
                 source=source,
             ),
+        )
+        meta_json = json.dumps(
+            merged_metadata,
             ensure_ascii=True,
             sort_keys=True,
         )

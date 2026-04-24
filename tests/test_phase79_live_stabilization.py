@@ -6,7 +6,7 @@ from pathlib import Path
 from brainstack import BrainstackMemoryProvider
 from brainstack.db import BrainstackStore
 from brainstack.diagnostics import build_memory_kernel_doctor, build_query_inspect
-from brainstack.operating_truth import OPERATING_OWNER
+from brainstack.operating_truth import OPERATING_OWNER, recent_work_stable_key
 from brainstack.runtime_handoff_io import summarize_runtime_handoff_dirs
 from scripts import brainstack_doctor
 
@@ -161,7 +161,10 @@ def test_recent_work_operating_truth_beats_weak_stale_transcript_residue(monkeyp
     store = _open_store(tmp_path)
     try:
         store.upsert_operating_record(
-            stable_key="operating_truth::recent_work",
+            stable_key=recent_work_stable_key(
+                principal_scope_key=PRINCIPAL_SCOPE,
+                workstream_id="phase79-live-stabilization",
+            ),
             principal_scope_key=PRINCIPAL_SCOPE,
             record_type="recent_work_summary",
             content=(
@@ -172,6 +175,7 @@ def test_recent_work_operating_truth_beats_weak_stale_transcript_residue(monkeyp
             source="test:phase79",
             metadata={
                 "principal_scope_key": PRINCIPAL_SCOPE,
+                "workstream_id": "phase79-live-stabilization",
                 "semantic_terms": ["Brainstack development stabilization"],
             },
         )

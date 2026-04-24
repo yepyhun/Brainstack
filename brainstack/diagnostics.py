@@ -268,6 +268,8 @@ def _candidate_evidence_key(shelf: str, candidate: Mapping[str, Any]) -> str:
 def _summarize_rows(shelf: str, rows: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
     output: list[Dict[str, Any]] = []
     for row in rows:
+        raw_metadata = row.get("metadata")
+        metadata: Dict[str, Any] = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
         output.append(
             {
                 "evidence_key": _evidence_key(shelf, row),
@@ -285,6 +287,9 @@ def _summarize_rows(shelf: str, rows: list[Dict[str, Any]]) -> list[Dict[str, An
                 "same_session": bool(row.get("same_session")),
                 "same_principal": bool(row.get("same_principal")),
                 "suppression_reason": row.get("_brainstack_suppression_reason", ""),
+                "authority_level": metadata.get("authority_level", ""),
+                "workstream_id": metadata.get("workstream_id", ""),
+                "source_kind": metadata.get("source_kind", ""),
                 "citation_id": row.get("citation_id", ""),
                 "document_hash": row.get("document_hash", ""),
                 "section_hash": row.get("section_hash", ""),
@@ -373,6 +378,8 @@ def build_query_inspect(
                 "shelf": shelf,
                 "reason": "Candidate was not selected by route, authority, dedupe, or packet budget.",
                 "suppression_reason": str(candidate.get("suppression_reason") or ""),
+                "authority_level": str(candidate.get("operating_authority_level") or ""),
+                "workstream_id": str(candidate.get("workstream_id") or ""),
                 "channel_ranks": dict(candidate.get("channel_ranks") or {}),
                 "keyword_score": float(candidate.get("keyword_score") or 0.0),
                 "semantic_score": float(candidate.get("semantic_score") or 0.0),

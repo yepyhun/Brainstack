@@ -11,6 +11,8 @@ from .db import BrainstackStore
 from .operating_truth import (
     OPERATING_RECORD_TYPES,
     RECENT_WORK_RECAP_RECORD_TYPES,
+    is_background_recent_work,
+    recent_work_authority_rank,
 )
 from .profile_contract import is_native_explicit_style_item
 from .style_contract import STYLE_CONTRACT_SLOT
@@ -276,6 +278,11 @@ def _candidate_priority_bonus(candidate: EvidenceCandidate) -> float:
 def _operating_record_type_bonus(row: Mapping[str, Any]) -> float:
     record_type = str(row.get("record_type") or "").strip()
     if record_type == "recent_work_summary":
+        authority_rank = recent_work_authority_rank(dict(row))
+        if authority_rank <= 20:
+            return -0.08
+        if authority_rank >= 300:
+            return 0.18
         return 0.16
     if record_type in RECENT_WORK_RECAP_RECORD_TYPES:
         return 0.12
@@ -1067,9 +1074,23 @@ def _profile_keyword_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dic
 
 
 def _operating_channel_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
-    ranked = list(enumerate(_dedupe_rows(rows)))
+    deduped = _dedupe_rows(rows)
+    has_authoritative_recent_work = any(
+        str(row.get("record_type") or "").strip() == "recent_work_summary"
+        and not is_background_recent_work(row)
+        for row in deduped
+    )
+    if has_authoritative_recent_work:
+        for row in deduped:
+            if is_background_recent_work(row):
+                row["_brainstack_suppression_reason"] = (
+                    "background_recent_work_summary: unscoped recent-work summary is "
+                    "background evidence when scoped operating truth is available"
+                )
+    ranked = list(enumerate(deduped))
     ranked.sort(
         key=lambda item: (
+            recent_work_authority_rank(item[1]),
             float(item[1].get("keyword_score") or 0.0),
             str(item[1].get("updated_at") or ""),
             -0.05 * item[0],
@@ -1256,6 +1277,8 @@ def _select_rows(
         suppression_reason = _weak_cross_session_keyword_residue_reason(candidate)
         if suppression_reason:
             candidate.row["_brainstack_suppression_reason"] = suppression_reason
+            continue
+        if str(candidate.row.get("_brainstack_suppression_reason") or ""):
             continue
         if candidate.shelf == "profile" and len(profile_items) < profile_limit:
             stable_key = str(row.get("stable_key") or "").strip()
@@ -1945,6 +1968,16 @@ def retrieve_executive_context(
                 "query_token_overlap": int(candidate.row.get("_brainstack_query_token_overlap") or 0),
                 "query_token_count": int(candidate.row.get("_brainstack_query_token_count") or 0),
                 "same_session": bool(candidate.row.get("same_session")),
+                "operating_authority_level": str(
+                    (candidate.row.get("metadata") or {}).get("authority_level")
+                    if isinstance(candidate.row.get("metadata"), dict)
+                    else ""
+                ),
+                "workstream_id": str(
+                    (candidate.row.get("metadata") or {}).get("workstream_id")
+                    if isinstance(candidate.row.get("metadata"), dict)
+                    else ""
+                ),
                 "suppression_reason": str(candidate.row.get("_brainstack_suppression_reason") or ""),
                 "content_excerpt": _candidate_text(candidate)[:220],
             }

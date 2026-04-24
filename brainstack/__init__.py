@@ -47,7 +47,9 @@ from .operating_truth import (
     OPERATING_RECORD_RECENT_WORK_SUMMARY,
     OPERATING_RECORD_RUNTIME_APPROVAL_POLICY,
     build_operating_stable_key,
+    normalize_recent_work_metadata,
     parse_operating_capture,
+    recent_work_stable_key,
 )
 from .output_contract import validate_output_against_contract
 from .profile_contract import (
@@ -927,6 +929,15 @@ class BrainstackMemoryProvider(MemoryProvider):
                             explicit_rule_id,
                         ]
                     )
+                elif record_type == OPERATING_RECORD_RECENT_WORK_SUMMARY:
+                    stable_key = recent_work_stable_key(
+                        principal_scope_key=self._principal_scope_key,
+                        workstream_id=str(combined_metadata.get("workstream_id") or ""),
+                    ) or build_operating_stable_key(
+                        principal_scope_key=self._principal_scope_key,
+                        record_type=record_type,
+                        content=content_text,
+                    )
                 else:
                     stable_key = build_operating_stable_key(
                         principal_scope_key=self._principal_scope_key,
@@ -1022,11 +1033,21 @@ class BrainstackMemoryProvider(MemoryProvider):
         compact_summary = trim_text_boundary(_normalize_compact_text(content), max_len=280)
         if not compact_summary:
             return False
+        recent_work_metadata = normalize_recent_work_metadata(
+            stable_key="",
+            source=source,
+            metadata=dict(metadata or {}),
+        )
+        stable_key_override = recent_work_stable_key(
+            principal_scope_key=self._principal_scope_key,
+            workstream_id=str(recent_work_metadata.get("workstream_id") or ""),
+        )
         return self._upsert_brainstack_operating_record(
             record_type=OPERATING_RECORD_RECENT_WORK_SUMMARY,
             content=compact_summary,
             source=source,
-            metadata=metadata,
+            metadata=recent_work_metadata,
+            stable_key_override=stable_key_override,
         )
 
     def _promote_open_decisions(

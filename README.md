@@ -199,6 +199,7 @@ What is currently true:
 - graph, transcript, continuity, and corpus shelves remain distinct instead of collapsing into one flat memory blob
 - doctor output distinguishes active backends from explicit degraded states instead of treating silent fallback as success
 - release hygiene tooling rejects tracked private runtime state, local planning state, and high-confidence secret-shaped payloads
+- recent-work operating truth is workstream-scoped so project status and agent assignments do not collapse into one canonical memory
 
 What is not claimed:
 
@@ -383,3 +384,4 @@ The current corrective direction is narrow and concrete:
 - reduce installer host edits toward native Hermes seams wherever upstream already provides the surface
 - make backend degradation, runtime handoff, and recall packet selection inspectable before claiming confidence
 - keep exact-fact, recent-work, and stale-residue handling universal rather than live-case-specific
+- keep recent-work authority scoped by workstream instead of promoting unscoped idle summaries as canonical truth
