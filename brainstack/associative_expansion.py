@@ -177,6 +177,8 @@ def build_associative_expansion(
             for anchor in _anchor_values(seed):
                 if search_count >= max_searches or len(included) >= max_candidates:
                     break
+                seed_row_type = str(seed.get("row_type") or "").strip()
+                anchor_kind = "subject" if anchor == _normalize_text(seed.get("subject")) else "object_value"
                 search_count += 1
                 rows = [
                     dict(row)
@@ -211,6 +213,14 @@ def build_associative_expansion(
                         query_terms=query_terms,
                         depth=depth,
                     )
+                    if (
+                        accepted
+                        and seed_row_type not in {"relation", "inferred_relation"}
+                        and anchor_kind == "object_value"
+                        and overlap < 2
+                    ):
+                        accepted = False
+                        reason = "non_relation_value_anchor_requires_stronger_query_relevance"
                     if not accepted:
                         suppressed.append(
                             {

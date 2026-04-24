@@ -11,6 +11,7 @@ from .profile_contract import (
     normalize_profile_slot,
 )
 from .style_contract import STYLE_CONTRACT_SLOT, normalize_style_contract_payload
+from .temporal import normalize_temporal_fields
 from .transcript import split_turn_content
 
 
@@ -371,15 +372,27 @@ def _normalize_states(items: Any) -> List[Dict[str, Any]]:
         value = _normalize_text(raw.get("value"))
         if not subject or not attribute or not value or _should_drop_state(attribute=attribute, value=value):
             continue
-        normalized.append(
-            {
-                "subject": subject,
-                "attribute": attribute,
-                "value": value,
-                "supersede": bool(raw.get("supersede", False)),
-                "confidence": _coerce_confidence(raw.get("confidence"), default=0.82),
-            }
-        )
+        item: Dict[str, Any] = {
+            "subject": subject,
+            "attribute": attribute,
+            "value": value,
+            "supersede": bool(raw.get("supersede", False)),
+            "confidence": _coerce_confidence(raw.get("confidence"), default=0.82),
+        }
+        temporal_payload = raw.get("temporal_scope") if isinstance(raw.get("temporal_scope"), Mapping) else raw.get("temporal")
+        if isinstance(temporal_payload, Mapping):
+            temporal = normalize_temporal_fields(
+                observed_at=temporal_payload.get("observed_at"),
+                valid_at=temporal_payload.get("valid_at"),
+                valid_from=temporal_payload.get("valid_from"),
+                valid_to=temporal_payload.get("valid_to"),
+                supersedes=temporal_payload.get("supersedes"),
+                superseded_by=temporal_payload.get("superseded_by"),
+                episode_id=temporal_payload.get("episode_id"),
+            )
+            if temporal:
+                item["temporal"] = temporal
+        normalized.append(item)
     return normalized[:8]
 
 
@@ -610,7 +623,7 @@ def extract_tier2_candidates(
                 "{\n"
                 '  "profile_items": [{"category":"identity|preference|shared_work","content":"...","slot":"optional-stable-slot","confidence":0.0}],\n'
                 '  "style_contract": {"title":"optional explicit pack name or empty string","sections":[{"heading":"...","lines":["..."]}],"confidence":0.0} | null,\n'
-                '  "states": [{"subject":"...","attribute":"...","value":"...","supersede":true,"confidence":0.0}],\n'
+                '  "states": [{"subject":"...","attribute":"...","value":"...","supersede":true,"confidence":0.0,"temporal":{"observed_at":"optional ISO time","valid_from":"optional ISO time","valid_to":"optional ISO time"}}],\n'
                 '  "relations": [{"subject":"...","predicate":"...","object":"...","confidence":0.0}],\n'
                 '  "inferred_relations": [{"subject":"...","predicate":"...","object":"...","confidence":0.0,"reason":"short evidence"}],\n'
                 '  "typed_entities": [{"turn_number":0,"name":"specific short label","entity_type":"snake_case_type","subject":"User","attributes":{"metric_key":"value"},"confidence":0.0}],\n'
@@ -639,6 +652,8 @@ def extract_tier2_candidates(
                 "- use explicit entity names when clear, otherwise use User\n"
                 "- inferred_relations are optional; include them only when a relation is strongly implied by multiple transcript cues or stable shared context\n"
                 "- keep inferred_relations bounded and conservative; omit weak guesses\n"
+                "- state temporal fields are optional and must be ISO timestamps already grounded by the transcript batch; never guess relative durations\n"
+                "- if a state has relative time but no absolute validity window, omit temporal fields rather than inventing dates\n"
                 "- typed_entities are optional; use them only for durable user-owned real-world events, purchases, repeated activities, or routines that would support later aggregate queries\n"
                 "- when emitting typed_entities, keep attributes compact and scalar; prefer reusable keys like distance_miles, amount_usd, duration_days, count, destination, or category over prose\n"
                 "- do not replace temporal_events with typed_entities; when both help, emit both compactly\n"

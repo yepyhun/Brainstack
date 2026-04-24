@@ -1,5 +1,5 @@
 name: brainstack
-version: 1.0.25
+version: 1.0.26
 description: "Brainstack — continuity, profile, graph-truth, and corpus memory behind the Hermes composite provider boundary."
 hooks:
   - on_turn_start

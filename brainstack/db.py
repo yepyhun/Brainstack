@@ -19,6 +19,13 @@ from .behavior_policy import (
 )
 from .corpus_ingest import corpus_ingest_versions, normalize_corpus_source
 from .corpus_backend import CorpusBackend, create_corpus_backend
+from .db_row_codecs import (
+    corpus_search_row_to_dict as _corpus_search_row_to_dict,
+    decode_json_array as _decode_json_array,
+    decode_json_object as _decode_json_object,
+    operating_row_to_dict as _operating_row_to_dict,
+    task_row_to_dict as _task_row_to_dict,
+)
 from .graph_backend import GraphBackend, create_graph_backend
 from .logistics_contract import derive_transcript_logistics_typed_entities
 from .live_system_state import (
@@ -56,7 +63,7 @@ from .style_contract import (
     style_contract_source_rank,
 )
 from .task_memory import STATUS_OPEN
-from .temporal import merge_temporal, normalize_temporal_fields, record_is_effective_at
+from .temporal import merge_temporal, normalize_temporal_fields, record_is_effective_at, record_temporal_status
 from .usefulness import (
     apply_retrieval_telemetry,
     graph_priority_adjustment,
@@ -168,54 +175,6 @@ def build_like_tokens(query: str, *, limit: int = 8) -> List[str]:
     return [f"%{token.lower()}%" for token in _extract_query_terms(query, limit=limit)]
 
 
-def _decode_json_object(value: Any) -> Dict[str, Any]:
-    if isinstance(value, dict):
-        return dict(value)
-    text = str(value or "").strip()
-    if not text:
-        return {}
-    try:
-        payload = json.loads(text)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _decode_json_array(value: Any) -> List[Any]:
-    if isinstance(value, list):
-        return list(value)
-    text = str(value or "").strip()
-    if not text:
-        return []
-    try:
-        payload = json.loads(text)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return []
-    return payload if isinstance(payload, list) else []
-
-
-def _corpus_search_row_to_dict(row: sqlite3.Row | Mapping[str, Any]) -> Dict[str, Any]:
-    item = dict(row)
-    document_metadata = _decode_json_object(item.pop("document_metadata_json", {}))
-    section_metadata = _decode_json_object(item.pop("section_metadata_json", {}))
-    ingest_metadata = document_metadata.get("corpus_ingest") if isinstance(document_metadata, Mapping) else {}
-    if not isinstance(ingest_metadata, Mapping):
-        ingest_metadata = {}
-    stable_key = str(item.get("stable_key") or "").strip()
-    section_index = int(item.get("section_index") or 0)
-    citation_id = str(section_metadata.get("citation_id") or "").strip() or f"{stable_key or item.get('document_id')}#s{section_index}"
-    item["metadata"] = section_metadata
-    item["document_metadata"] = document_metadata
-    item["stable_key"] = stable_key
-    item["citation_id"] = citation_id
-    item["document_hash"] = str(ingest_metadata.get("document_hash") or section_metadata.get("document_hash") or "")
-    item["section_hash"] = str(section_metadata.get("section_hash") or "")
-    item["corpus_fingerprint"] = str(ingest_metadata.get("fingerprint") or section_metadata.get("corpus_fingerprint") or "")
-    item["source_adapter"] = str(ingest_metadata.get("source_adapter") or section_metadata.get("source_adapter") or "")
-    item["source_id"] = str(ingest_metadata.get("source_id") or section_metadata.get("source_id") or "")
-    return item
-
-
 def _numeric_signature(value: Any) -> tuple[str, ...]:
     return tuple(NUMERIC_TOKEN_RE.findall(str(value or "")))
 
@@ -280,27 +239,6 @@ def _cursor_lastrowid(cur: sqlite3.Cursor) -> int:
     return int(row_id)
 
 
-def _task_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
-    return {
-        "id": int(row["id"]),
-        "stable_key": str(row["stable_key"] or ""),
-        "principal_scope_key": str(row["principal_scope_key"] or ""),
-        "item_type": str(row["item_type"] or ""),
-        "title": str(row["title"] or ""),
-        "due_date": str(row["due_date"] or ""),
-        "date_scope": str(row["date_scope"] or ""),
-        "optional": bool(int(row["optional"] or 0)),
-        "status": str(row["status"] or ""),
-        "owner": str(row["owner"] or ""),
-        "source": str(row["source"] or ""),
-        "source_session_id": str(row["source_session_id"] or ""),
-        "source_turn_number": int(row["source_turn_number"] or 0),
-        "metadata": _decode_json_object(row["metadata_json"]),
-        "created_at": str(row["created_at"] or ""),
-        "updated_at": str(row["updated_at"] or ""),
-    }
-
-
 def _task_search_projection(row: Mapping[str, Any]) -> str:
     metadata = _decode_json_object(row.get("metadata"))
     parts = [
@@ -346,32 +284,6 @@ def _task_match_score(
     if str(row.get("due_date") or "").strip():
         score += 0.05
     return score, overlap + numeric_matches
-
-
-def _operating_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
-    record_type = str(row["record_type"] or "")
-    stable_key = str(row["stable_key"] or "")
-    source = str(row["source"] or "")
-    metadata = normalize_operating_record_metadata(
-        record_type=record_type,
-        stable_key=stable_key,
-        source=source,
-        metadata=_decode_json_object(row["metadata_json"]),
-    )
-    return {
-        "id": int(row["id"]),
-        "stable_key": stable_key,
-        "principal_scope_key": str(row["principal_scope_key"] or ""),
-        "record_type": record_type,
-        "content": str(row["content"] or ""),
-        "owner": str(row["owner"] or ""),
-        "source": source,
-        "source_session_id": str(row["source_session_id"] or ""),
-        "source_turn_number": int(row["source_turn_number"] or 0),
-        "metadata": metadata,
-        "created_at": str(row["created_at"] or ""),
-        "updated_at": str(row["updated_at"] or ""),
-    }
 
 
 def _merge_record_metadata(
@@ -673,6 +585,7 @@ def _graph_metadata_confidence(metadata: Dict[str, Any] | None) -> float:
 def _graph_match_text(row: Dict[str, Any]) -> str:
     parts = [
         str(row.get("subject") or "").strip(),
+        str(row.get("matched_alias") or "").strip(),
         str(row.get("predicate") or "").strip(),
         str(row.get("object_value") or "").strip(),
         str(row.get("conflict_value") or "").strip(),
@@ -691,6 +604,8 @@ def _graph_fact_class(row: Dict[str, Any]) -> str:
     if row_type == "state":
         if row.get("is_current") and record_is_effective_at(row):
             return "explicit_state_current"
+        if row.get("is_current") and record_temporal_status(row) == "expired":
+            return "explicit_state_expired"
         return "explicit_state_prior"
     return row_type or "graph"
 
@@ -702,6 +617,7 @@ def _graph_fact_priority(row: Dict[str, Any]) -> int:
         "explicit_relation": 430,
         "conflict": 390,
         "explicit_state_prior": 310,
+        "explicit_state_expired": 260,
         "inferred_relation": 180,
     }
     return priorities.get(fact_class, 0)
@@ -775,6 +691,10 @@ class BrainstackStore:
         self._run_compatibility_migrations_if_needed()
         try:
             self._graph_backend = create_graph_backend(self._graph_backend_name, db_path=self._graph_db_path)
+            if self._graph_backend is None and self._graph_backend_name not in {"", "none", "sqlite"}:
+                self._graph_backend_error = (
+                    f"Graph backend {self._graph_backend_name!r} was requested but no backend adapter is active."
+                )
             if self._graph_backend is not None:
                 self._graph_backend.open()
                 self._graph_backend_error = ""
@@ -1823,6 +1743,25 @@ class BrainstackStore:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS graph_entity_aliases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alias_name TEXT NOT NULL,
+                normalized_alias TEXT NOT NULL,
+                target_entity_id INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(normalized_alias, target_entity_id),
+                FOREIGN KEY(target_entity_id) REFERENCES graph_entities(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_graph_entity_aliases_normalized
+            ON graph_entity_aliases(normalized_alias);
+
+            CREATE INDEX IF NOT EXISTS idx_graph_entity_aliases_target
+            ON graph_entity_aliases(target_entity_id);
+
             CREATE TABLE IF NOT EXISTS graph_relations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 subject_entity_id INTEGER NOT NULL,
@@ -2381,6 +2320,17 @@ class BrainstackStore:
             raise RuntimeError(f"Missing graph entity for snapshot: {entity_id}")
         entity = dict(entity_row)
 
+        alias_rows = self.conn.execute(
+            """
+            SELECT alias_name, normalized_alias, source, metadata_json, updated_at
+            FROM graph_entity_aliases
+            WHERE target_entity_id = ?
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (entity_id,),
+        ).fetchall()
+        aliases = [_row_to_dict(row) for row in alias_rows]
+
         state_rows = self.conn.execute(
             """
             SELECT 'state' AS row_type,
@@ -2511,6 +2461,7 @@ class BrainstackStore:
 
         return {
             "entity": entity,
+            "aliases": aliases,
             "states": states,
             "conflicts": conflicts,
             "relations": relations,
@@ -5699,6 +5650,19 @@ class BrainstackStore:
         ).fetchone()
         if row:
             return dict(row)
+        alias_row = self.conn.execute(
+            """
+            SELECT ge.id, ge.canonical_name, ge.normalized_name, ga.alias_name AS matched_alias
+            FROM graph_entity_aliases ga
+            JOIN graph_entities ge ON ge.id = ga.target_entity_id
+            WHERE ga.normalized_alias = ?
+            ORDER BY ga.updated_at DESC, ga.id DESC
+            LIMIT 1
+            """,
+            (normalized,),
+        ).fetchone()
+        if alias_row:
+            return dict(alias_row)
         cur = self.conn.execute(
             """
             INSERT INTO graph_entities (canonical_name, normalized_name, created_at, updated_at)
@@ -5731,6 +5695,39 @@ class BrainstackStore:
         target = self.get_or_create_entity(target_name)
         alias_id = int(alias["id"])
         target_id = int(target["id"])
+        alias_metadata = _merge_record_metadata(
+            None,
+            {
+                "graph_identity": {
+                    "kind": "alias_merge",
+                    "alias_name": alias_name.strip(),
+                    "target_name": target_name.strip(),
+                },
+                "provenance": {"source_ids": ["merge_entity_alias"]},
+            },
+            source="entity_alias_merge",
+        )
+        self.conn.execute(
+            """
+            INSERT INTO graph_entity_aliases (
+                alias_name, normalized_alias, target_entity_id, source, metadata_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(normalized_alias, target_entity_id)
+            DO UPDATE SET alias_name = excluded.alias_name,
+                          source = excluded.source,
+                          metadata_json = excluded.metadata_json,
+                          updated_at = excluded.updated_at
+            """,
+            (
+                alias_name.strip(),
+                alias_normalized,
+                target_id,
+                "entity_alias_merge",
+                json.dumps(alias_metadata, ensure_ascii=True, sort_keys=True),
+                now,
+                now,
+            ),
+        )
 
         self.conn.execute("UPDATE graph_states SET entity_id = ? WHERE entity_id = ?", (target_id, alias_id))
         self.conn.execute("UPDATE graph_conflicts SET entity_id = ? WHERE entity_id = ?", (target_id, alias_id))
@@ -5790,7 +5787,10 @@ class BrainstackStore:
                 (int(group["subject_entity_id"]), str(group["predicate"]), int(group["object_entity_id"])),
             ).fetchall()
             for row in rows[1:]:
-                self.conn.execute("UPDATE graph_inferred_relations SET active = 0, updated_at = ? WHERE id = ?", (now, int(row["id"])))
+                self.conn.execute(
+                    "UPDATE graph_inferred_relations SET active = 0, updated_at = ? WHERE id = ?",
+                    (now, int(row["id"])),
+                )
 
         refs = self.conn.execute(
             """
@@ -5812,6 +5812,8 @@ class BrainstackStore:
             self.conn.execute("DELETE FROM graph_entities WHERE id = ?", (alias_id,))
 
         self.conn.commit()
+        if self._graph_backend is not None:
+            self._publish_entity_subgraph(target_id)
         return {"status": "merged", "alias_id": alias_id, "target_id": target_id}
 
     @_locked
@@ -6043,6 +6045,7 @@ class BrainstackStore:
         if temporal:
             normalized_metadata["temporal"] = temporal
         valid_from = str(normalized_metadata.get("temporal", {}).get("valid_from") or now)
+        valid_to = str(normalized_metadata.get("temporal", {}).get("valid_to") or "")
         current = self.conn.execute(
             """
             SELECT id, value_text, source, metadata_json, valid_from, valid_to
@@ -6057,9 +6060,14 @@ class BrainstackStore:
 
         if current and " ".join(str(current["value_text"]).lower().split()) == normalized_new:
             merged = _merge_record_metadata(current["metadata_json"], normalized_metadata, source=source)
+            merged_valid_to = str((merged.get("temporal") or {}).get("valid_to") or current["valid_to"] or "")
             self.conn.execute(
-                "UPDATE graph_states SET metadata_json = ? WHERE id = ?",
-                (json.dumps(merged, ensure_ascii=True, sort_keys=True), int(current["id"])),
+                "UPDATE graph_states SET metadata_json = ?, valid_to = ? WHERE id = ?",
+                (
+                    json.dumps(merged, ensure_ascii=True, sort_keys=True),
+                    merged_valid_to or None,
+                    int(current["id"]),
+                ),
             )
             self.conn.commit()
             return {"status": "unchanged", "entity_id": entity["id"], "state_id": int(current["id"])}
@@ -6162,7 +6170,7 @@ class BrainstackStore:
             """
             INSERT INTO graph_states (
                 entity_id, attribute, value_text, source, metadata_json, valid_from, valid_to, is_current
-            ) VALUES (?, ?, ?, ?, ?, ?, NULL, 1)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
             """,
             (
                 entity["id"],
@@ -6171,6 +6179,7 @@ class BrainstackStore:
                 source,
                 json.dumps(state_metadata, ensure_ascii=True, sort_keys=True),
                 valid_from,
+                valid_to or None,
             ),
         )
         new_state_id = _cursor_lastrowid(cur)
@@ -6274,30 +6283,30 @@ class BrainstackStore:
             patterns = [f"%{raw_query}%"]
         candidate_limit = max(limit * 8, 24)
         state_where = " OR ".join(
-            "lower(ge.canonical_name) LIKE ? OR lower(gs.value_text) LIKE ? OR lower(gs.attribute) LIKE ?"
+            "lower(ge.canonical_name) LIKE ? OR lower(gea.alias_name) LIKE ? OR lower(gs.value_text) LIKE ? OR lower(gs.attribute) LIKE ?"
             for _ in patterns
         )
         relation_where = " OR ".join(
-            "lower(ge.canonical_name) LIKE ? OR lower(COALESCE(go.canonical_name, gr.object_text, '')) LIKE ? OR lower(gr.predicate) LIKE ?"
+            "lower(ge.canonical_name) LIKE ? OR lower(gea_subject.alias_name) LIKE ? OR lower(COALESCE(go.canonical_name, gr.object_text, '')) LIKE ? OR lower(gea_object.alias_name) LIKE ? OR lower(gr.predicate) LIKE ?"
             for _ in patterns
         )
         conflict_where = " OR ".join(
-            "lower(ge.canonical_name) LIKE ? OR lower(gc.attribute) LIKE ? OR lower(gc.candidate_value_text) LIKE ?"
+            "lower(ge.canonical_name) LIKE ? OR lower(gea.alias_name) LIKE ? OR lower(gc.attribute) LIKE ? OR lower(gc.candidate_value_text) LIKE ?"
             for _ in patterns
         )
         inferred_where = " OR ".join(
-            "lower(ge.canonical_name) LIKE ? OR lower(COALESCE(go.canonical_name, gir.object_text, '')) LIKE ? OR lower(gir.predicate) LIKE ?"
+            "lower(ge.canonical_name) LIKE ? OR lower(gea_subject.alias_name) LIKE ? OR lower(COALESCE(go.canonical_name, gir.object_text, '')) LIKE ? OR lower(gea_object.alias_name) LIKE ? OR lower(gir.predicate) LIKE ?"
             for _ in patterns
         )
         params: List[Any] = []
         for pattern in patterns:
-            params.extend([pattern, pattern, pattern])
+            params.extend([pattern, pattern, pattern, pattern])
         for pattern in patterns:
-            params.extend([pattern, pattern, pattern])
+            params.extend([pattern, pattern, pattern, pattern, pattern])
         for pattern in patterns:
-            params.extend([pattern, pattern, pattern])
+            params.extend([pattern, pattern, pattern, pattern])
         for pattern in patterns:
-            params.extend([pattern, pattern, pattern])
+            params.extend([pattern, pattern, pattern, pattern, pattern])
         rows = self.conn.execute(
             f"""
             WITH state_hits AS (
@@ -6313,9 +6322,11 @@ class BrainstackStore:
                        gs.metadata_json AS metadata_json,
                        '' AS conflict_metadata_json,
                        '' AS conflict_source,
-                       '' AS conflict_value
+                       '' AS conflict_value,
+                       COALESCE(gea.alias_name, '') AS matched_alias
                 FROM graph_states gs
                 JOIN graph_entities ge ON ge.id = gs.entity_id
+                LEFT JOIN graph_entity_aliases gea ON gea.target_entity_id = ge.id
                 WHERE {state_where}
             ),
             relation_hits AS (
@@ -6331,10 +6342,13 @@ class BrainstackStore:
                        gr.metadata_json AS metadata_json,
                        '' AS conflict_metadata_json,
                        '' AS conflict_source,
-                       '' AS conflict_value
+                       '' AS conflict_value,
+                       COALESCE(gea_subject.alias_name, gea_object.alias_name, '') AS matched_alias
                 FROM graph_relations gr
                 JOIN graph_entities ge ON ge.id = gr.subject_entity_id
                 LEFT JOIN graph_entities go ON go.id = gr.object_entity_id
+                LEFT JOIN graph_entity_aliases gea_subject ON gea_subject.target_entity_id = ge.id
+                LEFT JOIN graph_entity_aliases gea_object ON gea_object.target_entity_id = go.id
                 WHERE {relation_where}
             ),
             conflict_hits AS (
@@ -6350,10 +6364,12 @@ class BrainstackStore:
                        gs.metadata_json AS metadata_json,
                        gc.metadata_json AS conflict_metadata_json,
                        gc.candidate_source AS conflict_source,
-                       gc.candidate_value_text AS conflict_value
+                       gc.candidate_value_text AS conflict_value,
+                       COALESCE(gea.alias_name, '') AS matched_alias
                 FROM graph_conflicts gc
                 JOIN graph_entities ge ON ge.id = gc.entity_id
                 JOIN graph_states gs ON gs.id = gc.current_state_id
+                LEFT JOIN graph_entity_aliases gea ON gea.target_entity_id = ge.id
                 WHERE gc.status = 'open'
                   AND ({conflict_where})
             ),
@@ -6370,10 +6386,13 @@ class BrainstackStore:
                        gir.metadata_json AS metadata_json,
                        '' AS conflict_metadata_json,
                        '' AS conflict_source,
-                       '' AS conflict_value
+                       '' AS conflict_value,
+                       COALESCE(gea_subject.alias_name, gea_object.alias_name, '') AS matched_alias
                 FROM graph_inferred_relations gir
                 JOIN graph_entities ge ON ge.id = gir.subject_entity_id
                 LEFT JOIN graph_entities go ON go.id = gir.object_entity_id
+                LEFT JOIN graph_entity_aliases gea_subject ON gea_subject.target_entity_id = ge.id
+                LEFT JOIN graph_entity_aliases gea_object ON gea_object.target_entity_id = go.id
                 WHERE gir.active = 1
                   AND ({inferred_where})
             )
@@ -6392,6 +6411,20 @@ class BrainstackStore:
             tuple(params + [candidate_limit]),
         ).fetchall()
         parsed = _attach_keyword_scores(_row_to_dict(row) for row in rows)
+        token_fragments = [pattern.strip("%").lower() for pattern in patterns if pattern.strip("%")]
+        deduped: Dict[tuple[str, int], Dict[str, Any]] = {}
+        for item in parsed:
+            matched_alias = str(item.get("matched_alias") or "").strip()
+            if matched_alias and not any(fragment in matched_alias.lower() for fragment in token_fragments):
+                item["matched_alias"] = ""
+            row_key = (str(item.get("row_type") or ""), int(item.get("row_id") or 0))
+            existing = deduped.get(row_key)
+            if existing is None:
+                deduped[row_key] = item
+                continue
+            if str(item.get("matched_alias") or "").strip() and not str(existing.get("matched_alias") or "").strip():
+                deduped[row_key] = item
+        parsed = list(deduped.values())
         parsed = [item for item in parsed if _graph_sort_key(item)[0] > 0]
         parsed.sort(key=_graph_sort_key, reverse=True)
         return parsed[:limit]
@@ -6564,6 +6597,11 @@ class BrainstackStore:
 
     @_locked
     def search_graph(self, *, query: str, limit: int, principal_scope_key: str = "") -> List[Dict[str, Any]]:
+        external_requested = self._graph_backend_name not in {"", "none", "sqlite"}
+        retrieval_source = "graph.sqlite_lexical"
+        match_mode = "sqlite_lexical"
+        backend_status = "degraded" if external_requested and self._graph_backend is None else "active"
+        fallback_reason = str(self._graph_backend_error or "") if backend_status == "degraded" else ""
         if self._graph_backend is None:
             rows = self._sqlite_search_graph(query=query, limit=limit)
         else:
@@ -6573,16 +6611,25 @@ class BrainstackStore:
                 self._disable_graph_backend(reason=str(exc))
                 logger.warning("Brainstack graph search failed; falling back to SQLite: %s", exc)
                 rows = self._sqlite_search_graph(query=query, limit=limit)
+                backend_status = "degraded"
+                fallback_reason = str(exc)
             else:
                 self._graph_backend_error = ""
+                retrieval_source = f"graph.{getattr(self._graph_backend, 'target_name', '') or self._graph_backend_name}"
+                match_mode = "external_graph"
+                backend_status = "active"
+                fallback_reason = ""
         keyword_rows = _attach_keyword_scores(rows)
         scored: List[Dict[str, Any]] = []
         for row in keyword_rows:
             item = dict(row)
             if not _annotate_principal_scope(item, principal_scope_key=principal_scope_key):
                 continue
-            item.setdefault("retrieval_source", "graph.keyword")
-            item.setdefault("match_mode", "keyword")
+            item.setdefault("retrieval_source", retrieval_source)
+            item.setdefault("match_mode", "alias_lexical" if str(item.get("matched_alias") or "").strip() else match_mode)
+            item.setdefault("graph_backend_requested", self._graph_backend_name)
+            item.setdefault("graph_backend_status", backend_status)
+            item.setdefault("graph_fallback_reason", fallback_reason)
             if _graph_sort_key(item)[0] <= 0:
                 continue
             scored.append(item)

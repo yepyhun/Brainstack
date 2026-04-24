@@ -11,7 +11,7 @@ from .profile_contract import (
 )
 from .provenance import summarize_provenance
 from .style_contract import STYLE_CONTRACT_SLOT
-from .temporal import record_is_effective_at
+from .temporal import record_is_effective_at, record_temporal_status
 from .transcript import primary_user_turn_content, trim_text_boundary
 
 
@@ -408,6 +408,8 @@ def _graph_fact_class(row: Dict[str, Any]) -> str:
     if row_type == "state":
         if row.get("is_current") and record_is_effective_at(row):
             return "explicit_state_current"
+        if row.get("is_current") and record_temporal_status(row) == "expired":
+            return "explicit_state_expired"
         return "explicit_state_prior"
     return row_type or "graph"
 
@@ -476,7 +478,7 @@ def _render_graph_rows(
                 )
             )
             continue
-        current_marker = "current" if fact_class == "explicit_state_current" else "prior"
+        current_marker = "current" if fact_class == "explicit_state_current" else "expired" if fact_class == "explicit_state_expired" else "prior"
         text = f"[state:{current_marker}] {row['subject']} {row['predicate']}={row['object_value']}"
         lines.append(
             _with_provenance(
@@ -946,7 +948,9 @@ def render_working_memory_block(
         ]
         conflicts = [row for row in graph_rows_for_sections if _graph_fact_class(row) == "conflict"]
         historical_truth = [
-            row for row in graph_rows_for_sections if _graph_fact_class(row) == "explicit_state_prior"
+            row
+            for row in graph_rows_for_sections
+            if _graph_fact_class(row) in {"explicit_state_prior", "explicit_state_expired"}
         ]
         inferred_links = [
             row for row in graph_rows_for_sections if _graph_fact_class(row) == "inferred_relation"
@@ -961,7 +965,7 @@ def render_working_memory_block(
         if conflict_lines:
             graph_sections.append("### Open Conflicts\n" + _render_items(conflict_lines))
 
-        if show_graph_history or conflicts:
+        if show_graph_history or conflicts or any(_graph_fact_class(row) == "explicit_state_expired" for row in historical_truth):
             history_lines = _render_graph_rows(historical_truth, provenance_mode=provenance_mode)
             if history_lines:
                 graph_sections.append("### Historical Truth\n" + _render_items(history_lines))

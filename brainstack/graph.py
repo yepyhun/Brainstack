@@ -10,6 +10,7 @@ from .graph_evidence import (
     prepare_graph_evidence_ingress,
 )
 from .provenance import merge_provenance
+from .temporal import merge_temporal
 
 
 def ingest_graph_evidence(
@@ -41,6 +42,11 @@ def ingest_graph_evidence_with_receipt(
         item_metadata = dict(base_metadata)
         item_metadata["graph_evidence_boundary"] = GRAPH_EVIDENCE_BOUNDARY_VERSION
         item_metadata["graph_evidence"] = item.to_dict()
+        if item.temporal_scope:
+            item_metadata["temporal"] = merge_temporal(
+                item_metadata.get("temporal") if isinstance(item_metadata.get("temporal"), Mapping) else None,
+                item.temporal_scope,
+            )
         item_metadata["provenance"] = merge_provenance(
             item_metadata.get("provenance") if isinstance(item_metadata.get("provenance"), Mapping) else None,
             {

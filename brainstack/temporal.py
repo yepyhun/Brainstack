@@ -82,6 +82,10 @@ def merge_temporal(
 
 
 def record_is_effective_at(record: Mapping[str, Any], as_of: str | None = None) -> bool:
+    return record_temporal_status(record, as_of=as_of) == "current"
+
+
+def record_temporal_status(record: Mapping[str, Any], as_of: str | None = None) -> str:
     metadata = record.get("metadata")
     temporal = metadata.get("temporal") if isinstance(metadata, Mapping) else None
     valid_from = _parse_iso(str(record.get("valid_from") or "")) or _parse_iso(
@@ -92,7 +96,7 @@ def record_is_effective_at(record: Mapping[str, Any], as_of: str | None = None) 
     )
     point_in_time = _parse_iso(as_of) or datetime.now(timezone.utc)
     if valid_from and point_in_time < valid_from:
-        return False
+        return "not_yet_valid"
     if valid_to and point_in_time >= valid_to:
-        return False
-    return True
+        return "expired"
+    return "current"

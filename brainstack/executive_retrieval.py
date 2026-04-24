@@ -8,6 +8,11 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 from .associative_expansion import AssociativeExpansionBounds, build_associative_expansion
 from .db import BrainstackStore
+from .entity_resolver import (
+    annotate_graph_rows_with_entity_resolution,
+    filter_graph_rows_to_entity_resolution_candidates,
+    resolve_entity_candidates,
+)
 from .operating_truth import (
     OPERATING_RECORD_TYPES,
     RECENT_WORK_RECAP_RECORD_TYPES,
@@ -16,6 +21,7 @@ from .operating_truth import (
 )
 from .profile_contract import is_native_explicit_style_item
 from .style_contract import STYLE_CONTRACT_SLOT
+from .temporal import record_is_effective_at, record_temporal_status
 from .tier2_extractor import _default_llm_caller, _extract_json_object, _extract_text_content
 from .transcript import primary_user_turn_content, split_turn_content
 from .usefulness import graph_priority_adjustment, profile_priority_adjustment
@@ -276,7 +282,7 @@ def _candidate_priority_bonus(candidate: EvidenceCandidate) -> float:
         elif fact_class == "explicit_state_prior":
             bonus -= 0.02
         elif fact_class == "conflict":
-            bonus -= 0.04
+            bonus += 0.1
 
     return bonus
 
@@ -1109,6 +1115,7 @@ def _operating_channel_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[D
 def _graph_match_text(row: Dict[str, Any]) -> str:
     parts = [
         str(row.get("subject") or "").strip(),
+        str(row.get("matched_alias") or "").strip(),
         str(row.get("attribute") or "").strip(),
         str(row.get("value") or "").strip(),
         str(row.get("predicate") or "").strip(),
@@ -1127,8 +1134,10 @@ def _graph_fact_class(row: Dict[str, Any]) -> str:
     if row_type == "relation":
         return "explicit_relation"
     if row_type == "state":
-        if row.get("is_current"):
+        if row.get("is_current") and record_is_effective_at(row):
             return "explicit_state_current"
+        if row.get("is_current") and record_temporal_status(row) == "expired":
+            return "explicit_state_expired"
         return "explicit_state_prior"
     return row_type or "graph"
 
@@ -1164,14 +1173,21 @@ def _corpus_channel_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict
 
 def _temporal_graph_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
     ranked = list(enumerate(rows))
+
+    def priority(item: tuple[int, Dict[str, Any]]) -> tuple[Any, ...]:
+        index, row = item
+        fact_class = _graph_fact_class(row)
+        return (
+            1 if fact_class == "explicit_state_current" else 0,
+            1 if fact_class == "conflict" else 0,
+            1 if fact_class == "explicit_state_prior" else 0,
+            1 if fact_class == "explicit_state_expired" else 0,
+            str(row.get("happened_at") or ""),
+            -0.05 * index,
+        )
+
     ranked.sort(
-        key=lambda item: (
-            1 if _graph_fact_class(item[1]) == "explicit_state_current" else 0,
-            1 if _graph_fact_class(item[1]) == "conflict" else 0,
-            1 if _graph_fact_class(item[1]) == "explicit_state_prior" else 0,
-            str(item[1].get("happened_at") or ""),
-            -0.05 * item[0],
-        ),
+        key=priority,
         reverse=True,
     )
     return [row for _, row in ranked[:limit]]
@@ -1417,6 +1433,18 @@ def retrieve_executive_context(
         corpus_limit=corpus_limit,
     )
     search_queries = [_normalize_text(query)]
+    entity_resolution = resolve_entity_candidates(
+        store,
+        query=query,
+        principal_scope_key=principal_scope_key,
+        limit=4,
+    )
+    resolver_query_variants = [
+        _normalize_text(f"{candidate.get('canonical_name', '')} {query}")
+        for candidate in entity_resolution.get("candidates", [])
+        if isinstance(candidate, Mapping) and str(candidate.get("canonical_name") or "").strip()
+    ]
+    graph_search_queries = list(dict.fromkeys(search_queries + resolver_query_variants))
     continuity_queries = _build_cross_session_search_queries(query)
     task_lookup = analysis.get("task_lookup") if isinstance(analysis.get("task_lookup"), Mapping) else None
     operating_lookup = analysis.get("operating_lookup") if isinstance(analysis.get("operating_lookup"), Mapping) else None
@@ -1656,6 +1684,8 @@ def retrieve_executive_context(
     semantic_operating_rows = [row for row in semantic_evidence_rows if str(row.get("semantic_shelf") or "") == "operating"]
     semantic_continuity_rows = [row for row in semantic_evidence_rows if str(row.get("semantic_shelf") or "") == "continuity_match"]
     semantic_graph_rows = [row for row in semantic_evidence_rows if str(row.get("semantic_shelf") or "") == "graph"]
+    semantic_graph_rows = filter_graph_rows_to_entity_resolution_candidates(semantic_graph_rows, entity_resolution)
+    semantic_graph_rows = annotate_graph_rows_with_entity_resolution(semantic_graph_rows, entity_resolution)
     semantic_index_corpus_rows = [row for row in semantic_evidence_rows if str(row.get("semantic_shelf") or "") == "corpus"]
     if semantic_task_rows:
         task_rows = _dedupe_rows(_round_robin(task_rows, semantic_task_rows))[:24]
@@ -1680,7 +1710,7 @@ def retrieve_executive_context(
         _graph_channel_rows(
             _collect_query_rows(
                 shelf="graph",
-                queries=search_queries,
+                queries=graph_search_queries,
                 searcher=lambda variant: store.search_graph(
                     query=variant,
                     limit=max(graph_limit * 4, 12),
@@ -1693,6 +1723,7 @@ def retrieve_executive_context(
         else []
     )
     graph_rows = _annotate_query_flags(graph_rows, query=query)
+    graph_rows = annotate_graph_rows_with_entity_resolution(graph_rows, entity_resolution)
     associative_expansion = build_associative_expansion(
         store,
         query=query,
@@ -1708,7 +1739,10 @@ def retrieve_executive_context(
     )
     associative_graph_rows = (
         _graph_channel_rows(
-            _annotate_query_flags(list(associative_expansion.get("candidate_rows") or []), query=query),
+            annotate_graph_rows_with_entity_resolution(
+                _annotate_query_flags(list(associative_expansion.get("candidate_rows") or []), query=query),
+                entity_resolution,
+            ),
             limit=max(graph_limit * 2, 4),
         )
         if graph_limit > 0
@@ -1745,7 +1779,7 @@ def retrieve_executive_context(
         temporal_graph_rows = _temporal_graph_rows(
             _collect_query_rows(
                 shelf="graph",
-                queries=search_queries,
+                queries=graph_search_queries,
                 searcher=lambda variant: store.search_graph(
                     query=variant,
                     limit=max(graph_limit * 6, 12),
@@ -1754,6 +1788,7 @@ def retrieve_executive_context(
             ),
             limit=max(graph_limit * 2, 6),
         )
+        temporal_graph_rows = annotate_graph_rows_with_entity_resolution(temporal_graph_rows, entity_resolution)
 
     temporal_transcript_rows = []
     if transcript_limit > 0 and temporal_support_requested:
@@ -1786,7 +1821,7 @@ def retrieve_executive_context(
     if graph_rows and semantic_graph_rows:
         graph_recall_status = {
             "status": "active",
-            "reason": "Query used lexical graph rows and typed semantic graph seeds.",
+            "reason": "Query used lexical graph rows and typed semantic_seeded graph seeds.",
             "recall_mode": "hybrid_seeded",
         }
     elif semantic_graph_rows:
@@ -1986,6 +2021,18 @@ def retrieve_executive_context(
                 "created_at": str(candidate.row.get("created_at") or ""),
                 "keyword_score": float(candidate.row.get("keyword_score") or 0.0),
                 "semantic_score": float(candidate.row.get("semantic_score") or 0.0),
+                "retrieval_source": str(candidate.row.get("retrieval_source") or ""),
+                "match_mode": str(candidate.row.get("match_mode") or ""),
+                "row_type": str(candidate.row.get("row_type") or ""),
+                "fact_class": str(candidate.row.get("fact_class") or ""),
+                "matched_alias": str(candidate.row.get("matched_alias") or ""),
+                "entity_resolution_source": str(candidate.row.get("entity_resolution_source") or ""),
+                "entity_resolution_reason": str(candidate.row.get("entity_resolution_reason") or ""),
+                "entity_resolution_confidence": float(candidate.row.get("entity_resolution_confidence") or 0.0),
+                "entity_resolution_merge_eligible": bool(candidate.row.get("entity_resolution_merge_eligible")),
+                "graph_backend_status": str(candidate.row.get("graph_backend_status") or ""),
+                "graph_backend_requested": str(candidate.row.get("graph_backend_requested") or ""),
+                "graph_fallback_reason": str(candidate.row.get("graph_fallback_reason") or ""),
                 "query_token_overlap": int(candidate.row.get("_brainstack_query_token_overlap") or 0),
                 "query_token_count": int(candidate.row.get("_brainstack_query_token_count") or 0),
                 "same_session": bool(candidate.row.get("same_session")),
@@ -2012,6 +2059,7 @@ def retrieve_executive_context(
             "queries": list(search_queries),
             "legacy_disabled": True,
         },
+        "entity_resolution": entity_resolution,
         "lookup_semantics": lookup_semantics,
         "associative_expansion": {
             key: value

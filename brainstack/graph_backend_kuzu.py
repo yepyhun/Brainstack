@@ -71,6 +71,16 @@ CREATE NODE TABLE IF NOT EXISTS Entity(
     PRIMARY KEY(id)
 );
 
+CREATE NODE TABLE IF NOT EXISTS EntityAlias(
+    normalized_alias STRING,
+    alias_name STRING,
+    target_entity_id INT64,
+    source STRING,
+    metadata_json STRING,
+    updated_at STRING,
+    PRIMARY KEY(normalized_alias)
+);
+
 CREATE NODE TABLE IF NOT EXISTS State(
     id INT64,
     entity_id INT64,
@@ -261,6 +271,46 @@ class KuzuGraphBackend:
                     },
                 )
 
+            aliases = [
+                dict(alias)
+                for alias in snapshot.get("aliases", [])
+                if str(alias.get("normalized_alias") or "").strip()
+            ]
+            normalized_aliases = [str(alias.get("normalized_alias") or "") for alias in aliases]
+            if normalized_aliases:
+                self._execute(
+                    """
+                    MATCH (a:EntityAlias)
+                    WHERE a.target_entity_id = $entity_id AND NOT a.normalized_alias IN $normalized_aliases
+                    DETACH DELETE a
+                    """,
+                    {"entity_id": entity_id, "normalized_aliases": normalized_aliases},
+                )
+            else:
+                self._execute(
+                    "MATCH (a:EntityAlias) WHERE a.target_entity_id = $entity_id DETACH DELETE a",
+                    {"entity_id": entity_id},
+                )
+            for alias in aliases:
+                self._execute(
+                    """
+                    MERGE (a:EntityAlias {normalized_alias: $normalized_alias})
+                    SET a.alias_name = $alias_name,
+                        a.target_entity_id = $target_entity_id,
+                        a.source = $source,
+                        a.metadata_json = $metadata_json,
+                        a.updated_at = $updated_at
+                    """,
+                    {
+                        "normalized_alias": str(alias.get("normalized_alias") or ""),
+                        "alias_name": str(alias.get("alias_name") or ""),
+                        "target_entity_id": entity_id,
+                        "source": str(alias.get("source") or ""),
+                        "metadata_json": str(alias.get("metadata_json") or "{}"),
+                        "updated_at": str(alias.get("updated_at") or ""),
+                    },
+                )
+
             for relation in snapshot.get("relations", []):
                 target = relation["object_entity"]
                 self._ensure_entity(target)
@@ -361,6 +411,24 @@ class KuzuGraphBackend:
                 break
             rows = self.conn.execute(
                 """
+                MATCH (a:EntityAlias)
+                WHERE lower(a.alias_name) CONTAINS lower($term)
+                   OR lower(a.normalized_alias) CONTAINS lower($term)
+                   OR lower($term) CONTAINS lower(a.alias_name)
+                   OR lower($term) CONTAINS lower(a.normalized_alias)
+                RETURN a.target_entity_id
+                LIMIT $limit
+                """,
+                {"term": token, "limit": limit},
+            )
+            alias_rows = list(_iter_result_rows(rows))
+            add_rows(alias_rows)
+
+        for token in tokens:
+            if len(ids) >= limit:
+                break
+            rows = self.conn.execute(
+                """
                 MATCH (s:State)
                 WHERE lower(s.attribute) CONTAINS lower($term)
                    OR lower(s.value_text) CONTAINS lower($term)
@@ -453,6 +521,32 @@ class KuzuGraphBackend:
             names[int(row[0])] = str(row[1] or "")
         return names
 
+    def _matched_aliases(self, entity_ids: List[int], query: str) -> Dict[int, str]:
+        tokens = _tokens(query)
+        if not entity_ids or not tokens:
+            return {}
+        aliases: Dict[int, str] = {}
+        for token in tokens:
+            rows = self.conn.execute(
+                """
+                MATCH (a:EntityAlias)
+                WHERE a.target_entity_id IN $ids
+                  AND (
+                    lower(a.alias_name) CONTAINS lower($term)
+                    OR lower(a.normalized_alias) CONTAINS lower($term)
+                    OR lower($term) CONTAINS lower(a.alias_name)
+                    OR lower($term) CONTAINS lower(a.normalized_alias)
+                  )
+                RETURN a.target_entity_id, a.alias_name
+                LIMIT $limit
+                """,
+                {"ids": entity_ids, "term": token, "limit": max(len(entity_ids) * 4, 8)},
+            )
+            for row in _iter_result_rows(rows):
+                entity_id = int(row[0])
+                aliases.setdefault(entity_id, str(row[1] or ""))
+        return aliases
+
     def search_graph(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
         seed_ids = self._seed_entity_ids(query, limit=max(limit * 3, 8))
         related_ids = self._related_entity_ids(seed_ids, limit=max(limit * 3, 8))
@@ -460,6 +554,7 @@ class KuzuGraphBackend:
         if not all_ids:
             return []
         entity_names = self._entity_names(all_ids)
+        matched_aliases = self._matched_aliases(all_ids, query)
         rows: List[Dict[str, Any]] = []
 
         state_rows = self.conn.execute(
@@ -488,6 +583,7 @@ class KuzuGraphBackend:
                     "conflict_metadata": {},
                     "conflict_source": "",
                     "conflict_value": "",
+                    "matched_alias": matched_aliases.get(entity_id, ""),
                     "active": True,
                 }
             )
@@ -518,6 +614,7 @@ class KuzuGraphBackend:
                     "conflict_metadata": _decode_json_object(row[6]),
                     "conflict_source": str(row[5] or ""),
                     "conflict_value": str(row[4] or ""),
+                    "matched_alias": matched_aliases.get(entity_id, ""),
                     "active": True,
                 }
             )
@@ -568,6 +665,7 @@ class KuzuGraphBackend:
                     "conflict_metadata": {},
                     "conflict_source": "",
                     "conflict_value": "",
+                    "matched_alias": matched_aliases.get(int(row[1]), "") or matched_aliases.get(int(row[2]), ""),
                     "active": bool(row[7]),
                 }
             )
@@ -588,6 +686,7 @@ class KuzuGraphBackend:
                     "conflict_metadata": {},
                     "conflict_source": "",
                     "conflict_value": "",
+                    "matched_alias": matched_aliases.get(int(row[1]), "") or matched_aliases.get(int(row[2]), ""),
                     "active": bool(row[7]),
                 }
             )

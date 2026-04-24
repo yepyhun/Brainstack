@@ -77,6 +77,12 @@ from .style_contract import (
 from .structured_understanding import resolve_user_timezone
 from .task_memory import build_task_stable_key, parse_task_capture
 from .tier2_extractor import extract_tier2_candidates
+from .tool_schemas import (
+    build_tool_schemas,
+    explicit_capture_tool_schema,
+    runtime_handoff_update_tool_schema,
+    workstream_recap_tool_schema,
+)
 from .transcript import trim_text_boundary
 from .runtime_handoff_io import (
     ACTIVE_TASK_STATUSES,
@@ -1385,177 +1391,36 @@ class BrainstackMemoryProvider(MemoryProvider):
             self._queue_tier2_background(session_id=sid, turn_number=self._turn_counter, trigger_reason=plan.tier2_schedule.reason)
 
     def _runtime_handoff_update_tool_schema(self) -> Dict[str, Any]:
-        return {
-            "name": "runtime_handoff_update",
-            "description": (
-                "Record the typed runtime status of a pending session-start handoff task. "
-                "Use only with a task_id from the runtime handoff block."
-            ),
-            "x_brainstack_tool_class": "runtime_status_write",
-            "x_brainstack_model_callable": False,
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task_id": {"type": "string"},
-                    "status": {
-                        "type": "string",
-                        "enum": ["pending", "in_progress", "blocked", "completed", "failed", "stale", "cancelled"],
-                    },
-                    "result_summary": {"type": "string"},
-                    "note": {"type": "string"},
-                    "artifact_refs": {"type": "array", "items": {"type": "string"}},
-                    "approved_by": {"type": "string"},
-                },
-                "required": ["task_id", "status"],
-            },
-        }
+        return runtime_handoff_update_tool_schema()
 
     def _workstream_recap_tool_schema(self) -> Dict[str, Any]:
-        return {
-            "name": "brainstack_workstream_recap",
-            "description": (
-                "Commit an explicit, scoped workstream recap summary into Brainstack operating truth. "
-                "Requires a typed workstream_id; does not infer workstream identity from prose."
-            ),
-            "x_brainstack_tool_class": "explicit_workstream_recap_write",
-            "x_brainstack_capture_schema": "brainstack.workstream_recap_capture.v1",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "workstream_id": {"type": "string"},
-                    "summary": {"type": "string"},
-                    "source_role": {"type": "string", "enum": ["user", "operator"]},
-                    "owner_role": {
-                        "type": "string",
-                        "enum": [RECENT_WORK_OWNER_USER_PROJECT, RECENT_WORK_OWNER_AGENT_ASSIGNMENT],
-                    },
-                    "source_kind": {
-                        "type": "string",
-                        "enum": [RECENT_WORK_SOURCE_EXPLICIT, RECENT_WORK_SOURCE_MANUAL_MIGRATION],
-                    },
-                    "source": {"type": "string"},
-                    "metadata": {"type": "object"},
-                },
-                "required": ["workstream_id", "summary", "source_role", "owner_role", "source_kind"],
-                "additionalProperties": False,
-            },
-        }
+        return workstream_recap_tool_schema(
+            owner_user_project=RECENT_WORK_OWNER_USER_PROJECT,
+            owner_agent_assignment=RECENT_WORK_OWNER_AGENT_ASSIGNMENT,
+            source_explicit=RECENT_WORK_SOURCE_EXPLICIT,
+            source_manual_migration=RECENT_WORK_SOURCE_MANUAL_MIGRATION,
+        )
 
     def _explicit_capture_tool_schema(self, *, name: str, operation: str) -> Dict[str, Any]:
-        properties: Dict[str, Any] = {
-            "shelf": {"type": "string", "enum": ["profile", "operating", "task"]},
-            "stable_key": {"type": "string"},
-            "source_role": {"type": "string", "enum": ["user", "operator"]},
-            "authority_class": {"type": "string"},
-            "content": {"type": "string"},
-            "category": {"type": "string"},
-            "record_type": {"type": "string"},
-            "title": {"type": "string"},
-            "due_date": {"type": "string"},
-            "date_scope": {"type": "string"},
-            "status": {"type": "string"},
-            "optional": {"type": "boolean"},
-            "confidence": {"type": "number"},
-            "metadata": {"type": "object"},
-        }
-        if operation == "supersede":
-            properties["supersedes_stable_key"] = {"type": "string"}
-        return {
-            "name": name,
-            "description": (
-                "Commit explicit typed Brainstack memory through the durable capture contract. "
-                "This tool requires schema fields and does not infer memory intent from prose."
-            ),
-            "x_brainstack_tool_class": "explicit_memory_write",
-            "x_brainstack_capture_schema": EXPLICIT_CAPTURE_SCHEMA_VERSION,
-            "parameters": {
-                "type": "object",
-                "properties": properties,
-                "required": ["shelf", "stable_key", "source_role"],
-                "additionalProperties": False,
-            },
-        }
+        return explicit_capture_tool_schema(
+            name=name,
+            operation=operation,
+            capture_schema_version=EXPLICIT_CAPTURE_SCHEMA_VERSION,
+        )
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        schemas = [
-            {
-                "name": "brainstack_recall",
-                "description": (
-                    "Recall scoped Brainstack memory evidence for a query. "
-                    "Read-only; returns evidence shelves and a bounded packet preview."
-                ),
-                "x_brainstack_tool_class": "read_only_memory",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "session_id": {"type": "string"},
-                    },
-                    "required": ["query"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "brainstack_inspect",
-                "description": (
-                    "Inspect Brainstack retrieval for a query with channels, routing, selected evidence, "
-                    "suppressed evidence, and final packet metadata. Read-only."
-                ),
-                "x_brainstack_tool_class": "read_only_memory_diagnostics",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "session_id": {"type": "string"},
-                    },
-                    "required": ["query"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "brainstack_stats",
-                "description": (
-                    "Return scoped Brainstack memory-kernel health, row counts, and capability status. "
-                    "Read-only; does not run repair or mutation."
-                ),
-                "x_brainstack_tool_class": "read_only_memory_health",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "strict": {"type": "boolean"},
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            self._explicit_capture_tool_schema(name="brainstack_remember", operation="remember"),
-            self._explicit_capture_tool_schema(name="brainstack_supersede", operation="supersede"),
-            self._workstream_recap_tool_schema(),
-            {
-                "name": "brainstack_consolidate",
-                "description": (
-                    "Run bounded Brainstack memory maintenance. Dry-run by default; apply mode is limited "
-                    "to derived semantic index rebuild and does not delete durable truth."
-                ),
-                "x_brainstack_tool_class": "bounded_memory_maintenance",
-                "x_brainstack_maintenance_schema": MAINTENANCE_SCHEMA_VERSION,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "apply": {"type": "boolean"},
-                        "maintenance_class": {
-                            "type": "string",
-                            "enum": [MAINTENANCE_CLASS_SEMANTIC_INDEX],
-                        },
-                    },
-                    "additionalProperties": False,
-                },
-            },
-        ]
-        if bool(self._config.get("runtime_handoff_update_model_callable", False)):
-            schema = self._runtime_handoff_update_tool_schema()
-            schema["x_brainstack_model_callable"] = True
-            schemas.append(schema)
-        return schemas
+        return build_tool_schemas(
+            capture_schema_version=EXPLICIT_CAPTURE_SCHEMA_VERSION,
+            maintenance_schema_version=MAINTENANCE_SCHEMA_VERSION,
+            maintenance_class_semantic_index=MAINTENANCE_CLASS_SEMANTIC_INDEX,
+            owner_user_project=RECENT_WORK_OWNER_USER_PROJECT,
+            owner_agent_assignment=RECENT_WORK_OWNER_AGENT_ASSIGNMENT,
+            source_explicit=RECENT_WORK_SOURCE_EXPLICIT,
+            source_manual_migration=RECENT_WORK_SOURCE_MANUAL_MIGRATION,
+            runtime_handoff_update_model_callable=bool(
+                self._config.get("runtime_handoff_update_model_callable", False)
+            ),
+        )
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         if tool_name == "brainstack_recall":
