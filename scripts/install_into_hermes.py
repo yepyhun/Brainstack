@@ -2767,6 +2767,9 @@ def main() -> int:
                 compose_path = _default_compose_path(target, config_path)
             except RuntimeError as exc:
                 if args.runtime == "docker":
+                    if config_path is None:
+                        print("FAIL Docker runtime install requires a concrete agent config.", file=sys.stderr)
+                        return 2
                     try:
                         compose_path = _generated_compose_path(target, config_path)
                     except RuntimeError:
@@ -2880,6 +2883,9 @@ def main() -> int:
         print(f"Wrote manifest: {target / '.brainstack-install-manifest.json'}")
 
     if args.doctor:
+        if config_path is None:
+            print("FAIL Doctor requires a concrete agent config.", file=sys.stderr)
+            return 2
         return _run_doctor(
             target,
             args,

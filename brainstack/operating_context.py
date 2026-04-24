@@ -4,6 +4,7 @@ from typing import Any, Dict, Iterable, List, Mapping
 
 from .operating_truth import (
     OPERATING_RECORD_ACTIVE_WORK,
+    OPERATING_RECORD_CANONICAL_POLICY,
     OPERATING_RECORD_COMPLETED_OUTCOME,
     OPERATING_RECORD_CURRENT_COMMITMENT,
     OPERATING_RECORD_DISCARDED_WORK,
@@ -12,7 +13,9 @@ from .operating_truth import (
     OPERATING_RECORD_NEXT_STEP,
     OPERATING_RECORD_OPEN_DECISION,
     OPERATING_RECORD_RECENT_WORK_SUMMARY,
+    OPERATING_RECORD_RUNTIME_APPROVAL_POLICY,
 )
+from .local_typed_understanding import build_session_recovery_contract
 
 
 OPERATING_CONTEXT_SNAPSHOT_VERSION = 1
@@ -126,7 +129,14 @@ def _build_current_commitments(
     )
     if records:
         return records
-    return _unique_lines((str(row.get("title") or "") for row in task_rows), limit=limit)
+    return _unique_lines(
+        (
+            str(row.get("title") or "")
+            for row in task_rows
+            if str(row.get("item_type") or "").strip() == "commitment"
+        ),
+        limit=limit,
+    )
 
 
 def _build_external_owner_pointers(
@@ -140,6 +150,117 @@ def _build_external_owner_pointers(
         limit=limit,
     )
     return [{"content": line} for line in lines]
+
+
+def _build_runtime_approval_policy(
+    operating_rows: Iterable[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    policy_rows = [
+        dict(row)
+        for row in operating_rows
+        if str(row.get("record_type") or "").strip() == OPERATING_RECORD_RUNTIME_APPROVAL_POLICY
+    ]
+    if not policy_rows:
+        return {"present": False, "domains": [], "content": "", "source": ""}
+    policy_rows.sort(
+        key=lambda row: (
+            str(row.get("updated_at") or ""),
+            str(row.get("created_at") or ""),
+        ),
+        reverse=True,
+    )
+    row = policy_rows[0]
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
+    domains = []
+    for raw in (metadata or {}).get("domains") or ():
+        if not isinstance(raw, Mapping):
+            continue
+        name = _normalize_text(raw.get("name") or raw.get("domain"))
+        if not name:
+            continue
+        domains.append(
+            {
+                "name": name,
+                "approval_required": bool(raw.get("approval_required")),
+                "default_action": _normalize_text(raw.get("default_action") or raw.get("action")),
+                "risk_class": _normalize_text(raw.get("risk_class")),
+            }
+        )
+    return {
+        "present": True,
+        "content": _normalize_text(row.get("content")),
+        "source": _normalize_text(row.get("source")),
+        "domains": domains,
+        "default_action": _normalize_text((metadata or {}).get("default_action")),
+    }
+
+
+def _build_runtime_handoff_tasks(
+    task_rows: Iterable[Mapping[str, Any]],
+    *,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    tasks: List[Dict[str, Any]] = []
+    for row in task_rows:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
+        if not bool((metadata or {}).get("runtime_handoff")):
+            continue
+        tasks.append(
+            {
+                "stable_key": str(row.get("stable_key") or "").strip(),
+                "title": _normalize_text(row.get("title")),
+                "status": _normalize_text(row.get("status")),
+                "due_date": _normalize_text(row.get("due_date")),
+                "item_type": _normalize_text(row.get("item_type")),
+                "domain": _normalize_text((metadata or {}).get("domain")),
+                "action": _normalize_text((metadata or {}).get("action")),
+                "risk_class": _normalize_text((metadata or {}).get("risk_class")),
+                "approval_required": bool((metadata or {}).get("approval_required")),
+                "task_id": _normalize_text((metadata or {}).get("task_id")) or _normalize_text(row.get("stable_key")),
+            }
+        )
+        if len(tasks) >= limit:
+            break
+    return tasks
+
+
+def _build_canonical_policy(
+    operating_rows: Iterable[Mapping[str, Any]],
+    *,
+    limit: int,
+) -> Dict[str, Any]:
+    rules: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in operating_rows:
+        if str(row.get("record_type") or "").strip() != OPERATING_RECORD_CANONICAL_POLICY:
+            continue
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
+        content = _normalize_text(row.get("content"))
+        if not content:
+            continue
+        rule_id = _normalize_text((metadata or {}).get("rule_id")) or _normalize_text(row.get("stable_key"))
+        if not rule_id or rule_id in seen:
+            continue
+        seen.add(rule_id)
+        rules.append(
+            {
+                "rule_id": rule_id,
+                "rule_class": _normalize_text((metadata or {}).get("rule_class")) or "explicit_rule",
+                "content": content,
+                "source": _normalize_text(row.get("source")),
+                "source_authority": _normalize_text((metadata or {}).get("source_authority")) or "explicit",
+                "updated_at": _normalize_text(row.get("updated_at")),
+            }
+        )
+        if len(rules) >= limit:
+            break
+    return {
+        "present": bool(rules),
+        "rule_count": len(rules),
+        "rules": rules,
+        "runtime_read_only": True,
+        "authority_owner": "brainstack.canonical_policy",
+    }
 
 
 def _build_session_state(lifecycle_state: Mapping[str, Any] | None) -> Dict[str, Any]:
@@ -210,6 +331,9 @@ def build_operating_context_snapshot(
         record_type=OPERATING_RECORD_NEXT_STEP,
         limit=4,
     )
+    runtime_approval_policy = _build_runtime_approval_policy(operating_list)
+    canonical_policy = _build_canonical_policy(operating_list, limit=8)
+    runtime_handoff_tasks = _build_runtime_handoff_tasks(task_rows, limit=8)
     session_state = _build_session_state(lifecycle_state)
     external_owner_pointers = _build_external_owner_pointers(operating_list, limit=4)
     completed_outcomes = _operating_record_lines(
@@ -228,6 +352,14 @@ def build_operating_context_snapshot(
             "If the user re-engages vaguely, resume the active work or open decisions below before falling back to generic small talk. "
             "Do not invent reminders or scheduling state that is not grounded in the committed records."
         )
+    session_recovery_contract = build_session_recovery_contract(
+        live_system_state_count=len(live_system_state),
+        runtime_handoff_task_count=len(runtime_handoff_tasks),
+        current_commitment_count=len(current_commitments),
+        next_step_count=len(next_steps),
+        open_decision_count=len(open_decisions),
+        approval_policy_present=bool(runtime_approval_policy.get("present")),
+    )
 
     return {
         "snapshot_version": OPERATING_CONTEXT_SNAPSHOT_VERSION,
@@ -249,6 +381,11 @@ def build_operating_context_snapshot(
         "current_commitment_count": len(current_commitments),
         "next_steps": next_steps,
         "next_step_count": len(next_steps),
+        "runtime_approval_policy": runtime_approval_policy,
+        "canonical_policy": canonical_policy,
+        "runtime_handoff_tasks": runtime_handoff_tasks,
+        "runtime_handoff_task_count": len(runtime_handoff_tasks),
+        "session_recovery_contract": session_recovery_contract,
         "completed_outcomes": completed_outcomes,
         "completed_outcome_count": len(completed_outcomes),
         "discarded_work": discarded_work,
@@ -260,8 +397,8 @@ def build_operating_context_snapshot(
         "external_owner_pointer_count": len(external_owner_pointers),
         "proactive_guidance": proactive_guidance,
         "owner_boundary": (
-            "Brainstack owns bounded task and commitment truth recorded in its structured task memory, "
-            "plus committed operating truth recorded in its operating substrate. Reminders and broader scheduling authority stay with dedicated owners."
+            "Brainstack owns canonical durable policy truth, bounded task and commitment truth recorded in its structured task memory, "
+            "and committed operating/live-state truth recorded in its operating substrate. Reminders, scheduling, approval enforcement, and broader execution authority stay with dedicated runtime owners."
         ),
     }
 
@@ -290,10 +427,22 @@ def render_operating_context_section(
     live_system_state = _unique_lines(snapshot.get("live_system_state") or [], limit=6)
     current_commitments = _unique_lines(snapshot.get("current_commitments") or [], limit=4)
     next_steps = _unique_lines(snapshot.get("next_steps") or [], limit=4)
+    raw_runtime_approval_policy = snapshot.get("runtime_approval_policy")
+    runtime_approval_policy: Mapping[str, Any] = (
+        raw_runtime_approval_policy if isinstance(raw_runtime_approval_policy, Mapping) else {}
+    )
+    raw_canonical_policy = snapshot.get("canonical_policy")
+    canonical_policy: Mapping[str, Any] = raw_canonical_policy if isinstance(raw_canonical_policy, Mapping) else {}
+    runtime_handoff_tasks = list(snapshot.get("runtime_handoff_tasks") or [])
+    raw_session_recovery_contract = snapshot.get("session_recovery_contract")
+    session_recovery_contract: Mapping[str, Any] = (
+        raw_session_recovery_contract if isinstance(raw_session_recovery_contract, Mapping) else {}
+    )
     completed_outcomes = _unique_lines(snapshot.get("completed_outcomes") or [], limit=4)
     discarded_work = _unique_lines(snapshot.get("discarded_work") or [], limit=4)
     stable_profile_entries = list(snapshot.get("stable_profile_entries") or [])
-    session_state = snapshot.get("session_state") if isinstance(snapshot.get("session_state"), Mapping) else {}
+    raw_session_state = snapshot.get("session_state")
+    session_state: Mapping[str, Any] = raw_session_state if isinstance(raw_session_state, Mapping) else {}
     proactive_guidance = _normalize_text(snapshot.get("proactive_guidance"))
     owner_boundary = _normalize_text(snapshot.get("owner_boundary"))
     external_owner_pointers = list(snapshot.get("external_owner_pointers") or [])
@@ -349,6 +498,61 @@ def render_operating_context_section(
             next_step_lines.append(f"- {_trim(next_step, 180)}")
         content_added = _append_block(lines, next_step_lines, char_budget=char_budget) or content_added
 
+    if bool(runtime_approval_policy.get("present")):
+        policy_lines = ["", "Runtime approval policy:"]
+        content = _normalize_text(runtime_approval_policy.get("content"))
+        if content:
+            policy_lines.append(f"- {_trim(content, 180)}")
+        for entry in list(runtime_approval_policy.get("domains") or [])[:6]:
+            if not isinstance(entry, Mapping):
+                continue
+            name = _normalize_text(entry.get("name"))
+            if not name:
+                continue
+            action = _normalize_text(entry.get("default_action")) or (
+                "ask_user" if bool(entry.get("approval_required")) else "auto_approved"
+            )
+            risk_class = _normalize_text(entry.get("risk_class"))
+            detail = f"{name}: {action}"
+            if risk_class:
+                detail += f" ({risk_class})"
+            policy_lines.append(f"- {_trim(detail, 180)}")
+        content_added = _append_block(lines, policy_lines, char_budget=char_budget) or content_added
+
+    if bool(canonical_policy.get("present")):
+        canonical_lines = ["", "Canonical policy:"]
+        for rule in list(canonical_policy.get("rules") or [])[:4]:
+            if not isinstance(rule, Mapping):
+                continue
+            content = _normalize_text(rule.get("content"))
+            if not content:
+                continue
+            rule_class = _normalize_text(rule.get("rule_class"))
+            prefix = f"[{rule_class}] " if rule_class else ""
+            canonical_lines.append(f"- {prefix}{_trim(content, 180)}")
+        content_added = _append_block(lines, canonical_lines, char_budget=char_budget) or content_added
+
+    if runtime_handoff_tasks:
+        handoff_lines = ["", "Runtime handoff tasks:"]
+        for task in runtime_handoff_tasks[:4]:
+            if not isinstance(task, Mapping):
+                continue
+            title = _normalize_text(task.get("title"))
+            if not title:
+                continue
+            suffix_bits = []
+            domain = _normalize_text(task.get("domain"))
+            action = _normalize_text(task.get("action"))
+            if domain:
+                suffix_bits.append(domain)
+            if action:
+                suffix_bits.append(action)
+            if bool(task.get("approval_required")):
+                suffix_bits.append("approval required")
+            suffix = f" [{' | '.join(suffix_bits)}]" if suffix_bits else ""
+            handoff_lines.append(f"- {_trim(title, 150)}{suffix}")
+        content_added = _append_block(lines, handoff_lines, char_budget=char_budget) or content_added
+
     if completed_outcomes:
         outcome_lines = ["", "Completed outcomes:"]
         for outcome in completed_outcomes:
@@ -384,6 +588,19 @@ def render_operating_context_section(
         for pointer in external_owner_pointers[:4]:
             pointer_lines.append(f"- {_trim(pointer.get('content'), 180)}")
         content_added = _append_block(lines, pointer_lines, char_budget=char_budget) or content_added
+
+    if session_recovery_contract:
+        recovery_lines = ["", "Session recovery contract:"]
+        ordered = list(session_recovery_contract.get("ordered_checks") or [])
+        for item in ordered[:5]:
+            if not isinstance(item, Mapping):
+                continue
+            surface = _normalize_text(item.get("surface")).replace("_", " ")
+            purpose = _normalize_text(item.get("purpose"))
+            if not surface:
+                continue
+            recovery_lines.append(f"- {surface}: {_trim(purpose or 'startup check', 120)}")
+        content_added = _append_block(lines, recovery_lines, char_budget=char_budget) or content_added
 
     if content_added and owner_boundary:
         _append_block(

@@ -491,9 +491,6 @@ _TYPED_ENTITY_NUMERIC_KEYS = {
     "quantity",
 }
 
-_TIER2_RESPONSE_FORMAT = {"type": "json_object"}
-
-
 def _normalize_typed_entity_attributes(raw: Any) -> Dict[str, str]:
     if not isinstance(raw, Mapping):
         return {}
@@ -570,7 +567,6 @@ def _default_llm_caller(*, task: str, messages: list, timeout: float, max_tokens
         messages=messages,
         temperature=0.0,
         max_tokens=max_tokens,
-        extra_body={"response_format": _TIER2_RESPONSE_FORMAT},
         timeout=timeout,
     )
 

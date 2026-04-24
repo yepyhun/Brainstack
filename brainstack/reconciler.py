@@ -74,6 +74,23 @@ def _candidate_metadata(
     return payload
 
 
+def _is_assistant_authored_candidate(candidate: Mapping[str, Any] | None) -> bool:
+    if not isinstance(candidate, Mapping):
+        return False
+    containers = [candidate]
+    for key in ("metadata", "provenance"):
+        nested = candidate.get(key)
+        if isinstance(nested, Mapping):
+            containers.append(nested)
+    for payload in containers:
+        for key in ("role", "source_role", "author_role", "speaker"):
+            if str(payload.get(key) or "").strip().lower() == "assistant":
+                return True
+        if str(payload.get("source") or "").strip().lower().startswith("assistant"):
+            return True
+    return False
+
+
 def _reconcile_profile_items(
     store: BrainstackStore,
     *,
@@ -83,6 +100,9 @@ def _reconcile_profile_items(
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
     for candidate in candidates:
+        if _is_assistant_authored_candidate(candidate):
+            actions.append({"kind": "profile", "action": "REJECT_ASSISTANT_AUTHORED"})
+            continue
         category = _normalize_text(candidate.get("category")).lower()
         content = _normalize_text(candidate.get("content"))
         if not category or not content:
@@ -125,6 +145,8 @@ def _reconcile_style_contract(
     source: str,
     metadata: Mapping[str, Any],
 ) -> List[Dict[str, Any]]:
+    if _is_assistant_authored_candidate(candidate):
+        return [{"kind": "style_contract", "action": "REJECT_ASSISTANT_AUTHORED"}]
     normalized = normalize_style_contract_payload(candidate)
     if not normalized:
         return []
@@ -168,6 +190,9 @@ def _reconcile_states(
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
     for candidate in candidates:
+        if _is_assistant_authored_candidate(candidate):
+            actions.append({"kind": "state", "action": "REJECT_ASSISTANT_AUTHORED"})
+            continue
         subject_name = _canonicalize_person_subject(candidate.get("subject"), user_name=user_name)
         outcome = store.upsert_graph_state(
             subject_name=subject_name,
@@ -204,6 +229,9 @@ def _reconcile_relations(
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
     for candidate in candidates:
+        if _is_assistant_authored_candidate(candidate):
+            actions.append({"kind": "relation", "action": "REJECT_ASSISTANT_AUTHORED"})
+            continue
         subject_name = _canonicalize_person_subject(candidate.get("subject"), user_name=user_name)
         object_name = _canonicalize_person_subject(candidate.get("object"), user_name=user_name)
         outcome = store.upsert_graph_relation(
@@ -232,6 +260,9 @@ def _reconcile_inferred_relations(
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
     for candidate in candidates:
+        if _is_assistant_authored_candidate(candidate):
+            actions.append({"kind": "inferred_relation", "action": "REJECT_ASSISTANT_AUTHORED"})
+            continue
         subject_name = _canonicalize_person_subject(candidate.get("subject"), user_name=user_name)
         object_name = _canonicalize_person_subject(candidate.get("object"), user_name=user_name)
         outcome = store.upsert_graph_inferred_relation(
@@ -273,6 +304,9 @@ def _reconcile_typed_entities(
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
     for candidate in candidates:
+        if _is_assistant_authored_candidate(candidate):
+            actions.append({"kind": "typed_entity", "action": "REJECT_ASSISTANT_AUTHORED"})
+            continue
         entity_name = _typed_entity_name(candidate)
         entity_type = _normalize_text(candidate.get("entity_type")).lower()
         if not entity_name or not entity_type:
@@ -312,6 +346,9 @@ def _reconcile_continuity(
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
     for event in temporal_events:
+        if _is_assistant_authored_candidate(event):
+            actions.append({"kind": "continuity", "action": "REJECT_ASSISTANT_AUTHORED", "type": "temporal_event"})
+            continue
         content = _normalize_text(event.get("content"))
         if not content:
             continue
@@ -357,6 +394,11 @@ def _reconcile_continuity(
             actions.append({"kind": "continuity", "action": "NONE", "type": "summary"})
 
     for decision in decisions:
+        if isinstance(decision, Mapping) and _is_assistant_authored_candidate(decision):
+            actions.append({"kind": "continuity", "action": "REJECT_ASSISTANT_AUTHORED", "type": "decision"})
+            continue
+        if isinstance(decision, Mapping):
+            decision = _normalize_text(decision.get("content"))
         if store.find_continuity_event(session_id=session_id, kind="decision", content=decision) is not None:
             actions.append({"kind": "continuity", "action": "NONE", "type": "decision", "content": decision})
             continue

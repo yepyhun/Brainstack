@@ -188,6 +188,7 @@ def build_working_memory_packet(
     timezone_name: str = "UTC",
     system_substrate: Dict[str, Any] | None = None,
     render_ordinary_contract: bool = False,
+    record_retrievals: bool = True,
 ) -> Dict[str, Any]:
     analysis = analyze_query(
         store,
@@ -382,7 +383,7 @@ def build_working_memory_packet(
         system_substrate=system_substrate,
     )
 
-    if profile_items:
+    if record_retrievals and profile_items:
         matched_profile_keys = {
             str(item.get("stable_key") or "").strip()
             for item in retrieval["profile_items"]
@@ -401,9 +402,9 @@ def build_working_memory_packet(
                 for row in profile_items
             ]
         )
-    if graph_rows:
+    if record_retrievals and graph_rows:
         store.record_graph_retrievals(rows=graph_rows)
-    if corpus_rows:
+    if record_retrievals and corpus_rows:
         store.record_corpus_retrievals(rows=corpus_rows)
     return {
         "analysis": asdict(analysis),
@@ -419,6 +420,7 @@ def build_working_memory_packet(
         "corpus_rows": corpus_rows,
         "fused_candidates": retrieval["fused_candidates"],
         "decomposition": retrieval.get("decomposition", {"used": False, "queries": [query]}),
+        "associative_expansion": retrieval.get("associative_expansion", {}),
         "routing": routing,
         "system_substrate": dict(system_substrate or {}),
         "block": block,

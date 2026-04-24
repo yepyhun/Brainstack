@@ -6,7 +6,6 @@ from typing import Any, Dict, Mapping
 
 from .operating_truth import OPERATING_RECORD_TYPES
 from .structured_understanding import (
-    ROUTE_FACT,
     ROUTE_MODES,
     current_local_date,
     resolve_user_timezone,
@@ -19,6 +18,9 @@ ITEM_TYPES = {
     ITEM_TYPE_TASK,
     ITEM_TYPE_COMMITMENT,
 }
+
+SESSION_RECOVERY_CONTRACT_VERSION = 1
+VOLATILE_OPERATING_RECORD_TYPES = {"session_state"}
 
 DATE_SCOPE_VALUES = {
     "",
@@ -33,6 +35,38 @@ DATE_SCOPE_VALUES = {
 
 def _normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
+
+
+def _normalize_json_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        normalized: Dict[str, Any] = {}
+        for key, raw in value.items():
+            normalized_key = _normalize_text(key)
+            if not normalized_key:
+                continue
+            normalized_value = _normalize_json_value(raw)
+            if normalized_value is None:
+                continue
+            normalized[normalized_key] = normalized_value
+        return normalized or None
+    if isinstance(value, (list, tuple)):
+        items = []
+        for raw in value:
+            normalized_value = _normalize_json_value(raw)
+            if normalized_value is None:
+                continue
+            items.append(normalized_value)
+        return items or None
+    return _normalize_text(value) or None
+
+
+def _normalize_json_mapping(value: Any) -> Dict[str, Any]:
+    normalized = _normalize_json_value(value)
+    return dict(normalized) if isinstance(normalized, Mapping) else {}
 
 
 def _extract_mapping_payload(text: str) -> Dict[str, Any] | None:
@@ -136,6 +170,7 @@ def _normalize_task_capture_payload(payload: Mapping[str, Any] | None) -> Dict[s
                 "date_scope": item_date_scope,
                 "optional": bool(raw.get("optional")),
                 "status": _normalize_text(raw.get("status")) or "open",
+                "metadata": _normalize_json_mapping(raw.get("metadata")),
             }
         )
     if not items:
@@ -159,10 +194,75 @@ def _normalize_operating_capture_payload(payload: Mapping[str, Any] | None) -> D
         content = _normalize_text(raw.get("content"))
         if record_type not in OPERATING_RECORD_TYPES or not content:
             continue
-        items.append({"record_type": record_type, "content": content})
+        items.append(
+            {
+                "record_type": record_type,
+                "content": content,
+                "metadata": _normalize_json_mapping(raw.get("metadata")),
+            }
+        )
     if not items:
         return None
     return {"items": items[:8]}
+
+
+def build_session_recovery_contract(
+    *,
+    live_system_state_count: int = 0,
+    runtime_handoff_task_count: int = 0,
+    current_commitment_count: int = 0,
+    next_step_count: int = 0,
+    open_decision_count: int = 0,
+    approval_policy_present: bool = False,
+) -> Dict[str, Any]:
+    ordered_checks = [
+        {
+            "surface": "live_system_state",
+            "required": True,
+            "present": bool(live_system_state_count),
+            "count": max(int(live_system_state_count or 0), 0),
+            "purpose": "authoritative current runtime state",
+        },
+        {
+            "surface": "runtime_handoff_tasks",
+            "required": False,
+            "present": bool(runtime_handoff_task_count),
+            "count": max(int(runtime_handoff_task_count or 0), 0),
+            "purpose": "explicit runtime-consumable pending work",
+        },
+        {
+            "surface": "current_commitments",
+            "required": False,
+            "present": bool(current_commitment_count),
+            "count": max(int(current_commitment_count or 0), 0),
+            "purpose": "active committed work",
+        },
+        {
+            "surface": "next_steps",
+            "required": False,
+            "present": bool(next_step_count),
+            "count": max(int(next_step_count or 0), 0),
+            "purpose": "near-term continuation hints",
+        },
+        {
+            "surface": "open_decisions",
+            "required": False,
+            "present": bool(open_decision_count),
+            "count": max(int(open_decision_count or 0), 0),
+            "purpose": "blocked or unresolved choices",
+        },
+    ]
+    return {
+        "contract_version": SESSION_RECOVERY_CONTRACT_VERSION,
+        "bounded": True,
+        "startup_mode": "session_start_recovery",
+        "approval_policy_present": bool(approval_policy_present),
+        "ordered_checks": ordered_checks,
+        "summary": (
+            "Recover current live state first, then explicit runtime handoff tasks, then committed work, "
+            "next steps, and open decisions. Do not reconstruct this order from loose transcripts."
+        ),
+    }
 
 
 def _probe_task_lookup(
@@ -196,10 +296,18 @@ def _probe_task_lookup(
 
 def _operating_projection(row: Mapping[str, Any]) -> str:
     metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
+    semantic_terms = metadata.get("semantic_terms") if isinstance(metadata, Mapping) else ()
+    if isinstance(semantic_terms, str):
+        semantic_text = semantic_terms
+    elif isinstance(semantic_terms, (list, tuple, set)):
+        semantic_text = " ".join(str(term or "") for term in semantic_terms if isinstance(term, (str, int, float)))
+    else:
+        semantic_text = ""
     parts = [
         str(row.get("record_type") or "").replace("_", " ").strip(),
         _normalize_text(row.get("content")),
         _normalize_text((metadata or {}).get("input_excerpt")),
+        _normalize_text(semantic_text),
     ]
     return " ".join(part for part in parts if part)
 
@@ -222,6 +330,10 @@ def _rank_operating_rows_locally(rows: list[Mapping[str, Any]], *, query: str, l
                 score += 1.0
         if overlap <= 0:
             continue
+        if str(row.get("record_type") or "").strip() in VOLATILE_OPERATING_RECORD_TYPES and len(query_tokens) > 1:
+            required_overlap = min(2, len(query_tokens))
+            if overlap < required_overlap:
+                continue
         row["keyword_score"] = max(float(row.get("keyword_score") or 0.0), score)
         row["_brainstack_query_token_overlap"] = overlap
         row["retrieval_source"] = str(row.get("retrieval_source") or "operating.keyword")

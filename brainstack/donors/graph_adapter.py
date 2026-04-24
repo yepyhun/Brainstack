@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Sequence
 
-from ..graph import ingest_graph_evidence, ingest_graph_evidence_with_receipt
+from ..graph import ingest_graph_evidence_with_receipt
 from ..graph_evidence import GraphEvidenceItem, attach_graph_source_context
 
 

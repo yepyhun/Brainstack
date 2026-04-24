@@ -24,13 +24,28 @@ from agent.memory_provider import MemoryProvider
 
 from .control_plane import build_working_memory_packet
 from .db import BrainstackStore
+from .diagnostics import build_memory_kernel_doctor, build_query_inspect
 from .donors import continuity_adapter, corpus_adapter, graph_adapter
 from .donors.registry import get_donor_registry
+from .explicit_capture import (
+    EXPLICIT_CAPTURE_SCHEMA_VERSION,
+    build_commit_metadata,
+    receipt_excerpt,
+    validate_explicit_capture_payload,
+)
 from .extraction_pipeline import build_session_message_ingest_plan, build_turn_ingest_plan
+from .maintenance import (
+    MAINTENANCE_CLASS_SEMANTIC_INDEX,
+    MAINTENANCE_SCHEMA_VERSION,
+    normalize_maintenance_args,
+    run_bounded_maintenance,
+)
 from .operating_truth import (
     OPERATING_OWNER,
+    OPERATING_RECORD_CANONICAL_POLICY,
     OPERATING_RECORD_OPEN_DECISION,
     OPERATING_RECORD_RECENT_WORK_SUMMARY,
+    OPERATING_RECORD_RUNTIME_APPROVAL_POLICY,
     build_operating_stable_key,
     parse_operating_capture,
 )
@@ -52,12 +67,24 @@ from .style_contract import (
     looks_like_style_contract_fragment,
     looks_like_style_contract_teaching,
 )
-from .task_memory import build_task_stable_key, parse_task_capture, resolve_user_timezone
-from .tier1_extractor import build_profile_stable_key
+from .structured_understanding import resolve_user_timezone
+from .task_memory import build_task_stable_key, parse_task_capture
 from .tier2_extractor import extract_tier2_candidates
 from .transcript import trim_text_boundary
+from .runtime_handoff_io import (
+    ACTIVE_TASK_STATUSES,
+    ALL_TASK_STATUSES,
+    TERMINAL_TASK_STATUSES,
+    locate_task_record,
+    utc_now_iso,
+    write_task_record,
+)
 
 logger = logging.getLogger(__name__)
+
+DISABLED_MEMORY_WRITE_TOOLS = {
+    "brainstack_invalidate",
+}
 
 
 def _normalize_compact_text(value: Any) -> str:
@@ -247,6 +274,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._last_write_receipt: Dict[str, Any] | None = None
         self._last_tier2_schedule: Dict[str, Any] | None = None
         self._last_tier2_batch_result: Dict[str, Any] | None = None
+        self._last_maintenance_receipt: Dict[str, Any] | None = None
         self._tier2_batch_history: List[Dict[str, Any]] = []
         self._pending_tier2_turns = 0
         self._pending_explicit_write_count = 0
@@ -350,6 +378,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._last_write_receipt = None
         self._last_tier2_schedule = None
         self._last_tier2_batch_result = None
+        self._last_maintenance_receipt = None
         self._tier2_batch_history = []
         self._pending_tier2_turns = 0
         self._pending_explicit_write_count = 0
@@ -361,6 +390,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._principal_scope = {}
         self._principal_scope_key = ""
         self._recent_user_messages = []
+        self._hermes_home = ""
 
     def initialize(self, session_id: str, **kwargs) -> None:
         hermes_home = str(kwargs.get("hermes_home") or "")
@@ -380,6 +410,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             self._store = None
         self._reset_session_runtime_state()
         self._session_id = session_id
+        self._hermes_home = hermes_home
         self._principal_scope = _build_principal_scope(**kwargs)
         self._principal_scope_key = str(self._principal_scope.get("principal_scope_key") or "").strip()
         self._user_timezone = resolve_user_timezone(
@@ -396,14 +427,14 @@ class BrainstackMemoryProvider(MemoryProvider):
         )
         self._store.open()
 
-    def _scoped_metadata(self, metadata: Dict[str, Any] | None = None) -> Dict[str, Any] | None:
+    def _scoped_metadata(self, metadata: Mapping[str, Any] | None = None) -> Dict[str, Any]:
         payload = dict(metadata or {})
         if self._user_timezone:
             payload.setdefault("timezone", self._user_timezone)
         if self._principal_scope_key:
             payload.setdefault("principal_scope_key", self._principal_scope_key)
             payload.setdefault("principal_scope", dict(self._principal_scope))
-        return payload or None
+        return payload
 
     def _next_write_receipt_id(self) -> str:
         self._write_receipt_counter += 1
@@ -527,7 +558,8 @@ class BrainstackMemoryProvider(MemoryProvider):
         metadata: Dict[str, Any] | None = None,
         require_explicit_signal: bool = False,
     ) -> Dict[str, Any] | None:
-        if not self._store or not content:
+        store = self._store
+        if store is None or not content:
             return None
         style_contract = self._resolve_style_contract_candidate(
             content=content,
@@ -540,6 +572,16 @@ class BrainstackMemoryProvider(MemoryProvider):
         if style_contract is None:
             return None
 
+        def commit() -> None:
+            store.upsert_profile_item(
+                stable_key=style_contract["slot"],
+                category=style_contract["category"],
+                content=style_contract["content"],
+                source=style_contract["source"],
+                confidence=float(style_contract["confidence"]),
+                metadata=style_contract["metadata"],
+            )
+
         receipt = self._commit_explicit_write(
             owner="brainstack.profile_archive",
             write_class="style_contract",
@@ -548,14 +590,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             stable_key=str(style_contract["slot"]),
             category=str(style_contract["category"]),
             content=str(style_contract["content"]),
-            commit=lambda: self._store.upsert_profile_item(
-                stable_key=style_contract["slot"],
-                category=style_contract["category"],
-                content=style_contract["content"],
-                source=style_contract["source"],
-                confidence=float(style_contract["confidence"]),
-                metadata=style_contract["metadata"],
-            ),
+            commit=commit,
             extra={
                 "rule_count": int(style_contract.get("metadata", {}).get("style_contract_rule_count") or 0),
                 "fragment_count": int(style_contract.get("metadata", {}).get("style_contract_fragment_count") or 1),
@@ -565,7 +600,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                 ),
             },
         )
-        profile_row = self._store.get_profile_item(
+        profile_row = store.get_profile_item(
             stable_key=str(style_contract["slot"]),
             principal_scope_key=self._principal_scope_key,
         )
@@ -731,7 +766,8 @@ class BrainstackMemoryProvider(MemoryProvider):
         source: str,
         metadata: Dict[str, Any] | None = None,
     ) -> Dict[str, Any] | None:
-        if not self._store or not content or not isinstance(capture, dict):
+        store = self._store
+        if store is None or not content or not isinstance(capture, dict):
             return None
         items = list(capture.get("items") or [])
         if not items:
@@ -756,13 +792,18 @@ class BrainstackMemoryProvider(MemoryProvider):
                 title = str(item.get("title") or "").strip()
                 item_due_date = str(item.get("due_date") or due_date).strip()
                 item_date_scope = str(item.get("date_scope") or date_scope).strip()
+                raw_item_metadata = item.get("metadata")
+                item_metadata: Mapping[str, Any] = raw_item_metadata if isinstance(raw_item_metadata, Mapping) else {}
+                combined_metadata = dict(write_metadata)
+                if item_metadata:
+                    combined_metadata.update(dict(item_metadata))
                 stable_key = build_task_stable_key(
                     principal_scope_key=self._principal_scope_key,
                     item_type=str(item.get("item_type") or item_type).strip() or item_type,
                     due_date=item_due_date,
                     title=title,
                 )
-                self._store.upsert_task_item(
+                store.upsert_task_item(
                     stable_key=stable_key,
                     principal_scope_key=self._principal_scope_key,
                     item_type=str(item.get("item_type") or item_type).strip() or item_type,
@@ -775,7 +816,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                     source=source,
                     source_session_id=str((metadata or {}).get("session_id") or self._session_id or "").strip(),
                     source_turn_number=int((metadata or {}).get("turn_number") or self._turn_counter or 0),
-                    metadata=write_metadata,
+                    metadata=combined_metadata,
                 )
 
         receipt = self._commit_explicit_write(
@@ -844,7 +885,8 @@ class BrainstackMemoryProvider(MemoryProvider):
         source: str,
         metadata: Dict[str, Any] | None = None,
     ) -> Dict[str, Any] | None:
-        if not self._store or not content or not isinstance(capture, dict):
+        store = self._store
+        if store is None or not content or not isinstance(capture, dict):
             return None
         items = list(capture.get("items") or [])
         if not items:
@@ -870,12 +912,27 @@ class BrainstackMemoryProvider(MemoryProvider):
                 content_text = str(item.get("content") or "").strip()
                 if not record_type or not content_text:
                     continue
-                stable_key = build_operating_stable_key(
-                    principal_scope_key=self._principal_scope_key,
-                    record_type=record_type,
-                    content=content_text,
-                )
-                self._store.upsert_operating_record(
+                raw_item_metadata = item.get("metadata")
+                item_metadata: Mapping[str, Any] = raw_item_metadata if isinstance(raw_item_metadata, Mapping) else {}
+                combined_metadata = dict(write_metadata)
+                if item_metadata:
+                    combined_metadata.update(dict(item_metadata))
+                explicit_rule_id = _normalize_compact_text(combined_metadata.get("rule_id"))
+                if record_type == OPERATING_RECORD_CANONICAL_POLICY and explicit_rule_id:
+                    stable_key = "::".join(
+                        [
+                            "canonical_policy",
+                            self._principal_scope_key or "global",
+                            explicit_rule_id,
+                        ]
+                    )
+                else:
+                    stable_key = build_operating_stable_key(
+                        principal_scope_key=self._principal_scope_key,
+                        record_type=record_type,
+                        content=content_text,
+                    )
+                store.upsert_operating_record(
                     stable_key=stable_key,
                     principal_scope_key=self._principal_scope_key,
                     record_type=record_type,
@@ -884,7 +941,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                     source=source,
                     source_session_id=str((metadata or {}).get("session_id") or self._session_id or "").strip(),
                     source_turn_number=int((metadata or {}).get("turn_number") or self._turn_counter or 0),
-                    metadata=write_metadata,
+                    metadata=combined_metadata,
                 )
 
         receipt = self._commit_explicit_write(
@@ -928,13 +985,14 @@ class BrainstackMemoryProvider(MemoryProvider):
         content: str,
         source: str,
         metadata: Dict[str, Any] | None = None,
+        stable_key_override: str = "",
     ) -> bool:
         if not self._store:
             return False
         normalized_content = _normalize_compact_text(content)
         if not normalized_content:
             return False
-        stable_key = build_operating_stable_key(
+        stable_key = _normalize_compact_text(stable_key_override) or build_operating_stable_key(
             principal_scope_key=self._principal_scope_key,
             record_type=record_type,
             content=normalized_content,
@@ -1299,8 +1357,642 @@ class BrainstackMemoryProvider(MemoryProvider):
         if plan.tier2_schedule.should_queue:
             self._queue_tier2_background(session_id=sid, turn_number=self._turn_counter, trigger_reason=plan.tier2_schedule.reason)
 
+    def _runtime_handoff_update_tool_schema(self) -> Dict[str, Any]:
+        return {
+            "name": "runtime_handoff_update",
+            "description": (
+                "Record the typed runtime status of a pending session-start handoff task. "
+                "Use only with a task_id from the runtime handoff block."
+            ),
+            "x_brainstack_tool_class": "runtime_status_write",
+            "x_brainstack_model_callable": False,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "in_progress", "blocked", "completed", "failed", "stale", "cancelled"],
+                    },
+                    "result_summary": {"type": "string"},
+                    "note": {"type": "string"},
+                    "artifact_refs": {"type": "array", "items": {"type": "string"}},
+                    "approved_by": {"type": "string"},
+                },
+                "required": ["task_id", "status"],
+            },
+        }
+
+    def _explicit_capture_tool_schema(self, *, name: str, operation: str) -> Dict[str, Any]:
+        properties: Dict[str, Any] = {
+            "shelf": {"type": "string", "enum": ["profile", "operating", "task"]},
+            "stable_key": {"type": "string"},
+            "source_role": {"type": "string", "enum": ["user", "operator"]},
+            "authority_class": {"type": "string"},
+            "content": {"type": "string"},
+            "category": {"type": "string"},
+            "record_type": {"type": "string"},
+            "title": {"type": "string"},
+            "due_date": {"type": "string"},
+            "date_scope": {"type": "string"},
+            "status": {"type": "string"},
+            "optional": {"type": "boolean"},
+            "confidence": {"type": "number"},
+            "metadata": {"type": "object"},
+        }
+        if operation == "supersede":
+            properties["supersedes_stable_key"] = {"type": "string"}
+        return {
+            "name": name,
+            "description": (
+                "Commit explicit typed Brainstack memory through the durable capture contract. "
+                "This tool requires schema fields and does not infer memory intent from prose."
+            ),
+            "x_brainstack_tool_class": "explicit_memory_write",
+            "x_brainstack_capture_schema": EXPLICIT_CAPTURE_SCHEMA_VERSION,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": ["shelf", "stable_key", "source_role"],
+                "additionalProperties": False,
+            },
+        }
+
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return []
+        schemas = [
+            {
+                "name": "brainstack_recall",
+                "description": (
+                    "Recall scoped Brainstack memory evidence for a query. "
+                    "Read-only; returns evidence shelves and a bounded packet preview."
+                ),
+                "x_brainstack_tool_class": "read_only_memory",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "session_id": {"type": "string"},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "brainstack_inspect",
+                "description": (
+                    "Inspect Brainstack retrieval for a query with channels, routing, selected evidence, "
+                    "suppressed evidence, and final packet metadata. Read-only."
+                ),
+                "x_brainstack_tool_class": "read_only_memory_diagnostics",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "session_id": {"type": "string"},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "brainstack_stats",
+                "description": (
+                    "Return scoped Brainstack memory-kernel health, row counts, and capability status. "
+                    "Read-only; does not run repair or mutation."
+                ),
+                "x_brainstack_tool_class": "read_only_memory_health",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "strict": {"type": "boolean"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            self._explicit_capture_tool_schema(name="brainstack_remember", operation="remember"),
+            self._explicit_capture_tool_schema(name="brainstack_supersede", operation="supersede"),
+            {
+                "name": "brainstack_consolidate",
+                "description": (
+                    "Run bounded Brainstack memory maintenance. Dry-run by default; apply mode is limited "
+                    "to derived semantic index rebuild and does not delete durable truth."
+                ),
+                "x_brainstack_tool_class": "bounded_memory_maintenance",
+                "x_brainstack_maintenance_schema": MAINTENANCE_SCHEMA_VERSION,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "apply": {"type": "boolean"},
+                        "maintenance_class": {
+                            "type": "string",
+                            "enum": [MAINTENANCE_CLASS_SEMANTIC_INDEX],
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        ]
+        if bool(self._config.get("runtime_handoff_update_model_callable", False)):
+            schema = self._runtime_handoff_update_tool_schema()
+            schema["x_brainstack_model_callable"] = True
+            schemas.append(schema)
+        return schemas
+
+    def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+        if tool_name == "brainstack_recall":
+            return json.dumps(self._handle_brainstack_recall(args), ensure_ascii=False)
+        if tool_name == "brainstack_inspect":
+            return json.dumps(self._handle_brainstack_inspect(args), ensure_ascii=False)
+        if tool_name == "brainstack_stats":
+            return json.dumps(self._handle_brainstack_stats(args), ensure_ascii=False)
+        if tool_name == "brainstack_remember":
+            return json.dumps(self._handle_brainstack_explicit_capture("remember", args), ensure_ascii=False)
+        if tool_name == "brainstack_supersede":
+            return json.dumps(self._handle_brainstack_explicit_capture("supersede", args), ensure_ascii=False)
+        if tool_name == "brainstack_consolidate":
+            return json.dumps(self._handle_brainstack_consolidate(args), ensure_ascii=False)
+        if tool_name == "runtime_handoff_update":
+            return json.dumps(self._handle_runtime_handoff_update(args, **kwargs), ensure_ascii=False)
+        if tool_name in DISABLED_MEMORY_WRITE_TOOLS:
+            return json.dumps(
+                {
+                    "schema": "brainstack.tool_error.v1",
+                    "tool_name": tool_name,
+                    "error_code": "tool_disabled_pending_contract",
+                    "error": "This Brainstack memory operation is disabled until its explicit durable contract lands.",
+                    "read_only": False,
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {
+                "schema": "brainstack.tool_error.v1",
+                "tool_name": tool_name,
+                "error_code": "unknown_tool",
+                "error": f"Unknown Brainstack tool: {tool_name}",
+            },
+            ensure_ascii=False,
+        )
+
+    def _handle_brainstack_explicit_capture(self, operation: str, args: Mapping[str, Any]) -> Dict[str, Any]:
+        tool_name = f"brainstack_{operation}"
+        if self._store is None:
+            return {
+                "schema": "brainstack.tool_error.v1",
+                "tool_name": tool_name,
+                "error_code": "store_unavailable",
+                "error": "Brainstack store is not initialized.",
+                "read_only": False,
+            }
+        store = self._store
+        capture, rejection = validate_explicit_capture_payload(
+            args,
+            operation=operation,
+            principal_scope_key=self._principal_scope_key,
+            session_id=self._session_id,
+            turn_number=self._turn_counter,
+        )
+        if rejection is not None:
+            self._last_write_receipt = dict(rejection)
+            self._set_memory_operation_trace(
+                surface="explicit_capture_rejected",
+                note="Explicit durable capture rejected by schema validation.",
+            )
+            return rejection
+        assert capture is not None
+
+        metadata = self._scoped_metadata(build_commit_metadata(capture))
+        shelf = str(capture.get("shelf") or "")
+        stable_key = str(capture.get("stable_key") or "")
+        source = f"{tool_name}:{shelf}"
+        content = str(capture.get("content") or capture.get("title") or "")
+
+        def _commit() -> None:
+            if shelf == "profile":
+                store.upsert_profile_item(
+                    stable_key=stable_key,
+                    category=str(capture.get("category") or ""),
+                    content=str(capture.get("content") or ""),
+                    source=source,
+                    confidence=float(capture.get("confidence") or 0.95),
+                    metadata=metadata,
+                )
+                return
+            if shelf == "operating":
+                store.upsert_operating_record(
+                    stable_key=stable_key,
+                    principal_scope_key=self._principal_scope_key,
+                    record_type=str(capture.get("record_type") or ""),
+                    content=str(capture.get("content") or ""),
+                    owner="brainstack.explicit_capture",
+                    source=source,
+                    source_session_id=self._session_id,
+                    source_turn_number=self._turn_counter,
+                    metadata=metadata,
+                )
+                return
+            if shelf == "task":
+                store.upsert_task_item(
+                    stable_key=stable_key,
+                    principal_scope_key=self._principal_scope_key,
+                    item_type=str(capture.get("item_type") or "task"),
+                    title=str(capture.get("title") or ""),
+                    due_date=str(capture.get("due_date") or ""),
+                    date_scope=str(capture.get("date_scope") or ""),
+                    optional=bool(capture.get("optional", False)),
+                    status=str(capture.get("status") or "open"),
+                    owner="brainstack.explicit_capture",
+                    source=source,
+                    source_session_id=self._session_id,
+                    source_turn_number=self._turn_counter,
+                    metadata=metadata,
+                )
+
+        receipt = self._commit_explicit_write(
+            owner="brainstack.explicit_capture",
+            write_class=f"explicit_{operation}",
+            source=source,
+            target=shelf,
+            stable_key=stable_key,
+            category=str(capture.get("category") or capture.get("record_type") or capture.get("item_type") or shelf),
+            content=content,
+            commit=_commit,
+            extra={
+                "schema": EXPLICIT_CAPTURE_SCHEMA_VERSION,
+                "tool_name": tool_name,
+                "operation": operation,
+                "shelf": shelf,
+                "source_role": str(capture.get("source_role") or ""),
+                "authority_class": str(capture.get("authority_class") or ""),
+                "content_excerpt": receipt_excerpt(content),
+                "supersedes_stable_key": str(capture.get("supersedes_stable_key") or ""),
+            },
+        )
+        receipt["read_only"] = False
+        return receipt
+
+    def _handle_brainstack_consolidate(self, args: Mapping[str, Any]) -> Dict[str, Any]:
+        if self._store is None:
+            return {
+                "schema": "brainstack.tool_error.v1",
+                "tool_name": "brainstack_consolidate",
+                "error_code": "store_unavailable",
+                "error": "Brainstack store is not initialized.",
+                "read_only": False,
+            }
+        normalized = normalize_maintenance_args(args)
+        receipt = run_bounded_maintenance(
+            self._store,
+            apply=bool(normalized["apply"]),
+            maintenance_class=str(normalized["maintenance_class"]),
+            principal_scope_key=self._principal_scope_key,
+        )
+        receipt["tool_name"] = "brainstack_consolidate"
+        receipt["read_only"] = not bool(normalized["apply"])
+        self._last_maintenance_receipt = json.loads(json.dumps(receipt, ensure_ascii=True))
+        return receipt
+
+    def _handle_brainstack_recall(self, args: Mapping[str, Any]) -> Dict[str, Any]:
+        query = _normalize_compact_text(args.get("query") if isinstance(args, Mapping) else "")
+        if not query:
+            return {
+                "schema": "brainstack.tool_error.v1",
+                "tool_name": "brainstack_recall",
+                "error_code": "invalid_query",
+                "error": "brainstack_recall requires a non-empty query.",
+                "read_only": True,
+            }
+        report = self.query_inspect(
+            query=query,
+            session_id=str(args.get("session_id") or self._session_id) if isinstance(args, Mapping) else self._session_id,
+        )
+        raw_selected = report.get("selected_evidence")
+        selected: Mapping[str, Any] = raw_selected if isinstance(raw_selected, Mapping) else {}
+        evidence_count = sum(len(rows or []) for rows in selected.values()) if isinstance(selected, Mapping) else 0
+        raw_packet = report.get("final_packet")
+        packet: Mapping[str, Any] = raw_packet if isinstance(raw_packet, Mapping) else {}
+        return {
+            "schema": "brainstack.tool_recall.v1",
+            "tool_name": "brainstack_recall",
+            "read_only": True,
+            "principal_scope_key": self._principal_scope_key,
+            "query": query,
+            "routing": dict(report.get("routing") or {}),
+            "channels": list(report.get("channels") or []),
+            "selected_evidence": dict(selected),
+            "evidence_count": evidence_count,
+            "final_packet": {
+                "sections": list(packet.get("sections") or []),
+                "char_count": int(packet.get("char_count") or 0),
+                "preview": str(packet.get("preview") or ""),
+            },
+        }
+
+    def _handle_brainstack_inspect(self, args: Mapping[str, Any]) -> Dict[str, Any]:
+        query = _normalize_compact_text(args.get("query") if isinstance(args, Mapping) else "")
+        if not query:
+            return {
+                "schema": "brainstack.tool_error.v1",
+                "tool_name": "brainstack_inspect",
+                "error_code": "invalid_query",
+                "error": "brainstack_inspect requires a non-empty query.",
+                "read_only": True,
+            }
+        report = self.query_inspect(
+            query=query,
+            session_id=str(args.get("session_id") or self._session_id) if isinstance(args, Mapping) else self._session_id,
+        )
+        return {
+            "schema": "brainstack.tool_inspect.v1",
+            "tool_name": "brainstack_inspect",
+            "read_only": True,
+            "principal_scope_key": self._principal_scope_key,
+            "report": report,
+        }
+
+    def _handle_brainstack_stats(self, args: Mapping[str, Any]) -> Dict[str, Any]:
+        strict_value = args.get("strict", False) if isinstance(args, Mapping) else False
+        strict = strict_value if isinstance(strict_value, bool) else str(strict_value).strip().lower() in {"1", "true", "yes"}
+        return {
+            "schema": "brainstack.tool_stats.v1",
+            "tool_name": "brainstack_stats",
+            "read_only": True,
+            "principal_scope_key": self._principal_scope_key,
+            "lifecycle": self.lifecycle_status(),
+            "maintenance": dict(self._last_maintenance_receipt or {}),
+            "report": self.memory_kernel_doctor(strict=strict),
+        }
+
+    def lifecycle_status(self) -> Dict[str, Any]:
+        store_active = self._store is not None
+        worker_busy = bool(self._tier2_running)
+        explicit_write_barrier = self._pending_explicit_write_count > 0
+        if not store_active:
+            status = "unavailable"
+            reason = "Brainstack provider has not been initialized or has been shut down."
+        elif explicit_write_barrier:
+            status = "degraded"
+            reason = "An explicit write barrier is pending; shutdown/session maintenance must wait."
+        else:
+            status = "active"
+            reason = "Brainstack provider is initialized and lifecycle hooks are available."
+
+        exported_tools = [
+            {
+                "name": str(schema.get("name") or ""),
+                "tool_class": str(schema.get("x_brainstack_tool_class") or ""),
+                "model_callable": bool(schema.get("x_brainstack_model_callable", True)),
+            }
+            for schema in self.get_tool_schemas()
+        ]
+        hook_status = "active" if store_active else "unavailable"
+        return {
+            "schema": "brainstack.provider_lifecycle.v1",
+            "status": status,
+            "reason": reason,
+            "session_id": self._session_id,
+            "principal_scope_key": self._principal_scope_key,
+            "store_initialized": store_active,
+            "tier2_worker_running": worker_busy,
+            "pending_tier2_turns": self._pending_tier2_turns,
+            "pending_explicit_write_count": self._pending_explicit_write_count,
+            "hooks": [
+                {"name": "initialize", "status": "active" if store_active else "available", "side_effect": "opens Brainstack store"},
+                {"name": "system_prompt_block", "status": hook_status, "side_effect": "read-only projection"},
+                {"name": "prefetch", "status": hook_status, "side_effect": "read-only recall"},
+                {"name": "sync_turn", "status": hook_status, "side_effect": "post-turn transcript and typed extraction"},
+                {"name": "on_pre_compress", "status": hook_status, "side_effect": "bounded continuity snapshot"},
+                {"name": "on_session_end", "status": hook_status, "side_effect": "bounded maintenance and session finalization"},
+                {"name": "shutdown", "status": "available", "side_effect": "closes store after barriers clear"},
+                {"name": "get_tool_schemas", "status": "available", "side_effect": "read-only schema export"},
+                {"name": "handle_tool_call", "status": "available", "side_effect": "tool-specific; memory tools are read-only in Phase 70"},
+            ],
+            "exported_tools": exported_tools,
+            "operator_only_tools": [self._runtime_handoff_update_tool_schema()],
+            "disabled_memory_write_tools": sorted(DISABLED_MEMORY_WRITE_TOOLS),
+            "last_maintenance": dict(self._last_maintenance_receipt or {}),
+            "shared_state_safety": {
+                "brainstack_authority": "Brainstack owns memory state and policy truth.",
+                "runtime_authority": "Hermes owns scheduling, execution, and approval enforcement.",
+                "operator_mcp_stance": "Optional operator access must use Brainstack APIs, not direct DB mutation.",
+                "concurrency_rule": "Shared store operations are serialized through BrainstackStore locked methods.",
+            },
+        }
+
+    def memory_kernel_doctor(self, *, strict: bool = False) -> Dict[str, Any]:
+        if self._store is None:
+            return {
+                "schema": "brainstack.memory_kernel_doctor.v1",
+                "strict": bool(strict),
+                "verdict": "fail" if strict else "unavailable",
+                "issues": [
+                    {
+                        "capability": "store",
+                        "status": "unavailable",
+                        "reason": "Brainstack store is not initialized.",
+                    }
+                ],
+            }
+        return build_memory_kernel_doctor(
+            self._store,
+            strict=strict,
+            tier2_state={
+                "enabled": self._tier2_session_end_flush_enabled,
+                "running": self._tier2_running,
+                "pending_turns": self._pending_tier2_turns,
+                "last_schedule": dict(self._last_tier2_schedule or {}),
+                "last_result": dict(self._last_tier2_batch_result or {}),
+                "history_count": len(self._tier2_batch_history),
+            },
+        )
+
+    def query_inspect(self, *, query: str, session_id: str | None = None) -> Dict[str, Any]:
+        if self._store is None:
+            return {
+                "schema": "brainstack.query_inspect.v1",
+                "error": "Brainstack store is not initialized.",
+            }
+        return build_query_inspect(
+            self._store,
+            query=query,
+            session_id=session_id or self._session_id,
+            principal_scope_key=self._principal_scope_key,
+            timezone_name=self._user_timezone,
+            route_resolver=self._route_resolver_override,
+            profile_match_limit=self._profile_match_limit,
+            continuity_recent_limit=self._continuity_recent_limit,
+            continuity_match_limit=self._continuity_match_limit,
+            transcript_match_limit=self._transcript_match_limit,
+            transcript_char_budget=self._transcript_char_budget,
+            evidence_item_budget=self._evidence_item_budget,
+            graph_limit=self._graph_match_limit,
+            corpus_limit=self._corpus_match_limit,
+            corpus_char_budget=self._corpus_char_budget,
+            operating_match_limit=self._operating_match_limit,
+            render_ordinary_contract=self._ordinary_packet_behavior_contract_enabled,
+        )
+
+    def _resolve_runtime_handoff_task(self, *, task_id: str) -> Dict[str, Any] | None:
+        snapshot = self.runtime_handoff_snapshot() or {}
+        for task in snapshot.get("runtime_handoff_tasks") or []:
+            if not isinstance(task, Mapping):
+                continue
+            if _normalize_compact_text(task.get("task_id")) == task_id:
+                return dict(task)
+        return None
+
+    def _task_defaults_from_record(self, raw: Mapping[str, Any]) -> Dict[str, Any]:
+        raw_payload = raw.get("payload")
+        payload: Mapping[str, Any] = raw_payload if isinstance(raw_payload, Mapping) else {}
+        task_type = _normalize_compact_text(raw.get("type"))
+        if task_type == "WIKI_INGEST":
+            return {
+                "title": f"Wiki ingest: {_normalize_compact_text(payload.get('topic')) or 'Wiki ingest'}",
+                "domain": "research",
+                "action": _normalize_compact_text(payload.get("action")) or "process_wiki_ingest",
+                "risk_class": "low",
+                "approval_required": False,
+            }
+        if task_type == "ALERT":
+            severity = _normalize_compact_text(payload.get("severity")) or "medium"
+            return {
+                "title": f"Alert: {_normalize_compact_text(payload.get('message')) or _normalize_compact_text(payload.get('component')) or 'runtime'}",
+                "domain": "infrastructure",
+                "action": _normalize_compact_text(payload.get("action")) or "review_alert",
+                "risk_class": severity if severity in {"low", "medium", "high"} else "medium",
+                "approval_required": severity == "high",
+            }
+        if task_type == "ROADMAP_ITEM_BLOCKED":
+            return {
+                "title": _normalize_compact_text(payload.get("task")) or _normalize_compact_text(payload.get("title")) or "Blocked roadmap item",
+                "domain": _normalize_compact_text(payload.get("domain")) or "unknown",
+                "action": _normalize_compact_text(payload.get("action")) or "awaiting_user_approval",
+                "risk_class": "high",
+                "approval_required": True,
+            }
+        domain = _normalize_compact_text(payload.get("domain")) or "unknown"
+        risk_class = _normalize_compact_text(payload.get("risk_class") or payload.get("severity"))
+        if risk_class not in {"low", "medium", "high"}:
+            risk_class = "medium"
+        return {
+            "title": _normalize_compact_text(payload.get("title") or payload.get("task") or payload.get("message") or payload.get("topic") or task_type or "Runtime handoff task"),
+            "domain": domain,
+            "action": _normalize_compact_text(payload.get("action")),
+            "risk_class": risk_class,
+            "approval_required": bool(payload.get("approval_required")) or domain == "unknown",
+        }
+
+    def _handle_runtime_handoff_update(self, args: Mapping[str, Any], **kwargs) -> Dict[str, Any]:
+        if not self._store:
+            return {"error": "BrainstackStore is not initialized"}
+        task_id = _normalize_compact_text(args.get("task_id"))
+        status = _normalize_compact_text(args.get("status")).lower()
+        if not task_id:
+            return {"error": "task_id is required"}
+        if status not in ALL_TASK_STATUSES:
+            return {"error": f"invalid status: {status}"}
+
+        if self._hermes_home:
+            hermes_home = Path(self._hermes_home).resolve()
+        else:
+            from hermes_constants import get_hermes_home
+
+            hermes_home = get_hermes_home().resolve()
+        current_path, current_raw = locate_task_record(hermes_home, task_id=task_id)
+        current_task = self._resolve_runtime_handoff_task(task_id=task_id) or {}
+        defaults = self._task_defaults_from_record(current_raw or {})
+
+        title = _normalize_compact_text(current_task.get("title")) or defaults.get("title") or task_id
+        domain = _normalize_compact_text(current_task.get("domain")) or defaults.get("domain") or "unknown"
+        action = _normalize_compact_text(current_task.get("action")) or defaults.get("action") or ""
+        risk_class = _normalize_compact_text(current_task.get("risk_class")) or defaults.get("risk_class") or "medium"
+        approval_required = bool(current_task.get("approval_required")) if current_task else bool(defaults.get("approval_required"))
+        result_summary = _normalize_compact_text(args.get("result_summary"))
+        note = _normalize_compact_text(args.get("note"))
+        artifact_refs = [str(item).strip() for item in (args.get("artifact_refs") or []) if str(item).strip()]
+        approved_by = _normalize_compact_text(args.get("approved_by"))
+        enforcement_error = ""
+        enforcement_message = ""
+        if approval_required and status in {"in_progress", "completed"} and not approved_by:
+            enforcement_error = "approval_required"
+            enforcement_message = "This task requires explicit approval before it can be started or completed."
+            status = "blocked"
+            if not note:
+                note = enforcement_message
+        metadata = {
+            "runtime_handoff": True,
+            "task_id": task_id,
+            "domain": domain,
+            "action": action,
+            "risk_class": risk_class,
+            "approval_required": approval_required,
+            "result_summary": result_summary,
+            "artifact_refs": artifact_refs,
+            "note": note,
+            "approved_by": approved_by,
+            "runtime_writeback": True,
+            "runtime_writeback_session_id": str(kwargs.get("session_id") or self._session_id or "").strip(),
+        }
+        self.upsert_runtime_handoff_task(
+            title=title,
+            task_id=task_id,
+            domain=domain,
+            action=action,
+            risk_class=risk_class,
+            approval_required=approval_required,
+            status=status,
+            source="runtime.handoff_writeback",
+            metadata=metadata,
+        )
+
+        if current_raw is not None:
+            raw_record: Dict[str, Any] = dict(current_raw)
+        else:
+            raw_record = {
+                "id": task_id,
+                "type": "RUNTIME_HANDOFF",
+                "created": utc_now_iso(),
+                "payload": {
+                    "title": title,
+                    "domain": domain,
+                    "action": action,
+                    "risk_class": risk_class,
+                    "approval_required": approval_required,
+                },
+            }
+        raw_record["status"] = status
+        raw_record["updated_at"] = utc_now_iso()
+        if result_summary:
+            raw_record["result_summary"] = result_summary
+        if note:
+            raw_record["note"] = note
+        if artifact_refs:
+            raw_record["artifact_refs"] = artifact_refs
+        if approved_by:
+            raw_record["approved_by"] = approved_by
+        if status in TERMINAL_TASK_STATUSES:
+            raw_record["completed_at"] = utc_now_iso()
+        elif status == "blocked":
+            raw_record["blocked_at"] = utc_now_iso()
+        elif status in ACTIVE_TASK_STATUSES:
+            raw_record["active_at"] = utc_now_iso()
+
+        destination = write_task_record(
+            hermes_home,
+            record=raw_record,
+            status=status,
+            current_path=current_path,
+        )
+        return {
+            "error": enforcement_error,
+            "message": enforcement_message,
+            "status": status,
+            "task_id": task_id,
+            "approval_required": approval_required,
+            "approved_by": approved_by,
+            "path": str(destination),
+            "brainstack_writeback": "committed",
+        }
 
     def ingest_corpus_document(
         self,
@@ -1585,6 +2277,7 @@ class BrainstackMemoryProvider(MemoryProvider):
     ) -> None:
         if not self._store or not content or action == "remove":
             return
+        store = self._store
         write_metadata = dict(metadata or {})
         write_origin = str(write_metadata.get("write_origin") or "").strip()
         if write_origin == "background_review":
@@ -1649,7 +2342,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                     candidate_confidence: float = candidate_confidence,
                     mirror_metadata: Dict[str, Any] | None = mirror_metadata,
                 ) -> None:
-                    self._store.upsert_profile_item(
+                    store.upsert_profile_item(
                         stable_key=stable_key,
                         category=category,
                         content=candidate_content,
@@ -1675,7 +2368,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                 )
             return
 
-        self._store.add_continuity_event(
+        store.add_continuity_event(
             session_id=self._session_id,
             turn_number=self._turn_counter,
             kind="builtin_memory",
@@ -1867,10 +2560,199 @@ class BrainstackMemoryProvider(MemoryProvider):
             session_id=self._session_id,
         )
 
+    def live_system_state_snapshot(self) -> Dict[str, Any] | None:
+        if not self._store:
+            return None
+        return self._store.get_live_system_state_snapshot(
+            principal_scope_key=self._principal_scope_key,
+        )
+
+    def runtime_handoff_snapshot(self) -> Dict[str, Any] | None:
+        snapshot = self.operating_context_snapshot()
+        if not isinstance(snapshot, Mapping):
+            return None
+        return {
+            "principal_scope_key": str(snapshot.get("principal_scope_key") or "").strip(),
+            "canonical_policy": dict(snapshot.get("canonical_policy") or {}),
+            "runtime_approval_policy": dict(snapshot.get("runtime_approval_policy") or {}),
+            "runtime_handoff_tasks": [dict(item) for item in (snapshot.get("runtime_handoff_tasks") or []) if isinstance(item, Mapping)],
+            "session_recovery_contract": dict(snapshot.get("session_recovery_contract") or {}),
+            "live_system_state": list(snapshot.get("live_system_state") or []),
+            "current_commitments": list(snapshot.get("current_commitments") or []),
+            "next_steps": list(snapshot.get("next_steps") or []),
+            "open_decisions": list(snapshot.get("open_decisions") or []),
+        }
+
+    def canonical_policy_snapshot(self) -> Dict[str, Any] | None:
+        snapshot = self.operating_context_snapshot()
+        if not isinstance(snapshot, Mapping):
+            return None
+        return {
+            "principal_scope_key": str(snapshot.get("principal_scope_key") or "").strip(),
+            "canonical_policy": dict(snapshot.get("canonical_policy") or {}),
+            "runtime_read_only": True,
+        }
+
     def operating_context_trace(self) -> Dict[str, Any] | None:
         if self._last_operating_context_trace is None:
             return None
         return json.loads(json.dumps(self._last_operating_context_trace, ensure_ascii=True))
+
+    def upsert_runtime_approval_policy(
+        self,
+        *,
+        domains: Sequence[Mapping[str, Any]],
+        default_action: str = "ask_user",
+        source: str = "brainstack.runtime_approval_policy",
+    ) -> Dict[str, Any] | None:
+        normalized_domains: List[Dict[str, Any]] = []
+        for raw in domains:
+            if not isinstance(raw, Mapping):
+                continue
+            name = _normalize_compact_text(raw.get("name") or raw.get("domain"))
+            if not name:
+                continue
+            normalized_domains.append(
+                {
+                    "name": name,
+                    "approval_required": bool(raw.get("approval_required")),
+                    "default_action": _normalize_compact_text(raw.get("default_action") or raw.get("action")),
+                    "risk_class": _normalize_compact_text(raw.get("risk_class")),
+                }
+            )
+        if not normalized_domains:
+            return None
+        content = "Runtime approval policy: " + ", ".join(
+            f"{item['name']}={item['default_action'] or ('ask_user' if item['approval_required'] else 'auto_approved')}"
+            for item in normalized_domains
+        )
+        committed = self._upsert_brainstack_operating_record(
+            record_type=OPERATING_RECORD_RUNTIME_APPROVAL_POLICY,
+            content=content,
+            source=source,
+            metadata={
+                "default_action": _normalize_compact_text(default_action) or "ask_user",
+                "domains": normalized_domains,
+            },
+        )
+        if not committed:
+            return None
+        return {
+            "status": "committed",
+            "record_type": OPERATING_RECORD_RUNTIME_APPROVAL_POLICY,
+            "domain_count": len(normalized_domains),
+            "source": source,
+        }
+
+    def upsert_canonical_policy_rule(
+        self,
+        *,
+        content: str,
+        rule_id: str = "",
+        rule_class: str = "user_rule",
+        source_authority: str = "explicit_user_rule",
+        source: str = "brainstack.canonical_policy",
+        metadata: Mapping[str, Any] | None = None,
+    ) -> Dict[str, Any] | None:
+        normalized_content = _normalize_compact_text(content)
+        if not self._store or not normalized_content:
+            return None
+        normalized_rule_id = _normalize_compact_text(rule_id) or hashlib.sha256(
+            normalized_content.encode("utf-8")
+        ).hexdigest()[:16]
+        stable_key = "::".join(
+            [
+                "canonical_policy",
+                self._principal_scope_key or "global",
+                normalized_rule_id,
+            ]
+        )
+        committed = self._upsert_brainstack_operating_record(
+            record_type=OPERATING_RECORD_CANONICAL_POLICY,
+            content=normalized_content,
+            source=source,
+            metadata={
+                **dict(metadata or {}),
+                "rule_id": normalized_rule_id,
+                "rule_class": _normalize_compact_text(rule_class) or "user_rule",
+                "source_authority": _normalize_compact_text(source_authority) or "explicit_user_rule",
+                "canonical_policy": True,
+                "promotion_mode": "explicit_only",
+                "runtime_read_only": True,
+            },
+            stable_key_override=stable_key,
+        )
+        if not committed:
+            return None
+        return {
+            "status": "committed",
+            "record_type": OPERATING_RECORD_CANONICAL_POLICY,
+            "rule_id": normalized_rule_id,
+            "rule_class": _normalize_compact_text(rule_class) or "user_rule",
+            "source": source,
+            "runtime_read_only": True,
+        }
+
+    def upsert_runtime_handoff_task(
+        self,
+        *,
+        title: str,
+        task_id: str = "",
+        domain: str = "",
+        action: str = "",
+        risk_class: str = "",
+        approval_required: bool = False,
+        due_date: str = "",
+        date_scope: str = "none",
+        optional: bool = False,
+        status: str = "open",
+        source: str = "brainstack.runtime_handoff_task",
+        metadata: Mapping[str, Any] | None = None,
+    ) -> Dict[str, Any] | None:
+        if not self._store:
+            return None
+        normalized_title = _normalize_compact_text(title)
+        if not normalized_title:
+            return None
+        normalized_task_id = _normalize_compact_text(task_id)
+        stable_key = normalized_task_id or build_task_stable_key(
+            principal_scope_key=self._principal_scope_key,
+            item_type="task",
+            due_date=str(due_date or "").strip(),
+            title=normalized_title,
+        )
+        task_metadata = dict(self._scoped_metadata(metadata))
+        task_metadata.update(
+            {
+                "runtime_handoff": True,
+                "task_id": normalized_task_id or stable_key,
+                "domain": _normalize_compact_text(domain),
+                "action": _normalize_compact_text(action),
+                "risk_class": _normalize_compact_text(risk_class),
+                "approval_required": bool(approval_required),
+            }
+        )
+        self._store.upsert_task_item(
+            stable_key=stable_key,
+            principal_scope_key=self._principal_scope_key,
+            item_type="task",
+            title=normalized_title,
+            due_date=str(due_date or "").strip(),
+            date_scope=str(date_scope or "none").strip() or "none",
+            optional=optional,
+            status=str(status or "open").strip() or "open",
+            owner="brainstack.task_memory",
+            source=source,
+            source_session_id=self._session_id,
+            source_turn_number=self._turn_counter,
+            metadata=task_metadata,
+        )
+        return {
+            "status": "committed",
+            "stable_key": stable_key,
+            "task_id": task_metadata.get("task_id"),
+            "title": normalized_title,
+        }
 
     def memory_operation_trace(self) -> Dict[str, Any] | None:
         if self._last_memory_operation_trace is None:
@@ -1966,6 +2848,8 @@ class BrainstackMemoryProvider(MemoryProvider):
                     }
                 ],
             }
+            raw_contract = result.get("contract")
+            contract: Mapping[str, Any] = raw_contract if isinstance(raw_contract, Mapping) else {}
             trace = dict(self._last_behavior_policy_trace or {})
             trace["final_output_validation"] = {
                 "surface": "final_output_validation",
@@ -1977,7 +2861,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                 "block_reason": "",
                 "repair_count": 0,
                 "remaining_violation_count": 1,
-                "contract": dict(result.get("contract") or {}),
+                "contract": dict(contract),
             }
             self._last_behavior_policy_trace = trace
             return result
@@ -1992,6 +2876,10 @@ class BrainstackMemoryProvider(MemoryProvider):
             compiled_policy=compiled_policy,
             enforcement_mode="ordinary_reply",
         )
+        raw_contract = result.get("contract")
+        contract = raw_contract if isinstance(raw_contract, Mapping) else {}
+        repairs = result.get("repairs")
+        remaining_violations = result.get("remaining_violations")
         trace = dict(self._last_behavior_policy_trace or {})
         trace["final_output_validation"] = {
             "surface": "final_output_validation",
@@ -2001,9 +2889,11 @@ class BrainstackMemoryProvider(MemoryProvider):
             "blocked": bool(result.get("blocked")),
             "can_ship": bool(result.get("can_ship", True)),
             "block_reason": str(result.get("block_reason") or ""),
-            "repair_count": len(list(result.get("repairs") or [])),
-            "remaining_violation_count": len(list(result.get("remaining_violations") or [])),
-            "contract": dict(result.get("contract") or {}),
+            "repair_count": len(repairs) if isinstance(repairs, Sequence) and not isinstance(repairs, (str, bytes)) else 0,
+            "remaining_violation_count": len(remaining_violations)
+            if isinstance(remaining_violations, Sequence) and not isinstance(remaining_violations, (str, bytes))
+            else 0,
+            "contract": dict(contract),
         }
         self._last_behavior_policy_trace = trace
         return result
@@ -2045,6 +2935,11 @@ class BrainstackMemoryProvider(MemoryProvider):
         self._tier2_batch_history.append(dict(result))
         if len(self._tier2_batch_history) > 256:
             self._tier2_batch_history = self._tier2_batch_history[-256:]
+        if self._store is not None:
+            try:
+                self._store.record_tier2_run_result(result)
+            except Exception:
+                logger.warning("Brainstack failed to persist Tier-2 run result", exc_info=True)
 
     def _queue_tier2_background(self, *, session_id: str, turn_number: int, trigger_reason: str) -> None:
         with self._tier2_lock:
@@ -2098,10 +2993,16 @@ class BrainstackMemoryProvider(MemoryProvider):
                 self._tier2_thread = None
 
     def _run_tier2_batch(self, *, session_id: str, turn_number: int, trigger_reason: str) -> Dict[str, Any]:
+        started_monotonic = time.monotonic()
         result: Dict[str, Any] = {
+            "run_id": hashlib.sha256(
+                f"{session_id}|{turn_number}|{trigger_reason}|{time.time_ns()}".encode("utf-8")
+            ).hexdigest()[:24],
+            "created_at": utc_now_iso(),
             "session_id": session_id,
             "turn_number": int(turn_number or 0),
             "trigger_reason": trigger_reason,
+            "request_status": "started",
             "transcript_turn_numbers": [],
             "transcript_ids": [],
             "transcript_count": 0,
@@ -2110,9 +3011,16 @@ class BrainstackMemoryProvider(MemoryProvider):
             "extracted_counts": {},
             "action_counts": {},
             "writes_performed": 0,
+            "no_op_reasons": [],
+            "error_reason": "",
+            "duration_ms": 0,
             "status": "not_run",
         }
         if not self._store:
+            result["status"] = "skipped_no_store"
+            result["request_status"] = "skipped"
+            result["no_op_reasons"] = ["store_unavailable"]
+            result["duration_ms"] = int((time.monotonic() - started_monotonic) * 1000)
             return result
         transcript_rows = [
             row
@@ -2124,23 +3032,43 @@ class BrainstackMemoryProvider(MemoryProvider):
         result["transcript_count"] = len(transcript_rows)
         if not transcript_rows:
             result["status"] = "skipped_no_transcript"
+            result["request_status"] = "skipped"
+            result["no_op_reasons"] = ["no_eligible_transcript_turns"]
+            result["duration_ms"] = int((time.monotonic() - started_monotonic) * 1000)
             self._record_tier2_batch_result(result)
             return result
         extractor = self._config.get("_tier2_extractor")
-        if callable(extractor):
-            extracted = extractor(
-                transcript_rows,
-                session_id=session_id,
-                turn_number=turn_number,
-                trigger_reason=trigger_reason,
-            )
-        else:
-            extracted = extract_tier2_candidates(
-                transcript_rows,
-                transcript_limit=self._tier2_transcript_limit,
-                timeout_seconds=self._tier2_timeout_seconds,
-                max_tokens=self._tier2_max_tokens,
-            )
+        try:
+            if callable(extractor):
+                extracted = extractor(
+                    transcript_rows,
+                    session_id=session_id,
+                    turn_number=turn_number,
+                    trigger_reason=trigger_reason,
+                )
+            else:
+                extracted = extract_tier2_candidates(
+                    transcript_rows,
+                    transcript_limit=self._tier2_transcript_limit,
+                    timeout_seconds=self._tier2_timeout_seconds,
+                    max_tokens=self._tier2_max_tokens,
+                )
+        except Exception as exc:
+            result["status"] = "failed"
+            result["request_status"] = "failed"
+            result["error_reason"] = str(exc)
+            result["duration_ms"] = int((time.monotonic() - started_monotonic) * 1000)
+            self._record_tier2_batch_result(result)
+            return result
+        if not isinstance(extracted, dict):
+            result["status"] = "failed"
+            result["request_status"] = "failed"
+            result["json_parse_status"] = "invalid_payload"
+            result["error_reason"] = "Tier-2 extractor returned a non-dict payload."
+            result["duration_ms"] = int((time.monotonic() - started_monotonic) * 1000)
+            self._record_tier2_batch_result(result)
+            return result
+        result["request_status"] = "ok"
         extracted_meta = extracted.get("_meta") if isinstance(extracted, dict) else {}
         result["json_parse_status"] = str((extracted_meta or {}).get("json_parse_status") or "unknown")
         result["parse_context"] = str((extracted_meta or {}).get("parse_context") or "")
@@ -2158,6 +3086,8 @@ class BrainstackMemoryProvider(MemoryProvider):
             "continuity_summary_present": 1 if str(extracted.get("continuity_summary") or "").strip() else 0,
         }
         result["extracted_counts"] = extracted_counts
+        if not any(int(value or 0) for value in extracted_counts.values()):
+            result["no_op_reasons"].append("extractor_returned_empty_payload")
         temporal_event_samples: List[Dict[str, Any]] = []
         for event in list(extracted.get("temporal_events", []) or [])[:6]:
             if not isinstance(event, dict):
@@ -2198,7 +3128,7 @@ class BrainstackMemoryProvider(MemoryProvider):
         for action in reconcile_report.get("actions", []):
             action_name = str(action.get("action") or "UNKNOWN")
             action_counts[action_name] = action_counts.get(action_name, 0) + 1
-            if action_name != "NONE":
+            if action_name != "NONE" and not action_name.startswith("REJECT_"):
                 writes_performed += 1
         operating_promotions = {
             "recent_work_promoted": self._promote_recent_work_summary(
@@ -2223,6 +3153,11 @@ class BrainstackMemoryProvider(MemoryProvider):
         result["action_counts"] = action_counts
         result["writes_performed"] = writes_performed
         result["operating_promotions"] = operating_promotions
+        if writes_performed <= 0:
+            result["no_op_reasons"].append("no_durable_writes_performed")
+        if action_counts and set(action_counts).issubset({"NONE", "REJECT_ASSISTANT_AUTHORED"}):
+            result["no_op_reasons"].append("all_candidates_rejected_or_noop")
         result["status"] = "ok"
+        result["duration_ms"] = int((time.monotonic() - started_monotonic) * 1000)
         self._record_tier2_batch_result(result)
         return result

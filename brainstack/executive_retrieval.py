@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping
 
+from .associative_expansion import AssociativeExpansionBounds, build_associative_expansion
 from .db import BrainstackStore
 from .operating_truth import (
     OPERATING_RECORD_TYPES,
@@ -34,6 +35,7 @@ FUSION_CHANNEL_WEIGHTS = {
     "operating": 1.05,
     "semantic": 1.12,
     "graph": 1.08,
+    "associative": 0.74,
     "temporal": 1.04,
 }
 FUSION_SHELF_WEIGHTS = {
@@ -106,6 +108,19 @@ def _build_cross_session_search_queries(query: str) -> List[str]:
     return [normalized] if normalized else []
 
 
+def _selected_fallback_sources(selected: Mapping[str, Any], *, include_graph: bool = True) -> List[str]:
+    sources: List[str] = []
+    if list(selected.get("matched") or []):
+        sources.append("continuity_match")
+    if list(selected.get("recent") or []):
+        sources.append("continuity_recent")
+    if list(selected.get("transcript_rows") or []):
+        sources.append("transcript")
+    if include_graph and list(selected.get("graph_rows") or []):
+        sources.append("graph")
+    return sources
+
+
 def _build_lookup_semantics(
     *,
     query: str,
@@ -121,15 +136,6 @@ def _build_lookup_semantics(
         if str(row.get("record_type") or "").strip() in RECENT_WORK_RECAP_RECORD_TYPES
     ]
     if isinstance(operating_lookup, Mapping):
-        fallback_sources: List[str] = []
-        if list(selected.get("matched") or []):
-            fallback_sources.append("continuity_match")
-        if list(selected.get("recent") or []):
-            fallback_sources.append("continuity_recent")
-        if list(selected.get("transcript_rows") or []):
-            fallback_sources.append("transcript")
-        if list(selected.get("graph_rows") or []):
-            fallback_sources.append("graph")
         return {
             "active": True,
             "domain": "operating_truth",
@@ -141,17 +147,10 @@ def _build_lookup_semantics(
                 for value in (operating_lookup.get("record_types") or ())
                 if str(value or "").strip() in OPERATING_RECORD_TYPES
             ],
-            "fallback_sources": fallback_sources,
+            "fallback_sources": _selected_fallback_sources(selected),
             "result_status": "committed_records" if operating_rows else "structured_miss",
         }
     if recent_work_rows:
-        fallback_sources = []
-        if list(selected.get("matched") or []):
-            fallback_sources.append("continuity_match")
-        if list(selected.get("recent") or []):
-            fallback_sources.append("continuity_recent")
-        if list(selected.get("transcript_rows") or []):
-            fallback_sources.append("transcript")
         return {
             "active": True,
             "domain": "recent_work_recap",
@@ -163,21 +162,13 @@ def _build_lookup_semantics(
                 for row in recent_work_rows
                 if str(row.get("record_type") or "").strip()
             ],
-            "fallback_sources": fallback_sources,
+            "fallback_sources": _selected_fallback_sources(selected, include_graph=False),
             "result_status": "committed_records",
         }
     if not isinstance(task_lookup, Mapping):
         return None
 
-    fallback_sources: List[str] = []
-    if list(selected.get("matched") or []):
-        fallback_sources.append("continuity_match")
-    if list(selected.get("recent") or []):
-        fallback_sources.append("continuity_recent")
-    if list(selected.get("transcript_rows") or []):
-        fallback_sources.append("transcript")
-    if list(selected.get("graph_rows") or []):
-        fallback_sources.append("graph")
+    fallback_sources = _selected_fallback_sources(selected)
 
     if task_rows:
         result_status = "committed_records"
@@ -1312,10 +1303,6 @@ def retrieve_executive_context(
     operating_limit = max(int(policy.get("operating_limit", 0)), 0)
     graph_limit = max(int(policy.get("graph_limit", 0)), 0)
     corpus_limit = max(int(policy.get("corpus_limit", 0)), 0)
-    style_contract_row = store.get_profile_item(
-        stable_key=STYLE_CONTRACT_SLOT,
-        principal_scope_key=principal_scope_key,
-    )
     native_explicit_style_rows = [
         row
         for row in store.list_profile_items(limit=24, principal_scope_key=principal_scope_key)
@@ -1325,7 +1312,10 @@ def retrieve_executive_context(
     effective_route_resolver = route_resolver
     if effective_route_resolver is None and isinstance(analysis_route_payload, Mapping):
         payload = dict(analysis_route_payload)
-        effective_route_resolver = lambda _query, _payload=payload: dict(_payload)
+
+        def effective_route_resolver(_query: str, _payload: Mapping[str, Any] = payload) -> Dict[str, Any]:
+            return dict(_payload)
+
     route = _resolve_route(
         query,
         route_resolver=effective_route_resolver,
@@ -1553,6 +1543,20 @@ def retrieve_executive_context(
         else []
     )
     semantic_corpus_rows = _annotate_query_flags(semantic_corpus_rows, query=query)
+    semantic_evidence_rows = store.search_semantic_evidence(
+        query=query,
+        principal_scope_key=principal_scope_key,
+        limit=max(evidence_item_budget * 4, 16),
+    )
+    semantic_evidence_rows = _annotate_query_flags(semantic_evidence_rows, query=query)
+    semantic_profile_rows = [row for row in semantic_evidence_rows if str(row.get("semantic_shelf") or "") == "profile"]
+    semantic_task_rows = [row for row in semantic_evidence_rows if str(row.get("semantic_shelf") or "") == "task"]
+    semantic_operating_rows = [row for row in semantic_evidence_rows if str(row.get("semantic_shelf") or "") == "operating"]
+    semantic_continuity_rows = [row for row in semantic_evidence_rows if str(row.get("semantic_shelf") or "") == "continuity_match"]
+    semantic_graph_rows = [row for row in semantic_evidence_rows if str(row.get("semantic_shelf") or "") == "graph"]
+    semantic_index_corpus_rows = [row for row in semantic_evidence_rows if str(row.get("semantic_shelf") or "") == "corpus"]
+    if semantic_task_rows:
+        task_rows = _dedupe_rows(_round_robin(task_rows, semantic_task_rows))[:24]
     task_structured_authority = isinstance(task_lookup, Mapping) and route.applied_mode != ROUTE_TEMPORAL
     if task_structured_authority:
         keyword_continuity_rows = []
@@ -1560,6 +1564,7 @@ def retrieve_executive_context(
         keyword_transcript_global_rows = []
         keyword_transcript_rows = []
         semantic_conversation_rows = []
+        semantic_continuity_rows = []
     keyword_rows = _round_robin(
         keyword_profile_rows,
         keyword_operating_rows,
@@ -1586,6 +1591,27 @@ def retrieve_executive_context(
         else []
     )
     graph_rows = _annotate_query_flags(graph_rows, query=query)
+    associative_expansion = build_associative_expansion(
+        store,
+        query=query,
+        principal_scope_key=principal_scope_key,
+        seed_rows=_dedupe_rows(_round_robin(graph_rows, semantic_graph_rows)),
+        bounds=AssociativeExpansionBounds(
+            max_seed_count=4,
+            max_depth=1,
+            max_candidate_count=max(min(graph_limit * 2, 8), 0),
+            max_search_count=12,
+            allowed_shelves=("graph",),
+        ),
+    )
+    associative_graph_rows = (
+        _graph_channel_rows(
+            _annotate_query_flags(list(associative_expansion.get("candidate_rows") or []), query=query),
+            limit=max(graph_limit * 2, 4),
+        )
+        if graph_limit > 0
+        else []
+    )
 
     recent_rows = (
         store.recent_continuity(session_id=session_id, limit=max(continuity_recent_limit * 4, 6))
@@ -1655,18 +1681,44 @@ def retrieve_executive_context(
         else []
     )
     graph_status = store.graph_backend_channel_status()
+    if graph_rows and semantic_graph_rows:
+        graph_recall_status = {
+            "status": "active",
+            "reason": "Query used lexical graph rows and typed semantic graph seeds.",
+            "recall_mode": "hybrid_seeded",
+        }
+    elif semantic_graph_rows:
+        graph_recall_status = {
+            "status": "active",
+            "reason": "Query used typed semantic graph seeds.",
+            "recall_mode": "semantic_seeded",
+        }
+    elif graph_rows:
+        graph_recall_status = {
+            "status": "active",
+            "reason": "Query used lexical graph search seeds.",
+            "recall_mode": "lexical_seeded",
+        }
+    else:
+        graph_recall_status = store.graph_recall_channel_status()
 
     merged: Dict[str, EvidenceCandidate] = {}
     _merge_channel(merged, channel_name="keyword", rows=keyword_profile_rows, shelf="profile")
+    _merge_channel(merged, channel_name="semantic", rows=semantic_profile_rows, shelf="profile")
     _merge_channel(merged, channel_name="operating", rows=keyword_operating_rows, shelf="operating")
     _merge_channel(merged, channel_name="operating", rows=recent_work_operating_rows, shelf="operating")
     _merge_channel(merged, channel_name="operating", rows=current_operating_rows, shelf="operating")
+    _merge_channel(merged, channel_name="semantic", rows=semantic_operating_rows, shelf="operating")
     _merge_channel(merged, channel_name="keyword", rows=keyword_continuity_rows, shelf="continuity_match")
+    _merge_channel(merged, channel_name="semantic", rows=semantic_continuity_rows, shelf="continuity_match")
     _merge_channel(merged, channel_name="keyword", rows=keyword_transcript_rows, shelf="transcript")
     _merge_channel(merged, channel_name="keyword", rows=keyword_corpus_rows, shelf="corpus")
     _merge_channel(merged, channel_name="semantic", rows=semantic_conversation_rows, shelf="transcript")
     _merge_channel(merged, channel_name="semantic", rows=semantic_corpus_rows, shelf="corpus")
+    _merge_channel(merged, channel_name="semantic", rows=semantic_index_corpus_rows, shelf="corpus")
     _merge_channel(merged, channel_name="graph", rows=graph_rows, shelf="graph")
+    _merge_channel(merged, channel_name="semantic", rows=semantic_graph_rows, shelf="graph")
+    _merge_channel(merged, channel_name="associative", rows=associative_graph_rows, shelf="graph")
     _merge_channel(merged, channel_name="temporal", rows=temporal_continuity_rows, shelf="continuity_recent")
     _merge_channel(merged, channel_name="temporal", rows=recent_rows, shelf="continuity_recent")
     _merge_channel(merged, channel_name="temporal", rows=temporal_transcript_rows, shelf="transcript")
@@ -1728,7 +1780,7 @@ def retrieve_executive_context(
         route.applied_mode = ROUTE_FACT
         selected = fact_selected
 
-    semantic_status = (
+    corpus_semantic_status = (
         store.corpus_semantic_channel_status()
         if corpus_limit > 0 or keyword_corpus_rows or semantic_corpus_rows
         else {
@@ -1736,6 +1788,29 @@ def retrieve_executive_context(
             "reason": "Corpus semantic retrieval was intentionally skipped for this query shape.",
         }
     )
+    semantic_index_status = store.semantic_evidence_channel_status()
+    semantic_channel_rows = semantic_conversation_rows + semantic_corpus_rows + semantic_evidence_rows
+    if str(semantic_index_status.get("status") or "") == "degraded":
+        semantic_status = {
+            "status": "degraded",
+            "reason": str(semantic_index_status.get("reason") or ""),
+        }
+    elif semantic_channel_rows:
+        semantic_status = {
+            "status": "active",
+            "reason": (
+                f"Derived index: {semantic_index_status.get('reason') or ''} "
+                f"Corpus backend: {corpus_semantic_status.get('reason') or ''}"
+            ).strip(),
+        }
+    else:
+        semantic_status = {
+            "status": str(corpus_semantic_status.get("status") or semantic_index_status.get("status") or "idle"),
+            "reason": (
+                f"Derived index: {semantic_index_status.get('reason') or ''} "
+                f"Corpus backend: {corpus_semantic_status.get('reason') or ''}"
+            ).strip(),
+        }
     channels = [
         _channel_status(
             "task_memory",
@@ -1751,7 +1826,7 @@ def retrieve_executive_context(
         ),
         _channel_status(
             "semantic",
-            semantic_conversation_rows + semantic_corpus_rows,
+            semantic_channel_rows,
             reason=str(semantic_status.get("reason") or ""),
             status=str(semantic_status.get("status") or "degraded"),
         ),
@@ -1761,6 +1836,18 @@ def retrieve_executive_context(
             graph_rows,
             reason=str(graph_status.get("reason") or ""),
             status=str(graph_status.get("status") or "degraded"),
+        ),
+        _channel_status(
+            "graph_recall",
+            graph_rows + semantic_graph_rows + associative_graph_rows,
+            reason=f"{graph_recall_status.get('recall_mode')}: {graph_recall_status.get('reason')}",
+            status=str(graph_recall_status.get("status") or "idle"),
+        ),
+        _channel_status(
+            "associative_expansion",
+            associative_graph_rows,
+            reason=str(associative_expansion.get("reason") or ""),
+            status=str(associative_expansion.get("status") or "idle"),
         ),
         _channel_status("temporal", temporal_rows),
     ]
@@ -1805,5 +1892,10 @@ def retrieve_executive_context(
             "legacy_disabled": True,
         },
         "lookup_semantics": lookup_semantics,
+        "associative_expansion": {
+            key: value
+            for key, value in associative_expansion.items()
+            if key != "candidate_rows"
+        },
         "routing": asdict(route),
     }

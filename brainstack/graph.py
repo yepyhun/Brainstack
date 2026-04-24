@@ -7,7 +7,6 @@ from .graph_evidence import (
     GRAPH_EVIDENCE_BOUNDARY_VERSION,
     GraphEvidenceIngressError,
     GraphEvidenceItem,
-    coerce_graph_evidence_item,
     prepare_graph_evidence_ingress,
 )
 from .provenance import merge_provenance

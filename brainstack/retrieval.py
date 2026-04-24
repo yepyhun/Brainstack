@@ -11,6 +11,7 @@ from .profile_contract import (
 )
 from .provenance import summarize_provenance
 from .style_contract import STYLE_CONTRACT_SLOT
+from .temporal import record_is_effective_at
 from .transcript import primary_user_turn_content, trim_text_boundary
 
 
@@ -197,7 +198,6 @@ def build_system_prompt_projection(
     fetch_limit = max(profile_limit * 3, 10)
     items = store.list_profile_items(limit=fetch_limit, principal_scope_key=principal_scope_key)
     behavior_snapshot = store.get_behavior_policy_snapshot(principal_scope_key=principal_scope_key)
-    compiled_policy_snapshot = behavior_snapshot.get("compiled_policy") if isinstance(behavior_snapshot, Mapping) else {}
     canonical_style_present = bool(
         isinstance(behavior_snapshot, Mapping)
         and isinstance(behavior_snapshot.get("raw_contract"), Mapping)
@@ -526,6 +526,9 @@ def _pack_corpus_rows(rows: Iterable[dict], *, char_budget: int, provenance_mode
         heading = str(row.get("heading") or "").strip()
         if heading and heading != row["title"]:
             label = f"{label} > {heading}"
+        citation_id = str(row.get("citation_id") or "").strip()
+        if citation_id:
+            label = f"{label} [{citation_id}]"
         content = str(row.get("content") or "").strip()
         snippet_fingerprint = _normalize_compare_text(" ".join(content.split())[:220])
         if snippet_fingerprint and snippet_fingerprint in seen_snippets:
@@ -828,7 +831,10 @@ def render_working_memory_block(
         filtered_profile_items = _filter_compiled_behavior_profile_items(profile_items, route_mode=route_mode)
     else:
         filtered_profile_items = [
-            item for item in profile_items if str(item.get("stable_key") or "").strip() not in hidden_profile_keys
+            item
+            for item in profile_items
+            if str(item.get("stable_key") or "").strip() not in hidden_profile_keys
+            and str(item.get("stable_key") or "").strip() not in substrate_profile_keys
         ]
         if route_mode != "style_contract":
             filtered_profile_items = [

@@ -17,10 +17,15 @@ from .behavior_policy import (
     build_behavior_policy_snapshot,
     compile_behavior_policy,
 )
+from .corpus_ingest import corpus_ingest_versions, normalize_corpus_source
 from .corpus_backend import CorpusBackend, create_corpus_backend
 from .graph_backend import GraphBackend, create_graph_backend
 from .logistics_contract import derive_transcript_logistics_typed_entities
-from .live_system_state import list_live_system_state_rows, search_live_system_state_rows
+from .live_system_state import (
+    build_live_system_state_snapshot,
+    list_live_system_state_rows,
+    search_live_system_state_rows,
+)
 from .profile_contract import (
     COMMUNICATION_CANONICAL_SLOTS,
     derive_transcript_identity_profile_items,
@@ -30,6 +35,13 @@ from .profile_contract import (
 from .operating_context import build_operating_context_snapshot
 from .operating_truth import OPERATING_RECORD_TYPES
 from .provenance import merge_provenance
+from .semantic_evidence import (
+    SEMANTIC_EVIDENCE_INDEX_VERSION,
+    decode_semantic_metadata,
+    normalize_semantic_terms,
+    semantic_evidence_fingerprint,
+    semantic_similarity,
+)
 from .style_contract import (
     STYLE_CONTRACT_DOC_KIND,
     STYLE_CONTRACT_SLOT,
@@ -56,6 +68,8 @@ PROFILE_SCOPE_DELIMITER = "::principal_scope::"
 PRINCIPAL_SCOPED_PROFILE_CATEGORIES = {"identity", "preference"}
 PRINCIPAL_SCOPE_KEY_FIELDS = ("platform", "user_id", "agent_identity", "agent_workspace")
 PERSONAL_SCOPE_KEY_FIELDS = ("platform", "user_id")
+VOLATILE_OPERATING_RECORD_TYPES = {"session_state"}
+VOLATILE_OPERATING_MIN_SEMANTIC_SCORE = 0.5
 MIGRATION_CANONICAL_COMMUNICATION_ROWS_V1 = "canonical_communication_rows_v1"
 MIGRATION_EXPLICIT_IDENTITY_BACKFILL_V1 = "explicit_identity_backfill_v1"
 MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V1 = "stable_logistics_typed_entities_v1"
@@ -104,6 +118,40 @@ def _attach_keyword_scores(rows: Iterable[Mapping[str, Any]]) -> List[Dict[str, 
     return annotated
 
 
+def _query_token_set(value: Any) -> set[str]:
+    return {
+        token
+        for token in QUERY_TOKEN_RE.findall(str(value or "").casefold())
+        if len(token) >= 3
+    }
+
+
+def _operating_relevance_text(row: Mapping[str, Any]) -> str:
+    parts = [str(row.get("content") or "")]
+    metadata = row.get("metadata")
+    if isinstance(metadata, Mapping):
+        for semantic_text in decode_semantic_metadata(metadata):
+            parts.append(str(semantic_text or ""))
+    return " ".join(part for part in parts if part)
+
+
+def _volatile_operating_keyword_match(row: Mapping[str, Any], *, query: str) -> bool:
+    if str(row.get("record_type") or "").strip() not in VOLATILE_OPERATING_RECORD_TYPES:
+        return True
+    query_tokens = _query_token_set(query)
+    if len(query_tokens) <= 1:
+        return True
+    row_tokens = _query_token_set(_operating_relevance_text(row))
+    overlap = len(query_tokens & row_tokens)
+    return overlap >= min(2, len(query_tokens))
+
+
+def _volatile_operating_semantic_match(row: Mapping[str, Any]) -> bool:
+    if str(row.get("record_type") or "").strip() not in VOLATILE_OPERATING_RECORD_TYPES:
+        return True
+    return float(row.get("semantic_score") or 0.0) >= VOLATILE_OPERATING_MIN_SEMANTIC_SCORE
+
+
 def build_fts_query(query: str) -> str:
     tokens = _extract_query_terms(query, limit=12)
     if not tokens:
@@ -126,6 +174,41 @@ def _decode_json_object(value: Any) -> Dict[str, Any]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _decode_json_array(value: Any) -> List[Any]:
+    if isinstance(value, list):
+        return list(value)
+    text = str(value or "").strip()
+    if not text:
+        return []
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return payload if isinstance(payload, list) else []
+
+
+def _corpus_search_row_to_dict(row: sqlite3.Row | Mapping[str, Any]) -> Dict[str, Any]:
+    item = dict(row)
+    document_metadata = _decode_json_object(item.pop("document_metadata_json", {}))
+    section_metadata = _decode_json_object(item.pop("section_metadata_json", {}))
+    ingest_metadata = document_metadata.get("corpus_ingest") if isinstance(document_metadata, Mapping) else {}
+    if not isinstance(ingest_metadata, Mapping):
+        ingest_metadata = {}
+    stable_key = str(item.get("stable_key") or "").strip()
+    section_index = int(item.get("section_index") or 0)
+    citation_id = str(section_metadata.get("citation_id") or "").strip() or f"{stable_key or item.get('document_id')}#s{section_index}"
+    item["metadata"] = section_metadata
+    item["document_metadata"] = document_metadata
+    item["stable_key"] = stable_key
+    item["citation_id"] = citation_id
+    item["document_hash"] = str(ingest_metadata.get("document_hash") or section_metadata.get("document_hash") or "")
+    item["section_hash"] = str(section_metadata.get("section_hash") or "")
+    item["corpus_fingerprint"] = str(ingest_metadata.get("fingerprint") or section_metadata.get("corpus_fingerprint") or "")
+    item["source_adapter"] = str(ingest_metadata.get("source_adapter") or section_metadata.get("source_adapter") or "")
+    item["source_id"] = str(ingest_metadata.get("source_id") or section_metadata.get("source_id") or "")
+    return item
 
 
 def _numeric_signature(value: Any) -> tuple[str, ...]:
@@ -445,8 +528,8 @@ def _scope_key_from_payload(payload: Mapping[str, Any] | None, *, fields: Iterab
     return "|".join(parts)
 
 
-def _principal_scope_key_from_metadata(metadata: Dict[str, Any] | None) -> str:
-    if not isinstance(metadata, dict):
+def _principal_scope_key_from_metadata(metadata: Mapping[str, Any] | None) -> str:
+    if not isinstance(metadata, Mapping):
         return ""
     direct = str(metadata.get("principal_scope_key") or "").strip()
     if direct:
@@ -780,7 +863,8 @@ class BrainstackStore:
             if str(item.get("principal_scope_key") or "").strip():
                 continue
             metadata = dict(item.get("metadata") or {})
-            provenance = metadata.get("provenance") if isinstance(metadata.get("provenance"), dict) else {}
+            raw_provenance = metadata.get("provenance")
+            provenance: Dict[str, Any] = raw_provenance if isinstance(raw_provenance, dict) else {}
             session_id = str(provenance.get("session_id") or "").strip()
             if not session_id:
                 continue
@@ -974,7 +1058,7 @@ class BrainstackStore:
             for candidate in candidates:
                 if str(candidate.get("slot") or "").strip() != "identity:age":
                     continue
-                metadata: Dict[str, Any] = {
+                candidate_metadata: Dict[str, Any] = {
                     "principal_scope_key": principal_scope_key,
                     "provenance": {
                         "source_ids": [f"migration:{MIGRATION_EXPLICIT_IDENTITY_BACKFILL_V1}"],
@@ -983,14 +1067,14 @@ class BrainstackStore:
                 }
                 principal_scope = scope_payloads.get(principal_scope_key)
                 if principal_scope:
-                    metadata["principal_scope"] = principal_scope
+                    candidate_metadata["principal_scope"] = principal_scope
                 self.upsert_profile_item(
                     stable_key="identity:age",
                     category=str(candidate.get("category") or "identity"),
                     content=str(candidate.get("content") or "").strip(),
                     source=str(candidate.get("source") or "tier2_compat_backfill"),
                     confidence=float(candidate.get("confidence") or 0.88),
-                    metadata=metadata,
+                    metadata=candidate_metadata,
                 )
                 migrated += 1
 
@@ -1032,7 +1116,7 @@ class BrainstackStore:
                 source="tier2_compat_backfill",
             )
             for candidate in candidates:
-                metadata: Dict[str, Any] = {
+                candidate_metadata: Dict[str, Any] = {
                     "principal_scope_key": principal_scope_key,
                     "provenance": {
                         "source_ids": [f"migration:{MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V1}"],
@@ -1041,16 +1125,16 @@ class BrainstackStore:
                 }
                 principal_scope = scope_payloads.get(principal_scope_key)
                 if principal_scope:
-                    metadata["principal_scope"] = principal_scope
+                    candidate_metadata["principal_scope"] = principal_scope
                 if isinstance(candidate.get("temporal"), dict):
-                    metadata["temporal"] = dict(candidate["temporal"])
+                    candidate_metadata["temporal"] = dict(candidate["temporal"])
                 actions = self.upsert_typed_entity(
                     entity_name=str(candidate.get("name") or "").strip(),
                     entity_type=str(candidate.get("entity_type") or "").strip(),
                     subject_name=str(candidate.get("subject") or "User").strip() or "User",
                     attributes=dict(candidate.get("attributes") or {}),
                     source=str(candidate.get("source") or "tier2_compat_backfill"),
-                    metadata=metadata,
+                    metadata=candidate_metadata,
                 )
                 if actions:
                     migrated += 1
@@ -1093,7 +1177,7 @@ class BrainstackStore:
                 source="tier2_compat_backfill",
             )
             for candidate in candidates:
-                metadata: Dict[str, Any] = {
+                candidate_metadata: Dict[str, Any] = {
                     "principal_scope_key": principal_scope_key,
                     "provenance": {
                         "source_ids": [f"migration:{MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V2}"],
@@ -1102,16 +1186,16 @@ class BrainstackStore:
                 }
                 principal_scope = scope_payloads.get(principal_scope_key)
                 if principal_scope:
-                    metadata["principal_scope"] = principal_scope
+                    candidate_metadata["principal_scope"] = principal_scope
                 if isinstance(candidate.get("temporal"), dict):
-                    metadata["temporal"] = dict(candidate["temporal"])
+                    candidate_metadata["temporal"] = dict(candidate["temporal"])
                 actions = self.upsert_typed_entity(
                     entity_name=str(candidate.get("name") or "").strip(),
                     entity_type=str(candidate.get("entity_type") or "").strip(),
                     subject_name=str(candidate.get("subject") or "User").strip() or "User",
                     attributes=dict(candidate.get("attributes") or {}),
                     source=str(candidate.get("source") or "tier2_compat_backfill"),
-                    metadata=metadata,
+                    metadata=candidate_metadata,
                     supersede_existing=True,
                 )
                 if actions:
@@ -1821,6 +1905,56 @@ class BrainstackStore:
                 tokenize = 'unicode61'
             );
 
+            CREATE TABLE IF NOT EXISTS semantic_evidence_index (
+                evidence_key TEXT PRIMARY KEY,
+                shelf TEXT NOT NULL,
+                row_id INTEGER NOT NULL DEFAULT 0,
+                stable_key TEXT NOT NULL DEFAULT '',
+                principal_scope_key TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                authority_class TEXT NOT NULL DEFAULT '',
+                provenance_class TEXT NOT NULL DEFAULT '',
+                content_excerpt TEXT NOT NULL DEFAULT '',
+                normalized_text TEXT NOT NULL DEFAULT '',
+                terms_json TEXT NOT NULL DEFAULT '[]',
+                source_updated_at TEXT NOT NULL DEFAULT '',
+                fingerprint TEXT NOT NULL DEFAULT '',
+                index_version TEXT NOT NULL DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_semantic_evidence_scope_shelf
+            ON semantic_evidence_index(principal_scope_key, shelf, active, updated_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_semantic_evidence_fingerprint
+            ON semantic_evidence_index(fingerprint, index_version, active);
+
+            CREATE TABLE IF NOT EXISTS tier2_run_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL UNIQUE,
+                session_id TEXT NOT NULL DEFAULT '',
+                turn_number INTEGER NOT NULL DEFAULT 0,
+                trigger_reason TEXT NOT NULL DEFAULT '',
+                request_status TEXT NOT NULL DEFAULT 'unknown',
+                parse_status TEXT NOT NULL DEFAULT 'unknown',
+                status TEXT NOT NULL DEFAULT 'unknown',
+                transcript_count INTEGER NOT NULL DEFAULT 0,
+                extracted_counts_json TEXT NOT NULL DEFAULT '{}',
+                action_counts_json TEXT NOT NULL DEFAULT '{}',
+                writes_performed INTEGER NOT NULL DEFAULT 0,
+                no_op_reasons_json TEXT NOT NULL DEFAULT '[]',
+                error_reason TEXT NOT NULL DEFAULT '',
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_tier2_run_records_session_updated
+            ON tier2_run_records(session_id, updated_at DESC);
+
             CREATE TABLE IF NOT EXISTS applied_migrations (
                 name TEXT PRIMARY KEY,
                 applied_at TEXT NOT NULL
@@ -2454,6 +2588,10 @@ class BrainstackStore:
             (row_id, content, session_id, kind),
         )
         self.conn.commit()
+        self._refresh_semantic_evidence_shelf(
+            shelf="continuity",
+            metadata=normalized_metadata,
+        )
         return row_id
 
     @_locked
@@ -3276,6 +3414,11 @@ class BrainstackStore:
             (row_id, content, category, stable_key),
         )
         self.conn.commit()
+        self._refresh_semantic_evidence_shelf(
+            shelf="profile",
+            principal_scope_key=principal_scope_key,
+            metadata=normalized_metadata,
+        )
         return row_id
 
     @_locked
@@ -3300,7 +3443,10 @@ class BrainstackStore:
             ):
                 refreshed = self._ensure_compiled_behavior_policy_for_contract_item(contract)
                 self.conn.commit()
-                return _compiled_behavior_policy_row_to_dict(self._get_compiled_behavior_policy_row(principal_scope_key=requested_scope_key)) if refreshed else None
+                refreshed_row = (
+                    self._get_compiled_behavior_policy_row(principal_scope_key=requested_scope_key) if refreshed else None
+                )
+                return _compiled_behavior_policy_row_to_dict(refreshed_row) if refreshed_row is not None else None
             return compiled_item
         if not requested_scope_key:
             return None
@@ -3352,9 +3498,8 @@ class BrainstackStore:
         )
         task_rows = self.list_task_items(
             principal_scope_key=scope_key,
-            item_type="commitment",
-            statuses=("open",),
-            limit=8,
+            statuses=("open", "pending", "blocked", "in_progress"),
+            limit=12,
         )
         continuity_rows = (
             self.recent_principal_continuity(
@@ -3377,6 +3522,18 @@ class BrainstackStore:
             lifecycle_state=lifecycle_state,
             stable_profile_limit=stable_profile_limit,
             decision_limit=decision_limit,
+        )
+
+    @_locked
+    def get_live_system_state_snapshot(
+        self,
+        *,
+        principal_scope_key: str = "",
+        limit: int = 8,
+    ) -> Dict[str, Any]:
+        return build_live_system_state_snapshot(
+            principal_scope_key=str(principal_scope_key or "").strip(),
+            limit=limit,
         )
 
     @_locked
@@ -3482,6 +3639,11 @@ class BrainstackStore:
                 ),
             )
             self.conn.commit()
+            self._refresh_semantic_evidence_shelf(
+                shelf="task",
+                principal_scope_key=principal_scope_key,
+                metadata=_decode_json_object(meta_json),
+            )
             return row_id
 
         cur = self.conn.execute(
@@ -3511,7 +3673,13 @@ class BrainstackStore:
             ),
         )
         self.conn.commit()
-        return _cursor_lastrowid(cur)
+        row_id = _cursor_lastrowid(cur)
+        self._refresh_semantic_evidence_shelf(
+            shelf="task",
+            principal_scope_key=principal_scope_key,
+            metadata=_decode_json_object(meta_json),
+        )
+        return row_id
 
     @_locked
     def list_task_items(
@@ -3701,6 +3869,11 @@ class BrainstackStore:
                 ),
             )
             self.conn.commit()
+            self._refresh_semantic_evidence_shelf(
+                shelf="operating",
+                principal_scope_key=principal_scope_key,
+                metadata=_decode_json_object(meta_json),
+            )
             return row_id
 
         cur = self.conn.execute(
@@ -3735,6 +3908,11 @@ class BrainstackStore:
             ),
         )
         self.conn.commit()
+        self._refresh_semantic_evidence_shelf(
+            shelf="operating",
+            principal_scope_key=principal_scope_key,
+            metadata=_decode_json_object(meta_json),
+        )
         return row_id
 
     @_locked
@@ -3772,6 +3950,8 @@ class BrainstackStore:
             item = _operating_row_to_dict(candidate_row)
             if not _annotate_principal_scope(item, principal_scope_key=requested_scope_key):
                 continue
+            if not record_is_effective_at(item):
+                continue
             logical_key = str(item.get("stable_key") or "").strip() or f"row:{item.get('id')}"
             existing = scoped.get(logical_key)
             if existing is None or _scoped_row_priority(item, principal_scope_key=requested_scope_key) > _scoped_row_priority(
@@ -3794,6 +3974,7 @@ class BrainstackStore:
                 limit=max(int(limit or 0), 1),
             )
             if not normalized_record_types or str(row.get("record_type") or "").strip() in normalized_record_types
+            if record_is_effective_at(row)
         ]
         return (live_rows + output)[: max(int(limit or 0), 1)]
 
@@ -3842,6 +4023,10 @@ class BrainstackStore:
         for row in scored:
             if not _annotate_principal_scope(row, principal_scope_key=requested_scope_key):
                 continue
+            if not record_is_effective_at(row):
+                continue
+            if not _volatile_operating_keyword_match(row, query=query):
+                continue
             row["retrieval_source"] = "operating.keyword"
             row["match_mode"] = "keyword"
             filtered.append(row)
@@ -3861,6 +4046,7 @@ class BrainstackStore:
                 limit=max(int(limit or 0), 1),
             )
             if not normalized_record_types or str(row.get("record_type") or "").strip() in normalized_record_types
+            if record_is_effective_at(row)
         ]
         merged = _attach_keyword_scores(live_rows + filtered)
         merged.sort(
@@ -4482,7 +4668,159 @@ class BrainstackStore:
         )
         if self._corpus_backend is not None:
             self._publish_corpus_document(document_id)
+        self._refresh_semantic_evidence_shelf(
+            shelf="corpus",
+            metadata=metadata,
+        )
         return {"document_id": document_id, "section_count": section_count, "stable_key": stable_key}
+
+    @_locked
+    def ingest_corpus_source(self, source_payload: Mapping[str, Any]) -> Dict[str, Any]:
+        normalized = normalize_corpus_source(source_payload)
+        existing = self.conn.execute(
+            "SELECT id, metadata_json FROM corpus_documents WHERE stable_key = ?",
+            (normalized["stable_key"],),
+        ).fetchone()
+        existing_hash = ""
+        existing_fingerprint = ""
+        if existing is not None:
+            existing_metadata = _decode_json_object(existing["metadata_json"])
+            ingest_metadata = existing_metadata.get("corpus_ingest")
+            if isinstance(ingest_metadata, Mapping):
+                existing_hash = str(ingest_metadata.get("document_hash") or "")
+                existing_fingerprint = str(ingest_metadata.get("fingerprint") or "")
+        if (
+            existing is not None
+            and existing_hash == normalized["document_hash"]
+            and existing_fingerprint == normalized["fingerprint"]
+        ):
+            section_count = int(
+                self.conn.execute(
+                    "SELECT COUNT(*) AS count FROM corpus_sections WHERE document_id = ?",
+                    (int(existing["id"]),),
+                ).fetchone()["count"]
+            )
+            return {
+                "schema": "brainstack.corpus_ingest_receipt.v1",
+                "status": "unchanged",
+                "document_id": int(existing["id"]),
+                "stable_key": normalized["stable_key"],
+                "section_count": section_count,
+                "document_hash": normalized["document_hash"],
+                "corpus_fingerprint": normalized["fingerprint"],
+                "citation_ids": list(normalized["citation_ids"]),
+                "source_adapter": normalized["source_adapter"],
+                "read_only": False,
+            }
+
+        status = "updated" if existing is not None else "inserted"
+        result = self.ingest_corpus_document(
+            stable_key=normalized["stable_key"],
+            title=normalized["title"],
+            doc_kind=normalized["doc_kind"],
+            source=normalized["source"],
+            sections=normalized["sections"],
+            metadata=normalized["metadata"],
+        )
+        return {
+            "schema": "brainstack.corpus_ingest_receipt.v1",
+            "status": status,
+            "document_id": int(result["document_id"]),
+            "stable_key": normalized["stable_key"],
+            "section_count": int(result["section_count"]),
+            "document_hash": normalized["document_hash"],
+            "corpus_fingerprint": normalized["fingerprint"],
+            "citation_ids": list(normalized["citation_ids"]),
+            "source_adapter": normalized["source_adapter"],
+            "read_only": False,
+        }
+
+    @_locked
+    def corpus_ingest_status(self, *, principal_scope_key: str = "") -> Dict[str, Any]:
+        requested_scope = str(principal_scope_key or "").strip()
+        versions = corpus_ingest_versions()
+        rows = self.conn.execute(
+            """
+            SELECT id, stable_key, title, metadata_json, active
+            FROM corpus_documents
+            WHERE active = 1
+            ORDER BY updated_at DESC, id DESC
+            """
+        ).fetchall()
+        document_count = 0
+        stale_documents: list[Dict[str, Any]] = []
+        missing_metadata_count = 0
+        for row in rows:
+            document_metadata = _decode_json_object(row["metadata_json"])
+            scope_key = _principal_scope_key_from_metadata(document_metadata)
+            if requested_scope and scope_key not in {"", requested_scope}:
+                continue
+            document_count += 1
+            ingest_metadata = document_metadata.get("corpus_ingest")
+            if not isinstance(ingest_metadata, Mapping):
+                missing_metadata_count += 1
+                stale_documents.append(
+                    {
+                        "document_id": int(row["id"]),
+                        "stable_key": str(row["stable_key"] or ""),
+                        "reason": "missing_corpus_ingest_metadata",
+                    }
+                )
+                continue
+            reasons: list[str] = []
+            expected_pairs = {
+                "schema": versions["schema"],
+                "source_adapter_contract": versions["adapter_contract"],
+                "normalizer": versions["normalizer"],
+                "sectioner": versions["sectioner"],
+                "embedder": versions["embedder"],
+            }
+            for key, expected in expected_pairs.items():
+                if str(ingest_metadata.get(key) or "") != expected:
+                    reasons.append(f"{key}_version_mismatch")
+            document_hash = str(ingest_metadata.get("document_hash") or "")
+            fingerprint = str(ingest_metadata.get("fingerprint") or "")
+            section_rows = self.conn.execute(
+                "SELECT metadata_json FROM corpus_sections WHERE document_id = ? ORDER BY section_index ASC",
+                (int(row["id"]),),
+            ).fetchall()
+            for section_row in section_rows:
+                section_metadata = _decode_json_object(section_row["metadata_json"])
+                if not section_metadata.get("section_hash"):
+                    reasons.append("section_hash_missing")
+                if not section_metadata.get("citation_id"):
+                    reasons.append("citation_id_missing")
+                if document_hash and str(section_metadata.get("document_hash") or "") != document_hash:
+                    reasons.append("section_document_hash_mismatch")
+                if fingerprint and str(section_metadata.get("corpus_fingerprint") or "") != fingerprint:
+                    reasons.append("section_fingerprint_mismatch")
+            if reasons:
+                stale_documents.append(
+                    {
+                        "document_id": int(row["id"]),
+                        "stable_key": str(row["stable_key"] or ""),
+                        "reason": ",".join(sorted(set(reasons))),
+                    }
+                )
+        if not document_count:
+            status = "idle"
+            reason = "No active corpus documents are present."
+        elif stale_documents:
+            status = "degraded"
+            reason = f"{len(stale_documents)} corpus document(s) have stale or incomplete ingest metadata."
+        else:
+            status = "active"
+            reason = "Corpus ingest metadata is current for all active documents."
+        return {
+            "schema": "brainstack.corpus_ingest_status.v1",
+            "status": status,
+            "reason": reason,
+            "versions": versions,
+            "document_count": document_count,
+            "stale_count": len(stale_documents),
+            "missing_metadata_count": missing_metadata_count,
+            "stale_documents": stale_documents[:20],
+        }
 
     @_locked
     def search_corpus(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
@@ -4493,14 +4831,17 @@ class BrainstackStore:
                     """
                     SELECT
                         cd.id AS document_id,
+                        cd.stable_key,
                         cd.title,
                         cd.doc_kind,
                         cd.source,
+                        cd.metadata_json AS document_metadata_json,
                         cs.id AS section_id,
                         cs.section_index,
                         cs.heading,
                         cs.content,
-                        cs.token_estimate
+                        cs.token_estimate,
+                        cs.metadata_json AS section_metadata_json
                     FROM corpus_section_fts fts
                     JOIN corpus_sections cs ON cs.id = fts.rowid
                     JOIN corpus_documents cd ON cd.id = cs.document_id
@@ -4510,7 +4851,7 @@ class BrainstackStore:
                     """,
                     (fts_query, limit),
                 ).fetchall()
-                output = [dict(row) for row in rows]
+                output = [_corpus_search_row_to_dict(row) for row in rows]
                 for row in output:
                     row["retrieval_source"] = "corpus.keyword"
                     row["match_mode"] = "keyword"
@@ -4528,14 +4869,17 @@ class BrainstackStore:
             f"""
             SELECT
                 cd.id AS document_id,
+                cd.stable_key,
                 cd.title,
                 cd.doc_kind,
                 cd.source,
+                cd.metadata_json AS document_metadata_json,
                 cs.id AS section_id,
                 cs.section_index,
                 cs.heading,
                 cs.content,
-                cs.token_estimate
+                cs.token_estimate,
+                cs.metadata_json AS section_metadata_json
             FROM corpus_sections cs
             JOIN corpus_documents cd ON cd.id = cs.document_id
             WHERE cd.active = 1
@@ -4549,7 +4893,7 @@ class BrainstackStore:
             """,
             tuple(patterns + patterns + patterns + [limit]),
         ).fetchall()
-        output = [dict(row) for row in rows]
+        output = [_corpus_search_row_to_dict(row) for row in rows]
         for row in output:
             row["retrieval_source"] = "corpus.keyword"
             row["match_mode"] = "keyword"
@@ -4643,6 +4987,560 @@ class BrainstackStore:
         )
         return output[:limit]
 
+    def _upsert_semantic_evidence_document(
+        self,
+        *,
+        evidence_key: str,
+        shelf: str,
+        row_id: int,
+        stable_key: str,
+        principal_scope_key: str,
+        source: str,
+        content: str,
+        metadata: Mapping[str, Any] | None,
+        source_updated_at: str,
+    ) -> None:
+        normalized_metadata = dict(metadata or {})
+        authority_class = str(normalized_metadata.get("authority_class") or shelf).strip()
+        provenance_class = str(normalized_metadata.get("provenance_class") or normalized_metadata.get("source_kind") or source).strip()
+        terms = normalize_semantic_terms(
+            shelf,
+            stable_key,
+            authority_class,
+            content,
+            *decode_semantic_metadata(normalized_metadata),
+        )
+        now = utc_now_iso()
+        self.conn.execute(
+            """
+            INSERT INTO semantic_evidence_index (
+                evidence_key, shelf, row_id, stable_key, principal_scope_key, source,
+                authority_class, provenance_class, content_excerpt, normalized_text,
+                terms_json, source_updated_at, fingerprint, index_version, active,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT(evidence_key) DO UPDATE SET
+                shelf = excluded.shelf,
+                row_id = excluded.row_id,
+                stable_key = excluded.stable_key,
+                principal_scope_key = excluded.principal_scope_key,
+                source = excluded.source,
+                authority_class = excluded.authority_class,
+                provenance_class = excluded.provenance_class,
+                content_excerpt = excluded.content_excerpt,
+                normalized_text = excluded.normalized_text,
+                terms_json = excluded.terms_json,
+                source_updated_at = excluded.source_updated_at,
+                fingerprint = excluded.fingerprint,
+                index_version = excluded.index_version,
+                active = 1,
+                updated_at = excluded.updated_at
+            """,
+            (
+                evidence_key,
+                shelf,
+                int(row_id or 0),
+                str(stable_key or "").strip(),
+                str(principal_scope_key or "").strip(),
+                str(source or "").strip(),
+                authority_class,
+                provenance_class,
+                str(content or "").strip()[:900],
+                " ".join(terms),
+                json.dumps(terms, ensure_ascii=True, sort_keys=True),
+                str(source_updated_at or "").strip(),
+                semantic_evidence_fingerprint(),
+                SEMANTIC_EVIDENCE_INDEX_VERSION,
+                now,
+                now,
+            ),
+        )
+
+    def _refresh_semantic_evidence_shelf(
+        self,
+        *,
+        shelf: str,
+        principal_scope_key: str = "",
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
+        index_shelf = "continuity_match" if str(shelf or "").strip() == "continuity" else str(shelf or "").strip()
+        scope_key = str(principal_scope_key or "").strip() or _principal_scope_key_from_metadata(metadata)
+        try:
+            self.rebuild_semantic_evidence_index(
+                principal_scope_key=scope_key,
+                shelves=(index_shelf,),
+            )
+        except Exception as exc:
+            logger.warning("Brainstack semantic evidence refresh failed for shelf %s: %s", index_shelf, exc)
+
+    @_locked
+    def rebuild_semantic_evidence_index(
+        self,
+        *,
+        principal_scope_key: str = "",
+        shelves: Iterable[str] | None = None,
+    ) -> Dict[str, Any]:
+        requested_scope_key = str(principal_scope_key or "").strip()
+        shelf_filter = {str(shelf or "").strip() for shelf in (shelves or ()) if str(shelf or "").strip()}
+        if shelf_filter:
+            params: List[Any] = list(sorted(shelf_filter))
+            sql = f"DELETE FROM semantic_evidence_index WHERE shelf IN ({','.join('?' for _ in shelf_filter)})"
+            if requested_scope_key:
+                sql += " AND principal_scope_key IN ('', ?)"
+                params.append(requested_scope_key)
+            self.conn.execute(sql, tuple(params))
+        else:
+            self.conn.execute("DELETE FROM semantic_evidence_index")
+
+        counts: Dict[str, int] = {}
+
+        def include_scope(scope_key: str) -> bool:
+            normalized = str(scope_key or "").strip()
+            return not requested_scope_key or normalized in {"", requested_scope_key}
+
+        def bump(shelf: str) -> None:
+            counts[shelf] = counts.get(shelf, 0) + 1
+
+        if not shelf_filter or "profile" in shelf_filter:
+            for row in self.conn.execute(
+                """
+                SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at, active
+                FROM profile_items
+                WHERE active = 1
+                """
+            ).fetchall():
+                item = _profile_row_to_dict(row)
+                if not include_scope(str(item.get("principal_scope_key") or "")):
+                    continue
+                self._upsert_semantic_evidence_document(
+                    evidence_key=f"profile:{item.get('stable_key') or item.get('id')}",
+                    shelf="profile",
+                    row_id=int(item.get("id") or 0),
+                    stable_key=str(item.get("stable_key") or ""),
+                    principal_scope_key=str(item.get("principal_scope_key") or ""),
+                    source=str(item.get("source") or ""),
+                    content=f"{item.get('category') or ''} {item.get('content') or ''}",
+                    metadata=item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {},
+                    source_updated_at=str(item.get("updated_at") or ""),
+                )
+                bump("profile")
+
+        if not shelf_filter or "task" in shelf_filter:
+            for row in self.conn.execute(
+                """
+                SELECT id, stable_key, principal_scope_key, item_type, title, due_date, date_scope,
+                       optional, status, owner, source, source_session_id, source_turn_number,
+                       metadata_json, created_at, updated_at
+                FROM task_items
+                """
+            ).fetchall():
+                item = _task_row_to_dict(row)
+                if not include_scope(str(item.get("principal_scope_key") or "")):
+                    continue
+                self._upsert_semantic_evidence_document(
+                    evidence_key=f"task:{item.get('stable_key') or item.get('id')}",
+                    shelf="task",
+                    row_id=int(item.get("id") or 0),
+                    stable_key=str(item.get("stable_key") or ""),
+                    principal_scope_key=str(item.get("principal_scope_key") or ""),
+                    source=str(item.get("source") or ""),
+                    content=f"{item.get('item_type') or ''} {item.get('title') or ''} {item.get('due_date') or ''} {item.get('status') or ''}",
+                    metadata=item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {},
+                    source_updated_at=str(item.get("updated_at") or ""),
+                )
+                bump("task")
+
+        if not shelf_filter or "operating" in shelf_filter:
+            for row in self.conn.execute(
+                """
+                SELECT id, stable_key, principal_scope_key, record_type, content, owner, source,
+                       source_session_id, source_turn_number, metadata_json, created_at, updated_at
+                FROM operating_records
+                """
+            ).fetchall():
+                item = _operating_row_to_dict(row)
+                if not include_scope(str(item.get("principal_scope_key") or "")):
+                    continue
+                self._upsert_semantic_evidence_document(
+                    evidence_key=f"operating:{item.get('stable_key') or item.get('id')}",
+                    shelf="operating",
+                    row_id=int(item.get("id") or 0),
+                    stable_key=str(item.get("stable_key") or ""),
+                    principal_scope_key=str(item.get("principal_scope_key") or ""),
+                    source=str(item.get("source") or ""),
+                    content=f"{item.get('record_type') or ''} {item.get('content') or ''}",
+                    metadata=item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {},
+                    source_updated_at=str(item.get("updated_at") or ""),
+                )
+                bump("operating")
+
+        if not shelf_filter or "corpus" in shelf_filter:
+            for row in self.conn.execute(
+                """
+                SELECT cd.id AS document_id, cd.stable_key, cd.title, cd.doc_kind, cd.source,
+                       cd.metadata_json AS document_metadata_json, cd.updated_at,
+                       cs.id AS section_id, cs.section_index, cs.heading, cs.content,
+                       cs.metadata_json AS section_metadata_json, cs.created_at
+                FROM corpus_sections cs
+                JOIN corpus_documents cd ON cd.id = cs.document_id
+                WHERE cd.active = 1
+                """
+            ).fetchall():
+                document_metadata = _decode_json_object(row["document_metadata_json"])
+                section_metadata = _decode_json_object(row["section_metadata_json"])
+                metadata = {**document_metadata, **section_metadata}
+                scope_key = _principal_scope_key_from_metadata(metadata)
+                if not include_scope(scope_key):
+                    continue
+                self._upsert_semantic_evidence_document(
+                    evidence_key=f"corpus:{int(row['document_id'] or 0)}:{int(row['section_index'] or 0)}",
+                    shelf="corpus",
+                    row_id=int(row["section_id"] or 0),
+                    stable_key=str(row["stable_key"] or ""),
+                    principal_scope_key=scope_key,
+                    source=str(row["source"] or ""),
+                    content=f"{row['title'] or ''} {row['heading'] or ''} {row['content'] or ''}",
+                    metadata=metadata,
+                    source_updated_at=str(row["updated_at"] or row["created_at"] or ""),
+                )
+                bump("corpus")
+
+        if not shelf_filter or "graph" in shelf_filter:
+            for row in self.conn.execute(
+                """
+                SELECT gs.id, ge.canonical_name AS subject, gs.attribute, gs.value_text,
+                       gs.source, gs.metadata_json, gs.valid_from, gs.valid_to, gs.is_current
+                FROM graph_states gs
+                JOIN graph_entities ge ON ge.id = gs.entity_id
+                WHERE gs.is_current = 1
+                """
+            ).fetchall():
+                item = _row_to_dict(row)
+                raw_graph_metadata = item.get("metadata")
+                graph_metadata: Mapping[str, Any] = raw_graph_metadata if isinstance(raw_graph_metadata, Mapping) else {}
+                scope_key = _principal_scope_key_from_metadata(graph_metadata)
+                if not include_scope(scope_key):
+                    continue
+                self._upsert_semantic_evidence_document(
+                    evidence_key=f"graph:state:{int(item.get('id') or 0)}",
+                    shelf="graph",
+                    row_id=int(item.get("id") or 0),
+                    stable_key=f"{item.get('subject') or ''}:{item.get('attribute') or ''}",
+                    principal_scope_key=scope_key,
+                    source=str(item.get("source") or ""),
+                    content=f"{item.get('subject') or ''} {item.get('attribute') or ''} {item.get('value_text') or ''}",
+                    metadata=graph_metadata,
+                    source_updated_at=str(item.get("valid_from") or ""),
+                )
+                bump("graph")
+
+        if not shelf_filter or "continuity" in shelf_filter or "continuity_match" in shelf_filter:
+            for row in self.conn.execute(
+                """
+                SELECT id, session_id, turn_number, kind, content, source, metadata_json, created_at, updated_at
+                FROM continuity_events
+                """
+            ).fetchall():
+                item = _row_to_dict(row)
+                raw_continuity_metadata = item.get("metadata")
+                continuity_metadata: Mapping[str, Any] = (
+                    raw_continuity_metadata if isinstance(raw_continuity_metadata, Mapping) else {}
+                )
+                scope_key = _principal_scope_key_from_metadata(continuity_metadata)
+                if not include_scope(scope_key):
+                    continue
+                self._upsert_semantic_evidence_document(
+                    evidence_key=f"continuity:{int(item.get('id') or 0)}",
+                    shelf="continuity_match",
+                    row_id=int(item.get("id") or 0),
+                    stable_key="",
+                    principal_scope_key=scope_key,
+                    source=str(item.get("source") or ""),
+                    content=f"{item.get('kind') or ''} {item.get('content') or ''}",
+                    metadata=continuity_metadata,
+                    source_updated_at=str(item.get("updated_at") or item.get("created_at") or ""),
+                )
+                bump("continuity_match")
+
+        self.conn.commit()
+        return {
+            "schema": "brainstack.semantic_evidence_backfill.v1",
+            "fingerprint": semantic_evidence_fingerprint(),
+            "index_version": SEMANTIC_EVIDENCE_INDEX_VERSION,
+            "counts": counts,
+        }
+
+    @_locked
+    def semantic_evidence_channel_status(self) -> Dict[str, Any]:
+        fingerprint = semantic_evidence_fingerprint()
+        active_count = int(
+            self.conn.execute("SELECT COUNT(*) AS count FROM semantic_evidence_index WHERE active = 1").fetchone()["count"]
+        )
+        stale_count = int(
+            self.conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM semantic_evidence_index
+                WHERE active = 1 AND (fingerprint != ? OR index_version != ?)
+                """,
+                (fingerprint, SEMANTIC_EVIDENCE_INDEX_VERSION),
+            ).fetchone()["count"]
+        )
+        if stale_count:
+            status = "degraded"
+            reason = "Semantic evidence index contains stale derived rows."
+        elif active_count:
+            status = "active"
+            reason = "Semantic evidence index is active."
+        else:
+            status = "idle"
+            reason = "Semantic evidence index has no active rows."
+        return {
+            "status": status,
+            "reason": reason,
+            "active_count": active_count,
+            "stale_count": stale_count,
+            "fingerprint": fingerprint,
+            "index_version": SEMANTIC_EVIDENCE_INDEX_VERSION,
+        }
+
+    @_locked
+    def record_tier2_run_result(self, result: Mapping[str, Any]) -> str:
+        run_id = str(result.get("run_id") or "").strip()
+        if not run_id:
+            basis = json.dumps(
+                {
+                    "session_id": result.get("session_id"),
+                    "turn_number": result.get("turn_number"),
+                    "trigger_reason": result.get("trigger_reason"),
+                    "created_at": utc_now_iso(),
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            )
+            run_id = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:24]
+        now = utc_now_iso()
+        no_op_reasons = result.get("no_op_reasons")
+        if not isinstance(no_op_reasons, list):
+            no_op_reasons = []
+        metadata = result.get("metadata") if isinstance(result.get("metadata"), Mapping) else {}
+        self.conn.execute(
+            """
+            INSERT INTO tier2_run_records (
+                run_id, session_id, turn_number, trigger_reason, request_status,
+                parse_status, status, transcript_count, extracted_counts_json,
+                action_counts_json, writes_performed, no_op_reasons_json,
+                error_reason, duration_ms, metadata_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                request_status = excluded.request_status,
+                parse_status = excluded.parse_status,
+                status = excluded.status,
+                transcript_count = excluded.transcript_count,
+                extracted_counts_json = excluded.extracted_counts_json,
+                action_counts_json = excluded.action_counts_json,
+                writes_performed = excluded.writes_performed,
+                no_op_reasons_json = excluded.no_op_reasons_json,
+                error_reason = excluded.error_reason,
+                duration_ms = excluded.duration_ms,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                run_id,
+                str(result.get("session_id") or ""),
+                int(result.get("turn_number") or 0),
+                str(result.get("trigger_reason") or ""),
+                str(result.get("request_status") or ""),
+                str(result.get("json_parse_status") or result.get("parse_status") or ""),
+                str(result.get("status") or ""),
+                int(result.get("transcript_count") or 0),
+                json.dumps(result.get("extracted_counts") or {}, ensure_ascii=True, sort_keys=True),
+                json.dumps(result.get("action_counts") or {}, ensure_ascii=True, sort_keys=True),
+                int(result.get("writes_performed") or 0),
+                json.dumps(no_op_reasons, ensure_ascii=True, sort_keys=True),
+                str(result.get("error_reason") or ""),
+                int(result.get("duration_ms") or 0),
+                json.dumps(metadata, ensure_ascii=True, sort_keys=True),
+                str(result.get("created_at") or now),
+                now,
+            ),
+        )
+        self.conn.commit()
+        return run_id
+
+    @_locked
+    def latest_tier2_run_record(self, *, session_id: str = "") -> Dict[str, Any] | None:
+        params: list[Any] = []
+        sql = """
+            SELECT *
+            FROM tier2_run_records
+            WHERE 1 = 1
+        """
+        normalized_session_id = str(session_id or "").strip()
+        if normalized_session_id:
+            sql += " AND session_id = ?"
+            params.append(normalized_session_id)
+        sql += " ORDER BY updated_at DESC, id DESC LIMIT 1"
+        row = self.conn.execute(sql, tuple(params)).fetchone()
+        if row is None:
+            return None
+        item = _row_to_dict(row)
+        item["extracted_counts"] = _decode_json_object(item.pop("extracted_counts_json", {}))
+        item["action_counts"] = _decode_json_object(item.pop("action_counts_json", {}))
+        item["no_op_reasons"] = _decode_json_array(item.pop("no_op_reasons_json", []))
+        return item
+
+    def _materialize_semantic_evidence_row(self, row: Mapping[str, Any]) -> Dict[str, Any] | None:
+        shelf = str(row.get("shelf") or "").strip()
+        row_id = int(row.get("row_id") or 0)
+        if shelf == "profile":
+            source_row = self.conn.execute(
+                """
+                SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at, active
+                FROM profile_items
+                WHERE id = ? AND active = 1
+                """,
+                (row_id,),
+            ).fetchone()
+            item = _profile_row_to_dict(source_row) if source_row else None
+        elif shelf == "task":
+            source_row = self.conn.execute(
+                """
+                SELECT id, stable_key, principal_scope_key, item_type, title, due_date, date_scope,
+                       optional, status, owner, source, source_session_id, source_turn_number,
+                       metadata_json, created_at, updated_at
+                FROM task_items
+                WHERE id = ?
+                """,
+                (row_id,),
+            ).fetchone()
+            item = _task_row_to_dict(source_row) if source_row else None
+        elif shelf == "operating":
+            source_row = self.conn.execute(
+                """
+                SELECT id, stable_key, principal_scope_key, record_type, content, owner, source,
+                       source_session_id, source_turn_number, metadata_json, created_at, updated_at
+                FROM operating_records
+                WHERE id = ?
+                """,
+                (row_id,),
+            ).fetchone()
+            item = _operating_row_to_dict(source_row) if source_row else None
+        elif shelf == "corpus":
+            source_row = self.conn.execute(
+                """
+                SELECT cd.id AS document_id, cd.stable_key, cd.title, cd.doc_kind, cd.source,
+                       cd.metadata_json AS document_metadata_json,
+                       cs.id AS section_id, cs.section_index, cs.heading, cs.content, cs.token_estimate,
+                       cs.metadata_json AS section_metadata_json
+                FROM corpus_sections cs
+                JOIN corpus_documents cd ON cd.id = cs.document_id
+                WHERE cs.id = ? AND cd.active = 1
+                """,
+                (row_id,),
+            ).fetchone()
+            item = _corpus_search_row_to_dict(source_row) if source_row else None
+        elif shelf == "graph":
+            source_row = self.conn.execute(
+                """
+                SELECT 'state' AS row_type,
+                       gs.id AS row_id,
+                       ge.canonical_name AS subject,
+                       gs.attribute AS predicate,
+                       gs.value_text AS object_value,
+                       gs.is_current AS is_current,
+                       gs.valid_from AS happened_at,
+                       gs.valid_to AS valid_to,
+                       gs.source AS source,
+                       gs.metadata_json AS metadata_json,
+                       '' AS conflict_metadata_json,
+                       '' AS conflict_source,
+                       '' AS conflict_value
+                FROM graph_states gs
+                JOIN graph_entities ge ON ge.id = gs.entity_id
+                WHERE gs.id = ? AND gs.is_current = 1
+                """,
+                (row_id,),
+            ).fetchone()
+            item = _row_to_dict(source_row) if source_row else None
+        elif shelf == "continuity_match":
+            source_row = self.conn.execute(
+                """
+                SELECT id, session_id, turn_number, kind, content, source, metadata_json, created_at, updated_at
+                FROM continuity_events
+                WHERE id = ?
+                """,
+                (row_id,),
+            ).fetchone()
+            item = _row_to_dict(source_row) if source_row else None
+        else:
+            item = None
+        if item is None:
+            return None
+        if shelf == "operating" and not record_is_effective_at(item):
+            return None
+        item["semantic_evidence_key"] = str(row.get("evidence_key") or "")
+        item["semantic_shelf"] = shelf
+        item["semantic_score"] = float(row.get("semantic_score") or 0.0)
+        item["retrieval_source"] = "semantic_evidence"
+        item["match_mode"] = "semantic"
+        item["semantic_index_fingerprint"] = str(row.get("fingerprint") or "")
+        return item
+
+    @_locked
+    def search_semantic_evidence(
+        self,
+        *,
+        query: str,
+        principal_scope_key: str = "",
+        limit: int = 8,
+        shelves: Iterable[str] | None = None,
+    ) -> List[Dict[str, Any]]:
+        query_terms = normalize_semantic_terms(query)
+        if not query_terms:
+            return []
+        fingerprint = semantic_evidence_fingerprint()
+        requested_scope_key = str(principal_scope_key or "").strip()
+        requested_shelves = [str(shelf or "").strip() for shelf in (shelves or ()) if str(shelf or "").strip()]
+        params: List[Any] = [fingerprint, SEMANTIC_EVIDENCE_INDEX_VERSION]
+        sql = """
+            SELECT *
+            FROM semantic_evidence_index
+            WHERE active = 1
+              AND fingerprint = ?
+              AND index_version = ?
+        """
+        if requested_scope_key:
+            sql += " AND principal_scope_key IN ('', ?)"
+            params.append(requested_scope_key)
+        if requested_shelves:
+            sql += f" AND shelf IN ({','.join('?' for _ in requested_shelves)})"
+            params.extend(requested_shelves)
+        sql += " ORDER BY updated_at DESC LIMIT 256"
+        rows = self.conn.execute(sql, tuple(params)).fetchall()
+        scored: List[tuple[float, Dict[str, Any]]] = []
+        for raw_row in rows:
+            row = dict(raw_row)
+            terms = _decode_json_array(row.get("terms_json"))
+            score = semantic_similarity(query_terms, terms)
+            if score <= 0.0:
+                continue
+            row["semantic_score"] = score
+            materialized = self._materialize_semantic_evidence_row(row)
+            if materialized is not None:
+                if not _volatile_operating_semantic_match(materialized):
+                    continue
+                scored.append((score, materialized))
+        scored.sort(
+            key=lambda item: (
+                item[0],
+                str(item[1].get("updated_at") or item[1].get("created_at") or item[1].get("happened_at") or ""),
+            ),
+            reverse=True,
+        )
+        return [row for _, row in scored[: max(int(limit or 0), 1)]]
+
     @_locked
     def corpus_semantic_channel_status(self) -> Dict[str, str]:
         if self._corpus_backend is None:
@@ -4680,6 +5578,51 @@ class BrainstackStore:
         return {
             "status": "active",
             "reason": f"Graph retrieval is served by {self._graph_backend.target_name}.",
+        }
+
+    @_locked
+    def graph_recall_channel_status(self) -> Dict[str, Any]:
+        storage_status = self.graph_backend_channel_status()
+        graph_rows = self.conn.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM graph_states WHERE is_current = 1) +
+                (SELECT COUNT(*) FROM graph_relations WHERE active = 1) +
+                (SELECT COUNT(*) FROM graph_inferred_relations WHERE active = 1) AS count
+            """
+        ).fetchone()
+        graph_row_count = int(graph_rows["count"] if graph_rows is not None else 0)
+        semantic_graph_rows = self.conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM semantic_evidence_index
+            WHERE active = 1
+              AND shelf = 'graph'
+              AND fingerprint = ?
+              AND index_version = ?
+            """,
+            (semantic_evidence_fingerprint(), SEMANTIC_EVIDENCE_INDEX_VERSION),
+        ).fetchone()
+        semantic_graph_count = int(semantic_graph_rows["count"] if semantic_graph_rows is not None else 0)
+        if graph_row_count <= 0:
+            mode = "unavailable"
+            status = "idle"
+            reason = "No current graph rows are available for recall."
+        elif semantic_graph_count > 0:
+            mode = "hybrid_seeded"
+            status = "active"
+            reason = "Graph recall can use lexical graph search plus typed semantic evidence seeds."
+        else:
+            mode = "lexical_seeded"
+            status = "active"
+            reason = "Graph recall uses lexical graph search seeds only."
+        return {
+            "status": status,
+            "reason": reason,
+            "recall_mode": mode,
+            "graph_row_count": graph_row_count,
+            "semantic_graph_seed_count": semantic_graph_count,
+            "storage_status": dict(storage_status),
         }
 
     def _normalize_entity_name(self, name: str) -> str:
@@ -5485,6 +6428,10 @@ class BrainstackStore:
         )
         if self._graph_backend is not None and int(outcome.get("entity_id") or 0) > 0:
             self._publish_entity_subgraph(int(outcome["entity_id"]))
+        self._refresh_semantic_evidence_shelf(
+            shelf="graph",
+            metadata=metadata,
+        )
         return outcome
 
     @_locked

@@ -1,0 +1,71 @@
+{
+  "_meta": {
+    "updated_at": "2026-04-23T21:35:59.747Z",
+    "version": 1,
+    "generated_by": "codex-gsd-intel-refresh",
+    "project_root": "/home/lauratom/Asztal/ai/atado/Brainstack-phase50",
+    "source": "Brainstack-phase50"
+  },
+  "entries": {
+    "single_external_provider": {
+      "status": "active",
+      "decision": "Hermes should see exactly one external Brainstack memory provider.",
+      "rationale": "Avoids tool schema bloat and conflicting memory backends while keeping host contract intact.",
+      "evidence": [
+        ".planning/PROJECT.md",
+        "README.md",
+        "brainstack/__init__.py"
+      ]
+    },
+    "shelf_separation": {
+      "status": "active",
+      "decision": "Memory is split into profile, continuity, transcript, graph-truth, and corpus shelves.",
+      "rationale": "Durable facts, continuity, evidence, graph truth, and large documents need different ownership and budgets.",
+      "evidence": [
+        "README.md",
+        "brainstack/db.py",
+        "brainstack/executive_retrieval.py"
+      ]
+    },
+    "storage_by_responsibility": {
+      "status": "active",
+      "decision": "Use SQLite for shell/profile/session/transcript/lexical state, Kuzu for graph truth, and Chroma for semantic corpus retrieval.",
+      "rationale": "Keeps each storage backend scoped to the retrieval/truth job it is good at.",
+      "evidence": [
+        "README.md",
+        "brainstack/db.py",
+        "brainstack/graph_backend_kuzu.py",
+        "brainstack/corpus_backend_chroma.py"
+      ]
+    },
+    "donor_first_native_host_seams": {
+      "status": "active",
+      "decision": "Brainstack stays donor-first and uses Hermes native host seams instead of becoming a behavior governor.",
+      "rationale": "Preserves update-safety and separates memory kernel responsibilities from host behavior policy.",
+      "evidence": [
+        "docs/PUBLISHING_SCOPE.md",
+        "docs/HOST_PATCH_SURFACE.md",
+        ".planning/PR-CANDIDATES.md"
+      ]
+    },
+    "workspace_truth": {
+      "status": "active",
+      "decision": "Brainstack code and GSD planning live in Brainstack-phase50; latest Hermes source/testing lives in veglegeshermes-source.",
+      "rationale": "Prevents stale hermes-agent-latest planning leftovers from driving current work.",
+      "evidence": [
+        ".planning/WORKSPACE-BOUNDARIES.md",
+        ".planning/PROJECT.md"
+      ]
+    },
+    "bounded_retrieval": {
+      "status": "active",
+      "decision": "Retrieval and prompt assembly must stay bounded, route-aware, and token-disciplined.",
+      "rationale": "Brainstack should improve working memory without prompt stuffing or benchmark-only heuristics.",
+      "evidence": [
+        "brainstack/control_plane.py",
+        "brainstack/executive_retrieval.py",
+        ".planning/PR-CANDIDATES.md"
+      ]
+    }
+  }
+}

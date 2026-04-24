@@ -14,6 +14,10 @@ OPERATING_RECORD_OPEN_DECISION = "open_decision"
 OPERATING_RECORD_CURRENT_COMMITMENT = "current_commitment"
 OPERATING_RECORD_NEXT_STEP = "next_step"
 OPERATING_RECORD_EXTERNAL_OWNER_POINTER = "external_owner_pointer"
+OPERATING_RECORD_RUNTIME_APPROVAL_POLICY = "runtime_approval_policy"
+OPERATING_RECORD_CANONICAL_POLICY = "canonical_policy"
+OPERATING_RECORD_PROCEDURE_MEMORY = "procedure_memory"
+OPERATING_RECORD_SESSION_STATE = "session_state"
 
 OPERATING_RECORD_TYPES = (
     OPERATING_RECORD_ACTIVE_WORK,
@@ -25,6 +29,10 @@ OPERATING_RECORD_TYPES = (
     OPERATING_RECORD_CURRENT_COMMITMENT,
     OPERATING_RECORD_NEXT_STEP,
     OPERATING_RECORD_EXTERNAL_OWNER_POINTER,
+    OPERATING_RECORD_RUNTIME_APPROVAL_POLICY,
+    OPERATING_RECORD_CANONICAL_POLICY,
+    OPERATING_RECORD_PROCEDURE_MEMORY,
+    OPERATING_RECORD_SESSION_STATE,
 )
 
 OPERATING_SINGLETON_RECORD_TYPES = {
@@ -61,6 +69,10 @@ def _record_type_label(record_type: str) -> str:
         OPERATING_RECORD_CURRENT_COMMITMENT: "current commitment",
         OPERATING_RECORD_NEXT_STEP: "next step",
         OPERATING_RECORD_EXTERNAL_OWNER_POINTER: "external owner",
+        OPERATING_RECORD_RUNTIME_APPROVAL_POLICY: "runtime approval policy",
+        OPERATING_RECORD_CANONICAL_POLICY: "canonical policy",
+        OPERATING_RECORD_PROCEDURE_MEMORY: "procedure memory",
+        OPERATING_RECORD_SESSION_STATE: "session state",
     }
     return labels.get(str(record_type or "").strip(), "operating truth")
 
@@ -90,7 +102,7 @@ class OperatingTruthCapture:
     items: List[OperatingTruthItem]
 
     def to_dict(self) -> Dict[str, Any]:
-        payload = {"items": [item.to_dict() for item in self.items]}
+        payload: Dict[str, Any] = {"items": [item.to_dict() for item in self.items]}
         payload["item_count"] = len(self.items)
         payload["record_types"] = [item.record_type for item in self.items]
         return payload

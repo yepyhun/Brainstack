@@ -184,8 +184,9 @@ def style_contract_cleanliness_issues(
         parsed = parse_style_contract_text(raw_text)
         if parsed is None:
             return ["unparseable_contract"]
-        title = parsed.get("title")
-        sections = parsed.get("sections")
+        title = _normalize_text(parsed.get("title"))
+        parsed_sections = parsed.get("sections")
+        sections = parsed_sections if isinstance(parsed_sections, list) else []
     return _style_contract_cleanliness_issues_for_parts(title=title, sections=sections)
 
 
@@ -475,7 +476,8 @@ def render_style_contract_content(
 def normalize_style_contract_payload(payload: Any) -> Dict[str, Any] | None:
     if not isinstance(payload, Mapping):
         return None
-    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
+    raw_metadata = payload.get("metadata")
+    metadata: Mapping[str, Any] = raw_metadata if isinstance(raw_metadata, Mapping) else {}
     slot = _normalize_text(payload.get("slot"))
     title = (
         _normalize_text(payload.get("title"))

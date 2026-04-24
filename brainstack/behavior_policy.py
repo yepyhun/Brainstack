@@ -563,7 +563,8 @@ def build_behavior_policy_snapshot(
     raw_hash = hashlib.sha256(raw_content.encode("utf-8")).hexdigest() if raw_content else ""
 
     compiled_record = dict(compiled_policy_record or {})
-    compiled_policy = compiled_record.get("policy") if isinstance(compiled_record.get("policy"), Mapping) else {}
+    raw_compiled_policy = compiled_record.get("policy")
+    compiled_policy: Mapping[str, Any] = raw_compiled_policy if isinstance(raw_compiled_policy, Mapping) else {}
     compiled_status = _normalize_text(compiled_policy.get("status") or compiled_record.get("status"))
     compiled_source_hash = _normalize_text(compiled_policy.get("source_contract_hash"))
     projection_text = str(compiled_policy.get("projection_text") or "").strip()

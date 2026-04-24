@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Mapping
 
 LIVE_SYSTEM_STATE_OWNER = "brainstack.live_system_state"
 LIVE_SYSTEM_STATE_RECORD_TYPE = "live_system_state"
+LIVE_SYSTEM_STATE_SNAPSHOT_VERSION = 1
 
 logger = logging.getLogger(__name__)
 QUERY_TOKEN_RE = re.compile(r"[^\W_]+(?:[-_][^\W_]+)*", re.UNICODE)
@@ -160,6 +161,27 @@ def _cron_job_rows(*, principal_scope_key: str) -> List[Dict[str, Any]]:
 def list_live_system_state_rows(*, principal_scope_key: str, limit: int = 8) -> List[Dict[str, Any]]:
     rows = _cron_job_rows(principal_scope_key=principal_scope_key)
     return rows[: max(int(limit or 0), 1)]
+
+
+def build_live_system_state_snapshot(*, principal_scope_key: str, limit: int = 8) -> Dict[str, Any]:
+    rows = list_live_system_state_rows(principal_scope_key=principal_scope_key, limit=limit)
+    authoritative_sources = []
+    seen: set[str] = set()
+    for row in rows:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
+        provider = _normalize_text((metadata or {}).get("provider"))
+        if not provider or provider in seen:
+            continue
+        seen.add(provider)
+        authoritative_sources.append(provider)
+    return {
+        "snapshot_version": LIVE_SYSTEM_STATE_SNAPSHOT_VERSION,
+        "principal_scope_key": str(principal_scope_key or "").strip(),
+        "rows": rows,
+        "row_count": len(rows),
+        "authoritative_sources": authoritative_sources,
+        "authoritative": bool(rows),
+    }
 
 
 def search_live_system_state_rows(

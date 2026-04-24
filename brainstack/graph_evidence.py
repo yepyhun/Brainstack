@@ -15,7 +15,7 @@ class GraphEvidenceSpan:
     end_char: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        payload = {"excerpt": str(self.excerpt or "").strip()}
+        payload: dict[str, Any] = {"excerpt": str(self.excerpt or "").strip()}
         if self.start_char is not None:
             payload["start_char"] = int(self.start_char)
         if self.end_char is not None:

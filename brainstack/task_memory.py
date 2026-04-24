@@ -5,8 +5,6 @@ from datetime import datetime
 import re
 from typing import Any, Dict
 
-from .structured_understanding import resolve_user_timezone
-
 STATUS_OPEN = "open"
 ITEM_TYPE_TASK = "task"
 ITEM_TYPE_COMMITMENT = "commitment"
