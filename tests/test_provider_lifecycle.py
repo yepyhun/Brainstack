@@ -21,7 +21,7 @@ def _initialize(provider: BrainstackMemoryProvider) -> None:
         "lifecycle-session",
         platform="test",
         user_id="user",
-        agent_identity="bestie",
+        agent_identity="agent-smoke",
         agent_workspace="workspace",
     )
 

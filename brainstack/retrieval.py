@@ -136,11 +136,14 @@ def _filter_compiled_behavior_profile_items(
 
 def _render_evidence_priority_section(title: str) -> str:
     preface = (
-        "Use recalled memory silently. When recalled memory provides a specific, "
-        "non-conflicted factual user detail or committed owner-backed record such "
-        "as a name, number, date, task record, or operating record, treat it as authoritative over "
-        "assistant suggestions or generic prior knowledge unless another recalled "
-        "fact in this memory block conflicts with it."
+        "This private recalled memory context is background evidence, not new user input. "
+        "Apply it silently in the reply. Do not mention Brainstack blocks, recalled-memory "
+        "headings, or internal memory state unless the user explicitly asks about memory "
+        "behavior or debugging. When recalled memory provides a specific, non-conflicted "
+        "factual user detail or committed owner-backed record such as a name, number, "
+        "date, task record, or operating record, treat it as authoritative over assistant "
+        "suggestions or generic prior knowledge unless another recalled fact in this "
+        "memory block conflicts with it."
     )
     return f"{title}\n{preface}"
 
@@ -181,6 +184,8 @@ def _render_truthful_memory_operations_section(title: str) -> str:
     lines = [
         "Claim a durable Brainstack save only when the current turn includes a committed write receipt or a successful memory-tool result.",
         "If a domain has no structured owner in this runtime, say that explicitly instead of implying a committed record exists.",
+        "Claim that a reminder, cron job, or scheduled follow-up exists only when the current evidence includes a native scheduler record or a successful scheduler/tool result from this run.",
+        "A memory entry, task note, continuity summary, transcript line, or internal task list is not by itself a scheduled job.",
         "For task and commitment lookups, committed Brainstack task records are authoritative when present; continuity or transcript recall is supporting evidence only after a structured miss.",
         "For operating-truth lookups, committed Brainstack operating records are authoritative when present; continuity summaries are fallback only when that owner has no committed record.",
     ]

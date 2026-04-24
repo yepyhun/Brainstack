@@ -92,6 +92,15 @@ def _backend_capability(
     backend_object_active = active_backend is not None
     active = backend_object_active or not external_requested
     error_text = str(error or "").strip()
+    error_class = ""
+    if error_text:
+        lowered_error = error_text.casefold()
+        if "std::bad_alloc" in lowered_error or "memoryerror" in lowered_error:
+            error_class = "backend_open_memory_error"
+        elif "no module" in lowered_error or "import" in lowered_error:
+            error_class = "backend_dependency_missing"
+        else:
+            error_class = "backend_unavailable"
     target_name = str(getattr(active_backend, "target_name", "") or "")
     if backend_object_active and not error_text:
         status = "active"
@@ -107,10 +116,13 @@ def _backend_capability(
         "requested": requested,
         "external_requested": external_requested,
         "active": active,
+        "active_backend": target_name or ("sqlite" if not external_requested else ""),
+        "sqlite_fallback_active": external_requested and not backend_object_active,
         "status": status,
         "target_name": target_name,
         "reason": reason,
         "error": error_text,
+        "error_class": error_class,
     }
 
 
@@ -263,6 +275,16 @@ def _summarize_rows(shelf: str, rows: list[Dict[str, Any]]) -> list[Dict[str, An
                 "id": row.get("id", row.get("row_id", "")),
                 "stable_key": row.get("stable_key", ""),
                 "source": row.get("source", ""),
+                "record_type": row.get("record_type", row.get("kind", "")),
+                "retrieval_source": row.get("retrieval_source", ""),
+                "match_mode": row.get("match_mode", ""),
+                "keyword_score": float(row.get("keyword_score") or 0.0),
+                "semantic_score": float(row.get("semantic_score") or 0.0),
+                "query_token_overlap": int(row.get("_brainstack_query_token_overlap") or 0),
+                "query_token_count": int(row.get("_brainstack_query_token_count") or 0),
+                "same_session": bool(row.get("same_session")),
+                "same_principal": bool(row.get("same_principal")),
+                "suppression_reason": row.get("_brainstack_suppression_reason", ""),
                 "citation_id": row.get("citation_id", ""),
                 "document_hash": row.get("document_hash", ""),
                 "section_hash": row.get("section_hash", ""),
@@ -350,7 +372,12 @@ def build_query_inspect(
                 "evidence_key": evidence_key,
                 "shelf": shelf,
                 "reason": "Candidate was not selected by route, authority, dedupe, or packet budget.",
+                "suppression_reason": str(candidate.get("suppression_reason") or ""),
                 "channel_ranks": dict(candidate.get("channel_ranks") or {}),
+                "keyword_score": float(candidate.get("keyword_score") or 0.0),
+                "semantic_score": float(candidate.get("semantic_score") or 0.0),
+                "query_token_overlap": int(candidate.get("query_token_overlap") or 0),
+                "query_token_count": int(candidate.get("query_token_count") or 0),
                 "excerpt": str(candidate.get("content_excerpt") or "")[:220],
             }
         )

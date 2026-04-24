@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from brainstack import BrainstackMemoryProvider
+from brainstack.db import BrainstackStore
 from brainstack.maintenance import MAINTENANCE_SCHEMA_VERSION
 
 
@@ -19,16 +20,22 @@ def _provider(tmp_path: Path) -> BrainstackMemoryProvider:
         "maintenance-session",
         platform="test",
         user_id="user",
-        agent_identity="bestie",
+        agent_identity="agent-smoke",
         agent_workspace="workspace",
     )
     assert provider._store is not None
     return provider
 
 
+def _store(provider: BrainstackMemoryProvider) -> BrainstackStore:
+    store = provider._store
+    assert store is not None
+    return store
+
+
 def _seed_stale_semantic_index(provider: BrainstackMemoryProvider) -> None:
-    assert provider._store is not None
-    provider._store.upsert_profile_item(
+    store = _store(provider)
+    store.upsert_profile_item(
         stable_key="identity:maintenance",
         category="identity",
         content="Maintenance proof record.",
@@ -36,22 +43,23 @@ def _seed_stale_semantic_index(provider: BrainstackMemoryProvider) -> None:
         confidence=0.95,
         metadata=provider._scoped_metadata({"semantic_terms": ["maintenance proof substrate"]}),
     )
-    provider._store.conn.execute("UPDATE semantic_evidence_index SET fingerprint = 'stale-fingerprint'")
-    provider._store.conn.commit()
+    store.conn.execute("UPDATE semantic_evidence_index SET fingerprint = 'stale-fingerprint'")
+    store.conn.commit()
 
 
 def test_consolidate_dry_run_reports_candidates_without_mutating_truth(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     try:
         _seed_stale_semantic_index(provider)
-        before = provider._store.get_profile_item(
+        store = _store(provider)
+        before = store.get_profile_item(
             stable_key="identity:maintenance",
             principal_scope_key=provider._principal_scope_key,
         )
 
         receipt = json.loads(provider.handle_tool_call("brainstack_consolidate", {"apply": False}))
 
-        after = provider._store.get_profile_item(
+        after = store.get_profile_item(
             stable_key="identity:maintenance",
             principal_scope_key=provider._principal_scope_key,
         )
@@ -72,8 +80,9 @@ def test_consolidate_apply_rebuilds_only_derived_semantic_index(tmp_path: Path) 
     provider = _provider(tmp_path)
     try:
         _seed_stale_semantic_index(provider)
-        assert provider._store.semantic_evidence_channel_status()["status"] == "degraded"
-        before_profile_count = provider._store.conn.execute(
+        store = _store(provider)
+        assert store.semantic_evidence_channel_status()["status"] == "degraded"
+        before_profile_count = store.conn.execute(
             "SELECT COUNT(*) AS count FROM profile_items"
         ).fetchone()["count"]
 
@@ -84,7 +93,7 @@ def test_consolidate_apply_rebuilds_only_derived_semantic_index(tmp_path: Path) 
             )
         )
 
-        after_profile_count = provider._store.conn.execute(
+        after_profile_count = store.conn.execute(
             "SELECT COUNT(*) AS count FROM profile_items"
         ).fetchone()["count"]
         assert receipt["schema"] == MAINTENANCE_SCHEMA_VERSION
@@ -92,7 +101,7 @@ def test_consolidate_apply_rebuilds_only_derived_semantic_index(tmp_path: Path) 
         assert receipt["status"] == "ok"
         assert receipt["read_only"] is False
         assert receipt["changes"][0]["truth_mutation"] is False
-        assert provider._store.semantic_evidence_channel_status()["status"] == "active"
+        assert store.semantic_evidence_channel_status()["status"] == "active"
         assert before_profile_count == after_profile_count
 
         stats = json.loads(provider.handle_tool_call("brainstack_stats", {"strict": False}))
@@ -105,6 +114,7 @@ def test_consolidate_rejects_unsupported_apply_class_without_mutation(tmp_path: 
     provider = _provider(tmp_path)
     try:
         _seed_stale_semantic_index(provider)
+        store = _store(provider)
         receipt = json.loads(
             provider.handle_tool_call(
                 "brainstack_consolidate",
@@ -113,6 +123,6 @@ def test_consolidate_rejects_unsupported_apply_class_without_mutation(tmp_path: 
         )
         assert receipt["status"] == "rejected"
         assert "maintenance_class_apply_not_supported" in receipt["no_op_reasons"]
-        assert provider._store.semantic_evidence_channel_status()["status"] == "degraded"
+        assert store.semantic_evidence_channel_status()["status"] == "degraded"
     finally:
         provider.shutdown()

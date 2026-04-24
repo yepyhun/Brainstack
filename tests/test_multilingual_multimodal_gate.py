@@ -20,7 +20,7 @@ def _provider(tmp_path: Path) -> BrainstackMemoryProvider:
         "multilingual-gate",
         platform="test",
         user_id="user",
-        agent_identity="bestie",
+        agent_identity="agent-smoke",
         agent_workspace="workspace",
     )
     assert provider._store is not None

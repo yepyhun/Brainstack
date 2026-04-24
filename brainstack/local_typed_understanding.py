@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, Mapping
 
 from .operating_truth import OPERATING_RECORD_TYPES
+from .semantic_evidence import normalize_semantic_terms, semantic_similarity
 from .structured_understanding import (
     ROUTE_MODES,
     current_local_date,
@@ -312,36 +313,57 @@ def _operating_projection(row: Mapping[str, Any]) -> str:
     return " ".join(part for part in parts if part)
 
 
+def _operating_record_type_priority(row: Mapping[str, Any]) -> float:
+    record_type = str(row.get("record_type") or "").strip()
+    if record_type == "recent_work_summary":
+        return 1.0
+    if record_type in {
+        "completed_outcome",
+        "discarded_work",
+        "active_work",
+        "open_decision",
+        "current_commitment",
+        "next_step",
+    }:
+        return 0.8
+    if record_type == "live_system_state":
+        return 0.2
+    return 0.5
+
+
 def _rank_operating_rows_locally(rows: list[Mapping[str, Any]], *, query: str, limit: int) -> list[Dict[str, Any]]:
-    query_tokens = [token for token in _normalize_text(query).casefold().split() if len(token) >= 2]
-    if not query_tokens:
+    query_terms = normalize_semantic_terms(query)
+    if not query_terms:
         return []
     ranked: list[tuple[float, Dict[str, Any]]] = []
     for raw in rows:
         row = dict(raw)
-        projection = _operating_projection(row).casefold()
-        if not projection:
+        document_terms = normalize_semantic_terms(_operating_projection(row))
+        if not document_terms:
             continue
-        overlap = 0
-        score = 0.0
-        for token in query_tokens:
-            if token in projection:
-                overlap += 1
-                score += 1.0
+        score = semantic_similarity(query_terms, document_terms)
+        overlap = len(
+            {
+                query_term
+                for query_term in query_terms
+                if semantic_similarity((query_term,), document_terms) > 0.0
+            }
+        )
         if overlap <= 0:
             continue
-        if str(row.get("record_type") or "").strip() in VOLATILE_OPERATING_RECORD_TYPES and len(query_tokens) > 1:
-            required_overlap = min(2, len(query_tokens))
+        if str(row.get("record_type") or "").strip() in VOLATILE_OPERATING_RECORD_TYPES and len(query_terms) > 1:
+            required_overlap = min(2, len(query_terms))
             if overlap < required_overlap:
                 continue
         row["keyword_score"] = max(float(row.get("keyword_score") or 0.0), score)
         row["_brainstack_query_token_overlap"] = overlap
-        row["retrieval_source"] = str(row.get("retrieval_source") or "operating.keyword")
-        row["match_mode"] = str(row.get("match_mode") or "keyword")
+        row["retrieval_source"] = str(row.get("retrieval_source") or "operating.local_terms")
+        row["match_mode"] = str(row.get("match_mode") or "local_terms")
         ranked.append((score, row))
     ranked.sort(
         key=lambda item: (
             item[0],
+            _operating_record_type_priority(item[1]),
             str(item[1].get("updated_at") or ""),
             str(item[1].get("created_at") or ""),
         ),

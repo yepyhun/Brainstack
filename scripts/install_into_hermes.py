@@ -11,6 +11,7 @@ upstream Hermes seams rather than Brainstack installer responsibilities.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import importlib.util
 import json
@@ -32,6 +33,152 @@ BACKEND_DEPENDENCIES = {
     "openai": "openai",
     "croniter": "croniter",
 }
+
+HOST_PATCH_MODE_CATEGORIES: dict[str, set[str]] = {
+    "core": {"required_seam", "core_hygiene"},
+    "compat": {"required_seam", "core_hygiene", "compat_hotfix"},
+    "legacy": {"required_seam", "core_hygiene", "compat_hotfix", "legacy_host_patch"},
+}
+
+HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
+    "_patch_run_agent": {
+        "category": "required_seam",
+        "owner": "host-seam",
+        "removal_condition": "Hermes exposes structured write-origin metadata and interrupted-turn sync suppression natively.",
+    },
+    "_patch_memory_provider": {
+        "category": "required_seam",
+        "owner": "host-seam",
+        "removal_condition": "Hermes MemoryProvider.on_memory_write accepts optional metadata natively.",
+    },
+    "_patch_memory_manager_required_seam": {
+        "category": "required_seam",
+        "owner": "host-seam",
+        "removal_condition": "Hermes MemoryManager forwards optional write metadata natively.",
+    },
+    "_patch_dockerfile_backend_dependencies": {
+        "category": "required_seam",
+        "owner": "build-seam",
+        "removal_condition": "Hermes supports plugin-declared runtime dependency installation.",
+    },
+    "_patch_dockerignore": {
+        "category": "core_hygiene",
+        "owner": "source-hygiene",
+        "removal_condition": "Upstream Docker build context already excludes private runtime state.",
+    },
+    "_patch_config": {
+        "category": "core_hygiene",
+        "owner": "runtime-config",
+        "removal_condition": "Hermes provides a first-class provider activation config writer.",
+    },
+    "_patch_auxiliary_client": {
+        "category": "compat_hotfix",
+        "owner": "host-provider-hotfix",
+        "removal_condition": "Hermes auxiliary task resolver natively supports provider=main model inheritance.",
+    },
+    "_patch_credential_pool": {
+        "category": "compat_hotfix",
+        "owner": "host-provider-hotfix",
+        "removal_condition": "Hermes credential pool natively rejects stale Nous agent keys at selection time.",
+    },
+    "_patch_credential_pool_tests": {
+        "category": "compat_hotfix",
+        "owner": "host-provider-hotfix-test",
+        "removal_condition": "Upstream Hermes tests cover stale Nous agent-key rejection.",
+    },
+    "_patch_compose_healthcheck": {
+        "category": "compat_hotfix",
+        "owner": "private-runtime",
+        "removal_condition": "Runtime deployment provides an explicit readiness healthcheck outside source patching.",
+    },
+    "_patch_compose_runtime_identity": {
+        "category": "compat_hotfix",
+        "owner": "private-runtime",
+        "removal_condition": "Runtime deployment provides UID/GID mapping outside source patching.",
+    },
+    "_patch_prompt_builder": {
+        "category": "legacy_host_patch",
+        "owner": "host-prompt-legacy",
+        "removal_condition": "Brainstack provider projection renders the evidence-use contract.",
+    },
+    "_patch_memory_manager": {
+        "category": "legacy_host_patch",
+        "owner": "host-memory-legacy",
+        "removal_condition": "Brainstack provider projection renders private memory-context guidance.",
+    },
+    "_patch_cron_jobs": {
+        "category": "legacy_host_patch",
+        "owner": "host-scheduler",
+        "removal_condition": "Scheduler correctness is handled by upstream Hermes or explicit private runtime tooling.",
+    },
+    "_patch_cron_scheduler": {
+        "category": "legacy_host_patch",
+        "owner": "host-scheduler",
+        "removal_condition": "Scheduler delivery/fail-closed behavior is handled by upstream Hermes.",
+    },
+    "_patch_cron_scheduler_tests": {
+        "category": "legacy_host_patch",
+        "owner": "host-scheduler-test",
+        "removal_condition": "Scheduler compatibility patches are no longer applied by Brainstack installer.",
+    },
+    "_patch_cron_tests": {
+        "category": "legacy_host_patch",
+        "owner": "host-scheduler-test",
+        "removal_condition": "Scheduler compatibility patches are no longer applied by Brainstack installer.",
+    },
+    "_patch_gateway_run": {
+        "category": "legacy_host_patch",
+        "owner": "host-gateway",
+        "removal_condition": "Gateway lifecycle/status behavior is handled by upstream Hermes.",
+    },
+    "_patch_docker_entrypoint": {
+        "category": "legacy_host_patch",
+        "owner": "host-docker-runtime",
+        "removal_condition": "Upstream Docker entrypoint owns UID/GID and runtime ownership normalization.",
+    },
+}
+
+PRIVATE_RUNTIME_DENYLIST: tuple[str, ...] = (
+    ".planning",
+    ".planning/**",
+    "hermes-config",
+    "hermes-config/**",
+    "runtime",
+    "runtime/**",
+    "docker-compose.*.yml",
+    "scripts/desktop",
+    "scripts/desktop/**",
+    "*.desktop",
+    "sessions",
+    "sessions/**",
+    "memories",
+    "memories/**",
+    "cron",
+    "cron/**",
+    "auth.json",
+    "**/auth.json",
+    "auth.lock",
+    "**/auth.lock",
+    ".env",
+    "**/.env",
+    "gateway_state.json",
+    "**/gateway_state.json",
+    "gateway.pid",
+    "**/gateway.pid",
+    "state.db",
+    "state.db-*",
+    "**/state.db",
+    "**/state.db-*",
+    "brainstack/*.db",
+    "brainstack/*.db-*",
+    "**/brainstack/*.db",
+    "**/brainstack/*.db-*",
+)
+
+SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|"
+    r"oauth[_-]?token|agent[_-]?key)\s*[:=]\s*['\"]?[A-Za-z0-9_./+=-]{20,}"
+)
 
 HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
     {
@@ -115,12 +262,20 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "why": "Preserves provenance/trust boundaries between host memory events and Brainstack durable state.",
     },
     {
-        "patcher": "_patch_memory_manager",
+        "patcher": "_patch_memory_manager_required_seam",
         "target": "agent/memory_manager.py",
         "scope": "memory-write-seam",
         "runtime_modes": ("source", "docker"),
-        "purpose": "Route host memory writes into Brainstack with explicit ownership and minimal shared contract.",
-        "why": "Needed until Hermes exposes a cleaner provider-owned write-origin seam.",
+        "purpose": "Forward optional write-origin metadata from Hermes memory manager to external memory providers.",
+        "why": "Brainstack must distinguish reflection/background writes from user-established truth without heuristic inference.",
+    },
+    {
+        "patcher": "_patch_memory_manager",
+        "target": "agent/memory_manager.py",
+        "scope": "legacy-memory-projection-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Legacy host-side private recalled-memory wording mutation.",
+        "why": "Superseded by Brainstack-owned evidence-use projection; retained only for legacy emergency installs.",
     },
     {
         "patcher": "_patch_gateway_run",
@@ -195,6 +350,107 @@ def _iter_payload_files(root: Path) -> list[Path]:
         if path.is_file() and "__pycache__" not in path.parts and not path.name.endswith(".pyc"):
             files.append(path)
     return files
+
+
+def _normalize_rel_path(value: str | Path) -> str:
+    rendered = str(value).replace("\\", "/").strip()
+    while rendered.startswith("./"):
+        rendered = rendered[2:]
+    return rendered.strip("/")
+
+
+def _is_private_runtime_path(value: str | Path) -> bool:
+    normalized = _normalize_rel_path(value)
+    if not normalized:
+        return False
+    return any(
+        normalized == pattern.rstrip("/").replace("/**", "")
+        or fnmatch.fnmatch(normalized, pattern)
+        for pattern in PRIVATE_RUNTIME_DENYLIST
+    )
+
+
+def _assert_no_private_payload_files(files: list[dict[str, str]]) -> None:
+    private_sources = [
+        item["source"]
+        for item in files
+        if _is_private_runtime_path(item.get("source", ""))
+    ]
+    if private_sources:
+        raise RuntimeError(
+            "Refusing to include private runtime files in Brainstack payload: "
+            + ", ".join(sorted(private_sources)[:12])
+        )
+
+
+def _path_may_contain_text(path: Path) -> bool:
+    return path.suffix.lower() in {
+        "",
+        ".cfg",
+        ".conf",
+        ".json",
+        ".md",
+        ".py",
+        ".sh",
+        ".toml",
+        ".txt",
+        ".yaml",
+        ".yml",
+    }
+
+
+def _scan_tracked_secret_like_assignments(repo_root: Path) -> list[str]:
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=repo_root,
+            text=False,
+            capture_output=True,
+            check=True,
+        )
+    except Exception:
+        return []
+    findings: list[str] = []
+    for raw in proc.stdout.split(b"\0"):
+        if not raw:
+            continue
+        rel = raw.decode("utf-8", errors="replace")
+        path = repo_root / rel
+        if not path.is_file() or not _path_may_contain_text(path):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if SECRET_ASSIGNMENT_RE.search(text):
+            findings.append(rel)
+    return findings
+
+
+def _check_release_hygiene(repo_root: Path) -> dict[str, Any]:
+    tracked: list[str] = []
+    staged: list[str] = []
+    for cmd, output in (
+        (["git", "ls-files", "-z"], tracked),
+        (["git", "diff", "--cached", "--name-only", "-z"], staged),
+    ):
+        proc = subprocess.run(cmd, cwd=repo_root, text=False, capture_output=True, check=True)
+        output.extend(
+            raw.decode("utf-8", errors="replace")
+            for raw in proc.stdout.split(b"\0")
+            if raw
+        )
+    private_tracked = [path for path in tracked if _is_private_runtime_path(path)]
+    private_staged = [path for path in staged if _is_private_runtime_path(path)]
+    secret_like = _scan_tracked_secret_like_assignments(repo_root)
+    status = "pass" if not private_tracked and not private_staged and not secret_like else "fail"
+    return {
+        "schema": "brainstack.release_hygiene.v1",
+        "status": status,
+        "private_tracked": private_tracked,
+        "private_staged": private_staged,
+        "secret_like_tracked": secret_like,
+    }
 
 
 def _default_target_python(target: Path) -> Path | None:
@@ -292,23 +548,64 @@ def _copy_file(src: Path, dst: Path, dry_run: bool) -> dict[str, str]:
     return copied
 
 
-def _selected_host_patch_inventory(runtime_mode: str) -> list[dict[str, Any]]:
+def _host_patch_policy(patcher: str) -> dict[str, str]:
+    return dict(
+        HOST_PATCH_POLICIES.get(
+            patcher,
+            {
+                "category": "legacy_host_patch",
+                "owner": "unclassified",
+                "removal_condition": "Classify this host patch before enabling it by default.",
+            },
+        )
+    )
+
+
+def _host_patch_selected(patcher: str, host_patch_mode: str) -> bool:
+    policy = _host_patch_policy(patcher)
+    allowed = HOST_PATCH_MODE_CATEGORIES[host_patch_mode]
+    return policy["category"] in allowed
+
+
+def _selected_host_patch_inventory(runtime_mode: str, host_patch_mode: str = "core") -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     normalized = "docker" if runtime_mode == "docker" else "source"
     for item in HOST_PATCH_INVENTORY:
         runtime_modes = tuple(item.get("runtime_modes") or ())
         if normalized in runtime_modes:
+            patcher = str(item["patcher"])
+            policy = _host_patch_policy(patcher)
             selected.append(
                 {
-                    "patcher": item["patcher"],
+                    "patcher": patcher,
                     "target": item["target"],
                     "scope": item["scope"],
                     "runtime_modes": list(runtime_modes),
                     "purpose": item["purpose"],
                     "why": item["why"],
+                    "category": policy["category"],
+                    "owner": policy["owner"],
+                    "removal_condition": policy["removal_condition"],
+                    "selected": _host_patch_selected(patcher, host_patch_mode),
+                    "host_patch_mode": host_patch_mode,
                 }
             )
     return selected
+
+
+def _run_host_patch(
+    patcher: str,
+    target_path: Path,
+    dry_run: bool,
+    *,
+    host_patch_mode: str,
+) -> list[str]:
+    if not _host_patch_selected(patcher, host_patch_mode):
+        return []
+    patch_func = globals().get(patcher)
+    if not callable(patch_func):
+        raise RuntimeError(f"Unknown host patcher: {patcher}")
+    return list(patch_func(target_path, dry_run))
 
 
 def _replace_once(text: str, old: str, new: str, *, label: str, path: Path) -> str:
@@ -330,49 +627,9 @@ def _replace_once_any(
     raise RuntimeError(f"Installer patch anchor missing for {label} in {path}")
 
 
-def _patch_memory_manager(path: Path, dry_run: bool) -> list[str]:
+def _patch_memory_manager_required_seam(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
-
-    if (
-        "When recalled memory provides a specific, non-conflicted factual user detail or committed " in text
-        and "over assistant suggestions or generic prior knowledge unless another recalled fact in this memory block conflicts with it.]\\n\\n" in text
-    ):
-        return applied
-
-    old_note = (
-        '        "[System note: The following is recalled memory context, "\n'
-        '        "NOT new user input. Treat as informational background data.]\\n\\n"\n'
-    )
-    new_note = (
-        '        "[System note: The following is private recalled memory context, NOT new user input. "\n'
-        '        "Apply it silently in your reply. Do not mention memory blocks, recalled-memory headings, "\n'
-        '        "or internal memory state unless the user explicitly asks about memory behavior or debugging. "\n'
-        '        "Use recalled details as supporting memory context, and when recalled items disagree, prefer the strongest committed or non-conflicted recalled record instead of blending them.]\\n\\n"\n'
-    )
-    current_private_note = (
-        '        "[System note: The following is private recalled memory context, NOT new user input. "\n'
-        '        "Apply it silently in your reply. Do not mention memory blocks, recalled-memory headings, "\n'
-        '        "or internal memory state unless the user explicitly asks about memory behavior or debugging.]\\n\\n"\n'
-    )
-    authoritative_private_note = (
-        '        "[System note: The following is private recalled memory context, NOT new user input. "\n'
-        '        "Apply it silently in your reply. Do not mention memory blocks, recalled-memory headings, "\n'
-        '        "or internal memory state unless the user explicitly asks about memory behavior or debugging. "\n'
-        '        "When recalled memory provides a specific, non-conflicted factual user detail or committed owner-backed record such as a name, number, date, or task record, treat it as authoritative over assistant suggestions or generic prior knowledge unless another recalled fact in this memory block conflicts with it.]\\n\\n"\n'
-    )
-    if new_note not in text:
-        text = _replace_once_any(
-            text,
-            [
-                (old_note, new_note),
-                (current_private_note, new_note),
-                (authoritative_private_note, new_note),
-            ],
-            label="memory_manager private recall note",
-            path=path,
-        )
-        applied.append("memory_manager:private_recall_note")
 
     metadata_signature = "def on_memory_write(self, action: str, target: str, content: str, metadata: dict | None = None) -> None:"
     if metadata_signature not in text:
@@ -409,6 +666,51 @@ def _patch_memory_manager(path: Path, dry_run: bool) -> list[str]:
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_memory_manager(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    old_note = (
+        '        "[System note: The following is recalled memory context, "\n'
+        '        "NOT new user input. Treat as informational background data.]\\n\\n"\n'
+    )
+    new_note = (
+        '        "[System note: The following is private recalled memory context, NOT new user input. "\n'
+        '        "Apply it silently in your reply. Do not mention memory blocks, recalled-memory headings, "\n'
+        '        "or internal memory state unless the user explicitly asks about memory behavior or debugging. "\n'
+        '        "Use recalled details as supporting memory context, and when recalled items disagree, prefer the strongest committed or non-conflicted recalled record instead of blending them.]\\n\\n"\n'
+    )
+    current_private_note = (
+        '        "[System note: The following is private recalled memory context, NOT new user input. "\n'
+        '        "Apply it silently in your reply. Do not mention memory blocks, recalled-memory headings, "\n'
+        '        "or internal memory state unless the user explicitly asks about memory behavior or debugging.]\\n\\n"\n'
+    )
+    authoritative_private_note = (
+        '        "[System note: The following is private recalled memory context, NOT new user input. "\n'
+        '        "Apply it silently in your reply. Do not mention memory blocks, recalled-memory headings, "\n'
+        '        "or internal memory state unless the user explicitly asks about memory behavior or debugging. "\n'
+        '        "When recalled memory provides a specific, non-conflicted factual user detail or committed owner-backed record such as a name, number, date, or task record, treat it as authoritative over assistant suggestions or generic prior knowledge unless another recalled fact in this memory block conflicts with it.]\\n\\n"\n'
+    )
+    if new_note not in text:
+        text = _replace_once_any(
+            text,
+            [
+                (old_note, new_note),
+                (current_private_note, new_note),
+                (authoritative_private_note, new_note),
+            ],
+            label="memory_manager private recall note",
+            path=path,
+        )
+        applied.append("memory_manager:private_recall_note")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+
+    applied.extend(_patch_memory_manager_required_seam(path, dry_run))
     return applied
 
 
@@ -2724,7 +3026,31 @@ def main() -> int:
     parser.add_argument("--skip-deps", action="store_true", help="Skip installing missing kuzu/chromadb into the target Hermes Python")
     parser.add_argument("--doctor", action="store_true", help="Run brainstack_doctor after install")
     parser.add_argument("--dry-run", action="store_true", help="Show planned actions without changing files")
+    parser.add_argument(
+        "--host-patch-mode",
+        choices=tuple(HOST_PATCH_MODE_CATEGORIES),
+        default="core",
+        help=(
+            "Host patch policy: core=minimal Brainstack seams only; "
+            "compat=core plus opt-in provider/runtime hotfixes; "
+            "legacy=previous broad host patch behavior for emergency rollback only"
+        ),
+    )
+    parser.add_argument(
+        "--check-release-hygiene",
+        action="store_true",
+        help="Fail if tracked or staged files include private runtime paths or high-confidence secrets.",
+    )
     args = parser.parse_args()
+
+    release_hygiene = _check_release_hygiene(REPO_ROOT)
+    if args.check_release_hygiene and release_hygiene["status"] != "pass":
+        print("FAIL release hygiene gate detected private or secret-like tracked content:", file=sys.stderr)
+        for key in ("private_tracked", "private_staged", "secret_like_tracked"):
+            values = release_hygiene.get(key) or []
+            if values:
+                print(f"  {key}: {', '.join(values[:12])}", file=sys.stderr)
+        return 2
 
     target = Path(args.target).expanduser().resolve()
     if not (target / "run_agent.py").exists():
@@ -2782,6 +3108,7 @@ def main() -> int:
     plugin_target = target / "plugins" / "memory" / "brainstack"
     selected_python = args.python.expanduser() if args.python else _default_target_python(target)
     files = _copy_tree(SOURCE_PLUGIN, plugin_target, args.dry_run)
+    _assert_no_private_payload_files(files)
     helper_files: list[dict[str, str]] = []
 
     generated_files: list[dict[str, str]] = []
@@ -2807,25 +3134,26 @@ def main() -> int:
     host_helper_files: list[dict[str, str]] = []
 
     host_patches: list[str] = []
-    host_patches.extend(_patch_run_agent(target / "run_agent.py", args.dry_run))
-    host_patches.extend(_patch_prompt_builder(target / "agent" / "prompt_builder.py", args.dry_run))
-    host_patches.extend(_patch_cron_jobs(target / "cron" / "jobs.py", args.dry_run))
-    host_patches.extend(_patch_cron_scheduler(target / "cron" / "scheduler.py", args.dry_run))
-    host_patches.extend(_patch_cron_scheduler_tests(target / "tests" / "cron" / "test_scheduler.py", args.dry_run))
-    host_patches.extend(_patch_cron_tests(target / "tests" / "cron" / "test_jobs.py", args.dry_run))
-    host_patches.extend(_patch_auxiliary_client(target / "agent" / "auxiliary_client.py", args.dry_run))
-    host_patches.extend(_patch_credential_pool(target / "agent" / "credential_pool.py", args.dry_run))
-    host_patches.extend(_patch_credential_pool_tests(target / "tests" / "agent" / "test_credential_pool.py", args.dry_run))
-    host_patches.extend(_patch_memory_provider(target / "agent" / "memory_provider.py", args.dry_run))
-    host_patches.extend(_patch_memory_manager(target / "agent" / "memory_manager.py", args.dry_run))
-    host_patches.extend(_patch_gateway_run(target / "gateway" / "run.py", args.dry_run))
+    host_patches.extend(_run_host_patch("_patch_run_agent", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_prompt_builder", target / "agent" / "prompt_builder.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_cron_jobs", target / "cron" / "jobs.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_cron_scheduler", target / "cron" / "scheduler.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_cron_scheduler_tests", target / "tests" / "cron" / "test_scheduler.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_cron_tests", target / "tests" / "cron" / "test_jobs.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_auxiliary_client", target / "agent" / "auxiliary_client.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_credential_pool", target / "agent" / "credential_pool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_credential_pool_tests", target / "tests" / "agent" / "test_credential_pool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_memory_provider", target / "agent" / "memory_provider.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_memory_manager_required_seam", target / "agent" / "memory_manager.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_memory_manager", target / "agent" / "memory_manager.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_gateway_run", target / "gateway" / "run.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     if args.runtime == "docker":
         assert compose_path is not None
-        host_patches.extend(_patch_compose_healthcheck(compose_path, args.dry_run))
-        host_patches.extend(_patch_compose_runtime_identity(compose_path, args.dry_run))
-        host_patches.extend(_patch_dockerignore(target / ".dockerignore", args.dry_run))
-        host_patches.extend(_patch_dockerfile_backend_dependencies(target / "Dockerfile", args.dry_run))
-        host_patches.extend(_patch_docker_entrypoint(target / "docker" / "entrypoint.sh", args.dry_run))
+        host_patches.extend(_run_host_patch("_patch_compose_healthcheck", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
+        host_patches.extend(_run_host_patch("_patch_compose_runtime_identity", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
+        host_patches.extend(_run_host_patch("_patch_dockerignore", target / ".dockerignore", args.dry_run, host_patch_mode=args.host_patch_mode))
+        host_patches.extend(_run_host_patch("_patch_dockerfile_backend_dependencies", target / "Dockerfile", args.dry_run, host_patch_mode=args.host_patch_mode))
+        host_patches.extend(_run_host_patch("_patch_docker_entrypoint", target / "docker" / "entrypoint.sh", args.dry_run, host_patch_mode=args.host_patch_mode))
 
     if config_path is not None:
         runtime_state_canonicalization = _canonicalize_runtime_user_profile(config_path, args.dry_run)
@@ -2845,13 +3173,15 @@ def main() -> int:
         "source_repo": str(REPO_ROOT),
         "target_hermes": str(target),
         "runtime_mode": args.runtime,
+        "host_patch_mode": args.host_patch_mode,
         "source_only_install": config_path is None,
         "plugin_target": str(plugin_target),
         "files": files,
         "helper_files": helper_files,
         "host_helper_files": host_helper_files,
         "host_patches": host_patches,
-        "host_patch_inventory": _selected_host_patch_inventory(args.runtime),
+        "host_patch_inventory": _selected_host_patch_inventory(args.runtime, args.host_patch_mode),
+        "release_hygiene": release_hygiene,
         "generated_files": generated_files,
         "config_path": str(config_path) if config_path is not None else None,
         "config": config_result,
@@ -2865,6 +3195,24 @@ def main() -> int:
     action = "DRY-RUN" if args.dry_run else "INSTALLED"
     print(f"{action} Brainstack payload files: {len(files)}")
     print(f"{action} helper files: {len(helper_files)}")
+    inventory = _selected_host_patch_inventory(args.runtime, args.host_patch_mode)
+    selected_inventory = [item for item in inventory if item.get("selected")]
+    skipped_inventory = [item for item in inventory if not item.get("selected")]
+    print(
+        f"{action} host patch mode: {args.host_patch_mode} "
+        f"({len(selected_inventory)} selected, {len(skipped_inventory)} skipped)"
+    )
+    if args.dry_run:
+        if selected_inventory:
+            selected_labels = ", ".join(
+                f"{item['patcher']}[{item['category']}]" for item in selected_inventory
+            )
+            print(f"{action} selected installer patchers: {selected_labels}")
+        if skipped_inventory:
+            skipped_labels = ", ".join(
+                f"{item['patcher']}[{item['category']}]" for item in skipped_inventory
+            )
+            print(f"{action} skipped installer patchers: {skipped_labels}")
     if host_helper_files:
         print(f"{action} host helper files: {len(host_helper_files)}")
     if host_patches:

@@ -235,7 +235,7 @@ def _candidate_priority_bonus(candidate: EvidenceCandidate) -> float:
         if _looks_user_led(text):
             bonus += 0.04
     elif candidate.shelf == "operating":
-        bonus += 0.07
+        bonus += 0.07 + _operating_record_type_bonus(row)
     elif candidate.shelf == "continuity_match":
         bonus += 0.02
     elif candidate.shelf == "continuity_recent":
@@ -271,6 +271,39 @@ def _candidate_priority_bonus(candidate: EvidenceCandidate) -> float:
             bonus -= 0.04
 
     return bonus
+
+
+def _operating_record_type_bonus(row: Mapping[str, Any]) -> float:
+    record_type = str(row.get("record_type") or "").strip()
+    if record_type == "recent_work_summary":
+        return 0.16
+    if record_type in RECENT_WORK_RECAP_RECORD_TYPES:
+        return 0.12
+    if record_type == "live_system_state":
+        return 0.02
+    return 0.05
+
+
+def _weak_cross_session_keyword_residue_reason(candidate: EvidenceCandidate) -> str:
+    """Explain why weak transcript-like keyword residue is not fact-packet evidence."""
+    if candidate.shelf not in {"transcript", "continuity_match", "continuity_recent"}:
+        return ""
+    if bool(candidate.row.get("same_session")):
+        return ""
+    if "temporal" in candidate.channel_ranks:
+        return ""
+    if "semantic" in candidate.channel_ranks and float(candidate.row.get("semantic_score") or 0.0) > 0.0:
+        return ""
+    query_token_count = int(candidate.row.get("_brainstack_query_token_count") or 0)
+    if query_token_count < 4:
+        return ""
+    overlap = int(candidate.row.get("_brainstack_query_token_overlap") or 0)
+    if overlap >= 2:
+        return ""
+    return (
+        "weak_cross_session_keyword_residue: broad query matched fewer than "
+        "two informative tokens on a transcript-like shelf"
+    )
 
 
 def _agreement_bonus(candidate: EvidenceCandidate) -> float:
@@ -997,6 +1030,7 @@ def _annotate_query_flags(rows: Iterable[Dict[str, Any]], *, query: str) -> List
         for token in re.findall(r"[^\W_]+", _normalize_text(query).casefold(), flags=re.UNICODE)
         if len(token) >= 3
     }
+    query_token_count = len(query_tokens)
     annotated: List[Dict[str, Any]] = []
     for row in rows:
         payload = dict(row)
@@ -1007,7 +1041,11 @@ def _annotate_query_flags(rows: Iterable[Dict[str, Any]], *, query: str) -> List
             for token in re.findall(r"[^\W_]+", content.casefold(), flags=re.UNICODE)
             if len(token) >= 3
         }
-        payload["_brainstack_query_token_overlap"] = len(query_tokens & row_tokens)
+        payload["_brainstack_query_token_count"] = query_token_count
+        payload["_brainstack_query_token_overlap"] = max(
+            int(payload.get("_brainstack_query_token_overlap") or 0),
+            len(query_tokens & row_tokens),
+        )
         annotated.append(payload)
     return annotated
 
@@ -1215,6 +1253,10 @@ def _select_rows(
 
     for candidate in candidates:
         row = materialize(candidate)
+        suppression_reason = _weak_cross_session_keyword_residue_reason(candidate)
+        if suppression_reason:
+            candidate.row["_brainstack_suppression_reason"] = suppression_reason
+            continue
         if candidate.shelf == "profile" and len(profile_items) < profile_limit:
             stable_key = str(row.get("stable_key") or "").strip()
             if stable_key and stable_key not in seen_profile_keys:
@@ -1478,14 +1520,30 @@ def retrieve_executive_context(
         else []
     )
     keyword_operating_rows = _annotate_query_flags(keyword_operating_rows, query=query)
+    recent_work_operating_source_rows: List[Dict[str, Any]] = []
+    if operating_limit > 0:
+        recent_work_operating_source_rows = store.search_operating_records(
+            query=query,
+            principal_scope_key=principal_scope_key,
+            record_types=RECENT_WORK_RECAP_RECORD_TYPES,
+            limit=max(operating_limit * 4, 8),
+        )
+        if not recent_work_operating_source_rows:
+            recent_work_operating_source_rows = [
+                {
+                    **dict(row),
+                    "retrieval_source": str(row.get("retrieval_source") or "operating.recent_work_current"),
+                    "match_mode": str(row.get("match_mode") or "authority"),
+                }
+                for row in store.list_operating_records(
+                    principal_scope_key=principal_scope_key,
+                    record_types=RECENT_WORK_RECAP_RECORD_TYPES,
+                    limit=max(operating_limit * 2, 4),
+                )
+            ]
     recent_work_operating_rows = (
         _operating_channel_rows(
-            store.search_operating_records(
-                query=query,
-                principal_scope_key=principal_scope_key,
-                record_types=RECENT_WORK_RECAP_RECORD_TYPES,
-                limit=max(operating_limit * 4, 8),
-            ),
+            recent_work_operating_source_rows,
             limit=max(operating_limit * 3, 8),
         )
         if operating_limit > 0
@@ -1747,6 +1805,9 @@ def retrieve_executive_context(
         matched_rows=fact_selected["matched"],
         limit=limits["transcript_limit"],
     )
+    fact_selected["transcript_rows"] = [
+        row for row in fact_selected["transcript_rows"] if not str(row.get("_brainstack_suppression_reason") or "")
+    ]
     selected = fact_selected
     if route.applied_mode == ROUTE_TEMPORAL:
         selected = _select_temporal_rows(
@@ -1881,7 +1942,10 @@ def retrieve_executive_context(
                 "created_at": str(candidate.row.get("created_at") or ""),
                 "keyword_score": float(candidate.row.get("keyword_score") or 0.0),
                 "semantic_score": float(candidate.row.get("semantic_score") or 0.0),
+                "query_token_overlap": int(candidate.row.get("_brainstack_query_token_overlap") or 0),
+                "query_token_count": int(candidate.row.get("_brainstack_query_token_count") or 0),
                 "same_session": bool(candidate.row.get("same_session")),
+                "suppression_reason": str(candidate.row.get("_brainstack_suppression_reason") or ""),
                 "content_excerpt": _candidate_text(candidate)[:220],
             }
             for candidate in fused

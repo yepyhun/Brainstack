@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from brainstack.db import BrainstackStore
 from brainstack.diagnostics import build_memory_kernel_doctor, build_query_inspect
 
 
-def _open_store(tmp_path: Path, **kwargs: object) -> BrainstackStore:
+def _open_store(tmp_path: Path, **kwargs: Any) -> BrainstackStore:
     store = BrainstackStore(str(tmp_path / "brainstack.sqlite3"), **kwargs)
     store.open()
     return store
@@ -65,7 +66,7 @@ def test_query_inspect_is_read_only_for_retrieval_telemetry(tmp_path: Path) -> N
         store.upsert_profile_item(
             stable_key="identity:name",
             category="identity",
-            content="LauraTom prefers proof-backed memory-kernel work.",
+            content="ExampleUser prefers proof-backed memory-kernel work.",
             source="test",
             confidence=0.95,
             metadata={"principal_scope_key": "principal:test"},
@@ -76,7 +77,7 @@ def test_query_inspect_is_read_only_for_retrieval_telemetry(tmp_path: Path) -> N
 
         report = build_query_inspect(
             store,
-            query="LauraTom memory kernel proof",
+            query="ExampleUser memory kernel proof",
             session_id="session:test",
             principal_scope_key="principal:test",
         )
@@ -87,13 +88,13 @@ def test_query_inspect_is_read_only_for_retrieval_telemetry(tmp_path: Path) -> N
         assert before is not None and after is not None
         assert dict(before) == dict(after)
         assert report["schema"] == "brainstack.query_inspect.v1"
-        assert report["query"] == "LauraTom memory kernel proof"
+        assert report["query"] == "ExampleUser memory kernel proof"
         assert report["routing"]["applied_mode"]
         assert report["selected_evidence"]["profile"]
         assert all(
             item["evidence_key"] != "profile:identity:name"
             for item in report["suppressed_evidence"]
         )
-        assert "LauraTom" in report["final_packet"]["preview"]
+        assert "ExampleUser" in report["final_packet"]["preview"]
     finally:
         store.close()

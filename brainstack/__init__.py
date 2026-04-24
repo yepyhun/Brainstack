@@ -76,6 +76,7 @@ from .runtime_handoff_io import (
     ALL_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
     locate_task_record,
+    summarize_runtime_handoff_dirs,
     utc_now_iso,
     write_task_record,
 )
@@ -2571,11 +2572,18 @@ class BrainstackMemoryProvider(MemoryProvider):
         snapshot = self.operating_context_snapshot()
         if not isinstance(snapshot, Mapping):
             return None
+        filesystem_summary: Dict[str, Any] = {}
+        if self._hermes_home:
+            try:
+                filesystem_summary = summarize_runtime_handoff_dirs(Path(self._hermes_home).resolve())
+            except Exception:
+                logger.warning("Brainstack runtime handoff filesystem summary failed", exc_info=True)
         return {
             "principal_scope_key": str(snapshot.get("principal_scope_key") or "").strip(),
             "canonical_policy": dict(snapshot.get("canonical_policy") or {}),
             "runtime_approval_policy": dict(snapshot.get("runtime_approval_policy") or {}),
             "runtime_handoff_tasks": [dict(item) for item in (snapshot.get("runtime_handoff_tasks") or []) if isinstance(item, Mapping)],
+            "runtime_handoff_filesystem": filesystem_summary,
             "session_recovery_contract": dict(snapshot.get("session_recovery_contract") or {}),
             "live_system_state": list(snapshot.get("live_system_state") or []),
             "current_commitments": list(snapshot.get("current_commitments") or []),

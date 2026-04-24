@@ -4,7 +4,7 @@ from pathlib import Path
 
 from brainstack.db import BrainstackStore
 from brainstack.diagnostics import build_memory_kernel_doctor, build_query_inspect
-from brainstack.semantic_evidence import decode_semantic_metadata
+from brainstack.semantic_evidence import decode_semantic_metadata, normalize_semantic_terms, semantic_similarity
 
 
 def _open_store(tmp_path: Path) -> BrainstackStore:
@@ -16,6 +16,11 @@ def _open_store(tmp_path: Path) -> BrainstackStore:
 def test_semantic_metadata_rejects_mapping_as_term_collection() -> None:
     assert decode_semantic_metadata({"semantic_terms": {"bad": "implicit keys"}}) == []
     assert decode_semantic_metadata({"semantic_terms": ["explicit term", 42]}) == ["explicit term", "42"]
+
+
+def test_semantic_similarity_matches_bounded_term_containment_without_phrase_lists() -> None:
+    assert semantic_similarity(normalize_semantic_terms("Brainstackről"), normalize_semantic_terms("Brainstack")) > 0.0
+    assert semantic_similarity(normalize_semantic_terms("ai"), normalize_semantic_terms("brain")) == 0.0
 
 
 def test_semantic_evidence_backfill_retrieves_profile_paraphrase(tmp_path: Path) -> None:

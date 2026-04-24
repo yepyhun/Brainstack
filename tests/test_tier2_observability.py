@@ -20,7 +20,7 @@ def _provider(tmp_path: Path, extractor) -> BrainstackMemoryProvider:
         "tier2-session",
         platform="test",
         user_id="user",
-        agent_identity="bestie",
+        agent_identity="agent-smoke",
         agent_workspace="workspace",
     )
     assert provider._store is not None
@@ -28,7 +28,7 @@ def _provider(tmp_path: Path, extractor) -> BrainstackMemoryProvider:
         session_id="tier2-session",
         turn_number=1,
         kind="turn",
-        content="User: remember that LauraTom uses Brainstack.\nAssistant: acknowledged.",
+        content="User: remember that ExampleUser uses Brainstack.\nAssistant: acknowledged.",
         source="test",
         metadata=provider._scoped_metadata(),
     )
@@ -42,7 +42,7 @@ def test_tier2_run_result_is_persisted_with_counts(tmp_path: Path) -> None:
                 {
                     "category": "identity",
                     "slot": "identity:name",
-                    "content": "LauraTom",
+                    "content": "ExampleUser",
                     "confidence": 0.95,
                     "metadata": {"source_role": "user"},
                 }

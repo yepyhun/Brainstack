@@ -94,12 +94,13 @@ Transcript is evidence. Graph is truth. Corpus is corpus. Profile is profile. Th
 - augments Hermes through the native explicit-memory seam instead of replacing builtin user/profile writes
 - keeps runtime ownership in Brainstack while storage is split by responsibility
 - uses `SQLite` for shell, session, profile, transcript, and lexical fallback state
-- uses embedded `Kuzu` for L2 graph truth
-- uses embedded `Chroma` for L3 semantic corpus retrieval
+- supports embedded `Kuzu` for L2 graph truth and reports explicitly if it is unavailable
+- supports embedded `Chroma` for L3 semantic corpus retrieval and reports explicitly if it is unavailable
 - is experimental and actively audited against the donor-first native-seam model
 - explicit user/addressing truth remains Hermes-host owned
 - transport-handle precedence and explicit-truth atomicity on live chat surfaces remain Hermes host seams, not Brainstack plugin seams
 - explicit multi-rule pack fidelity and ordinary-turn compliance are proven on the Hermes host path, not by reintroducing Brainstack-owned behavior governance
+- runtime handoff is read-only from Brainstack's side; scheduling, execution, and approval remain Hermes/runtime responsibilities
 
 ## Quickstart
 
@@ -196,6 +197,8 @@ What is currently true:
 - explicit multi-rule packs can remain as raw archival truth without requiring compiled behavior-policy re-growth
 - ordinary turns no longer depend on a Brainstack-specific communication-governor lane
 - graph, transcript, continuity, and corpus shelves remain distinct instead of collapsing into one flat memory blob
+- doctor output distinguishes active backends from explicit degraded states instead of treating silent fallback as success
+- release hygiene tooling rejects tracked private runtime state, local planning state, and high-confidence secret-shaped payloads
 
 What is not claimed:
 
@@ -227,6 +230,8 @@ This repository intentionally does not ship Hermes host files like:
 - `agent/prompt_builder.py`
 - `tools/memory_tool.py`
 - `gateway/session.py`
+- private runtime trees such as `hermes-config/`
+- local planning/workflow state such as `.planning/`
 
 If a live defect is rooted in explicit-truth capture, transport metadata precedence, or user-surface greeting behavior, the fix belongs on the Hermes host seam unless it can be shown to be a true Brainstack provider defect.
 
@@ -249,6 +254,7 @@ update_hermes_with_brainstack.py
 | `install_into_hermes.py` | Install Brainstack into a Hermes checkout |
 | `update_hermes_with_brainstack.py` | Refresh Hermes upstream and reinstall Brainstack |
 | `brainstack_doctor.py` | Validate install assumptions and fail closed when upstream changed something important |
+| `scripts/check_release_hygiene.py` | Fail release payloads that accidentally track private runtime state or high-confidence secrets |
 | `scripts/brainstack_refresh_donors.py` | Report donor state and run bounded refresh workflow |
 
 ## Reproducible quality gates
@@ -257,11 +263,12 @@ Use these gates before publishing a release or changing memory-kernel behavior:
 
 ```bash
 python -m pip install -r requirements-dev.txt
-python -m ruff check brainstack scripts tests
-python -m mypy brainstack scripts
-python -m pytest tests
+python -m pytest -q
+python -m ruff check .
+python -m mypy brainstack scripts tests --explicit-package-bases --ignore-missing-imports
 python scripts/brainstack_golden_recall_eval.py
 python scripts/brainstack_multilingual_multimodal_gate.py
+python scripts/check_release_hygiene.py --repo .
 python install_into_hermes.py --help
 python brainstack_doctor.py --help
 ```
@@ -277,6 +284,8 @@ Dry-run compatibility check:
 ```bash
 python install_into_hermes.py /path/to/hermes-agent --enable --doctor --dry-run --runtime docker
 ```
+
+By default the installer uses `--host-patch-mode core`, which applies only Brainstack payload/config/dependency work plus minimal memory-provider seams. Use `--host-patch-mode compat` only for explicit host-runtime compatibility hotfixes, and `--host-patch-mode legacy` only for emergency rollback/testing of the previous broad host patch behavior.
 
 Real install:
 
@@ -296,7 +305,7 @@ What the installer does:
 | :--- | :--- |
 | Plugin payload | Copies `brainstack/` into `plugins/memory/brainstack/` |
 | Host helper | Copies only Brainstack-specific runtime helpers; RTK sidecar wiring is not installed because upstream Hermes already owns tool-result budgeting natively |
-| Host patching | Applies only additive runtime helpers that keep Hermes native delivery and explicit memory writes intact |
+| Host patching | Defaults to `--host-patch-mode core`; compatibility host edits require an explicit `compat` or `legacy` mode |
 | Config | Sets `memory.provider: brainstack`, keeps builtin memory and builtin user profile enabled, and wires the `Kuzu` and `Chroma` paths |
 | Docker support | Generates `scripts/hermes-brainstack-start.sh`, adds a readiness-aware healthcheck, and supports the same install flow as local mode |
 | Verification | Writes a sanitized install manifest and can run doctor checks immediately |
@@ -305,6 +314,7 @@ What it intentionally does not do:
 
 - it does not guess unknown upstream host changes
 - it does not inject secrets
+- it does not ship private Hermes runtime config, local auth, session state, or `.planning/`
 - it does not pretend API-first deployment already exists
 - it does not claim donor auto-merge
 
@@ -361,15 +371,15 @@ The helper is intentionally small:
 
 `brainstack_doctor.py` is designed to fail closed.
 
-It validates that the target checkout still looks like Hermes, that the provider/plugin loader surfaces exist, that Brainstack is present and importable, that Hermes native explicit-memory surfaces remain enabled, and that config selects Brainstack without replacing the host's builtin profile write path. In `docker` mode it also checks the readiness-aware health wiring. In `local` mode it skips the Docker-specific assumptions.
+It validates that the target checkout still looks like Hermes, that the provider/plugin loader surfaces exist, that Brainstack is present and importable, that Hermes native explicit-memory surfaces remain enabled, and that config selects Brainstack without replacing the host's builtin profile write path. It also probes configured `Kuzu` and `Chroma` backend openability, checks read-only runtime handoff surfaces, and treats missing requested capabilities as explicit degraded states. In `docker` mode it checks readiness-aware health wiring and recognizes upstream-style runtime ownership normalization. In `local` mode it skips the Docker-specific assumptions.
 
 If Hermes upstream removes a required provider surface, the correct outcome is an explicit incompatibility report, not a silent partial install.
 
 ## Current direction
 
-The next recorded corrective direction is narrow and concrete:
+The current corrective direction is narrow and concrete:
 
-- better exact-fact turn selection
-- better update and supersession preference for fresher values
-- better packing fidelity for answer-bearing details
-- bounded query decomposition only where it is actually needed
+- keep Brainstack on the memory/state/policy side of the Hermes boundary
+- reduce installer host edits toward native Hermes seams wherever upstream already provides the surface
+- make backend degradation, runtime handoff, and recall packet selection inspectable before claiming confidence
+- keep exact-fact, recent-work, and stale-residue handling universal rather than live-case-specific

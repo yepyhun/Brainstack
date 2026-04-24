@@ -23,6 +23,45 @@ def build_memory_context_block(raw_context: str) -> str:
     assert brainstack_doctor._has_private_recall_wrapper(memory_manager)
 
 
+def test_doctor_accepts_brainstack_owned_evidence_use_contract():
+    retrieval_projection = """
+def _render_evidence_priority_section(title: str) -> str:
+    return (
+        "This private recalled memory context is background evidence, not new user input. "
+        "Do not mention Brainstack blocks. "
+        "Claim that a reminder, cron job, or scheduled follow-up exists only when the current evidence includes a native scheduler record. "
+        "A memory entry or internal task list is not by itself a scheduled job."
+    )
+"""
+
+    assert brainstack_doctor._has_brainstack_evidence_use_contract(retrieval_projection)
+
+
+def test_doctor_accepts_upstream_docker_runtime_ownership_normalization():
+    entrypoint = """
+if [ -n "$HERMES_UID" ] && [ "$HERMES_UID" != "$(id -u hermes)" ]; then
+    usermod -u "$HERMES_UID" hermes
+fi
+if [ -n "$HERMES_GID" ] && [ "$HERMES_GID" != "$(id -g hermes)" ]; then
+    groupmod -o -g "$HERMES_GID" hermes 2>/dev/null || true
+fi
+chown -R hermes:hermes "$HERMES_HOME" 2>/dev/null || true
+exec gosu hermes "$0" "$@"
+"""
+
+    assert brainstack_doctor._has_runtime_ownership_normalization(entrypoint)
+
+
+def test_doctor_accepts_legacy_brainstack_docker_runtime_ownership_normalization():
+    assert brainstack_doctor._has_runtime_ownership_normalization("fix_critical_runtime_ownership() { :; }")
+
+
+def test_doctor_rejects_entrypoint_that_drops_privileges_without_ownership_normalization():
+    entrypoint = 'exec gosu hermes "$0" "$@"'
+
+    assert not brainstack_doctor._has_runtime_ownership_normalization(entrypoint)
+
+
 def test_planned_install_treats_missing_backend_dependencies_as_planned(monkeypatch, tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text("{}", encoding="utf-8")

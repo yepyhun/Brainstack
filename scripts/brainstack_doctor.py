@@ -270,10 +270,22 @@ def _has_private_recall_wrapper(memory_manager: str) -> bool:
     return legacy_private_instruction or fenced_context_wrapper
 
 
+def _has_brainstack_evidence_use_contract(text: str) -> bool:
+    return (
+        "private recalled memory context is background evidence, not new user input" in text
+        and "Do not mention Brainstack blocks" in text
+        and "scheduled follow-up exists only when the current evidence includes a native scheduler record" in text
+        and "internal task list is not by itself a scheduled job" in text
+    )
+
+
 def _check_host_surfaces(target: Path) -> list[Check]:
     checks: list[Check] = []
     memory_provider = _read(target / "agent" / "memory_provider.py")
     memory_manager = _read(target / "agent" / "memory_manager.py")
+    installed_brainstack_retrieval = _read(target / "plugins" / "memory" / "brainstack" / "retrieval.py")
+    source_brainstack_retrieval = _read(Path(__file__).resolve().parents[1] / "brainstack" / "retrieval.py")
+    brainstack_retrieval = installed_brainstack_retrieval or source_brainstack_retrieval
     brainstack_mode = _read(target / "agent" / "brainstack_mode.py")
     loader = _read(target / "plugins" / "memory" / "__init__.py")
     run_agent = _read(target / "run_agent.py")
@@ -310,8 +322,10 @@ def _check_host_surfaces(target: Path) -> list[Check]:
 
     if _has_private_recall_wrapper(memory_manager):
         checks.append(Check("private_recall_wrapper", "pass", "MemoryManager wraps recalled context as private internal guidance"))
+    elif _has_brainstack_evidence_use_contract(brainstack_retrieval):
+        checks.append(Check("private_recall_wrapper", "pass", "Brainstack provider projection owns private memory evidence-use guidance"))
     else:
-        checks.append(Check("private_recall_wrapper", "fail", "agent/memory_manager.py still exposes recalled context too weakly"))
+        checks.append(Check("private_recall_wrapper", "fail", "No host or Brainstack provider private memory evidence-use contract was detected"))
 
     if "load_memory_provider" in loader and "plugins.memory." in loader:
         checks.append(Check("plugin_loader", "pass", "Hermes memory plugin loader is present"))
@@ -461,6 +475,17 @@ def _check_config(
         if runtime == "docker" and compose_path and not planned_install:
             return _docker_python_can_import(module_name, compose_path)
         return _python_can_import(module_name, python_bin)
+
+    def backend_open_checks(*, backend: str, configured_path: str) -> list[Check]:
+        return _backend_openability_checks(
+            backend=backend,
+            configured_path=configured_path,
+            config_path=config_path,
+            planned_install=planned_install,
+            python_bin=python_bin,
+            runtime=runtime,
+            compose_path=compose_path,
+        )
 
     def runtime_db_hygiene_checks() -> list[Check]:
         runtime_root = config_path.parent
@@ -619,6 +644,7 @@ def _check_config(
         dependency_state = dependency_import_ok("kuzu")
         if dependency_state is True:
             checks.append(Check("graph_backend_dependency", "pass", "Python kuzu package is importable"))
+            checks.extend(backend_open_checks(backend="kuzu", configured_path=graph_db_path))
         elif dependency_state is None:
             checks.append(
                 Check(
@@ -647,6 +673,7 @@ def _check_config(
         dependency_state = dependency_import_ok("chromadb")
         if dependency_state is True:
             checks.append(Check("corpus_backend_dependency", "pass", "Python chromadb package is importable"))
+            checks.extend(backend_open_checks(backend="chroma", configured_path=corpus_db_path))
         elif dependency_state is None:
             checks.append(
                 Check(
@@ -790,6 +817,159 @@ def _docker_python_can_import(module_name: str, compose_path: Path | None, *, se
     return False
 
 
+def _backend_probe_code(*, backend: str, configured_path: str, default_suffix: str) -> str:
+    raw_path = configured_path or f"$HERMES_HOME/brainstack/{default_suffix}"
+    if backend == "kuzu":
+        open_code = "import kuzu; kuzu.Database(path)"
+    elif backend == "chroma":
+        open_code = "import chromadb; chromadb.PersistentClient(path=path)"
+    else:
+        open_code = "raise RuntimeError('unsupported backend')"
+    return (
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        f"raw = {raw_path!r}\n"
+        "path = os.path.expandvars(raw)\n"
+        "exists = Path(path).exists()\n"
+        "payload = {'path': path, 'exists': exists, 'openable': None, 'error': '', 'error_class': ''}\n"
+        "if not exists:\n"
+        "    print(json.dumps(payload)); sys.exit(0)\n"
+        "try:\n"
+        f"    {open_code}\n"
+        "    payload['openable'] = True\n"
+        "except Exception as exc:\n"
+        "    payload['openable'] = False\n"
+        "    payload['error'] = str(exc)\n"
+        "    text = str(exc).casefold()\n"
+        "    if 'std::bad_alloc' in text or exc.__class__.__name__ == 'MemoryError':\n"
+        "        payload['error_class'] = 'backend_open_memory_error'\n"
+        "    else:\n"
+        "        payload['error_class'] = exc.__class__.__name__\n"
+        "print(json.dumps(payload))\n"
+    )
+
+
+def _run_python_probe(
+    code: str,
+    *,
+    python_bin: Path | None,
+    cwd: Path,
+    hermes_home: Path,
+) -> dict[str, Any] | None:
+    executable = str(python_bin) if python_bin is not None else sys.executable
+    env = os.environ.copy()
+    env.setdefault("HERMES_HOME", str(hermes_home))
+    try:
+        proc = subprocess.run(
+            [executable, "-c", code],
+            cwd=str(cwd),
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+        )
+    except Exception:
+        return None
+    raw = proc.stdout.strip().splitlines()[-1:] or [""]
+    try:
+        payload = json.loads(raw[0])
+    except Exception:
+        return {"openable": False, "error": (proc.stderr or proc.stdout or "backend probe failed").strip()}
+    if proc.returncode != 0 and payload.get("openable") is not True:
+        payload.setdefault("error", (proc.stderr or proc.stdout or "backend probe failed").strip())
+    return payload if isinstance(payload, dict) else None
+
+
+def _run_docker_python_probe(
+    code: str,
+    *,
+    compose_path: Path | None,
+    service: str | None = None,
+) -> dict[str, Any] | None:
+    if compose_path is None or not compose_path.exists():
+        return None
+    resolved_service = service or _default_compose_service(compose_path)
+    if not resolved_service:
+        return None
+    python_commands = [
+        "/opt/hermes/.venv/bin/python3",
+        "/opt/hermes/.venv/bin/python",
+        "python3",
+    ]
+    container_name = _default_container_name(compose_path, service=resolved_service)
+    commands: list[list[str]] = []
+    if container_name:
+        for python_cmd in python_commands:
+            commands.append(["docker", "exec", container_name, python_cmd, "-c", code])
+    for python_cmd in python_commands:
+        commands.append(
+            [
+                "docker",
+                "compose",
+                "-f",
+                str(compose_path),
+                "exec",
+                "-T",
+                resolved_service,
+                python_cmd,
+                "-c",
+                code,
+            ]
+        )
+    for cmd in commands:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        except Exception:
+            continue
+        raw = proc.stdout.strip().splitlines()[-1:] or [""]
+        try:
+            payload = json.loads(raw[0])
+        except Exception:
+            continue
+        return payload if isinstance(payload, dict) else None
+    return None
+
+
+def _backend_openability_checks(
+    *,
+    backend: str,
+    configured_path: str,
+    config_path: Path,
+    planned_install: bool,
+    python_bin: Path | None,
+    runtime: str,
+    compose_path: Path | None,
+) -> list[Check]:
+    default_suffix = "brainstack.kuzu" if backend == "kuzu" else "brainstack.chroma"
+    check_name = "graph_backend_open" if backend == "kuzu" else "corpus_backend_open"
+    code = _backend_probe_code(
+        backend=backend,
+        configured_path=configured_path,
+        default_suffix=default_suffix,
+    )
+    if runtime == "docker" and compose_path and not planned_install:
+        payload = _run_docker_python_probe(code, compose_path=compose_path)
+    else:
+        payload = _run_python_probe(
+            code,
+            python_bin=python_bin,
+            cwd=config_path.parent,
+            hermes_home=config_path.parent,
+        )
+    if payload is None:
+        return [Check(check_name, "warn", f"Could not probe {backend} backend openability")]
+    path = str(payload.get("path") or configured_path or default_suffix)
+    if not bool(payload.get("exists")):
+        status = "pass" if planned_install else "warn"
+        return [Check(check_name, status, f"{backend} backend path does not exist yet: {path}")]
+    if payload.get("openable") is True:
+        return [Check(check_name, "pass", f"{backend} backend opens successfully at {path}")]
+    error = str(payload.get("error") or "unknown backend open failure")
+    error_class = str(payload.get("error_class") or "backend_open_failure")
+    return [Check(check_name, "fail", f"{backend} backend exists but cannot be opened at {path}: {error_class}: {error}")]
+
+
 def _check_compose(compose_path: Path, planned_install: bool) -> list[Check]:
     checks: list[Check] = []
     if not compose_path.exists():
@@ -870,13 +1050,34 @@ def _check_docker_helpers(target: Path, planned_install: bool) -> list[Check]:
         checks.append(Check("dockerignore_runtime_excludes", "warn", "Runtime state is still visible to Docker build context"))
     entrypoint = target / "docker" / "entrypoint.sh"
     entrypoint_text = _read(entrypoint)
-    if "fix_critical_runtime_ownership" in entrypoint_text:
-        checks.append(Check("docker_runtime_ownership_fix", "pass", "Docker entrypoint normalizes critical runtime ownership"))
+    if _has_runtime_ownership_normalization(entrypoint_text):
+        checks.append(Check("docker_runtime_ownership_fix", "pass", "Docker entrypoint normalizes runtime ownership before privilege drop"))
     elif planned_install:
         checks.append(Check("docker_runtime_ownership_fix", "pass", "Installer will patch Docker entrypoint ownership normalization"))
     else:
         checks.append(Check("docker_runtime_ownership_fix", "warn", "Docker entrypoint lacks Brainstack runtime ownership normalization"))
     return checks
+
+
+def _has_runtime_ownership_normalization(entrypoint_text: str) -> bool:
+    """Return whether Docker startup owns writable runtime state before running Hermes.
+
+    Older Brainstack installs used a narrow `fix_critical_runtime_ownership`
+    patch. Current upstream Hermes already provides the safer donor-owned seam:
+    optional UID/GID remap, `$HERMES_HOME` ownership normalization, then `gosu`
+    privilege drop. The doctor should accept either shape instead of forcing a
+    Brainstack-specific host patch back into core mode.
+    """
+    text = str(entrypoint_text or "")
+    if "fix_critical_runtime_ownership" in text:
+        return True
+    required_markers = (
+        "HERMES_UID",
+        "HERMES_GID",
+        'chown -R hermes:hermes "$HERMES_HOME"',
+        "exec gosu hermes",
+    )
+    return all(marker in text for marker in required_markers)
 
 
 def run_doctor(args: argparse.Namespace) -> tuple[int, list[Check]]:

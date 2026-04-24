@@ -8,7 +8,7 @@ from typing import Any, Iterable, Mapping
 
 SEMANTIC_EVIDENCE_SCHEMA_VERSION = "semantic_evidence_document.v1"
 SEMANTIC_EVIDENCE_NORMALIZER_VERSION = "local_terms.v1"
-SEMANTIC_EVIDENCE_SCORER_VERSION = "weighted_overlap.v1"
+SEMANTIC_EVIDENCE_SCORER_VERSION = "weighted_overlap.v2"
 SEMANTIC_EVIDENCE_INDEX_VERSION = "semantic_evidence_index.v1"
 
 TOKEN_RE = re.compile(r"[^\W_]+(?:[-_][^\W_]+)*", re.UNICODE)
@@ -55,12 +55,24 @@ def normalize_semantic_terms(*values: Any) -> list[str]:
     return sorted(terms)
 
 
+def _term_matches(query_term: str, document_term: str) -> bool:
+    if query_term == document_term:
+        return True
+    if min(len(query_term), len(document_term)) < 4:
+        return False
+    return query_term in document_term or document_term in query_term
+
+
 def semantic_similarity(query_terms: Iterable[str], document_terms: Iterable[str]) -> float:
     query_set = {str(term or "").strip() for term in query_terms if str(term or "").strip()}
     document_set = {str(term or "").strip() for term in document_terms if str(term or "").strip()}
     if not query_set or not document_set:
         return 0.0
-    overlap = query_set & document_set
+    overlap = {
+        query_term
+        for query_term in query_set
+        if any(_term_matches(query_term, document_term) for document_term in document_set)
+    }
     if not overlap:
         return 0.0
     recall = len(overlap) / len(query_set)

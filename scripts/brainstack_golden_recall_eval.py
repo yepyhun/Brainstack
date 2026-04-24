@@ -63,7 +63,7 @@ def _seed_profile(store: BrainstackStore) -> None:
     store.upsert_profile_item(
         stable_key="identity:name",
         category="identity",
-        content="LauraTom uses Brainstack as the memory kernel.",
+        content="ExampleUser uses Brainstack as the memory kernel.",
         source=FIXTURE_SOURCE,
         confidence=0.99,
         metadata={
@@ -395,7 +395,7 @@ SCENARIOS: tuple[GoldenScenario, ...] = (
     ),
     GoldenScenario(
         scenario_id="profile.paraphrase_semantic_gap",
-        question="Which persistent recall substrate is LauraTom relying on?",
+        question="Which persistent recall substrate is ExampleUser relying on?",
         expected_shelf="profile",
         fixture="profile",
         expected_stable_key="identity:name",

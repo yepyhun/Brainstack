@@ -18,7 +18,7 @@ def _provider(tmp_path: Path) -> BrainstackMemoryProvider:
         "tool-session",
         platform="test",
         user_id="user",
-        agent_identity="bestie",
+        agent_identity="agent-smoke",
         agent_workspace="workspace",
     )
     assert provider._store is not None
@@ -55,7 +55,7 @@ def test_brainstack_recall_tool_returns_evidence_without_mutating_profile(tmp_pa
         provider._store.upsert_profile_item(
             stable_key="identity:name",
             category="identity",
-            content="LauraTom uses Brainstack as the memory kernel.",
+            content="ExampleUser uses Brainstack as the memory kernel.",
             source="tool-test",
             confidence=0.99,
             metadata=provider._scoped_metadata(),
@@ -64,7 +64,7 @@ def test_brainstack_recall_tool_returns_evidence_without_mutating_profile(tmp_pa
             "SELECT metadata_json, updated_at FROM profile_items WHERE content LIKE '%memory kernel%'"
         ).fetchone()
 
-        payload = json.loads(provider.handle_tool_call("brainstack_recall", {"query": "LauraTom memory kernel"}))
+        payload = json.loads(provider.handle_tool_call("brainstack_recall", {"query": "ExampleUser memory kernel"}))
 
         after = provider._store.conn.execute(
             "SELECT metadata_json, updated_at FROM profile_items WHERE content LIKE '%memory kernel%'"
@@ -75,7 +75,7 @@ def test_brainstack_recall_tool_returns_evidence_without_mutating_profile(tmp_pa
         assert payload["read_only"] is True
         assert payload["evidence_count"] >= 1
         assert payload["selected_evidence"]["profile"]
-        assert "LauraTom" in payload["final_packet"]["preview"]
+        assert "ExampleUser" in payload["final_packet"]["preview"]
     finally:
         provider.shutdown()
 
