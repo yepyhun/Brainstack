@@ -370,6 +370,39 @@ def _check_host_surfaces(target: Path) -> list[Check]:
     else:
         checks.append(Check("native_profile_write_bridge", "fail", "run_agent does not bridge Hermes native explicit writes into external memory providers"))
 
+    upstream_interrupted_sync_guard = (
+        "def _sync_external_memory_for_turn(" in run_agent
+        and "Interrupted turns are skipped entirely (#15218)" in run_agent
+        and "if interrupted:\n            return" in run_agent
+    )
+    legacy_interrupted_sync_guard = (
+        "self._memory_manager and final_response and original_user_message and not interrupted" in run_agent
+    )
+    if upstream_interrupted_sync_guard:
+        checks.append(
+            Check(
+                "interrupted_turn_external_memory_guard",
+                "pass",
+                "Hermes native seam skips external memory sync for interrupted turns (#15218/#15395)",
+            )
+        )
+    elif legacy_interrupted_sync_guard:
+        checks.append(
+            Check(
+                "interrupted_turn_external_memory_guard",
+                "pass",
+                "Legacy Brainstack host patch skips external memory sync for interrupted turns",
+            )
+        )
+    else:
+        checks.append(
+            Check(
+                "interrupted_turn_external_memory_guard",
+                "fail",
+                "run_agent can mirror interrupted turns into external memory providers",
+            )
+        )
+
     if "filter_legacy_memory_tool_defs" in run_agent and "LEGACY_MEMORY_TOOL_NAMES" in run_agent:
         checks.append(Check("legacy_tool_surface_gate", "warn", "Legacy Brainstack-only tool gating is still present in run_agent"))
     else:

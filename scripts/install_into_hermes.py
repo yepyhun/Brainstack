@@ -1729,8 +1729,13 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
         text = _replace_once(text, old_compile, deterministic_index_impl, label="run_agent deterministic user-profile index", path=path)
         applied.append("run_agent:deterministic_user_profile_index")
 
+    upstream_interrupted_sync_guard = (
+        "def _sync_external_memory_for_turn(" in text
+        and "Interrupted turns are skipped entirely (#15218)" in text
+        and "if interrupted:\n            return" in text
+    )
     sync_guard = "if self._memory_manager and final_response and original_user_message and not interrupted:"
-    if sync_guard not in text:
+    if not upstream_interrupted_sync_guard and sync_guard not in text:
         old_sync = (
             "        if self._memory_manager and final_response and original_user_message:\n"
             "            try:\n"

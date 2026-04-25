@@ -133,3 +133,42 @@ class Agent:
     patched = run_agent.read_text(encoding="utf-8")
     assert "_brainstack_memory_write_origin" not in patched
     assert "and not interrupted" in patched
+
+
+def test_run_agent_patch_accepts_upstream_interrupted_sync_helper(
+    tmp_path: Path,
+) -> None:
+    installer = _load_installer()
+    run_agent = tmp_path / "run_agent.py"
+    run_agent.write_text(
+        '''
+class Agent:
+    def _sync_external_memory_for_turn(self, *, original_user_message, final_response, interrupted):
+        """Mirror a completed turn into external memory providers.
+
+        Interrupted turns are skipped entirely (#15218).
+        """
+        if interrupted:
+            return
+        if not (self._memory_manager and final_response and original_user_message):
+            return
+        try:
+            self._memory_manager.sync_all(original_user_message, final_response)
+            self._memory_manager.queue_prefetch_all(original_user_message)
+        except Exception:
+            pass
+
+    def run(self):
+        if background_review:
+            review_agent._memory_store = self._memory_store
+            review_agent._memory_enabled = self._memory_enabled
+            review_agent._user_profile_enabled = self._user_profile_enabled
+            review_agent._memory_write_origin = "background_review"
+            review_agent._memory_write_context = "background_review"
+            review_agent._memory_nudge_interval = 0
+            review_agent._skill_nudge_interval = 0
+'''.lstrip(),
+        encoding="utf-8",
+    )
+
+    assert installer._patch_run_agent(run_agent, dry_run=False) == []
