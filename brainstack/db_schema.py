@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 import sqlite3
 
 
@@ -398,3 +399,36 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
     conn.commit()
 
+
+def schema_objects(conn: sqlite3.Connection) -> tuple[tuple[str, str], ...]:
+    rows = conn.execute(
+        """
+        SELECT type, name
+        FROM sqlite_master
+        WHERE name NOT LIKE 'sqlite_%'
+        ORDER BY type ASC, name ASC
+        """
+    ).fetchall()
+    return tuple(
+        (
+            str(row["type"] if isinstance(row, sqlite3.Row) else row[0]),
+            str(row["name"] if isinstance(row, sqlite3.Row) else row[1]),
+        )
+        for row in rows
+    )
+
+
+@lru_cache(maxsize=1)
+def expected_schema_objects() -> tuple[tuple[str, str], ...]:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        initialize_schema(conn)
+        return schema_objects(conn)
+    finally:
+        conn.close()
+
+
+def missing_schema_objects(conn: sqlite3.Connection) -> tuple[tuple[str, str], ...]:
+    actual = set(schema_objects(conn))
+    return tuple(item for item in expected_schema_objects() if item not in actual)

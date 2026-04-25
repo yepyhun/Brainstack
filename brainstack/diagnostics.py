@@ -4,6 +4,7 @@ from typing import Any, Dict, Mapping
 
 from .control_plane import build_working_memory_packet
 from .db import BrainstackStore
+from .db_diagnostics import build_db_substrate_snapshot
 from .graph_lineage import compact_graph_source_lineage
 
 
@@ -193,6 +194,7 @@ def build_memory_kernel_doctor(
         fallback_reason="No external corpus backend was requested; SQLite corpus storage/search is the active mode.",
     )
     tier2 = _tier2_capability(tier2_state)
+    db_substrate = build_db_substrate_snapshot(store.conn)
     latest_tier2_run = store.latest_tier2_run_record()
     if latest_tier2_run:
         tier2["latest_persistent_run"] = latest_tier2_run
@@ -213,7 +215,7 @@ def build_memory_kernel_doctor(
         }
     )
     issues: list[Dict[str, str]] = []
-    for capability in (graph, corpus, tier2, semantic_index, graph_recall):
+    for capability in (db_substrate, graph, corpus, tier2, semantic_index, graph_recall):
         if capability.get("requested") and capability.get("status") != "active":
             issues.append(
                 {
@@ -233,6 +235,7 @@ def build_memory_kernel_doctor(
         "verdict": verdict,
         "terms": dict(DIAGNOSTIC_TERMS),
         "capabilities": {
+            "db_substrate": db_substrate,
             "graph": graph,
             "corpus": corpus,
             "semantic_index": semantic_index,
