@@ -25,7 +25,6 @@ from agent.memory_provider import MemoryProvider
 from .control_plane import build_working_memory_packet
 from .consolidation import build_consolidation_source
 from .db import BrainstackStore
-from .diagnostics import build_memory_kernel_doctor, build_query_inspect
 from .donors import continuity_adapter, corpus_adapter, graph_adapter
 from .donors.registry import get_donor_registry
 from .explicit_capture import (
@@ -58,6 +57,14 @@ from .operating_truth import (
     recent_work_stable_key,
 )
 from .output_contract import validate_output_against_contract
+from .provider_diagnostics import (
+    build_provider_lifecycle_status,
+    build_provider_memory_kernel_doctor,
+    build_provider_query_inspect,
+    handle_brainstack_inspect,
+    handle_brainstack_recall,
+    handle_brainstack_stats,
+)
 from .profile_contract import (
     NATIVE_EXPLICIT_PROFILE_METADATA_KEY,
     NATIVE_EXPLICIT_PROFILE_MIRROR_SOURCE,
@@ -1686,167 +1693,59 @@ class BrainstackMemoryProvider(MemoryProvider):
         return receipt
 
     def _handle_brainstack_recall(self, args: Mapping[str, Any]) -> Dict[str, Any]:
-        query = _normalize_compact_text(args.get("query") if isinstance(args, Mapping) else "")
-        if not query:
-            return {
-                "schema": "brainstack.tool_error.v1",
-                "tool_name": "brainstack_recall",
-                "error_code": "invalid_query",
-                "error": "brainstack_recall requires a non-empty query.",
-                "read_only": True,
-            }
-        report = self.query_inspect(
-            query=query,
-            session_id=str(args.get("session_id") or self._session_id) if isinstance(args, Mapping) else self._session_id,
+        return handle_brainstack_recall(
+            args=args,
+            principal_scope_key=self._principal_scope_key,
+            session_id=self._session_id,
+            query_inspect=self.query_inspect,
         )
-        raw_selected = report.get("selected_evidence")
-        selected: Mapping[str, Any] = raw_selected if isinstance(raw_selected, Mapping) else {}
-        evidence_count = sum(len(rows or []) for rows in selected.values()) if isinstance(selected, Mapping) else 0
-        raw_packet = report.get("final_packet")
-        packet: Mapping[str, Any] = raw_packet if isinstance(raw_packet, Mapping) else {}
-        return {
-            "schema": "brainstack.tool_recall.v1",
-            "tool_name": "brainstack_recall",
-            "read_only": True,
-            "principal_scope_key": self._principal_scope_key,
-            "query": query,
-            "routing": dict(report.get("routing") or {}),
-            "channels": list(report.get("channels") or []),
-            "selected_evidence": dict(selected),
-            "evidence_count": evidence_count,
-            "final_packet": {
-                "sections": list(packet.get("sections") or []),
-                "char_count": int(packet.get("char_count") or 0),
-                "preview": str(packet.get("preview") or ""),
-            },
-        }
 
     def _handle_brainstack_inspect(self, args: Mapping[str, Any]) -> Dict[str, Any]:
-        query = _normalize_compact_text(args.get("query") if isinstance(args, Mapping) else "")
-        if not query:
-            return {
-                "schema": "brainstack.tool_error.v1",
-                "tool_name": "brainstack_inspect",
-                "error_code": "invalid_query",
-                "error": "brainstack_inspect requires a non-empty query.",
-                "read_only": True,
-            }
-        report = self.query_inspect(
-            query=query,
-            session_id=str(args.get("session_id") or self._session_id) if isinstance(args, Mapping) else self._session_id,
+        return handle_brainstack_inspect(
+            args=args,
+            principal_scope_key=self._principal_scope_key,
+            session_id=self._session_id,
+            query_inspect=self.query_inspect,
         )
-        return {
-            "schema": "brainstack.tool_inspect.v1",
-            "tool_name": "brainstack_inspect",
-            "read_only": True,
-            "principal_scope_key": self._principal_scope_key,
-            "report": report,
-        }
 
     def _handle_brainstack_stats(self, args: Mapping[str, Any]) -> Dict[str, Any]:
-        strict_value = args.get("strict", False) if isinstance(args, Mapping) else False
-        strict = strict_value if isinstance(strict_value, bool) else str(strict_value).strip().lower() in {"1", "true", "yes"}
-        return {
-            "schema": "brainstack.tool_stats.v1",
-            "tool_name": "brainstack_stats",
-            "read_only": True,
-            "principal_scope_key": self._principal_scope_key,
-            "lifecycle": self.lifecycle_status(),
-            "maintenance": dict(self._last_maintenance_receipt or {}),
-            "report": self.memory_kernel_doctor(strict=strict),
-        }
+        return handle_brainstack_stats(
+            args=args,
+            principal_scope_key=self._principal_scope_key,
+            lifecycle_status=self.lifecycle_status,
+            memory_kernel_doctor=self.memory_kernel_doctor,
+            last_maintenance_receipt=self._last_maintenance_receipt,
+        )
 
     def lifecycle_status(self) -> Dict[str, Any]:
-        store_active = self._store is not None
-        worker_busy = bool(self._tier2_running)
-        explicit_write_barrier = self._pending_explicit_write_count > 0
-        if not store_active:
-            status = "unavailable"
-            reason = "Brainstack provider has not been initialized or has been shut down."
-        elif explicit_write_barrier:
-            status = "degraded"
-            reason = "An explicit write barrier is pending; shutdown/session maintenance must wait."
-        else:
-            status = "active"
-            reason = "Brainstack provider is initialized and lifecycle hooks are available."
-
-        exported_tools = [
-            {
-                "name": str(schema.get("name") or ""),
-                "tool_class": str(schema.get("x_brainstack_tool_class") or ""),
-                "model_callable": bool(schema.get("x_brainstack_model_callable", True)),
-            }
-            for schema in self.get_tool_schemas()
-        ]
-        hook_status = "active" if store_active else "unavailable"
-        return {
-            "schema": "brainstack.provider_lifecycle.v1",
-            "status": status,
-            "reason": reason,
-            "session_id": self._session_id,
-            "principal_scope_key": self._principal_scope_key,
-            "store_initialized": store_active,
-            "tier2_worker_running": worker_busy,
-            "pending_tier2_turns": self._pending_tier2_turns,
-            "pending_explicit_write_count": self._pending_explicit_write_count,
-            "hooks": [
-                {"name": "initialize", "status": "active" if store_active else "available", "side_effect": "opens Brainstack store"},
-                {"name": "system_prompt_block", "status": hook_status, "side_effect": "read-only projection"},
-                {"name": "prefetch", "status": hook_status, "side_effect": "read-only recall"},
-                {"name": "sync_turn", "status": hook_status, "side_effect": "post-turn transcript and typed extraction"},
-                {"name": "on_pre_compress", "status": hook_status, "side_effect": "bounded continuity snapshot"},
-                {"name": "on_session_end", "status": hook_status, "side_effect": "bounded maintenance and session finalization"},
-                {"name": "shutdown", "status": "available", "side_effect": "closes store after barriers clear"},
-                {"name": "get_tool_schemas", "status": "available", "side_effect": "read-only schema export"},
-                {"name": "handle_tool_call", "status": "available", "side_effect": "tool-specific; memory tools are read-only in Phase 70"},
-            ],
-            "exported_tools": exported_tools,
-            "operator_only_tools": [self._runtime_handoff_update_tool_schema()],
-            "disabled_memory_write_tools": sorted(DISABLED_MEMORY_WRITE_TOOLS),
-            "last_maintenance": dict(self._last_maintenance_receipt or {}),
-            "shared_state_safety": {
-                "brainstack_authority": "Brainstack owns memory state and policy truth.",
-                "runtime_authority": "Hermes owns scheduling, execution, and approval enforcement.",
-                "operator_mcp_stance": "Optional operator access must use Brainstack APIs, not direct DB mutation.",
-                "concurrency_rule": "Shared store operations are serialized through BrainstackStore locked methods.",
-            },
-        }
+        return build_provider_lifecycle_status(
+            store=self._store,
+            tier2_running=self._tier2_running,
+            pending_explicit_write_count=self._pending_explicit_write_count,
+            session_id=self._session_id,
+            principal_scope_key=self._principal_scope_key,
+            pending_tier2_turns=self._pending_tier2_turns,
+            tool_schemas=self.get_tool_schemas(),
+            operator_only_tools=[self._runtime_handoff_update_tool_schema()],
+            disabled_memory_write_tools=sorted(DISABLED_MEMORY_WRITE_TOOLS),
+            last_maintenance_receipt=self._last_maintenance_receipt,
+        )
 
     def memory_kernel_doctor(self, *, strict: bool = False) -> Dict[str, Any]:
-        if self._store is None:
-            return {
-                "schema": "brainstack.memory_kernel_doctor.v1",
-                "strict": bool(strict),
-                "verdict": "fail" if strict else "unavailable",
-                "issues": [
-                    {
-                        "capability": "store",
-                        "status": "unavailable",
-                        "reason": "Brainstack store is not initialized.",
-                    }
-                ],
-            }
-        return build_memory_kernel_doctor(
-            self._store,
+        return build_provider_memory_kernel_doctor(
+            store=self._store,
             strict=strict,
-            tier2_state={
-                "enabled": self._tier2_session_end_flush_enabled,
-                "running": self._tier2_running,
-                "pending_turns": self._pending_tier2_turns,
-                "last_schedule": dict(self._last_tier2_schedule or {}),
-                "last_result": dict(self._last_tier2_batch_result or {}),
-                "history_count": len(self._tier2_batch_history),
-            },
+            tier2_session_end_flush_enabled=self._tier2_session_end_flush_enabled,
+            tier2_running=self._tier2_running,
+            pending_tier2_turns=self._pending_tier2_turns,
+            last_tier2_schedule=self._last_tier2_schedule,
+            last_tier2_batch_result=self._last_tier2_batch_result,
+            tier2_batch_history_count=len(self._tier2_batch_history),
         )
 
     def query_inspect(self, *, query: str, session_id: str | None = None) -> Dict[str, Any]:
-        if self._store is None:
-            return {
-                "schema": "brainstack.query_inspect.v1",
-                "error": "Brainstack store is not initialized.",
-            }
-        return build_query_inspect(
-            self._store,
+        return build_provider_query_inspect(
+            store=self._store,
             query=query,
             session_id=session_id or self._session_id,
             principal_scope_key=self._principal_scope_key,
