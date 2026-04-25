@@ -252,6 +252,7 @@ update_hermes_with_brainstack.py
 | `install_into_hermes.py` | Install Brainstack into a Hermes checkout |
 | `update_hermes_with_brainstack.py` | Refresh Hermes upstream and reinstall Brainstack |
 | `brainstack_doctor.py` | Validate install assumptions and fail closed when upstream changed something important |
+| `scripts/brainstack_store_ops.py` | Explicit JSON backup, restore, and migration-report CLI for the SQLite store |
 | `scripts/check_release_hygiene.py` | Fail release payloads that accidentally track private runtime state or high-confidence secrets |
 | `scripts/brainstack_refresh_donors.py` | Report donor state and run bounded refresh workflow |
 
