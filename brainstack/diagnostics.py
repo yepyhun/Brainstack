@@ -6,6 +6,7 @@ from .control_plane import build_working_memory_packet
 from .db import BrainstackStore
 from .db_diagnostics import build_db_substrate_snapshot
 from .graph_lineage import compact_graph_source_lineage
+from .retrieval_candidate import build_candidate_trace
 
 
 DIAGNOSTIC_TERMS: Dict[str, str] = {
@@ -470,6 +471,11 @@ def build_query_inspect(
         "associative_expansion": dict(packet.get("associative_expansion") or {}),
         "selected_evidence": selected_by_shelf,
         "suppressed_evidence": suppressed,
+        "retrieval_candidates": build_candidate_trace(
+            selected_by_shelf=selected_by_shelf,
+            suppressed_rows=suppressed,
+            suppressed_limit=40,
+        ),
         "final_packet": {
             "char_count": len(block),
             "section_count": len(sections),
