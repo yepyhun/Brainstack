@@ -202,6 +202,9 @@ What is currently true:
 - recent-work operating truth is workstream-scoped so project status and agent assignments do not collapse into one canonical memory
 - workstream recap evidence is typed and scoped, so compact operating state can anchor recap answers before broad continuity or corpus fallback
 - explicit scoped workstream recap capture can create idempotent operating anchors without guessing workstream identity from prose
+- store substrate checks expose schema and migration-ledger health through the doctor surface
+- explicit backup/restore helpers and migration dry-run reports support safer local upgrades
+- the installer recognizes Hermes' native interrupted-turn external-memory guard, so Brainstack follows the upstream host seam instead of forcing a stale local patch
 
 Release posture:
 
@@ -268,7 +271,7 @@ python install_into_hermes.py --help
 python brainstack_doctor.py --help
 ```
 
-The tracked test suite is intentionally host-shimmed where needed. Brainstack remains a Hermes plugin, so install and doctor smoke checks are part of release readiness; passing local unit tests alone is not a production-readiness claim.
+The tracked test suite is paired with install and doctor smoke checks because Brainstack is a Hermes plugin: release readiness means the code passes locally and the target Hermes seam still verifies.
 
 ## Installation into Hermes
 
