@@ -204,6 +204,10 @@ What is currently true:
 - explicit scoped workstream recap capture can create idempotent operating anchors without guessing workstream identity from prose
 - store substrate checks expose schema and migration-ledger health through the doctor surface
 - explicit backup/restore helpers and migration dry-run reports support safer local upgrades
+- traceable retrieval-candidate diagnostics expose selected and suppressed evidence without changing the default prompt packet
+- a shadow global allocator can inspect how a tighter evidence budget would behave before it becomes live behavior
+- local markdown/wiki files can enter the corpus shelf through explicit allowlisted source adapters instead of raw prompt stuffing
+- shelf-aware export and dry-run import reports make memory moves inspectable, redacted, and mutation-free by default
 - the installer recognizes Hermes' native interrupted-turn external-memory guard, so Brainstack follows the upstream host seam instead of forcing a stale local patch
 
 Release posture:
@@ -252,7 +256,7 @@ update_hermes_with_brainstack.py
 | `install_into_hermes.py` | Install Brainstack into a Hermes checkout |
 | `update_hermes_with_brainstack.py` | Refresh Hermes upstream and reinstall Brainstack |
 | `brainstack_doctor.py` | Validate install assumptions and fail closed when upstream changed something important |
-| `scripts/brainstack_store_ops.py` | Explicit JSON backup, restore, and migration-report CLI for the SQLite store |
+| `scripts/brainstack_store_ops.py` | Explicit JSON backup, restore, migration-report, shelf-export, and shelf-import dry-run CLI |
 | `scripts/check_release_hygiene.py` | Fail release payloads that accidentally track private runtime state or high-confidence secrets |
 | `scripts/brainstack_refresh_donors.py` | Report donor state and run bounded refresh workflow |
 
