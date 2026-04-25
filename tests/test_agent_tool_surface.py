@@ -73,14 +73,19 @@ def test_brainstack_recall_tool_returns_evidence_without_mutating_profile(tmp_pa
         assert dict(before) == dict(after)
         assert payload["schema"] == "brainstack.tool_recall.v1"
         assert payload["read_only"] is True
+        assert payload["model_use_contract"]["primary_answer_source"] == "final_packet.preview"
+        assert "current_assignment_authority=true" in payload["model_use_contract"]["current_assignment_rule"]
         assert payload["evidence_count"] >= 1
         assert payload["diagnostic_detail_tool"] == "brainstack_inspect"
         assert payload["selected_evidence"]["profile"]
+        assert payload["selected_evidence"]["profile"][0]["current_assignment_authority"] is False
         assert "suppressed_evidence" not in payload
         assert "retrieval_candidates" not in payload
         assert "global_allocator_shadow" not in payload
         assert len(json.dumps(payload, ensure_ascii=False)) < 7000
         assert "ExampleUser" in payload["final_packet"]["preview"]
+        raw_payload = provider.handle_tool_call("brainstack_recall", {"query": "ExampleUser memory kernel"})
+        assert raw_payload.index('"final_packet"') < raw_payload.index('"selected_evidence"')
     finally:
         provider.shutdown()
 

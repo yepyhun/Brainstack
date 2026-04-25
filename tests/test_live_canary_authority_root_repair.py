@@ -485,3 +485,50 @@ def test_background_continuity_cannot_imply_current_assignment(tmp_path: Path) -
         assert "Use the committed Brainstack operating records below as authoritative" not in preview
     finally:
         store.close()
+
+
+def test_recall_tool_marks_runtime_and_profile_as_non_assignment_authority(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        assert provider._store is not None
+        provider._store.upsert_profile_item(
+            stable_key="shared_work:brainstack-development-status",
+            category="shared_work",
+            content="Brainstack development status and zero-human workstream",
+            source="tier2:idle_window",
+            confidence=0.8,
+            metadata=provider._scoped_metadata({"source_kind": "tier2_idle_window"}),
+        )
+        provider._store.upsert_operating_record(
+            stable_key="runtime:scheduler:pulse",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            record_type=OPERATING_RECORD_LIVE_SYSTEM_STATE,
+            content="Hermes scheduler job 'Brainstack Proactive Pulse' is scheduled.",
+            owner="brainstack.live_system_state",
+            source="runtime_handoff:pulse",
+            metadata={
+                "principal_scope_key": PRINCIPAL_SCOPE,
+                "owner_role": "runtime_system",
+                "source_kind": "runtime_handoff",
+            },
+        )
+
+        payload = json.loads(
+            provider.handle_tool_call(
+                "brainstack_recall",
+                {"query": "Brainstack development status zero-human workstream assigned task current"},
+            )
+        )
+
+        assert payload["model_use_contract"]["primary_answer_source"] == "final_packet.preview"
+        assert "profile shared_work" in payload["model_use_contract"]["non_authority_sources"]
+        assert "runtime_state_only scheduler or pulse rows" in payload["model_use_contract"]["non_authority_sources"]
+        profile_cards = payload["selected_evidence"].get("profile", [])
+        operating_cards = payload["selected_evidence"].get("operating", [])
+        assert profile_cards
+        assert operating_cards
+        assert not any(card["current_assignment_authority"] for card in profile_cards)
+        assert not any(card["current_assignment_authority"] for card in operating_cards)
+        assert all(card["supporting_evidence_only"] for card in operating_cards if card["runtime_state_only"])
+    finally:
+        provider.shutdown()

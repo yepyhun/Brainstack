@@ -33,8 +33,24 @@ def _compact_channel_cards(channels: list[Any], *, limit: int = 8) -> list[dict[
     return cards
 
 
+def _is_current_assignment_authority(item: Mapping[str, Any]) -> bool:
+    shelf = _normalize_compact_text(item.get("shelf"))
+    if bool(item.get("runtime_state_only")) or bool(item.get("supporting_evidence_only")):
+        return False
+    if shelf == "operating":
+        return _normalize_compact_text(item.get("owner_role")) == "agent_assignment"
+    if shelf == "task":
+        return True
+    return False
+
+
 def _compact_evidence_card(item: Mapping[str, Any]) -> dict[str, Any]:
     """Return model-facing recall evidence, not inspect-grade diagnostics."""
+    runtime_state_only = bool(item.get("runtime_state_only"))
+    supporting_evidence_only = bool(item.get("supporting_evidence_only")) or runtime_state_only
+    current_assignment_authority = _is_current_assignment_authority(
+        {**dict(item), "supporting_evidence_only": supporting_evidence_only}
+    )
     return {
         "evidence_key": _normalize_compact_text(item.get("evidence_key")),
         "shelf": _normalize_compact_text(item.get("shelf")),
@@ -44,8 +60,9 @@ def _compact_evidence_card(item: Mapping[str, Any]) -> dict[str, Any]:
         "authority_level": _normalize_compact_text(item.get("authority_level")),
         "owner_role": _normalize_compact_text(item.get("owner_role")),
         "workstream_id": _normalize_compact_text(item.get("workstream_id")),
-        "runtime_state_only": bool(item.get("runtime_state_only")),
-        "supporting_evidence_only": bool(item.get("supporting_evidence_only")),
+        "runtime_state_only": runtime_state_only,
+        "supporting_evidence_only": supporting_evidence_only,
+        "current_assignment_authority": current_assignment_authority,
         "citation_id": _normalize_compact_text(item.get("citation_id")),
         "created_at": _normalize_compact_text(item.get("created_at")),
         "excerpt": _trim_compact_text(item.get("excerpt"), limit=180),
@@ -246,19 +263,33 @@ def handle_brainstack_recall(
         "schema": "brainstack.tool_recall.v1",
         "tool_name": "brainstack_recall",
         "read_only": True,
+        "model_use_contract": {
+            "primary_answer_source": "final_packet.preview",
+            "selected_evidence_use": "diagnostic support only; do not override final_packet authority notes",
+            "current_assignment_rule": (
+                "Treat current work, assignment, or workstream as recorded only when a selected task card exists "
+                "or an operating card has current_assignment_authority=true."
+            ),
+            "non_authority_sources": [
+                "profile shared_work",
+                "continuity/transcript/session summaries",
+                "runtime_state_only scheduler or pulse rows",
+                "external/session-search summaries",
+            ],
+        },
         "principal_scope_key": principal_scope_key,
         "query": query,
         "routing": dict(report.get("routing") or {}),
         "channels": _compact_channel_cards(list(report.get("channels") or [])),
-        "selected_evidence": compact_selected,
-        "evidence_count": evidence_count,
-        "evidence_card_count": sum(len(rows) for rows in compact_selected.values()),
-        "diagnostic_detail_tool": "brainstack_inspect",
         "final_packet": {
             "sections": list(packet.get("sections") or []),
             "char_count": int(packet.get("char_count") or 0),
             "preview": _trim_compact_text(packet.get("preview"), limit=1200),
         },
+        "selected_evidence": compact_selected,
+        "evidence_count": evidence_count,
+        "evidence_card_count": sum(len(rows) for rows in compact_selected.values()),
+        "diagnostic_detail_tool": "brainstack_inspect",
     }
 
 

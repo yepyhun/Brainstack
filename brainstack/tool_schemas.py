@@ -17,7 +17,8 @@ def recall_tool_schema() -> Dict[str, Any]:
         "name": "brainstack_recall",
         "description": (
             "Recall scoped Brainstack memory evidence for a query. "
-            "Read-only; returns evidence shelves and a bounded packet preview."
+            "Read-only; use final_packet.preview as the primary answer source. "
+            "Selected evidence is diagnostic support and cannot prove current assignment unless explicitly flagged."
         ),
         "x_brainstack_tool_class": "read_only_memory",
         "parameters": {
