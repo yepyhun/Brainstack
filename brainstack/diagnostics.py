@@ -7,6 +7,7 @@ from .db import BrainstackStore
 from .db_diagnostics import build_db_substrate_snapshot
 from .graph_lineage import compact_graph_source_lineage
 from .retrieval_candidate import build_candidate_trace
+from .working_memory_allocator import build_global_allocator_shadow
 
 
 DIAGNOSTIC_TERMS: Dict[str, str] = {
@@ -459,6 +460,12 @@ def build_query_inspect(
         )
     block = str(packet.get("block") or "")
     sections = [line[3:].strip() for line in block.splitlines() if line.startswith("## ")]
+    candidate_trace = build_candidate_trace(
+        selected_by_shelf=selected_by_shelf,
+        suppressed_rows=suppressed,
+        suppressed_limit=40,
+    )
+    policy_snapshot = dict(packet.get("policy") or {})
     return {
         "schema": "brainstack.query_inspect.v1",
         "query": str(query or ""),
@@ -471,16 +478,17 @@ def build_query_inspect(
         "associative_expansion": dict(packet.get("associative_expansion") or {}),
         "selected_evidence": selected_by_shelf,
         "suppressed_evidence": suppressed,
-        "retrieval_candidates": build_candidate_trace(
-            selected_by_shelf=selected_by_shelf,
-            suppressed_rows=suppressed,
-            suppressed_limit=40,
+        "retrieval_candidates": candidate_trace,
+        "global_allocator_shadow": build_global_allocator_shadow(
+            candidate_trace,
+            candidate_budget=int(policy_snapshot.get("evidence_item_budget") or evidence_item_budget or 1),
+            enabled=True,
         ),
         "final_packet": {
             "char_count": len(block),
             "section_count": len(sections),
             "sections": sections,
             "preview": block[:1200],
-            "policy": dict(packet.get("policy") or {}),
+            "policy": policy_snapshot,
         },
     }
