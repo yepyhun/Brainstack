@@ -6,7 +6,7 @@ from brainstack.db import BrainstackStore
 
 
 def _open_store(db_path: Path) -> BrainstackStore:
-    store = BrainstackStore(db_path=db_path, graph_backend="sqlite", corpus_backend="sqlite")
+    store = BrainstackStore(db_path=str(db_path), graph_backend="sqlite", corpus_backend="sqlite")
     store.open()
     return store
 
@@ -50,4 +50,3 @@ def test_schema_initialization_seam_is_idempotent(tmp_path: Path) -> None:
     assert migrations_1 == migrations_2
     assert ("table", "applied_migrations") in schema_2
     assert ("index", "idx_semantic_evidence_scope_shelf") in schema_2
-

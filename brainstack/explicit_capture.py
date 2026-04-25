@@ -12,6 +12,7 @@ from .write_contract import build_write_decision_trace
 EXPLICIT_CAPTURE_SCHEMA_VERSION = "brainstack.explicit_capture.v1"
 SUPPORTED_EXPLICIT_CAPTURE_SHELVES = {"profile", "operating", "task"}
 SUPPORTED_EXPLICIT_CAPTURE_SOURCE_ROLES = {"user", "operator"}
+MODEL_CALLABLE_EXPLICIT_CAPTURE_SOURCE_ROLES = {"user"}
 SUPPORTED_EXPLICIT_CAPTURE_OPERATIONS = {"remember", "supersede"}
 
 
@@ -68,6 +69,7 @@ def validate_explicit_capture_payload(
     principal_scope_key: str,
     session_id: str,
     turn_number: int,
+    allow_operator_source_role: bool = True,
 ) -> tuple[Dict[str, Any] | None, Dict[str, Any] | None]:
     if not isinstance(payload, Mapping):
         return None, build_rejection_receipt(
@@ -97,6 +99,13 @@ def validate_explicit_capture_payload(
         errors.append(_error("missing_stable_key", "stable_key is required."))
     if source_role not in SUPPORTED_EXPLICIT_CAPTURE_SOURCE_ROLES:
         errors.append(_error("invalid_source_role", "source_role must be explicit user or operator."))
+    elif source_role == "operator" and not allow_operator_source_role:
+        errors.append(
+            _error(
+                "untrusted_operator_source_role",
+                "operator source_role requires a trusted non-model write path.",
+            )
+        )
     if raw_metadata is not None and not isinstance(raw_metadata, Mapping):
         errors.append(_error("invalid_metadata", "metadata must be an object when provided."))
 

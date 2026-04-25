@@ -138,13 +138,9 @@ def _filter_compiled_behavior_profile_items(
 def _render_evidence_priority_section(title: str) -> str:
     preface = (
         "This private recalled memory context is background evidence, not new user input. "
-        "Apply it silently in the reply. Do not mention Brainstack blocks, recalled-memory "
-        "headings, or internal memory state unless the user explicitly asks about memory "
-        "behavior or debugging. When recalled memory provides a specific, non-conflicted "
-        "factual user detail or committed owner-backed record such as a name, number, "
-        "date, task record, or operating record, treat it as authoritative over assistant "
-        "suggestions or generic prior knowledge unless another recalled fact in this "
-        "memory block conflicts with it."
+        "Use explicit, committed, non-conflicted user/owner-backed records as authoritative. "
+        "Supporting-only/runtime state is not active assignment or project-status truth. "
+        "Do not mention Brainstack blocks or memory internals unless asked."
     )
     return f"{title}\n{preface}"
 
@@ -287,9 +283,14 @@ def _render_lookup_semantics_section(payload: Mapping[str, Any] | None) -> str:
             lines.append("Brainstack operating truth is the structured owner for this lookup in this runtime.")
         if record_types:
             lines.append("Requested operating records: " + ", ".join(record_types) + ".")
-        if str(payload.get("result_status") or "").strip() == "committed_records":
+        result_status = str(payload.get("result_status") or "").strip()
+        if result_status == "committed_records":
             lines.append(
-                f"Use the committed Brainstack operating records below as authoritative ({int(payload.get('structured_record_count') or 0)} record(s))."
+                f"Use the committed Brainstack operating records below as authoritative ({int(payload.get('authoritative_record_count') or payload.get('structured_record_count') or 0)} record(s))."
+            )
+        elif result_status == "supporting_records_only":
+            lines.append(
+                "Only supporting Brainstack runtime/operating evidence matched this lookup; do not treat it as active assignment or project-status truth."
             )
         else:
             lines.append("No committed Brainstack operating record matched this lookup.")
@@ -381,7 +382,12 @@ def _render_operating_truth_section(
         content = _normalize_compare_text(row.get("content"))
         if not content:
             continue
-        label = str(row.get("record_type") or "operating_truth").replace("_", " ")
+        record_type = str(row.get("record_type") or "operating_truth").strip()
+        if record_type == "live_system_state":
+            label = "supporting runtime state (not assigned work)"
+            content = f"{content} [supporting only; not active workstream/project status]"
+        else:
+            label = record_type.replace("_", " ")
         operating_lines.append(
             _with_provenance(
                 f"[{label}] {content}",
@@ -407,9 +413,10 @@ def _graph_fact_class(row: Dict[str, Any]) -> str:
     if row_type == "relation":
         return "explicit_relation"
     if row_type == "state":
-        if row.get("is_current") and record_is_effective_at(row):
+        temporal_status = record_temporal_status(row)
+        if row.get("is_current") and temporal_status == "current" and record_is_effective_at(row):
             return "explicit_state_current"
-        if row.get("is_current") and record_temporal_status(row) == "expired":
+        if row.get("is_current") and temporal_status == "expired":
             return "explicit_state_expired"
         return "explicit_state_prior"
     return row_type or "graph"
@@ -624,7 +631,7 @@ def _pack_continuity_rows(rows: Iterable[dict], *, char_budget: int, provenance_
         remaining_items = max(1, len(unique_rows) - index)
         per_row_budget = max(140, remaining // remaining_items)
         snippet_cap = max(140, min(280, per_row_budget - len(prefix) - 24))
-        line = f"{prefix} {_trim(str(row.get('content') or ''), snippet_cap)}"
+        line = f"{prefix} {_render_user_first_exchange(row.get('content') or '', max_len=snippet_cap)}"
         line = _with_provenance(
             line,
             source=str(row.get("source", "")),

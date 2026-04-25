@@ -15,6 +15,8 @@ from .operating_truth import (
     OPERATING_RECORD_OPEN_DECISION,
     OPERATING_RECORD_RECENT_WORK_SUMMARY,
     OPERATING_RECORD_RUNTIME_APPROVAL_POLICY,
+    is_background_operating_record,
+    is_background_recent_work,
 )
 from .local_typed_understanding import build_session_recovery_contract
 
@@ -53,12 +55,34 @@ def _unique_lines(values: Iterable[str], *, limit: int) -> List[str]:
     return lines
 
 
+def _profile_item_supports_stable_signal(item: Mapping[str, Any]) -> bool:
+    category = str(item.get("category") or "").strip()
+    if category == "identity":
+        return True
+    if category != "shared_work":
+        return False
+    source = str(item.get("source") or "").strip().casefold()
+    metadata = item.get("metadata")
+    payload = metadata if isinstance(metadata, Mapping) else {}
+    source_kind = str(payload.get("source_kind") or "").strip().casefold().replace("-", "_")
+    if source.startswith("tier2:") or source.startswith("on_session_end:recent_work_consolidation"):
+        return False
+    if source_kind in {"tier2_idle_window", "tier2_batch", "session_consolidation", "background_evidence"}:
+        return False
+    return source.startswith("explicit") or source.startswith("host") or source_kind in {
+        "explicit_operating_truth",
+        "manual_migration",
+    }
+
+
 def _build_stable_profile_entries(profile_items: Iterable[Mapping[str, Any]], *, limit: int) -> List[Dict[str, str]]:
     entries: List[Dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for item in profile_items:
         category = str(item.get("category") or "").strip()
         if category not in _STABLE_PROFILE_CATEGORIES:
+            continue
+        if not _profile_item_supports_stable_signal(item):
             continue
         stable_key = str(item.get("stable_key") or "").strip()
         content = _normalize_text(item.get("content"))
@@ -95,12 +119,14 @@ def _operating_record_lines(
     *,
     record_type: str,
     limit: int,
+    include_background: bool = False,
 ) -> List[str]:
     return _unique_lines(
         (
             str(row.get("content") or "")
             for row in operating_rows
             if str(row.get("record_type") or "").strip() == record_type
+            and (include_background or not is_background_operating_record(dict(row)))
         ),
         limit=limit,
     )
@@ -114,6 +140,8 @@ def _recent_work_line_and_status(
     continuity_list = [dict(row) for row in continuity_rows]
     for row in operating_rows:
         if str(row.get("record_type") or "").strip() != OPERATING_RECORD_RECENT_WORK_SUMMARY:
+            continue
+        if is_background_recent_work(dict(row)):
             continue
         status = consolidation_source_status(
             row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {},
@@ -333,17 +361,13 @@ def build_operating_context_snapshot(
         operating_list,
         continuity_rows=continuity_list,
     )
-    if not recent_work_summary:
-        recent_work_summary = _build_active_work_summary(continuity_list)
-        if recent_work_summary and recent_work_source_status.get("status") == "none":
-            recent_work_source_status = {"status": "continuity_fallback", "source_kind": "continuity", "source_count": 0}
-    if not active_work_summary and not recent_work_summary:
-        active_work_summary = _build_active_work_summary(continuity_list)
+    if not recent_work_summary and recent_work_source_status.get("status") == "none":
+        recent_work_source_status = {"status": "none", "source_kind": "", "source_count": 0}
     open_decisions = _operating_record_lines(
         operating_list,
         record_type=OPERATING_RECORD_OPEN_DECISION,
         limit=decision_limit,
-    ) or _build_open_decisions(continuity_list, limit=decision_limit)
+    )
     live_system_state = _operating_record_lines(
         operating_list,
         record_type=OPERATING_RECORD_LIVE_SYSTEM_STATE,
@@ -371,7 +395,14 @@ def build_operating_context_snapshot(
         limit=4,
     )
     proactive_guidance = ""
-    if live_system_state or active_work_summary or recent_work_summary or open_decisions or current_commitments or next_steps:
+    if (
+        active_work_summary
+        or recent_work_summary
+        or open_decisions
+        or current_commitments
+        or next_steps
+        or runtime_handoff_tasks
+    ):
         proactive_guidance = (
             "If the user re-engages vaguely, resume the active work or open decisions below before falling back to generic small talk. "
             "Do not invent reminders or scheduling state that is not grounded in the committed records."
@@ -474,15 +505,6 @@ def render_operating_context_section(
 
     content_added = False
 
-    if live_system_state:
-        live_state_lines = ["", "Current live system state:"]
-        for item in live_system_state:
-            live_state_lines.append(f"- {_trim(item, 180)}")
-        live_state_lines.append(
-            "- Only the live runtime state listed here is authoritative for currently active autonomous mechanisms."
-        )
-        content_added = _append_block(lines, live_state_lines, char_budget=char_budget) or content_added
-
     if active_work_summary:
         content_added = _append_block(
             lines,
@@ -522,6 +544,18 @@ def render_operating_context_section(
         for next_step in next_steps:
             next_step_lines.append(f"- {_trim(next_step, 180)}")
         content_added = _append_block(lines, next_step_lines, char_budget=char_budget) or content_added
+
+    if live_system_state:
+        live_state_lines = ["", "Supporting live runtime state (not workstream truth):"]
+        for item in live_system_state:
+            live_state_lines.append(f"- {_trim(item, 180)}")
+        live_state_lines.append(
+            "- This section is only authoritative for runtime mechanisms such as scheduler/pulse health."
+        )
+        live_state_lines.append(
+            "- Do not use this section to answer current user project status or the agent's assigned workstream."
+        )
+        content_added = _append_block(lines, live_state_lines, char_budget=char_budget) or content_added
 
     if bool(runtime_approval_policy.get("present")):
         policy_lines = ["", "Runtime approval policy:"]

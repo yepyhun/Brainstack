@@ -40,6 +40,7 @@ def test_procedure_memory_is_recallable_operating_evidence_not_execution_tool(tm
                     "authority_class": "operating",
                     "metadata": {"semantic_terms": ["phase boundary procedure"]},
                 },
+                trusted_write_origin="test_operator",
             )
         )
         assert receipt["status"] == "committed"
@@ -76,6 +77,7 @@ def test_session_state_respects_temporal_expiry_in_keyword_and_semantic_recall(t
                         "semantic_terms": ["obsolete temporary handoff"],
                     },
                 },
+                trusted_write_origin="test_operator",
             )
         )
         active = json.loads(
@@ -93,6 +95,7 @@ def test_session_state_respects_temporal_expiry_in_keyword_and_semantic_recall(t
                         "semantic_terms": ["current phase handoff"],
                     },
                 },
+                trusted_write_origin="test_operator",
             )
         )
         assert expired["status"] == "committed"

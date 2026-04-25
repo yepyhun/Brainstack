@@ -4,6 +4,7 @@ import re
 from typing import Any, Dict, List
 
 ROLE_PREFIX_RE = re.compile(r"^\s*(user|assistant|system|tool)\s*:\s*", re.IGNORECASE)
+INLINE_ROLE_PREFIX_RE = re.compile(r"(^|\s+\|\s*)(user|assistant|system|tool)\s*:\s*", re.IGNORECASE)
 
 
 def normalize_multiline_text(value: Any) -> str:
@@ -62,6 +63,17 @@ def split_turn_content(content: Any) -> Dict[str, str]:
     for raw_line in str(content or "").splitlines():
         cleaned = " ".join(raw_line.split())
         if not cleaned:
+            continue
+        inline_matches = list(INLINE_ROLE_PREFIX_RE.finditer(cleaned))
+        if inline_matches:
+            for index, match in enumerate(inline_matches):
+                role = match.group(2).casefold()
+                start = match.end()
+                end = inline_matches[index + 1].start() if index + 1 < len(inline_matches) else len(cleaned)
+                body = cleaned[start:end].strip(" |")
+                current = role
+                if body:
+                    parts[role].append(body)
             continue
         matched_role = None
         for role in ("user", "assistant", "system", "tool"):

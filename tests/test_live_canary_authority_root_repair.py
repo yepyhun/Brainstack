@@ -1,0 +1,454 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from brainstack import BrainstackMemoryProvider
+from brainstack.db import BrainstackStore
+from brainstack.diagnostics import build_query_inspect
+from brainstack.operating_context import build_operating_context_snapshot, render_operating_context_section
+from brainstack.operating_truth import (
+    OPERATING_RECORD_ACTIVE_WORK,
+    OPERATING_RECORD_LIVE_SYSTEM_STATE,
+    OPERATING_RECORD_OPEN_DECISION,
+    OPERATING_RECORD_RECENT_WORK_SUMMARY,
+)
+
+
+PRINCIPAL_SCOPE = "platform:test|user_id:user|agent_identity:agent-smoke|agent_workspace:workspace"
+
+
+def _provider(tmp_path: Path) -> BrainstackMemoryProvider:
+    provider = BrainstackMemoryProvider(
+        {
+            "db_path": str(tmp_path / "brainstack.sqlite3"),
+            "graph_backend": "sqlite",
+            "corpus_backend": "sqlite",
+        }
+    )
+    provider.initialize(
+        "live-canary-session",
+        platform="test",
+        user_id="user",
+        agent_identity="agent-smoke",
+        agent_workspace="workspace",
+    )
+    assert provider._store is not None
+    return provider
+
+
+def _open_store(tmp_path: Path) -> BrainstackStore:
+    store = BrainstackStore(str(tmp_path / "brainstack.sqlite3"), graph_backend="sqlite", corpus_backend="sqlite")
+    store.open()
+    return store
+
+
+def test_workstream_recap_model_tool_rejects_operator_role_but_trusted_host_can_write(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        schemas = {schema["name"]: schema for schema in provider.get_tool_schemas()}
+        recap_schema = schemas["brainstack_workstream_recap"]["parameters"]["properties"]["source_role"]
+        assert recap_schema["enum"] == ["user"]
+
+        rejected = json.loads(
+            provider.handle_tool_call(
+                "brainstack_workstream_recap",
+                {
+                    "workstream_id": "zero-human-research",
+                    "summary": "Zero-human research is the agent assignment.",
+                    "source_role": "operator",
+                    "owner_role": "agent_assignment",
+                    "source_kind": "explicit_operating_truth",
+                },
+            )
+        )
+        assert rejected["status"] == "rejected"
+        assert {error["code"] for error in rejected["errors"]} == {"untrusted_operator_source_role"}
+
+        committed = json.loads(
+            provider.handle_tool_call(
+                "brainstack_workstream_recap",
+                {
+                    "workstream_id": "zero-human-research",
+                    "summary": "Zero-human research is the agent assignment.",
+                    "source_role": "operator",
+                    "owner_role": "agent_assignment",
+                    "source_kind": "explicit_operating_truth",
+                },
+                trusted_write_origin="test_operator",
+            )
+        )
+        assert committed["status"] == "committed"
+        assert committed["write_invoker"] == "trusted_host"
+        assert committed["trusted_write_origin"] == "test_operator"
+    finally:
+        provider.shutdown()
+
+
+def test_tier2_background_operating_records_are_supporting_not_canonical(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        metadata = {"principal_scope_key": PRINCIPAL_SCOPE}
+        store.upsert_operating_record(
+            stable_key="operating:tier2:background-recent",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            record_type=OPERATING_RECORD_RECENT_WORK_SUMMARY,
+            content="Brainstack development and zero-human assignment are mixed background recap.",
+            owner="brainstack.tier2",
+            source="tier2:idle_window",
+            metadata={**metadata, "batch_reason": "idle_window"},
+        )
+        store.upsert_operating_record(
+            stable_key="operating:tier2:background-decision",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            record_type=OPERATING_RECORD_OPEN_DECISION,
+            content="Maybe Brainstack development is the agent assignment.",
+            owner="brainstack.tier2",
+            source="tier2:batch",
+            metadata=metadata,
+        )
+
+        report = build_query_inspect(
+            store,
+            query="Brainstack development zero-human assignment",
+            session_id="live-canary-session",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            operating_match_limit=6,
+            evidence_item_budget=12,
+        )
+
+        selected_operating_keys = {
+            str(item["evidence_key"]).removeprefix("operating:")
+            for item in report["selected_evidence"]["operating"]
+        }
+        assert "operating:tier2:background-recent" not in selected_operating_keys
+        assert "operating:tier2:background-decision" not in selected_operating_keys
+        suppressed = report["suppressed_evidence"]
+        assert any(
+            item["suppression_reason"].startswith("background_recent_work_summary:")
+            and item["supporting_evidence_only"] is True
+            for item in suppressed
+        )
+        assert any(
+            item["suppression_reason"].startswith("background_open_decision:")
+            and item["supporting_evidence_only"] is True
+            for item in suppressed
+        )
+    finally:
+        store.close()
+
+
+def test_scoped_assignment_beats_runtime_state_and_keeps_project_status_separate(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        assert provider._store is not None
+        provider._store.upsert_operating_record(
+            stable_key="operating:runtime:pulse",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            record_type=OPERATING_RECORD_LIVE_SYSTEM_STATE,
+            content="Brainstack Proactive Pulse cron is running for runtime maintenance.",
+            owner="brainstack.live_system_state",
+            source="runtime_handoff:pulse",
+            metadata={
+                "principal_scope_key": PRINCIPAL_SCOPE,
+                "owner_role": "runtime_system",
+                "source_kind": "runtime_handoff",
+            },
+        )
+        agent_assignment = json.loads(
+            provider.handle_tool_call(
+                "brainstack_workstream_recap",
+                {
+                    "workstream_id": "zero-human-research",
+                    "summary": "Zero-human research is the agent assigned workstream.",
+                    "source_role": "user",
+                    "owner_role": "agent_assignment",
+                    "source_kind": "explicit_operating_truth",
+                },
+            )
+        )
+        project_status = json.loads(
+            provider.handle_tool_call(
+                "brainstack_workstream_recap",
+                {
+                    "workstream_id": "brainstack-development",
+                    "summary": "Brainstack development status belongs to the user project.",
+                    "source_role": "user",
+                    "owner_role": "user_project",
+                    "source_kind": "explicit_operating_truth",
+                },
+            )
+        )
+        assert agent_assignment["status"] == "committed"
+        assert project_status["status"] == "committed"
+
+        assignment_report = build_query_inspect(
+            provider._store,
+            query="aktuális agent assigned workstream zero-human Brainstack pulse",
+            session_id="live-canary-session",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            operating_match_limit=6,
+            evidence_item_budget=12,
+        )
+        selected_operating = assignment_report["selected_evidence"]["operating"]
+        assert any(
+            item["workstream_id"] == "zero-human-research" and item["owner_role"] == "agent_assignment"
+            for item in selected_operating
+        )
+        assert not any(item["runtime_state_only"] for item in selected_operating)
+        assert any(item["runtime_state_only"] for item in assignment_report["suppressed_evidence"])
+
+        project_report = build_query_inspect(
+            provider._store,
+            query="Brainstack development project status user project",
+            session_id="live-canary-session",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            operating_match_limit=6,
+            evidence_item_budget=12,
+        )
+        assert any(
+            item["workstream_id"] == "brainstack-development" and item["owner_role"] == "user_project"
+            for item in project_report["selected_evidence"]["operating"]
+        )
+    finally:
+        provider.shutdown()
+
+
+def test_operating_context_snapshot_excludes_background_from_current_work_blocks(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        metadata = {"principal_scope_key": PRINCIPAL_SCOPE}
+        store.upsert_operating_record(
+            stable_key="operating:tier2:background-recent",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            record_type=OPERATING_RECORD_RECENT_WORK_SUMMARY,
+            content="Background summary must not become current work.",
+            owner="brainstack.tier2",
+            source="tier2:idle_window",
+            metadata={**metadata, "batch_reason": "idle_window"},
+        )
+        store.upsert_operating_record(
+            stable_key="operating:tier2:background-decision",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            record_type=OPERATING_RECORD_OPEN_DECISION,
+            content="Background decision must not become an open decision.",
+            owner="brainstack.tier2",
+            source="tier2:batch",
+            metadata=metadata,
+        )
+        store.upsert_operating_record(
+            stable_key="operating:runtime:pulse",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            record_type=OPERATING_RECORD_LIVE_SYSTEM_STATE,
+            content="Brainstack pulse runtime is healthy.",
+            owner="brainstack.live_system_state",
+            source="runtime_handoff:pulse",
+            metadata={**metadata, "owner_role": "runtime_system", "source_kind": "runtime_handoff"},
+        )
+        rows = store.list_operating_records(principal_scope_key=PRINCIPAL_SCOPE, limit=8)
+        snapshot = build_operating_context_snapshot(
+            principal_scope_key=PRINCIPAL_SCOPE,
+            compiled_behavior_policy_record=None,
+            profile_items=[],
+            operating_rows=rows,
+            task_rows=[],
+            continuity_rows=[],
+            lifecycle_state=None,
+        )
+        rendered = render_operating_context_section(snapshot, char_budget=1400)
+
+        assert snapshot["recent_work_summary"] == ""
+        assert snapshot["open_decisions"] == []
+        assert "Brainstack pulse runtime is healthy." in snapshot["live_system_state"]
+        assert "Supporting live runtime state (not workstream truth)" in rendered
+        assert "Do not use this section to answer current user project status" in rendered
+        assert "Proactive continuity rule" not in rendered
+        assert "Background summary must not become current work" not in rendered
+        assert "Background decision must not become an open decision" not in rendered
+    finally:
+        store.close()
+
+
+def test_session_end_consolidation_open_decisions_are_supporting_not_authority(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        metadata = {"principal_scope_key": PRINCIPAL_SCOPE}
+        store.upsert_operating_record(
+            stable_key="operating:session-end:open-decision",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            record_type=OPERATING_RECORD_OPEN_DECISION,
+            content="Treat Kimi K2.6 availability as a memory-managed state.",
+            owner="brainstack.session_consolidation",
+            source="on_session_end:recent_work_consolidation",
+            metadata=metadata,
+        )
+        rows = store.list_operating_records(principal_scope_key=PRINCIPAL_SCOPE, limit=8)
+        snapshot = build_operating_context_snapshot(
+            principal_scope_key=PRINCIPAL_SCOPE,
+            compiled_behavior_policy_record=None,
+            profile_items=[],
+            operating_rows=rows,
+            task_rows=[],
+            continuity_rows=[],
+            lifecycle_state=None,
+        )
+        rendered = render_operating_context_section(snapshot, char_budget=1400)
+
+        assert snapshot["open_decisions"] == []
+        assert "Treat Kimi K2.6 availability" not in rendered
+        assert "Proactive continuity rule" not in rendered
+    finally:
+        store.close()
+
+
+def test_background_shared_work_profile_does_not_render_as_stable_project_signal(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        snapshot = build_operating_context_snapshot(
+            principal_scope_key=PRINCIPAL_SCOPE,
+            compiled_behavior_policy_record=None,
+            profile_items=[
+                {
+                    "category": "shared_work",
+                    "stable_key": "shared_work:brainstack-development-status",
+                    "content": "Brainstack development status vs zero-human workstream",
+                    "source": "tier2:idle_window",
+                    "metadata": {"source_kind": "tier2_idle_window"},
+                },
+                {
+                    "category": "identity",
+                    "stable_key": "identity:user",
+                    "content": "LauraTom",
+                    "source": "tier2:idle_window",
+                },
+            ],
+            operating_rows=[],
+            task_rows=[],
+            continuity_rows=[],
+            lifecycle_state=None,
+        )
+        rendered = render_operating_context_section(snapshot, char_budget=1400)
+
+        assert snapshot["stable_profile_entries"] == [
+            {"category": "identity", "stable_key": "identity:user", "content": "LauraTom"}
+        ]
+        assert "Brainstack development status vs zero-human workstream" not in rendered
+        assert "[identity] LauraTom" in rendered
+    finally:
+        store.close()
+
+
+def test_sync_turn_continuity_strips_prior_assistant_answer_from_model_packet(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        store.add_continuity_event(
+            session_id="prior-canary",
+            turn_number=1,
+            kind="turn",
+            content=(
+                "user: [LauraTom] Emlékszel, mi a különbség a Brainstack fejlesztési státusz "
+                "és a zero-human workstream között? Most melyik a te aktuális feladatod? | "
+                "assistant: WRONG_ASSISTANT_ASSIGNMENT Brainstack development is active current work."
+            ),
+            source="sync_turn",
+            metadata={"principal_scope_key": PRINCIPAL_SCOPE},
+            created_at="2026-04-25T15:49:00+00:00",
+        )
+
+        report = build_query_inspect(
+            store,
+            query="Emlékszel Brainstack fejlesztési státusz zero-human workstream aktuális feladat",
+            session_id="live-canary-session",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            continuity_recent_limit=0,
+            continuity_match_limit=4,
+            transcript_match_limit=0,
+            graph_limit=0,
+            corpus_limit=0,
+        )
+
+        packet = report["final_packet"]["preview"]
+        assert "WRONG_ASSISTANT_ASSIGNMENT" not in packet
+        assert "Brainstack development is active current work" not in packet
+        assert "Emlékszel, mi a különbség" in packet
+    finally:
+        store.close()
+
+
+def test_operating_context_renders_active_work_before_runtime_state(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        metadata = {"principal_scope_key": PRINCIPAL_SCOPE}
+        store.upsert_operating_record(
+            stable_key="operating:active:zero-human",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            record_type=OPERATING_RECORD_ACTIVE_WORK,
+            content="Zero-human research is the current agent assignment.",
+            owner="brainstack.operating_truth",
+            source="explicit:user",
+            metadata={**metadata, "owner_role": "agent_assignment"},
+        )
+        store.upsert_operating_record(
+            stable_key="operating:runtime:pulse",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            record_type=OPERATING_RECORD_LIVE_SYSTEM_STATE,
+            content="Brainstack pulse runtime is healthy.",
+            owner="brainstack.live_system_state",
+            source="runtime_handoff:pulse",
+            metadata={**metadata, "owner_role": "runtime_system", "source_kind": "runtime_handoff"},
+        )
+
+        rows = store.list_operating_records(principal_scope_key=PRINCIPAL_SCOPE, limit=8)
+        snapshot = build_operating_context_snapshot(
+            principal_scope_key=PRINCIPAL_SCOPE,
+            compiled_behavior_policy_record=None,
+            profile_items=[],
+            operating_rows=rows,
+            task_rows=[],
+            continuity_rows=[],
+            lifecycle_state=None,
+        )
+        rendered = render_operating_context_section(snapshot, char_budget=1600)
+
+        current_index = rendered.index("Current work:")
+        runtime_index = rendered.index("Supporting live runtime state")
+        assert current_index < runtime_index
+        assert "Zero-human research is the current agent assignment." in rendered
+        assert snapshot["proactive_guidance"]
+    finally:
+        store.close()
+
+
+def test_working_memory_labels_runtime_state_as_supporting_not_assignment(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        store.upsert_operating_record(
+            stable_key="operating:runtime:pulse",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            record_type=OPERATING_RECORD_LIVE_SYSTEM_STATE,
+            content="Brainstack pulse runtime is healthy.",
+            owner="brainstack.live_system_state",
+            source="runtime_handoff:pulse",
+            metadata={
+                "principal_scope_key": PRINCIPAL_SCOPE,
+                "owner_role": "runtime_system",
+                "source_kind": "runtime_handoff",
+            },
+        )
+        report = build_query_inspect(
+            store,
+            query="Brainstack pulse runtime health",
+            session_id="live-canary-session",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            operating_match_limit=6,
+            evidence_item_budget=12,
+        )
+        preview = report["final_packet"]["preview"]
+        assert "supporting runtime state (not assigned work)" in preview
+        assert "not active workstream/project status" in preview
+        assert "Supporting-only/runtime state is not active assignment" in preview
+        assert "Only supporting Brainstack runtime/operating evidence matched this lookup" in preview
+        assert "Use the committed Brainstack operating records below as authoritative" not in preview
+        assert "[live system state]" not in preview
+    finally:
+        store.close()

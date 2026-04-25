@@ -23,7 +23,9 @@ from .operating_truth import (
     OPERATING_RECORD_TYPES,
     RECENT_WORK_RECAP_RECORD_TYPES,
     RECENT_WORK_AUTHORITY_CANONICAL,
+    background_operating_suppression_reason,
     is_background_recent_work,
+    is_background_operating_record,
     recent_work_authority_rank,
 )
 from .profile_contract import is_native_explicit_style_item
@@ -160,19 +162,34 @@ def _build_lookup_semantics(
         if str(row.get("record_type") or "").strip() in RECENT_WORK_RECAP_RECORD_TYPES
     ]
     if isinstance(operating_lookup, Mapping):
+        authoritative_rows = [
+            row
+            for row in operating_rows
+            if not bool(row.get("_brainstack_supporting_evidence_only"))
+            and not bool(row.get("_brainstack_runtime_state_only"))
+        ]
+        supporting_rows = [
+            row
+            for row in operating_rows
+            if bool(row.get("_brainstack_supporting_evidence_only")) or bool(row.get("_brainstack_runtime_state_only"))
+        ]
         return {
             "active": True,
             "domain": "operating_truth",
             "structured_owner_status": "brainstack.operating_truth",
             "structured_lookup_performed": True,
             "structured_record_count": len(operating_rows),
+            "authoritative_record_count": len(authoritative_rows),
+            "supporting_record_count": len(supporting_rows),
             "record_types": [
                 str(value or "").strip()
                 for value in (operating_lookup.get("record_types") or ())
                 if str(value or "").strip() in OPERATING_RECORD_TYPES
             ],
             "fallback_sources": _selected_fallback_sources(selected),
-            "result_status": "committed_records" if operating_rows else "structured_miss",
+            "result_status": "committed_records" if authoritative_rows else "supporting_records_only"
+            if supporting_rows
+            else "structured_miss",
         }
     if recent_work_rows:
         return {
@@ -304,6 +321,8 @@ def _candidate_priority_bonus(candidate: EvidenceCandidate) -> float:
 
 def _operating_record_type_bonus(row: Mapping[str, Any]) -> float:
     record_type = str(row.get("record_type") or "").strip()
+    if is_background_operating_record(dict(row)):
+        return -0.12
     if record_type == "recent_work_summary":
         authority_rank = recent_work_authority_rank(dict(row))
         if authority_rank <= 20:
@@ -314,7 +333,7 @@ def _operating_record_type_bonus(row: Mapping[str, Any]) -> float:
     if record_type in RECENT_WORK_RECAP_RECORD_TYPES:
         return 0.12
     if record_type == "live_system_state":
-        return 0.02
+        return -0.02
     return 0.05
 
 
@@ -1124,6 +1143,13 @@ def _profile_keyword_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dic
 
 def _operating_channel_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
     deduped = _dedupe_rows(rows)
+    for row in deduped:
+        if is_background_operating_record(row):
+            row["_brainstack_suppression_reason"] = background_operating_suppression_reason(row)
+            row["_brainstack_supporting_evidence_only"] = True
+        if str(row.get("record_type") or "").strip() == OPERATING_RECORD_LIVE_SYSTEM_STATE:
+            row["_brainstack_supporting_evidence_only"] = True
+            row["_brainstack_runtime_state_only"] = True
     has_authoritative_recent_work = any(
         str(row.get("record_type") or "").strip() == "recent_work_summary"
         and not is_background_recent_work(row)
@@ -1171,9 +1197,10 @@ def _graph_fact_class(row: Dict[str, Any]) -> str:
     if row_type == "relation":
         return "explicit_relation"
     if row_type == "state":
-        if row.get("is_current") and record_is_effective_at(row):
+        temporal_status = record_temporal_status(row)
+        if row.get("is_current") and temporal_status == "current" and record_is_effective_at(row):
             return "explicit_state_current"
-        if row.get("is_current") and record_temporal_status(row) == "expired":
+        if row.get("is_current") and temporal_status == "expired":
             return "explicit_state_expired"
         return "explicit_state_prior"
     return row_type or "graph"
@@ -1353,6 +1380,16 @@ def _select_rows(
             candidate.row["_brainstack_suppression_reason"] = str(
                 candidate.row.get("_brainstack_workstream_recap_reason")
                 or "supporting_only_unscoped_workstream_recap_evidence"
+            )
+            continue
+        if (
+            has_scoped_recap_anchor
+            and candidate.shelf == "operating"
+            and bool(candidate.row.get("_brainstack_runtime_state_only"))
+        ):
+            candidate.row["_brainstack_suppression_reason"] = (
+                "runtime_state_only: scheduler/live-state evidence is supporting context, "
+                "not assignment truth when scoped workstream authority is present"
             )
             continue
         if str(candidate.row.get("_brainstack_suppression_reason") or ""):
@@ -2116,9 +2153,15 @@ def retrieve_executive_context(
                 "same_session": bool(candidate.row.get("same_session")),
                 "recap_surface": bool(candidate.row.get("_brainstack_recap_surface")),
                 "supporting_evidence_only": bool(candidate.row.get("_brainstack_supporting_evidence_only")),
+                "runtime_state_only": bool(candidate.row.get("_brainstack_runtime_state_only")),
                 "workstream_recap_reason": str(candidate.row.get("_brainstack_workstream_recap_reason") or ""),
                 "operating_authority_level": str(
                     (candidate.row.get("metadata") or {}).get("authority_level")
+                    if isinstance(candidate.row.get("metadata"), dict)
+                    else ""
+                ),
+                "operating_owner_role": str(
+                    (candidate.row.get("metadata") or {}).get("owner_role")
                     if isinstance(candidate.row.get("metadata"), dict)
                     else ""
                 ),

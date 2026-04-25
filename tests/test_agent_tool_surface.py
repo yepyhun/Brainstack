@@ -74,7 +74,12 @@ def test_brainstack_recall_tool_returns_evidence_without_mutating_profile(tmp_pa
         assert payload["schema"] == "brainstack.tool_recall.v1"
         assert payload["read_only"] is True
         assert payload["evidence_count"] >= 1
+        assert payload["diagnostic_detail_tool"] == "brainstack_inspect"
         assert payload["selected_evidence"]["profile"]
+        assert "suppressed_evidence" not in payload
+        assert "retrieval_candidates" not in payload
+        assert "global_allocator_shadow" not in payload
+        assert len(json.dumps(payload, ensure_ascii=False)) < 7000
         assert "ExampleUser" in payload["final_packet"]["preview"]
     finally:
         provider.shutdown()

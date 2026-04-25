@@ -87,7 +87,15 @@ from .style_contract import (
     style_contract_source_rank,
 )
 from .task_memory import STATUS_OPEN
-from .temporal import merge_temporal, normalize_temporal_fields, record_is_effective_at, record_temporal_status
+from .temporal import (
+    infer_relative_duration_valid_to,
+    is_background_relative_duration_source,
+    is_unbounded_background_volatile_state,
+    merge_temporal,
+    normalize_temporal_fields,
+    record_is_effective_at,
+    record_temporal_status,
+)
 from .usefulness import (
     apply_retrieval_telemetry,
     graph_priority_adjustment,
@@ -630,9 +638,10 @@ def _graph_fact_class(row: Dict[str, Any]) -> str:
     if row_type == "relation":
         return "explicit_relation"
     if row_type == "state":
-        if row.get("is_current") and record_is_effective_at(row):
+        temporal_status = record_temporal_status(row)
+        if row.get("is_current") and temporal_status == "current" and record_is_effective_at(row):
             return "explicit_state_current"
-        if row.get("is_current") and record_temporal_status(row) == "expired":
+        if row.get("is_current") and temporal_status == "expired":
             return "explicit_state_expired"
         return "explicit_state_prior"
     return row_type or "graph"
@@ -5856,6 +5865,55 @@ class BrainstackStore:
         )
         if temporal:
             normalized_metadata["temporal"] = temporal
+        inferred_valid_to = infer_relative_duration_valid_to(
+            value_text=value_text,
+            temporal=temporal,
+            metadata=normalized_metadata,
+            attribute=attribute,
+        )
+        if inferred_valid_to and not normalized_metadata.get("temporal", {}).get("valid_to"):
+            if is_background_relative_duration_source(
+                {
+                    "source": source,
+                    "metadata": normalized_metadata,
+                    "attribute": attribute,
+                    "value_text": value_text,
+                }
+            ):
+                inferred_valid_to = str(temporal.get("valid_from") or temporal.get("observed_at") or now)
+            temporal = merge_temporal(temporal, {"valid_to": inferred_valid_to})
+            normalized_metadata["temporal"] = temporal
+            normalized_metadata["relative_duration_validity"] = {
+                "schema": "brainstack.relative_duration_validity.v1",
+                "derived_valid_to": inferred_valid_to,
+                "grammar": "numeric_duration_remaining",
+                "current_authority": "disabled_for_background_relative_duration"
+                if is_background_relative_duration_source(
+                    {
+                        "source": source,
+                        "metadata": normalized_metadata,
+                        "attribute": attribute,
+                        "value_text": value_text,
+                    }
+                )
+                else "valid_until_derived_window",
+            }
+        if not normalized_metadata.get("temporal", {}).get("valid_to") and is_unbounded_background_volatile_state(
+            {
+                "source": source,
+                "metadata": normalized_metadata,
+                "attribute": attribute,
+                "value_text": value_text,
+            }
+        ):
+            disabled_valid_to = str(temporal.get("valid_from") or temporal.get("observed_at") or now)
+            temporal = merge_temporal(temporal, {"valid_to": disabled_valid_to})
+            normalized_metadata["temporal"] = temporal
+            normalized_metadata["background_current_authority"] = {
+                "schema": "brainstack.background_current_authority.v1",
+                "current_authority": "disabled_for_unbounded_volatile_background_state",
+                "reason": "tier2_or_idle_window_source_without_explicit_valid_to",
+            }
         valid_from = str(normalized_metadata.get("temporal", {}).get("valid_from") or now)
         valid_to = str(normalized_metadata.get("temporal", {}).get("valid_to") or "")
         current = self.conn.execute(

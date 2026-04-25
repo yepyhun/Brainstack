@@ -123,7 +123,7 @@ def _seed_operating(store: BrainstackStore) -> None:
     store.upsert_operating_record(
         stable_key="operating:phase66:active-work",
         principal_scope_key=PRINCIPAL_SCOPE,
-        record_type="recent_work_summary",
+        record_type="active_work",
         content="Active Brainstack work is Phase 66 golden recall eval harness.",
         owner="brainstack.operating_truth",
         source=FIXTURE_SOURCE,

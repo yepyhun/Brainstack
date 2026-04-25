@@ -513,6 +513,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             failed["status"] = "failed"
             failed["error"] = str(exc)
             self._last_write_receipt = failed
+            self._set_memory_operation_trace(surface="explicit_write_failed", note=str(exc))
             raise
         finally:
             self._pending_explicit_write_count = max(0, self._pending_explicit_write_count - 1)
@@ -1415,7 +1416,15 @@ class BrainstackMemoryProvider(MemoryProvider):
             ),
         )
 
+    @staticmethod
+    def _trusted_operator_write_origin(kwargs: Mapping[str, Any]) -> str:
+        origin = _normalize_compact_text(kwargs.get("trusted_write_origin"))
+        if origin in {"host_operator", "manual_migration", "brainstack_internal", "test_operator"}:
+            return origin
+        return ""
+
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+        trusted_operator_origin = self._trusted_operator_write_origin(kwargs)
         if tool_name == "brainstack_recall":
             return json.dumps(self._handle_brainstack_recall(args), ensure_ascii=False)
         if tool_name == "brainstack_inspect":
@@ -1423,11 +1432,31 @@ class BrainstackMemoryProvider(MemoryProvider):
         if tool_name == "brainstack_stats":
             return json.dumps(self._handle_brainstack_stats(args), ensure_ascii=False)
         if tool_name == "brainstack_remember":
-            return json.dumps(self._handle_brainstack_explicit_capture("remember", args), ensure_ascii=False)
+            return json.dumps(
+                self._handle_brainstack_explicit_capture(
+                    "remember",
+                    args,
+                    trusted_operator_origin=trusted_operator_origin,
+                ),
+                ensure_ascii=False,
+            )
         if tool_name == "brainstack_supersede":
-            return json.dumps(self._handle_brainstack_explicit_capture("supersede", args), ensure_ascii=False)
+            return json.dumps(
+                self._handle_brainstack_explicit_capture(
+                    "supersede",
+                    args,
+                    trusted_operator_origin=trusted_operator_origin,
+                ),
+                ensure_ascii=False,
+            )
         if tool_name == "brainstack_workstream_recap":
-            return json.dumps(self._handle_brainstack_workstream_recap(args), ensure_ascii=False)
+            return json.dumps(
+                self._handle_brainstack_workstream_recap(
+                    args,
+                    trusted_operator_origin=trusted_operator_origin,
+                ),
+                ensure_ascii=False,
+            )
         if tool_name == "brainstack_consolidate":
             return json.dumps(self._handle_brainstack_consolidate(args), ensure_ascii=False)
         if tool_name == "runtime_handoff_update":
@@ -1453,7 +1482,12 @@ class BrainstackMemoryProvider(MemoryProvider):
             ensure_ascii=False,
         )
 
-    def _handle_brainstack_workstream_recap(self, args: Mapping[str, Any]) -> Dict[str, Any]:
+    def _handle_brainstack_workstream_recap(
+        self,
+        args: Mapping[str, Any],
+        *,
+        trusted_operator_origin: str = "",
+    ) -> Dict[str, Any]:
         tool_name = "brainstack_workstream_recap"
         if self._store is None:
             return {
@@ -1488,6 +1522,13 @@ class BrainstackMemoryProvider(MemoryProvider):
             errors.append({"code": "missing_summary", "message": "summary is required."})
         if source_role not in {"user", "operator"}:
             errors.append({"code": "invalid_source_role", "message": "source_role must be user or operator."})
+        elif source_role == "operator" and not trusted_operator_origin:
+            errors.append(
+                {
+                    "code": "untrusted_operator_source_role",
+                    "message": "operator source_role requires a trusted non-model write path.",
+                }
+            )
         if owner_role not in {RECENT_WORK_OWNER_USER_PROJECT, RECENT_WORK_OWNER_AGENT_ASSIGNMENT}:
             errors.append({"code": "invalid_owner_role", "message": "owner_role must be user_project or agent_assignment."})
         if source_kind not in {RECENT_WORK_SOURCE_EXPLICIT, RECENT_WORK_SOURCE_MANUAL_MIGRATION}:
@@ -1527,6 +1568,8 @@ class BrainstackMemoryProvider(MemoryProvider):
                 "source_kind": source_kind,
                 "authority_level": RECENT_WORK_AUTHORITY_CANONICAL,
                 "source_role": source_role,
+                "write_invoker": "trusted_host" if trusted_operator_origin else "model_tool",
+                "trusted_write_origin": trusted_operator_origin,
                 "workstream_recap_capture_schema": "brainstack.workstream_recap_capture.v1",
             }
         )
@@ -1567,13 +1610,21 @@ class BrainstackMemoryProvider(MemoryProvider):
                 "owner_role": str(metadata.get("owner_role") or ""),
                 "source_kind": str(metadata.get("source_kind") or ""),
                 "authority_level": str(metadata.get("authority_level") or ""),
+                "write_invoker": "trusted_host" if trusted_operator_origin else "model_tool",
+                "trusted_write_origin": trusted_operator_origin,
                 "content_excerpt": receipt_excerpt(summary),
             },
         )
         receipt["read_only"] = False
         return receipt
 
-    def _handle_brainstack_explicit_capture(self, operation: str, args: Mapping[str, Any]) -> Dict[str, Any]:
+    def _handle_brainstack_explicit_capture(
+        self,
+        operation: str,
+        args: Mapping[str, Any],
+        *,
+        trusted_operator_origin: str = "",
+    ) -> Dict[str, Any]:
         tool_name = f"brainstack_{operation}"
         if self._store is None:
             return {
@@ -1590,6 +1641,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             principal_scope_key=self._principal_scope_key,
             session_id=self._session_id,
             turn_number=self._turn_counter,
+            allow_operator_source_role=bool(trusted_operator_origin),
         )
         if rejection is not None:
             self._last_write_receipt = dict(rejection)
@@ -1600,7 +1652,10 @@ class BrainstackMemoryProvider(MemoryProvider):
             return rejection
         assert capture is not None
 
-        metadata = self._scoped_metadata(build_commit_metadata(capture))
+        raw_commit_metadata = build_commit_metadata(capture)
+        raw_commit_metadata["write_invoker"] = "trusted_host" if trusted_operator_origin else "model_tool"
+        raw_commit_metadata["trusted_write_origin"] = trusted_operator_origin
+        metadata = self._scoped_metadata(raw_commit_metadata)
         shelf = str(capture.get("shelf") or "")
         stable_key = str(capture.get("stable_key") or "")
         source = f"{tool_name}:{shelf}"
@@ -1662,6 +1717,8 @@ class BrainstackMemoryProvider(MemoryProvider):
                 "operation": operation,
                 "shelf": shelf,
                 "source_role": str(capture.get("source_role") or ""),
+                "write_invoker": "trusted_host" if trusted_operator_origin else "model_tool",
+                "trusted_write_origin": trusted_operator_origin,
                 "authority_class": str(capture.get("authority_class") or ""),
                 "content_excerpt": receipt_excerpt(content),
                 "supersedes_stable_key": str(capture.get("supersedes_stable_key") or ""),

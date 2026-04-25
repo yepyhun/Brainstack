@@ -10,6 +10,60 @@ def _normalize_compact_text(value: Any) -> str:
     return " ".join(str(value or "").split())
 
 
+def _trim_compact_text(value: Any, *, limit: int = 180) -> str:
+    text = _normalize_compact_text(value)
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _compact_channel_cards(channels: list[Any], *, limit: int = 8) -> list[dict[str, Any]]:
+    cards: list[dict[str, Any]] = []
+    for raw in channels[: max(0, limit)]:
+        if not isinstance(raw, Mapping):
+            continue
+        cards.append(
+            {
+                "name": _normalize_compact_text(raw.get("name")),
+                "status": _normalize_compact_text(raw.get("status")),
+                "candidate_count": int(raw.get("candidate_count") or 0),
+                "reason": _trim_compact_text(raw.get("reason"), limit=120),
+            }
+        )
+    return cards
+
+
+def _compact_evidence_card(item: Mapping[str, Any]) -> dict[str, Any]:
+    """Return model-facing recall evidence, not inspect-grade diagnostics."""
+    return {
+        "evidence_key": _normalize_compact_text(item.get("evidence_key")),
+        "shelf": _normalize_compact_text(item.get("shelf")),
+        "row_type": _normalize_compact_text(item.get("row_type") or item.get("record_type")),
+        "stable_key": _trim_compact_text(item.get("stable_key"), limit=120),
+        "source": _trim_compact_text(item.get("source"), limit=100),
+        "authority_level": _normalize_compact_text(item.get("authority_level")),
+        "owner_role": _normalize_compact_text(item.get("owner_role")),
+        "workstream_id": _normalize_compact_text(item.get("workstream_id")),
+        "runtime_state_only": bool(item.get("runtime_state_only")),
+        "supporting_evidence_only": bool(item.get("supporting_evidence_only")),
+        "citation_id": _normalize_compact_text(item.get("citation_id")),
+        "created_at": _normalize_compact_text(item.get("created_at")),
+        "excerpt": _trim_compact_text(item.get("excerpt"), limit=180),
+    }
+
+
+def _compact_selected_evidence(selected: Mapping[str, Any], *, per_shelf_limit: int = 3) -> dict[str, list[dict[str, Any]]]:
+    compact: dict[str, list[dict[str, Any]]] = {}
+    for shelf, raw_rows in selected.items():
+        rows = raw_rows if isinstance(raw_rows, list) else []
+        compact[str(shelf)] = [
+            _compact_evidence_card(row)
+            for row in rows[: max(0, per_shelf_limit)]
+            if isinstance(row, Mapping)
+        ]
+    return compact
+
+
 def build_provider_lifecycle_status(
     *,
     store: Any,
@@ -187,6 +241,7 @@ def handle_brainstack_recall(
     evidence_count = sum(len(rows or []) for rows in selected.values()) if isinstance(selected, Mapping) else 0
     raw_packet = report.get("final_packet")
     packet: Mapping[str, Any] = raw_packet if isinstance(raw_packet, Mapping) else {}
+    compact_selected = _compact_selected_evidence(selected)
     return {
         "schema": "brainstack.tool_recall.v1",
         "tool_name": "brainstack_recall",
@@ -194,13 +249,15 @@ def handle_brainstack_recall(
         "principal_scope_key": principal_scope_key,
         "query": query,
         "routing": dict(report.get("routing") or {}),
-        "channels": list(report.get("channels") or []),
-        "selected_evidence": dict(selected),
+        "channels": _compact_channel_cards(list(report.get("channels") or [])),
+        "selected_evidence": compact_selected,
         "evidence_count": evidence_count,
+        "evidence_card_count": sum(len(rows) for rows in compact_selected.values()),
+        "diagnostic_detail_tool": "brainstack_inspect",
         "final_packet": {
             "sections": list(packet.get("sections") or []),
             "char_count": int(packet.get("char_count") or 0),
-            "preview": str(packet.get("preview") or ""),
+            "preview": _trim_compact_text(packet.get("preview"), limit=1200),
         },
     }
 

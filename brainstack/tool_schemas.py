@@ -117,7 +117,7 @@ def workstream_recap_tool_schema(
             "properties": {
                 "workstream_id": {"type": "string"},
                 "summary": {"type": "string"},
-                "source_role": {"type": "string", "enum": ["user", "operator"]},
+                "source_role": {"type": "string", "enum": ["user"]},
                 "owner_role": {
                     "type": "string",
                     "enum": [owner_user_project, owner_agent_assignment],
@@ -139,7 +139,7 @@ def explicit_capture_tool_schema(*, name: str, operation: str, capture_schema_ve
     properties: Dict[str, Any] = {
         "shelf": {"type": "string", "enum": ["profile", "operating", "task"]},
         "stable_key": {"type": "string"},
-        "source_role": {"type": "string", "enum": ["user", "operator"]},
+        "source_role": {"type": "string", "enum": ["user"]},
         "authority_class": {"type": "string"},
         "content": {"type": "string"},
         "category": {"type": "string"},

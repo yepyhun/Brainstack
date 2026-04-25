@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from brainstack import BrainstackMemoryProvider
 from brainstack.db import BrainstackStore
 from brainstack.explicit_capture import EXPLICIT_CAPTURE_SCHEMA_VERSION
@@ -157,6 +159,104 @@ def test_explicit_capture_rejects_assistant_authored_or_insufficient_payload(tmp
         provider.shutdown()
 
 
+def test_model_callable_explicit_capture_rejects_operator_source_role(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        remember = json.loads(
+            provider.handle_tool_call(
+                "brainstack_remember",
+                {
+                    "shelf": "operating",
+                    "stable_key": "operating:bad:operator",
+                    "record_type": "canonical_policy",
+                    "content": "Model-callable tool must not mint operator truth.",
+                    "source_role": "operator",
+                    "authority_class": "operating",
+                },
+            )
+        )
+        assert remember["status"] == "rejected"
+        assert remember["write_contract_trace"]["reason_code"] == "untrusted_operator_source_role"
+        assert any(error["code"] == "untrusted_operator_source_role" for error in remember["errors"])
+
+        supersede = json.loads(
+            provider.handle_tool_call(
+                "brainstack_supersede",
+                {
+                    "shelf": "profile",
+                    "stable_key": "preference:bad_operator_supersede",
+                    "category": "preference",
+                    "content": "Model-callable supersede must not mint operator truth.",
+                    "source_role": "operator",
+                    "authority_class": "profile",
+                },
+            )
+        )
+        assert supersede["status"] == "rejected"
+        assert supersede["write_contract_trace"]["reason_code"] == "untrusted_operator_source_role"
+    finally:
+        provider.shutdown()
+
+
+def test_trusted_operator_explicit_capture_is_host_injected_not_model_schema(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        schemas = {schema["name"]: schema for schema in provider.get_tool_schemas()}
+        assert schemas["brainstack_remember"]["parameters"]["properties"]["source_role"]["enum"] == ["user"]
+        assert schemas["brainstack_supersede"]["parameters"]["properties"]["source_role"]["enum"] == ["user"]
+
+        receipt = json.loads(
+            provider.handle_tool_call(
+                "brainstack_remember",
+                {
+                    "shelf": "operating",
+                    "stable_key": "operating:trusted:operator",
+                    "record_type": "canonical_policy",
+                    "content": "Trusted host path may write operator truth.",
+                    "source_role": "operator",
+                    "authority_class": "operating",
+                },
+                trusted_write_origin="test_operator",
+            )
+        )
+        assert receipt["status"] == "committed"
+        assert receipt["write_invoker"] == "trusted_host"
+        assert receipt["trusted_write_origin"] == "test_operator"
+    finally:
+        provider.shutdown()
+
+
+def test_failed_explicit_write_keeps_failed_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider(tmp_path)
+    try:
+        assert provider._store is not None
+
+        def fail_upsert(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("forced profile write failure")
+
+        monkeypatch.setattr(provider._store, "upsert_profile_item", fail_upsert)
+        with pytest.raises(RuntimeError, match="forced profile write failure"):
+            provider.handle_tool_call(
+                "brainstack_remember",
+                {
+                    "shelf": "profile",
+                    "stable_key": "preference:forced_failure",
+                    "category": "preference",
+                    "content": "This write should fail.",
+                    "source_role": "user",
+                    "authority_class": "profile",
+                },
+            )
+
+        assert provider._last_write_receipt is not None
+        assert provider._last_write_receipt["status"] == "failed"
+        assert provider._last_memory_operation_trace is not None
+        assert provider._last_memory_operation_trace["surface"] == "explicit_write_failed"
+        assert provider._pending_explicit_write_count == 0
+    finally:
+        provider.shutdown()
+
+
 def test_explicit_operating_and_task_capture_use_typed_shelf_fields(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     try:
@@ -172,6 +272,7 @@ def test_explicit_operating_and_task_capture_use_typed_shelf_fields(tmp_path: Pa
                     "source_role": "operator",
                     "authority_class": "operating",
                 },
+                trusted_write_origin="test_operator",
             )
         )
         assert operating["status"] == "committed"
@@ -194,6 +295,7 @@ def test_explicit_operating_and_task_capture_use_typed_shelf_fields(tmp_path: Pa
                     "authority_class": "task",
                     "status": "open",
                 },
+                trusted_write_origin="test_operator",
             )
         )
         assert task["status"] == "committed"

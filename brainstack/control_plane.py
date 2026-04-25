@@ -8,16 +8,24 @@ from .executive_retrieval import retrieve_executive_context
 from .local_typed_understanding import analyze_local_query
 from .profile_contract import resolve_direct_identity_profile_slots
 from .retrieval import render_working_memory_block
-from .temporal import record_is_effective_at
+from .temporal import record_is_effective_at, record_temporal_status
 
 
 def _has_current_and_prior_graph_states(graph_rows: list[dict[str, Any]]) -> bool:
     has_current = any(
-        str(row.get("row_type") or "") == "state" and bool(row.get("is_current")) and record_is_effective_at(row)
+        str(row.get("row_type") or "") == "state"
+        and bool(row.get("is_current"))
+        and record_temporal_status(row) == "current"
+        and record_is_effective_at(row)
         for row in graph_rows
     )
     has_prior = any(
-        str(row.get("row_type") or "") == "state" and not (bool(row.get("is_current")) and record_is_effective_at(row))
+        str(row.get("row_type") or "") == "state"
+        and not (
+            bool(row.get("is_current"))
+            and record_temporal_status(row) == "current"
+            and record_is_effective_at(row)
+        )
         for row in graph_rows
     )
     return has_current and has_prior

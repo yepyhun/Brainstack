@@ -109,8 +109,10 @@ def _hindsight_metadata(row: Mapping[str, Any]) -> dict[str, Any]:
         "same_session": bool(row.get("same_session")),
         "same_principal": bool(row.get("same_principal")),
         "workstream_id": _text(row.get("workstream_id")),
+        "owner_role": _text(row.get("owner_role")),
         "recap_surface": bool(row.get("recap_surface")),
         "supporting_evidence_only": bool(row.get("supporting_evidence_only")),
+        "runtime_state_only": bool(row.get("runtime_state_only")),
         "workstream_recap_reason": _text(row.get("workstream_recap_reason")),
     }
     return {key: value for key, value in metadata.items() if value not in ("", False)}

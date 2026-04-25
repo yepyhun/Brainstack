@@ -67,12 +67,14 @@ RECENT_WORK_SOURCE_TIER2_IDLE = "tier2_idle_window"
 RECENT_WORK_SOURCE_TIER2_BATCH = "tier2_batch"
 RECENT_WORK_SOURCE_RUNTIME_HANDOFF = "runtime_handoff"
 RECENT_WORK_SOURCE_MANUAL_MIGRATION = "manual_migration"
+RECENT_WORK_SOURCE_SESSION_CONSOLIDATION = "session_consolidation"
 RECENT_WORK_SOURCE_KINDS = {
     RECENT_WORK_SOURCE_EXPLICIT,
     RECENT_WORK_SOURCE_TIER2_IDLE,
     RECENT_WORK_SOURCE_TIER2_BATCH,
     RECENT_WORK_SOURCE_RUNTIME_HANDOFF,
     RECENT_WORK_SOURCE_MANUAL_MIGRATION,
+    RECENT_WORK_SOURCE_SESSION_CONSOLIDATION,
 }
 
 RECENT_WORK_OWNER_USER_PROJECT = "user_project"
@@ -136,6 +138,8 @@ def recent_work_source_kind(source: Any, metadata: Dict[str, Any] | None = None)
         return RECENT_WORK_SOURCE_TIER2_BATCH
     if source_text.startswith("runtime_handoff"):
         return RECENT_WORK_SOURCE_RUNTIME_HANDOFF
+    if source_text.startswith("on_session_end:recent_work_consolidation"):
+        return RECENT_WORK_SOURCE_SESSION_CONSOLIDATION
     if source_text.startswith("migration:"):
         return RECENT_WORK_SOURCE_MANUAL_MIGRATION
     return RECENT_WORK_SOURCE_EXPLICIT
@@ -160,7 +164,11 @@ def normalize_recent_work_metadata(
     if owner_role not in RECENT_WORK_OWNER_ROLES:
         if source_kind == RECENT_WORK_SOURCE_RUNTIME_HANDOFF:
             owner_role = RECENT_WORK_OWNER_RUNTIME_SYSTEM
-        elif source_kind in {RECENT_WORK_SOURCE_TIER2_IDLE, RECENT_WORK_SOURCE_TIER2_BATCH}:
+        elif source_kind in {
+            RECENT_WORK_SOURCE_TIER2_IDLE,
+            RECENT_WORK_SOURCE_TIER2_BATCH,
+            RECENT_WORK_SOURCE_SESSION_CONSOLIDATION,
+        }:
             owner_role = RECENT_WORK_OWNER_UNKNOWN
         else:
             owner_role = RECENT_WORK_OWNER_USER_PROJECT
@@ -169,7 +177,13 @@ def normalize_recent_work_metadata(
     if authority_level not in RECENT_WORK_AUTHORITY_LEVELS:
         if not workstream_id:
             authority_level = RECENT_WORK_AUTHORITY_BACKGROUND
-        elif source_kind in {RECENT_WORK_SOURCE_TIER2_IDLE, RECENT_WORK_SOURCE_TIER2_BATCH}:
+        elif source_kind == RECENT_WORK_SOURCE_SESSION_CONSOLIDATION:
+            authority_level = RECENT_WORK_AUTHORITY_BACKGROUND
+        elif source_kind in {
+            RECENT_WORK_SOURCE_TIER2_IDLE,
+            RECENT_WORK_SOURCE_TIER2_BATCH,
+            RECENT_WORK_SOURCE_SESSION_CONSOLIDATION,
+        }:
             authority_level = RECENT_WORK_AUTHORITY_SCOPED_SUMMARY
         else:
             authority_level = RECENT_WORK_AUTHORITY_CANONICAL
@@ -226,6 +240,44 @@ def is_background_recent_work(row: Dict[str, Any]) -> bool:
         str(row.get("record_type") or "").strip() == OPERATING_RECORD_RECENT_WORK_SUMMARY
         and recent_work_authority_level(row) == RECENT_WORK_AUTHORITY_BACKGROUND
     )
+
+
+def operating_record_source_kind(row: Dict[str, Any]) -> str:
+    metadata = row.get("metadata")
+    payload = metadata if isinstance(metadata, dict) else {}
+    explicit = _normalize_identifier(payload.get("source_kind")).replace("-", "_")
+    if explicit:
+        return explicit
+    source = _normalize_text(row.get("source")).casefold()
+    if source.startswith("tier2:"):
+        if "idle_window" in source:
+            return RECENT_WORK_SOURCE_TIER2_IDLE
+        return RECENT_WORK_SOURCE_TIER2_BATCH
+    if source.startswith("on_session_end:recent_work_consolidation"):
+        return RECENT_WORK_SOURCE_SESSION_CONSOLIDATION
+    return ""
+
+
+def is_background_operating_record(row: Dict[str, Any]) -> bool:
+    record_type = str(row.get("record_type") or "").strip()
+    if is_background_recent_work(row):
+        return True
+    if record_type == OPERATING_RECORD_OPEN_DECISION:
+        return operating_record_source_kind(row) in {
+            RECENT_WORK_SOURCE_TIER2_IDLE,
+            RECENT_WORK_SOURCE_TIER2_BATCH,
+            RECENT_WORK_SOURCE_SESSION_CONSOLIDATION,
+        }
+    return False
+
+
+def background_operating_suppression_reason(row: Dict[str, Any]) -> str:
+    record_type = str(row.get("record_type") or "").strip()
+    if record_type == OPERATING_RECORD_RECENT_WORK_SUMMARY:
+        return "background_recent_work_summary: supporting evidence only; not canonical operating truth"
+    if record_type == OPERATING_RECORD_OPEN_DECISION:
+        return "background_open_decision: tier2-derived decision is supporting evidence until explicitly promoted"
+    return "background_operating_record: supporting evidence only"
 
 
 def _record_type_label(record_type: str) -> str:
