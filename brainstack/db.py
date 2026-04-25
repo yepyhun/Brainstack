@@ -26,6 +26,22 @@ from .db_row_codecs import (
     operating_row_to_dict as _operating_row_to_dict,
     task_row_to_dict as _task_row_to_dict,
 )
+from .db_migrations import (
+    MIGRATION_BEHAVIOR_CONTRACT_STORAGE_V1,
+    MIGRATION_CANONICAL_COMMUNICATION_ROWS_V1,
+    MIGRATION_COMPILED_BEHAVIOR_POLICY_V1,
+    MIGRATION_COMPILED_BEHAVIOR_POLICY_V2,
+    MIGRATION_EXPLICIT_IDENTITY_BACKFILL_V1,
+    MIGRATION_GRAPH_SOURCE_LINEAGE_V1,
+    MIGRATION_RECENT_WORK_AUTHORITY_V1,
+    MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V1,
+    MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V2,
+    MIGRATION_STYLE_CONTRACT_BEHAVIOR_DEMOTION_V1,
+    MIGRATION_STYLE_CONTRACT_PROFILE_LANE_V1,
+    mark_migration_applied,
+    migration_applied,
+    run_compatibility_migrations,
+)
 from .db_schema import initialize_schema
 from .graph_backend import GraphBackend, create_graph_backend
 from .graph_lineage import attach_graph_source_lineage
@@ -88,17 +104,6 @@ PROFILE_SCOPE_DELIMITER = "::principal_scope::"
 PRINCIPAL_SCOPED_PROFILE_CATEGORIES = {"identity", "preference"}
 VOLATILE_OPERATING_RECORD_TYPES = {"session_state"}
 VOLATILE_OPERATING_MIN_SEMANTIC_SCORE = 0.5
-MIGRATION_CANONICAL_COMMUNICATION_ROWS_V1 = "canonical_communication_rows_v1"
-MIGRATION_EXPLICIT_IDENTITY_BACKFILL_V1 = "explicit_identity_backfill_v1"
-MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V1 = "stable_logistics_typed_entities_v1"
-MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V2 = "stable_logistics_typed_entities_v2"
-MIGRATION_STYLE_CONTRACT_PROFILE_LANE_V1 = "style_contract_profile_lane_v1"
-MIGRATION_BEHAVIOR_CONTRACT_STORAGE_V1 = "behavior_contract_storage_v1"
-MIGRATION_COMPILED_BEHAVIOR_POLICY_V1 = "compiled_behavior_policy_v1"
-MIGRATION_COMPILED_BEHAVIOR_POLICY_V2 = "compiled_behavior_policy_v2"
-MIGRATION_STYLE_CONTRACT_BEHAVIOR_DEMOTION_V1 = "style_contract_behavior_demotion_v1"
-MIGRATION_RECENT_WORK_AUTHORITY_V1 = "recent_work_authority_v1"
-MIGRATION_GRAPH_SOURCE_LINEAGE_V1 = "graph_source_lineage_v1"
 TRANSCRIPT_HYGIENE_MARKERS = (
     "Assistant: Operation interrupted:",
     "Assistant: Session reset.",
@@ -904,48 +909,13 @@ class BrainstackStore:
 
     @_locked
     def _run_compatibility_migrations_if_needed(self) -> None:
-        if not self._migration_applied(MIGRATION_CANONICAL_COMMUNICATION_ROWS_V1):
-            self._apply_canonical_communication_rows_migration_v1()
-        if not self._migration_applied(MIGRATION_EXPLICIT_IDENTITY_BACKFILL_V1):
-            self._apply_explicit_identity_backfill_migration_v1()
-        if not self._migration_applied(MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V1):
-            self._apply_stable_logistics_typed_entities_migration_v1()
-        if not self._migration_applied(MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V2):
-            self._apply_stable_logistics_typed_entities_migration_v2()
-        if not self._migration_applied(MIGRATION_STYLE_CONTRACT_PROFILE_LANE_V1):
-            self._apply_style_contract_profile_lane_migration_v1()
-        if not self._migration_applied(MIGRATION_BEHAVIOR_CONTRACT_STORAGE_V1):
-            self._apply_behavior_contract_storage_migration_v1()
-        if not self._migration_applied(MIGRATION_COMPILED_BEHAVIOR_POLICY_V1):
-            self._apply_compiled_behavior_policy_migration_v1()
-        if not self._migration_applied(MIGRATION_COMPILED_BEHAVIOR_POLICY_V2):
-            self._apply_compiled_behavior_policy_migration_v2()
-        if not self._migration_applied(MIGRATION_STYLE_CONTRACT_BEHAVIOR_DEMOTION_V1):
-            self._apply_style_contract_behavior_demotion_migration_v1()
-        if not self._migration_applied(MIGRATION_RECENT_WORK_AUTHORITY_V1):
-            self._apply_recent_work_authority_migration_v1()
-        if not self._migration_applied(MIGRATION_GRAPH_SOURCE_LINEAGE_V1):
-            self._apply_graph_source_lineage_migration_v1()
+        run_compatibility_migrations(self)
 
     def _migration_applied(self, name: str) -> bool:
-        row = self.conn.execute(
-            "SELECT 1 FROM applied_migrations WHERE name = ? LIMIT 1",
-            (str(name or "").strip(),),
-        ).fetchone()
-        return row is not None
+        return migration_applied(self.conn, name)
 
     def _mark_migration_applied(self, name: str) -> None:
-        migration_name = str(name or "").strip()
-        if not migration_name:
-            return
-        self.conn.execute(
-            """
-            INSERT INTO applied_migrations(name, applied_at)
-            VALUES(?, ?)
-            ON CONFLICT(name) DO UPDATE SET applied_at = excluded.applied_at
-            """,
-            (migration_name, utc_now_iso()),
-        )
+        mark_migration_applied(self.conn, name)
 
     def _apply_graph_source_lineage_migration_v1(self) -> None:
         migrated = 0
