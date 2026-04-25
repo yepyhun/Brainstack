@@ -5,6 +5,8 @@ import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from .corpus_taxonomy import build_corpus_taxonomy_metadata, public_source_uri
+
 
 CORPUS_INGEST_SCHEMA_VERSION = "brainstack.corpus_ingest.v1"
 CORPUS_SOURCE_ADAPTER_CONTRACT_VERSION = "corpus_source_adapter.v1"
@@ -55,11 +57,21 @@ def normalize_corpus_source(payload: Mapping[str, Any]) -> dict[str, Any]:
     stable_key = explicit_stable_key or f"{source_adapter}:{source_id}"
     title = _normalize_text(payload.get("title") or stable_key)
     doc_kind = _normalize_text(payload.get("doc_kind") or "document")
-    source_uri = _normalize_text(payload.get("source_uri") or payload.get("source") or source_adapter)
+    raw_source_uri = _normalize_text(payload.get("source_uri") or payload.get("source") or source_adapter)
+    source_uri = public_source_uri(raw_source_uri, source_adapter=source_adapter, source_id=source_id)
     if not title:
         raise ValueError("corpus source requires stable_key/source_id and title")
 
     metadata = dict(payload.get("metadata") or {})
+    taxonomy = build_corpus_taxonomy_metadata(
+        source_adapter=source_adapter,
+        source_id=source_id,
+        stable_key=stable_key,
+        title=title,
+        doc_kind=doc_kind,
+        source_uri=raw_source_uri,
+    )
+    metadata["corpus_taxonomy"] = taxonomy
     section_char_limit = max(240, int(payload.get("section_char_limit") or DEFAULT_SECTION_CHAR_LIMIT))
     raw_sections = payload.get("sections")
     normalized_sections: list[dict[str, Any]] = []
@@ -111,6 +123,7 @@ def normalize_corpus_source(payload: Mapping[str, Any]) -> dict[str, Any]:
             "source_id": source_id,
             "section_hash": section_hash,
             "citation_id": citation_id,
+            "corpus_taxonomy": taxonomy,
         }
         if metadata.get("principal_scope_key"):
             section_metadata.setdefault("principal_scope_key", metadata.get("principal_scope_key"))

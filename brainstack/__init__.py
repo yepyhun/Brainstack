@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict, List, Mapping, Sequence
 from agent.memory_provider import MemoryProvider
 
 from .control_plane import build_working_memory_packet
+from .consolidation import build_consolidation_source
 from .db import BrainstackStore
 from .diagnostics import build_memory_kernel_doctor, build_query_inspect
 from .donors import continuity_adapter, corpus_adapter, graph_adapter
@@ -320,7 +321,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             {"key": "corpus_section_max_chars", "description": "Maximum size of an ingested corpus section", "default": "900"},
             {
                 "key": "system_prompt_behavior_contract_enabled",
-                "description": "Legacy compatibility toggle for archived rule-pack projection; keep disabled for product-ready runtime",
+                "description": "Legacy compatibility toggle for archived rule-pack projection; keep disabled for normal runtime",
                 "default": "false",
             },
             {
@@ -1085,10 +1086,14 @@ class BrainstackMemoryProvider(MemoryProvider):
         promoted_summary = False
         metadata = {"session_id": session_id, "turn_number": turn_number}
         if isinstance(summary_row, dict):
+            summary_metadata = {
+                **metadata,
+                "consolidation_source": build_consolidation_source([summary_row], source_kind="continuity"),
+            }
             promoted_summary = self._promote_recent_work_summary(
                 content=str(summary_row.get("content") or ""),
                 source=source,
-                metadata=metadata,
+                metadata=summary_metadata,
             )
         decision_rows = [
             str(row.get("content") or "")
@@ -1653,6 +1658,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                 "authority_class": str(capture.get("authority_class") or ""),
                 "content_excerpt": receipt_excerpt(content),
                 "supersedes_stable_key": str(capture.get("supersedes_stable_key") or ""),
+                "write_contract_trace": dict(capture.get("write_contract_trace") or {}),
             },
         )
         receipt["read_only"] = False
@@ -2050,13 +2056,21 @@ class BrainstackMemoryProvider(MemoryProvider):
             metadata=metadata,
             section_max_chars=self._corpus_section_max_chars,
         )
-        return self._store.ingest_corpus_document(
-            stable_key=payload["stable_key"],
-            title=normalized_title,
-            doc_kind=doc_kind,
-            source=normalized_source,
-            sections=payload["sections"],
-            metadata=metadata,
+        raw_metadata = dict(metadata or {})
+        source_adapter = str(raw_metadata.get("source_adapter") or raw_metadata.get("adapter") or "provider_document").strip()
+        source_id = str(raw_metadata.get("source_id") or payload["stable_key"]).strip()
+        return self._store.ingest_corpus_source(
+            {
+                "source_adapter": source_adapter or "provider_document",
+                "source_id": source_id or str(payload["stable_key"]),
+                "stable_key": payload["stable_key"],
+                "title": normalized_title,
+                "doc_kind": doc_kind,
+                "source_uri": normalized_source,
+                "content": text,
+                "metadata": self._scoped_metadata(raw_metadata),
+                "section_char_limit": self._corpus_section_max_chars,
+            }
         )
 
     def ingest_graph_evidence(
@@ -3064,6 +3078,8 @@ class BrainstackMemoryProvider(MemoryProvider):
         result["transcript_turn_numbers"] = [int(row.get("turn_number") or 0) for row in transcript_rows]
         result["transcript_ids"] = [int(row["id"]) for row in transcript_rows if row.get("id") is not None]
         result["transcript_count"] = len(transcript_rows)
+        consolidation_source = build_consolidation_source(transcript_rows, source_kind="transcript")
+        result["consolidation_source"] = dict(consolidation_source)
         if not transcript_rows:
             result["status"] = "skipped_no_transcript"
             result["request_status"] = "skipped"
@@ -3155,6 +3171,7 @@ class BrainstackMemoryProvider(MemoryProvider):
             metadata=self._scoped_metadata({
                 "batch_reason": trigger_reason,
                 "transcript_ids": [int(row["id"]) for row in transcript_rows if row.get("id") is not None],
+                "consolidation_source": dict(consolidation_source),
             }),
         )
         action_counts: Dict[str, int] = {}
@@ -3172,6 +3189,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                     "session_id": session_id,
                     "turn_number": turn_number,
                     "batch_reason": trigger_reason,
+                    "consolidation_source": dict(consolidation_source),
                 },
             ),
             "open_decisions_promoted": self._promote_open_decisions(
@@ -3181,6 +3199,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                     "session_id": session_id,
                     "turn_number": turn_number,
                     "batch_reason": trigger_reason,
+                    "consolidation_source": dict(consolidation_source),
                 },
             ),
         }

@@ -6,6 +6,7 @@ from typing import Any, Dict, Mapping
 from .operating_truth import OPERATING_RECORD_TYPES
 from .task_memory import ITEM_TYPE_TASK, STATUS_OPEN
 from .transcript import trim_text_boundary
+from .write_contract import build_write_decision_trace
 
 
 EXPLICIT_CAPTURE_SCHEMA_VERSION = "brainstack.explicit_capture.v1"
@@ -34,7 +35,11 @@ def build_rejection_receipt(
     principal_scope_key: str,
     session_id: str,
     turn_number: int,
+    lane: str = "",
+    source_role: str = "",
+    authority_class: str = "",
 ) -> Dict[str, Any]:
+    reason_code = str((errors[0] or {}).get("code") or "rejected") if errors else "rejected"
     return {
         "schema": EXPLICIT_CAPTURE_SCHEMA_VERSION,
         "tool_name": tool_name,
@@ -44,6 +49,15 @@ def build_rejection_receipt(
         "principal_scope_key": principal_scope_key,
         "session_id": session_id,
         "turn_number": int(turn_number),
+        "write_contract_trace": build_write_decision_trace(
+            lane=lane,
+            accepted=False,
+            reason_code=reason_code,
+            source_role=source_role,
+            authority_class=authority_class,
+            canonical=False,
+            source_present=bool(source_role),
+        ),
     }
 
 
@@ -63,6 +77,7 @@ def validate_explicit_capture_payload(
             principal_scope_key=principal_scope_key,
             session_id=session_id,
             turn_number=turn_number,
+            lane="",
         )
 
     errors: list[Dict[str, str]] = []
@@ -169,7 +184,20 @@ def validate_explicit_capture_payload(
             principal_scope_key=principal_scope_key,
             session_id=session_id,
             turn_number=turn_number,
+            lane=shelf,
+            source_role=source_role,
+            authority_class=authority_class,
         )
+    normalized["write_contract_trace"] = build_write_decision_trace(
+        lane=shelf,
+        accepted=True,
+        reason_code="explicit_schema_validated",
+        source_role=source_role,
+        authority_class=authority_class,
+        canonical=True,
+        source_present=True,
+        stable_key=stable_key,
+    )
     return normalized, None
 
 
@@ -189,9 +217,10 @@ def build_commit_metadata(capture: Mapping[str, Any]) -> Dict[str, Any]:
     )
     if capture.get("supersedes_stable_key"):
         metadata["supersedes_stable_key"] = capture.get("supersedes_stable_key")
+    if isinstance(capture.get("write_contract_trace"), Mapping):
+        metadata["write_contract_trace"] = dict(capture["write_contract_trace"])
     return metadata
 
 
 def receipt_excerpt(value: Any, *, max_len: int = 180) -> str:
     return trim_text_boundary(_compact(value), max_len=max_len)
-

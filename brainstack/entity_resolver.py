@@ -53,6 +53,8 @@ def resolve_entity_candidates(
         return {
             "schema": ENTITY_RESOLUTION_SCHEMA,
             "status": "idle",
+            "mode": "shadow_read_only",
+            "authoritative_switch": False,
             "query": "",
             "candidates": [],
             "no_merge_reasons": ["empty_query"],
@@ -140,6 +142,9 @@ def resolve_entity_candidates(
     return {
         "schema": ENTITY_RESOLUTION_SCHEMA,
         "status": "active" if selected else "no_match",
+        "mode": "shadow_read_only",
+        "authoritative_switch": False,
+        "candidate_count": len(selected),
         "query": str(query or ""),
         "principal_scope_key": str(principal_scope_key or ""),
         "candidates": selected,

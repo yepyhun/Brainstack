@@ -4,6 +4,7 @@ from typing import Any, Dict, Mapping
 
 from .control_plane import build_working_memory_packet
 from .db import BrainstackStore
+from .graph_lineage import compact_graph_source_lineage
 
 
 DIAGNOSTIC_TERMS: Dict[str, str] = {
@@ -270,8 +271,14 @@ def _summarize_rows(shelf: str, rows: list[Dict[str, Any]]) -> list[Dict[str, An
     for row in rows:
         raw_metadata = row.get("metadata")
         metadata: Dict[str, Any] = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+        lineage_metadata = metadata
+        if shelf == "graph" and str(row.get("row_type") or "") == "conflict":
+            raw_conflict_metadata = row.get("conflict_metadata")
+            lineage_metadata = dict(raw_conflict_metadata) if isinstance(raw_conflict_metadata, dict) else metadata
         raw_temporal = metadata.get("temporal")
         temporal: Dict[str, Any] = dict(raw_temporal) if isinstance(raw_temporal, dict) else {}
+        raw_corpus_taxonomy = metadata.get("corpus_taxonomy")
+        corpus_taxonomy: Dict[str, Any] = dict(raw_corpus_taxonomy) if isinstance(raw_corpus_taxonomy, dict) else {}
         output.append(
             {
                 "evidence_key": _evidence_key(shelf, row),
@@ -300,22 +307,40 @@ def _summarize_rows(shelf: str, rows: list[Dict[str, Any]]) -> list[Dict[str, An
                 "graph_backend_requested": row.get("graph_backend_requested", ""),
                 "graph_backend_status": row.get("graph_backend_status", ""),
                 "graph_fallback_reason": row.get("graph_fallback_reason", ""),
+                "graph_source_lineage": compact_graph_source_lineage(lineage_metadata) if shelf == "graph" else {},
+                "graph_authority_status": lineage_metadata.get("graph_authority_status", "") if shelf == "graph" else "",
                 "keyword_score": float(row.get("keyword_score") or 0.0),
                 "semantic_score": float(row.get("semantic_score") or 0.0),
                 "query_token_overlap": int(row.get("_brainstack_query_token_overlap") or 0),
                 "query_token_count": int(row.get("_brainstack_query_token_count") or 0),
+                "rrf_score": float(row.get("_brainstack_rrf_score") or 0.0),
+                "channels": list(row.get("_brainstack_channels") or []),
+                "channel_ranks": dict(row.get("_brainstack_channel_ranks") or {}),
+                "selection_status": "selected" if row.get("_brainstack_channels") else "",
+                "selection_reason": "selected_by_fusion_and_budget" if row.get("_brainstack_channels") else "",
+                "authority_floor": int(row.get("_brainstack_authority_floor") or 0),
+                "authority_floor_applied": bool(row.get("_brainstack_authority_floor_applied")),
                 "same_session": bool(row.get("same_session")),
                 "same_principal": bool(row.get("same_principal")),
                 "suppression_reason": row.get("_brainstack_suppression_reason", ""),
                 "authority_level": metadata.get("authority_level", ""),
                 "workstream_id": metadata.get("workstream_id", ""),
                 "source_kind": metadata.get("source_kind", ""),
+                "consolidation_source": dict(metadata.get("consolidation_source") or {})
+                if isinstance(metadata.get("consolidation_source"), dict)
+                else {},
                 "recap_surface": bool(row.get("_brainstack_recap_surface")),
                 "supporting_evidence_only": bool(row.get("_brainstack_supporting_evidence_only")),
                 "workstream_recap_reason": row.get("_brainstack_workstream_recap_reason", ""),
                 "citation_id": row.get("citation_id", ""),
                 "document_hash": row.get("document_hash", ""),
                 "section_hash": row.get("section_hash", ""),
+                "corpus_taxonomy": corpus_taxonomy if shelf == "corpus" else {},
+                "source_display_id": corpus_taxonomy.get("display_source_id", "") if shelf == "corpus" else "",
+                "public_source_uri": corpus_taxonomy.get("public_source_uri", "") if shelf == "corpus" else "",
+                "corpus_retrieval_trace": dict(row.get("_brainstack_corpus_retrieval_trace") or {})
+                if shelf == "corpus"
+                else {},
                 "created_at": row.get("created_at", row.get("updated_at", "")),
                 "excerpt": str(
                     row.get("content")
@@ -419,6 +444,8 @@ def build_query_inspect(
                 "supporting_evidence_only": bool(candidate.get("supporting_evidence_only")),
                 "workstream_recap_reason": str(candidate.get("workstream_recap_reason") or ""),
                 "channel_ranks": dict(candidate.get("channel_ranks") or {}),
+                "selection_status": str(candidate.get("selection_status") or ""),
+                "selection_reason": str(candidate.get("selection_reason") or ""),
                 "keyword_score": float(candidate.get("keyword_score") or 0.0),
                 "semantic_score": float(candidate.get("semantic_score") or 0.0),
                 "query_token_overlap": int(candidate.get("query_token_overlap") or 0),

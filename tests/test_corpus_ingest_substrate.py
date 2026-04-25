@@ -55,6 +55,44 @@ def test_corpus_source_ingest_is_idempotent_and_citation_backed(tmp_path: Path) 
         store.close()
 
 
+def test_corpus_taxonomy_exposes_stable_display_identity_without_private_paths(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        private_path = "/private/local/project/source-notes.md"
+        receipt = store.ingest_corpus_source(
+            {
+                **_source_payload("Private source path must not be public.", stable_key="doc:private-path"),
+                "source_uri": private_path,
+            }
+        )
+        assert receipt["status"] == "inserted"
+
+        document = store.conn.execute(
+            "SELECT source, metadata_json FROM corpus_documents WHERE stable_key = ?",
+            ("doc:private-path",),
+        ).fetchone()
+        assert document is not None
+        assert private_path not in document["source"]
+        assert private_path not in document["metadata_json"]
+
+        report = build_query_inspect(
+            store,
+            query="Private source path",
+            session_id="corpus-taxonomy",
+            principal_scope_key=PRINCIPAL_SCOPE,
+        )
+        corpus = report["selected_evidence"]["corpus"]
+        assert corpus
+        taxonomy = corpus[0]["corpus_taxonomy"]
+        assert taxonomy["schema"] == "brainstack.corpus_taxonomy.v1"
+        assert taxonomy["mapping"] == "adapted_wing_room_drawer"
+        assert taxonomy["source_uri_redacted"] is True
+        assert corpus[0]["source_display_id"] == taxonomy["display_source_id"]
+        assert private_path not in str(corpus[0])
+    finally:
+        store.close()
+
+
 def test_corpus_reingest_replaces_stale_sections_without_duplicate_documents(tmp_path: Path) -> None:
     store = _open_store(tmp_path)
     try:

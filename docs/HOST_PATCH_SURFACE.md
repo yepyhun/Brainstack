@@ -22,7 +22,7 @@ Brainstack has three different install surfaces:
 
 The canonical inventory lives in:
 
-- [install_into_hermes.py](/home/lauratom/Asztal/ai/atado/Brainstack-phase50/scripts/install_into_hermes.py)
+- [install_into_hermes.py](../scripts/install_into_hermes.py)
 
 The installer now exposes a structured inventory and writes it into:
 
@@ -65,7 +65,7 @@ Each host patch entry records:
 Current high-risk host-owned seams include:
 
 - cron scheduler delivery/runtime integration
-- credential-pool runtime auth safety for Nous-backed cron execution
+- credential-pool runtime auth safety for provider-backed cron execution
 - memory-provider/write-origin bridge wiring
 - gateway lifecycle hooks
 
@@ -93,4 +93,4 @@ When a new Hermes version lands:
 - Do not treat copied plugin payload files as host patches.
 - Do not mix runtime config drift with source patch drift.
 - Do not add silent host mutations without adding them to the installer inventory.
-- Do not claim a Hermes upgrade is safe without checking the inventory targets first.
+- Treat Hermes upgrades as unsafe until the inventory targets have been checked.

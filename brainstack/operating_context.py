@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Mapping
 
+from .consolidation import consolidation_source_status
 from .operating_truth import (
     OPERATING_RECORD_ACTIVE_WORK,
     OPERATING_RECORD_CANONICAL_POLICY,
@@ -103,6 +104,27 @@ def _operating_record_lines(
         ),
         limit=limit,
     )
+
+
+def _recent_work_line_and_status(
+    operating_rows: Iterable[Mapping[str, Any]],
+    *,
+    continuity_rows: Iterable[Mapping[str, Any]],
+) -> tuple[str, Dict[str, Any]]:
+    continuity_list = [dict(row) for row in continuity_rows]
+    for row in operating_rows:
+        if str(row.get("record_type") or "").strip() != OPERATING_RECORD_RECENT_WORK_SUMMARY:
+            continue
+        status = consolidation_source_status(
+            row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {},
+            source_rows=continuity_list,
+        )
+        if status.get("status") == "stale_source_changed":
+            return "", status
+        content = _normalize_text(row.get("content"))
+        if content:
+            return content, status
+    return "", {"status": "none", "source_kind": "", "source_count": 0}
 
 
 def _build_open_decisions(continuity_rows: Iterable[Mapping[str, Any]], *, limit: int) -> List[str]:
@@ -307,12 +329,14 @@ def build_operating_context_snapshot(
         limit=1,
     )
     active_work_summary = active_work_candidates[0] if active_work_candidates else ""
-    recent_work_candidates = _operating_record_lines(
+    recent_work_summary, recent_work_source_status = _recent_work_line_and_status(
         operating_list,
-        record_type=OPERATING_RECORD_RECENT_WORK_SUMMARY,
-        limit=1,
+        continuity_rows=continuity_list,
     )
-    recent_work_summary = recent_work_candidates[0] if recent_work_candidates else _build_active_work_summary(continuity_list)
+    if not recent_work_summary:
+        recent_work_summary = _build_active_work_summary(continuity_list)
+        if recent_work_summary and recent_work_source_status.get("status") == "none":
+            recent_work_source_status = {"status": "continuity_fallback", "source_kind": "continuity", "source_count": 0}
     if not active_work_summary and not recent_work_summary:
         active_work_summary = _build_active_work_summary(continuity_list)
     open_decisions = _operating_record_lines(
@@ -373,6 +397,7 @@ def build_operating_context_snapshot(
         "stable_profile_entry_count": len(stable_profile_entries),
         "active_work_summary": active_work_summary,
         "recent_work_summary": recent_work_summary,
+        "recent_work_summary_source_status": recent_work_source_status,
         "open_decisions": open_decisions,
         "open_decision_count": len(open_decisions),
         "live_system_state": live_system_state,

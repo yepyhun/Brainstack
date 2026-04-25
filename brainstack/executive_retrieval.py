@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 from .associative_expansion import AssociativeExpansionBounds, build_associative_expansion
+from .corpus_retrieval_trace import annotate_corpus_retrieval_trace
 from .db import BrainstackStore
 from .entity_resolver import (
     annotate_graph_rows_with_entity_resolution,
@@ -14,8 +15,14 @@ from .entity_resolver import (
     resolve_entity_candidates,
 )
 from .operating_truth import (
+    OPERATING_RECORD_ACTIVE_WORK,
+    OPERATING_RECORD_CANONICAL_POLICY,
+    OPERATING_RECORD_CURRENT_COMMITMENT,
+    OPERATING_RECORD_LIVE_SYSTEM_STATE,
+    OPERATING_RECORD_RUNTIME_APPROVAL_POLICY,
     OPERATING_RECORD_TYPES,
     RECENT_WORK_RECAP_RECORD_TYPES,
+    RECENT_WORK_AUTHORITY_CANONICAL,
     is_background_recent_work,
     recent_work_authority_rank,
 )
@@ -55,6 +62,14 @@ FUSION_SHELF_WEIGHTS = {
     "continuity_recent": 0.96,
     "transcript": 1.0,
     "corpus": 0.94,
+}
+AUTHORITY_FLOOR_SCORE = 80
+OPERATING_AUTHORITY_FLOOR_TYPES = {
+    OPERATING_RECORD_ACTIVE_WORK,
+    OPERATING_RECORD_CANONICAL_POLICY,
+    OPERATING_RECORD_CURRENT_COMMITMENT,
+    OPERATING_RECORD_LIVE_SYSTEM_STATE,
+    OPERATING_RECORD_RUNTIME_APPROVAL_POLICY,
 }
 
 logger = logging.getLogger(__name__)
@@ -330,6 +345,28 @@ def _agreement_bonus(candidate: EvidenceCandidate) -> float:
     if channel_count <= 1:
         return 0.0
     return min(0.15, 0.05 * (channel_count - 1))
+
+
+def _candidate_authority_floor(candidate: EvidenceCandidate) -> int:
+    row = candidate.row
+    raw_metadata = row.get("metadata")
+    metadata: Mapping[str, Any] = raw_metadata if isinstance(raw_metadata, Mapping) else {}
+    if candidate.shelf == "profile":
+        return 100
+    if candidate.shelf == "operating":
+        record_type = str(row.get("record_type") or "").strip()
+        authority_level = str(metadata.get("authority_level") or "").strip()
+        if record_type in OPERATING_AUTHORITY_FLOOR_TYPES or authority_level == RECENT_WORK_AUTHORITY_CANONICAL:
+            return 90
+    if candidate.shelf == "graph":
+        fact_class = str(row.get("fact_class") or "").strip()
+        if fact_class in {"explicit_state_current", "conflict"}:
+            return 85
+    return 0
+
+
+def _candidate_has_authority_floor(candidate: EvidenceCandidate) -> bool:
+    return _candidate_authority_floor(candidate) >= AUTHORITY_FLOOR_SCORE
 
 
 def _fusion_rank_contribution(*, channel_name: str, shelf: str, rank: int) -> float:
@@ -1297,6 +1334,9 @@ def _select_rows(
         row["_brainstack_rrf_score"] = candidate.rrf_score
         row["_brainstack_channels"] = sorted(candidate.channel_ranks)
         row["_brainstack_channel_ranks"] = dict(candidate.channel_ranks)
+        authority_floor = _candidate_authority_floor(candidate)
+        row["_brainstack_authority_floor"] = authority_floor
+        row["_brainstack_authority_floor_applied"] = authority_floor >= AUTHORITY_FLOOR_SCORE
         return row
 
     for candidate in candidates:
@@ -1324,7 +1364,8 @@ def _select_rows(
                 profile_items.append(row)
             continue
 
-        if shared_budget_enabled and evidence_items_used >= evidence_item_budget:
+        if shared_budget_enabled and evidence_items_used >= evidence_item_budget and not _candidate_has_authority_floor(candidate):
+            candidate.row["_brainstack_suppression_reason"] = "not_selected_by_global_evidence_budget"
             continue
 
         if candidate.shelf == "continuity_match" and len(matched) < continuity_match_limit:
@@ -1645,6 +1686,11 @@ def retrieve_executive_context(
         else []
     )
     keyword_corpus_rows = _annotate_query_flags(keyword_corpus_rows, query=query)
+    keyword_corpus_rows = annotate_corpus_retrieval_trace(
+        keyword_corpus_rows,
+        query=query,
+        candidate_limit=max(corpus_limit * 4, 8),
+    )
     semantic_conversation_rows = (
         _collect_query_rows(
                 shelf="transcript",
@@ -1673,6 +1719,11 @@ def retrieve_executive_context(
         else []
     )
     semantic_corpus_rows = _annotate_query_flags(semantic_corpus_rows, query=query)
+    semantic_corpus_rows = annotate_corpus_retrieval_trace(
+        semantic_corpus_rows,
+        query=query,
+        candidate_limit=max(corpus_limit * 4, 8),
+    )
     semantic_evidence_rows = store.search_semantic_evidence(
         query=query,
         principal_scope_key=principal_scope_key,
@@ -1687,6 +1738,11 @@ def retrieve_executive_context(
     semantic_graph_rows = filter_graph_rows_to_entity_resolution_candidates(semantic_graph_rows, entity_resolution)
     semantic_graph_rows = annotate_graph_rows_with_entity_resolution(semantic_graph_rows, entity_resolution)
     semantic_index_corpus_rows = [row for row in semantic_evidence_rows if str(row.get("semantic_shelf") or "") == "corpus"]
+    semantic_index_corpus_rows = annotate_corpus_retrieval_trace(
+        semantic_index_corpus_rows,
+        query=query,
+        candidate_limit=max(evidence_item_budget * 4, 16),
+    )
     if semantic_task_rows:
         task_rows = _dedupe_rows(_round_robin(task_rows, semantic_task_rows))[:24]
     task_structured_authority = isinstance(task_lookup, Mapping) and route.applied_mode != ROUTE_TEMPORAL
@@ -1920,6 +1976,20 @@ def retrieve_executive_context(
         route.applied_mode = ROUTE_FACT
         selected = fact_selected
 
+    selected_candidate_keys = {
+        _candidate_key(shelf, row)
+        for shelf, rows in (
+            ("profile", selected.get("profile_items") or []),
+            ("operating", selected.get("operating_rows") or []),
+            ("continuity_match", selected.get("matched") or []),
+            ("continuity_recent", selected.get("recent") or []),
+            ("transcript", selected.get("transcript_rows") or []),
+            ("graph", selected.get("graph_rows") or []),
+            ("corpus", selected.get("corpus_rows") or []),
+        )
+        for row in rows
+    }
+
     corpus_semantic_status = (
         store.corpus_semantic_channel_status()
         if corpus_limit > 0 or keyword_corpus_rows or semantic_corpus_rows
@@ -2012,7 +2082,15 @@ def retrieve_executive_context(
                 "rrf_score": candidate.rrf_score,
                 "agreement_bonus": _agreement_bonus(candidate),
                 "priority_bonus": _candidate_priority_bonus(candidate),
+                "authority_floor": _candidate_authority_floor(candidate),
+                "authority_floor_applied": _candidate_has_authority_floor(candidate),
                 "channel_ranks": dict(candidate.channel_ranks),
+                "selection_status": "selected" if candidate.key in selected_candidate_keys else "not_selected",
+                "selection_reason": (
+                    "selected_by_fusion_and_budget"
+                    if candidate.key in selected_candidate_keys
+                    else str(candidate.row.get("_brainstack_suppression_reason") or "not_selected_by_route_authority_dedupe_or_budget")
+                ),
                 "id": int(candidate.row.get("id") or 0),
                 "row_id": int(candidate.row.get("row_id") or 0),
                 "turn_number": int(candidate.row.get("turn_number") or 0),

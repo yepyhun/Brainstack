@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 
 from brainstack import BrainstackMemoryProvider
+from brainstack.db import BrainstackStore
 from brainstack.explicit_capture import EXPLICIT_CAPTURE_SCHEMA_VERSION
+from brainstack.graph import ingest_graph_evidence_with_receipt
+from brainstack.graph_evidence import GraphEvidenceItem
+from brainstack.write_contract import WRITE_CONTRACT_TRACE_SCHEMA_VERSION
 
 
 def _provider(tmp_path: Path) -> BrainstackMemoryProvider:
@@ -49,6 +53,11 @@ def test_explicit_profile_remember_writes_multilingual_user_truth_and_recall(tmp
         assert receipt["schema"] == EXPLICIT_CAPTURE_SCHEMA_VERSION
         assert receipt["status"] == "committed"
         assert receipt["tool_name"] == "brainstack_remember"
+        assert receipt["write_contract_trace"]["schema"] == WRITE_CONTRACT_TRACE_SCHEMA_VERSION
+        assert receipt["write_contract_trace"]["lane"] == "profile"
+        assert receipt["write_contract_trace"]["accepted"] is True
+        assert receipt["write_contract_trace"]["canonical"] is True
+        assert "gyökérok" not in json.dumps(receipt["write_contract_trace"], ensure_ascii=False)
         row = provider._store.get_profile_item(
             stable_key="preference:engineering_style",
             principal_scope_key=provider._principal_scope_key,
@@ -121,6 +130,10 @@ def test_explicit_capture_rejects_assistant_authored_or_insufficient_payload(tmp
             )
         )
         assert rejected["status"] == "rejected"
+        assert rejected["write_contract_trace"]["lane"] == "profile"
+        assert rejected["write_contract_trace"]["accepted"] is False
+        assert rejected["write_contract_trace"]["canonical"] is False
+        assert rejected["write_contract_trace"]["reason_code"] == "invalid_source_role"
         assert any(error["code"] == "invalid_source_role" for error in rejected["errors"])
         assert (
             provider._store.get_profile_item(
@@ -137,6 +150,8 @@ def test_explicit_capture_rejects_assistant_authored_or_insufficient_payload(tmp
             )
         )
         assert missing["status"] == "rejected"
+        assert missing["write_contract_trace"]["accepted"] is False
+        assert missing["write_contract_trace"]["reason_code"] in {"missing_category", "missing_content"}
         assert any(error["code"] == "missing_content" for error in missing["errors"])
     finally:
         provider.shutdown()
@@ -160,6 +175,7 @@ def test_explicit_operating_and_task_capture_use_typed_shelf_fields(tmp_path: Pa
             )
         )
         assert operating["status"] == "committed"
+        assert operating["write_contract_trace"]["lane"] == "operating"
         operating_rows = provider._store.search_operating_records(
             query="root-cause analysis",
             principal_scope_key=provider._principal_scope_key,
@@ -181,6 +197,7 @@ def test_explicit_operating_and_task_capture_use_typed_shelf_fields(tmp_path: Pa
             )
         )
         assert task["status"] == "committed"
+        assert task["write_contract_trace"]["lane"] == "task"
         tasks = provider._store.search_task_items(
             query="explicit capture proof",
             principal_scope_key=provider._principal_scope_key,
@@ -189,3 +206,59 @@ def test_explicit_operating_and_task_capture_use_typed_shelf_fields(tmp_path: Pa
         assert tasks
     finally:
         provider.shutdown()
+
+
+def test_write_contract_trace_routes_continuity_graph_and_corpus_to_evidence_lanes(tmp_path: Path) -> None:
+    store = BrainstackStore(str(tmp_path / "brainstack.sqlite3"), graph_backend="sqlite", corpus_backend="sqlite")
+    store.open()
+    try:
+        continuity_id = store.add_continuity_event(
+            session_id="session:continuity",
+            turn_number=1,
+            kind="summary",
+            content="Evidence-only recap, not canonical user truth.",
+            source="continuity-fixture",
+            metadata={"principal_scope_key": "principal:lane-routing"},
+        )
+        continuity_row = store.conn.execute(
+            "SELECT metadata_json FROM continuity_events WHERE id = ?",
+            (continuity_id,),
+        ).fetchone()
+        continuity_trace = json.loads(continuity_row["metadata_json"])["write_contract_trace"]
+        assert continuity_trace["schema"] == WRITE_CONTRACT_TRACE_SCHEMA_VERSION
+        assert continuity_trace["lane"] == "continuity"
+        assert continuity_trace["canonical"] is False
+        assert "Evidence-only recap" not in json.dumps(continuity_trace)
+
+        graph_result = ingest_graph_evidence_with_receipt(
+            store,
+            source="graph-fixture",
+            metadata={"principal_scope_key": "principal:lane-routing"},
+            evidence_items=[
+                GraphEvidenceItem(
+                    kind="state",
+                    subject="Lane Routing Fixture",
+                    attribute="status",
+                    value_text="active",
+                )
+            ],
+        )
+        assert graph_result["receipt"]["write_contract_trace"]["lane"] == "graph"
+        assert graph_result["receipt"]["write_contract_trace"]["canonical"] is False
+
+        corpus_receipt = store.ingest_corpus_source(
+            {
+                "source_adapter": "test_fixture",
+                "source_id": "doc:lane-routing",
+                "stable_key": "doc:lane-routing",
+                "title": "Lane Routing Corpus",
+                "doc_kind": "project_note",
+                "source_uri": "fixture://lane-routing",
+                "content": "Corpus source body.",
+                "metadata": {"principal_scope_key": "principal:lane-routing"},
+            }
+        )
+        assert corpus_receipt["write_contract_trace"]["lane"] == "corpus"
+        assert corpus_receipt["write_contract_trace"]["canonical"] is False
+    finally:
+        store.close()

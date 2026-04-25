@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping
 
 from .db import BrainstackStore
+from .graph_lineage import compact_graph_source_lineage
 from .operating_context import render_operating_context_section
 from .profile_contract import (
     is_native_explicit_style_item,
@@ -434,12 +435,17 @@ def _render_graph_rows(
             continue
         seen.add(row_key)
         fact_class = _graph_fact_class(row)
+        graph_extra = _graph_provenance_note(row)
         if fact_class == "explicit_relation":
-            text = f"[relation:explicit] {row['subject']} {row['predicate']} {row['object_value']}"
+            text = _append_compact_note(
+                f"[relation:explicit] {row['subject']} {row['predicate']} {row['object_value']}",
+                graph_extra,
+            )
             lines.append(
                 _with_provenance(
                     text,
                     source=str(row.get("source", "")),
+                    extra=graph_extra,
                     provenance_mode=provenance_mode,
                     metadata=row.get("metadata"),
                 )
@@ -448,7 +454,11 @@ def _render_graph_rows(
         if fact_class == "inferred_relation":
             reason = str((row.get("metadata") or {}).get("inference_reason") or "").strip()
             extra = f"reason={reason}" if reason else ""
-            text = f"[relation:inferred] {row['subject']} {row['predicate']} {row['object_value']}"
+            extra = _join_note_parts(extra, graph_extra)
+            text = _append_compact_note(
+                f"[relation:inferred] {row['subject']} {row['predicate']} {row['object_value']}",
+                graph_extra,
+            )
             lines.append(
                 _with_provenance(
                     text,
@@ -460,14 +470,18 @@ def _render_graph_rows(
             )
             continue
         if fact_class == "conflict":
-            text = (
-                f"[conflict] {row['subject']} {row['predicate']} "
-                f"current={row['object_value']} candidate={row['conflict_value']}"
+            text = _append_compact_note(
+                (
+                    f"[conflict] {row['subject']} {row['predicate']} "
+                    f"current={row['object_value']} candidate={row['conflict_value']}"
+                ),
+                _graph_provenance_note(row, conflict=True),
             )
             conflict_basis = summarize_provenance((row.get("conflict_metadata") or {}).get("provenance"))
             extra = f"candidate_source={row.get('conflict_source', '')}"
             if conflict_basis:
                 extra = f"{extra} ; candidate_basis={conflict_basis}" if extra else f"candidate_basis={conflict_basis}"
+            extra = _join_note_parts(extra, _graph_provenance_note(row, conflict=True))
             lines.append(
                 _with_provenance(
                     text,
@@ -479,16 +493,47 @@ def _render_graph_rows(
             )
             continue
         current_marker = "current" if fact_class == "explicit_state_current" else "expired" if fact_class == "explicit_state_expired" else "prior"
-        text = f"[state:{current_marker}] {row['subject']} {row['predicate']}={row['object_value']}"
+        text = _append_compact_note(
+            f"[state:{current_marker}] {row['subject']} {row['predicate']}={row['object_value']}",
+            graph_extra,
+        )
         lines.append(
             _with_provenance(
                 text,
                 source=str(row.get("source", "")),
+                extra=graph_extra,
                 provenance_mode=provenance_mode,
                 metadata=row.get("metadata"),
             )
         )
     return lines
+
+
+def _join_note_parts(*parts: str) -> str:
+    return " ; ".join(part for part in parts if str(part or "").strip())
+
+
+def _append_compact_note(text: str, note: str) -> str:
+    return f"{text} [{note}]" if note else text
+
+
+def _graph_provenance_note(row: Mapping[str, Any], *, conflict: bool = False) -> str:
+    metadata = row.get("conflict_metadata") if conflict else row.get("metadata")
+    lineage = compact_graph_source_lineage(metadata if isinstance(metadata, Mapping) else {})
+    if not lineage:
+        return "lineage=missing"
+    source_kind = str(lineage.get("source_kind") or "").strip()
+    source_stable_id = str(lineage.get("source_stable_id") or "").strip()
+    status = str(lineage.get("status") or "").strip()
+    provenance_class = str(lineage.get("provenance_class") or "").strip()
+    parts = []
+    if source_kind or source_stable_id:
+        parts.append(f"src={source_kind}:{source_stable_id}".rstrip(":"))
+    if provenance_class:
+        parts.append(f"prov={provenance_class}")
+    if status and status != "active":
+        parts.append(f"lineage={status}")
+    return " ; ".join(parts)
 
 
 def _with_provenance(

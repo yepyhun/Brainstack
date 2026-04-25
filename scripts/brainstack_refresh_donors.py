@@ -98,7 +98,7 @@ def _build_report(selected: set[str] | None, run_smoke: bool) -> Dict[str, Any]:
         "donors": donors,
         "honesty_note": (
             "This report verifies local adapter seams and optional local smoke tests only. "
-            "It does not claim upstream code was auto-merged or that compatibility is guaranteed without review."
+            "It records donor state for explicit review before any compatibility decision."
         ),
     }
 

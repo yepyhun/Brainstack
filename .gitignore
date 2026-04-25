@@ -28,3 +28,13 @@ SOUL.md
 reports/
 brainstack.chroma/
 brainstack.kuzu
+
+# Local proof/development tests stay off the public release payload unless promoted deliberately.
+tests/test_phase*.py
+tests/test_*_closure.py
+tests/test_*_canary.py
+tests/test_graph_provenance_projection.py
+tests/test_graph_source_lineage.py
+tests/test_hindsight_consolidation_parity.py
+tests/test_mempalace_hybrid_corpus_retrieval.py
+tests/test_cross_layer_fusion_authority.py

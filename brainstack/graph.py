@@ -11,6 +11,7 @@ from .graph_evidence import (
 )
 from .provenance import merge_provenance
 from .temporal import merge_temporal
+from .write_contract import build_write_decision_trace
 
 
 def ingest_graph_evidence(
@@ -38,10 +39,19 @@ def ingest_graph_evidence_with_receipt(
     results: List[Dict[str, Any]] = []
     base_metadata = dict(metadata or {})
     prepared = prepare_graph_evidence_ingress(evidence_items, strict=True)
+    write_contract_trace = build_write_decision_trace(
+        lane="graph",
+        accepted=True,
+        reason_code="typed_graph_evidence",
+        authority_class="graph",
+        canonical=False,
+        source_present=bool(str(source or "").strip()),
+    )
     for item in prepared["items"]:
         item_metadata = dict(base_metadata)
         item_metadata["graph_evidence_boundary"] = GRAPH_EVIDENCE_BOUNDARY_VERSION
         item_metadata["graph_evidence"] = item.to_dict()
+        item_metadata["write_contract_trace"] = dict(write_contract_trace)
         if item.temporal_scope:
             item_metadata["temporal"] = merge_temporal(
                 item_metadata.get("temporal") if isinstance(item_metadata.get("temporal"), Mapping) else None,
@@ -79,6 +89,7 @@ def ingest_graph_evidence_with_receipt(
     receipt = dict(prepared["receipt"])
     receipt["source"] = str(source or "").strip()
     receipt["written_count"] = len(results)
+    receipt["write_contract_trace"] = dict(write_contract_trace)
     receipt["write_results"] = [
         {
             "kind": str(result.get("kind") or ""),

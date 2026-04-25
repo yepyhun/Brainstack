@@ -27,6 +27,7 @@ from .db_row_codecs import (
     task_row_to_dict as _task_row_to_dict,
 )
 from .graph_backend import GraphBackend, create_graph_backend
+from .graph_lineage import attach_graph_source_lineage
 from .logistics_contract import derive_transcript_logistics_typed_entities
 from .live_system_state import (
     build_live_system_state_snapshot,
@@ -75,6 +76,7 @@ from .usefulness import (
     graph_priority_adjustment,
     profile_priority_adjustment,
 )
+from .write_contract import build_write_decision_trace
 
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -95,6 +97,7 @@ MIGRATION_COMPILED_BEHAVIOR_POLICY_V1 = "compiled_behavior_policy_v1"
 MIGRATION_COMPILED_BEHAVIOR_POLICY_V2 = "compiled_behavior_policy_v2"
 MIGRATION_STYLE_CONTRACT_BEHAVIOR_DEMOTION_V1 = "style_contract_behavior_demotion_v1"
 MIGRATION_RECENT_WORK_AUTHORITY_V1 = "recent_work_authority_v1"
+MIGRATION_GRAPH_SOURCE_LINEAGE_V1 = "graph_source_lineage_v1"
 TRANSCRIPT_HYGIENE_MARKERS = (
     "Assistant: Operation interrupted:",
     "Assistant: Session reset.",
@@ -313,6 +316,37 @@ def _merge_record_metadata(
     if provenance:
         merged["provenance"] = provenance
     return merged
+
+
+def _normalize_graph_record_metadata(
+    metadata: Dict[str, Any] | None,
+    *,
+    source: str,
+    graph_kind: str,
+) -> Dict[str, Any]:
+    normalized = _normalize_record_metadata(metadata, source=source)
+    normalized.setdefault("source_kind", "explicit" if graph_kind != "inferred_relation" else "inferred")
+    normalized.setdefault("graph_kind", "relation" if graph_kind in {"relation", "inferred_relation"} else graph_kind)
+    return attach_graph_source_lineage(
+        normalized,
+        source=source,
+        graph_kind=graph_kind,
+    )
+
+
+def _merge_graph_record_metadata(
+    existing_metadata_json: Any,
+    incoming_metadata: Dict[str, Any] | None,
+    *,
+    source: str,
+    graph_kind: str,
+) -> Dict[str, Any]:
+    merged = _merge_record_metadata(existing_metadata_json, incoming_metadata, source=source)
+    return attach_graph_source_lineage(
+        merged,
+        source=source,
+        graph_kind=graph_kind,
+    )
 
 
 def _style_contract_rule_count(*, content: Any, metadata: Any) -> int:
@@ -628,6 +662,27 @@ def _graph_sort_key(row: Dict[str, Any]) -> tuple[int, float, int, int, str]:
     )
 
 
+def _graph_structured_field_match_score(row: Mapping[str, Any], *, query: str) -> float:
+    query_tokens = _query_token_set(query)
+    if not query_tokens:
+        return 0.0
+    score = 0.0
+    for field, weight in (
+        ("predicate", 1.5),
+        ("subject", 1.0),
+        ("object_value", 1.0),
+        ("matched_alias", 1.0),
+        ("conflict_value", 1.0),
+    ):
+        field_tokens = _query_token_set(row.get(field))
+        if not field_tokens:
+            continue
+        overlap = len(query_tokens & field_tokens)
+        if overlap:
+            score += float(overlap) * weight
+    return score
+
+
 def _locked(method: F) -> F:
     @wraps(method)
     def wrapper(self, *args, **kwargs):
@@ -868,6 +923,8 @@ class BrainstackStore:
             self._apply_style_contract_behavior_demotion_migration_v1()
         if not self._migration_applied(MIGRATION_RECENT_WORK_AUTHORITY_V1):
             self._apply_recent_work_authority_migration_v1()
+        if not self._migration_applied(MIGRATION_GRAPH_SOURCE_LINEAGE_V1):
+            self._apply_graph_source_lineage_migration_v1()
 
     def _migration_applied(self, name: str) -> bool:
         row = self.conn.execute(
@@ -888,6 +945,43 @@ class BrainstackStore:
             """,
             (migration_name, utc_now_iso()),
         )
+
+    def _apply_graph_source_lineage_migration_v1(self) -> None:
+        migrated = 0
+        row_specs = (
+            ("graph_states", "state", "source"),
+            ("graph_relations", "relation", "source"),
+            ("graph_inferred_relations", "inferred_relation", "source"),
+            ("graph_conflicts", "state_conflict", "candidate_source"),
+        )
+        for table_name, graph_kind, source_column in row_specs:
+            rows = self.conn.execute(
+                f"SELECT id, {source_column} AS source, metadata_json FROM {table_name} ORDER BY id ASC"
+            ).fetchall()
+            for row in rows:
+                existing = _decode_json_object(row["metadata_json"])
+                updated = attach_graph_source_lineage(
+                    existing,
+                    source=str(row["source"] or ""),
+                    graph_kind=graph_kind,
+                )
+                if updated == existing:
+                    continue
+                self.conn.execute(
+                    f"UPDATE {table_name} SET metadata_json = ? WHERE id = ?",
+                    (
+                        json.dumps(updated, ensure_ascii=True, sort_keys=True),
+                        int(row["id"]),
+                    ),
+                )
+                migrated += 1
+        self._mark_migration_applied(MIGRATION_GRAPH_SOURCE_LINEAGE_V1)
+        self.conn.commit()
+        if migrated:
+            self._refresh_semantic_evidence_shelf(
+                shelf="graph",
+                metadata={"migration": MIGRATION_GRAPH_SOURCE_LINEAGE_V1},
+            )
 
     @_locked
     def _apply_recent_work_authority_migration_v1(self) -> None:
@@ -2561,6 +2655,17 @@ class BrainstackStore:
         normalized_metadata = _normalize_record_metadata(metadata, source=source)
         normalized_metadata.setdefault("source_kind", "explicit")
         normalized_metadata.setdefault("graph_kind", "relation")
+        normalized_metadata.setdefault(
+            "write_contract_trace",
+            build_write_decision_trace(
+                lane="continuity",
+                accepted=True,
+                reason_code="continuity_event",
+                authority_class="continuity",
+                canonical=False,
+                source_present=bool(str(source or "").strip()),
+            ),
+        )
         cur = self.conn.execute(
             """
             INSERT INTO continuity_events (
@@ -4682,6 +4787,19 @@ class BrainstackStore:
     @_locked
     def ingest_corpus_source(self, source_payload: Mapping[str, Any]) -> Dict[str, Any]:
         normalized = normalize_corpus_source(source_payload)
+        write_contract_trace = build_write_decision_trace(
+            lane="corpus",
+            accepted=True,
+            reason_code="corpus_source_ingest",
+            authority_class="corpus",
+            canonical=False,
+            source_present=bool(str(normalized.get("source_id") or normalized.get("source") or "").strip()),
+            stable_key=str(normalized.get("stable_key") or ""),
+        )
+        normalized["metadata"] = {
+            **dict(normalized.get("metadata") or {}),
+            "write_contract_trace": dict(write_contract_trace),
+        }
         existing = self.conn.execute(
             "SELECT id, metadata_json FROM corpus_documents WHERE stable_key = ?",
             (normalized["stable_key"],),
@@ -4715,6 +4833,7 @@ class BrainstackStore:
                 "corpus_fingerprint": normalized["fingerprint"],
                 "citation_ids": list(normalized["citation_ids"]),
                 "source_adapter": normalized["source_adapter"],
+                "write_contract_trace": dict(write_contract_trace),
                 "read_only": False,
             }
 
@@ -4737,6 +4856,7 @@ class BrainstackStore:
             "corpus_fingerprint": normalized["fingerprint"],
             "citation_ids": list(normalized["citation_ids"]),
             "source_adapter": normalized["source_adapter"],
+            "write_contract_trace": dict(write_contract_trace),
             "read_only": False,
         }
 
@@ -5922,7 +6042,12 @@ class BrainstackStore:
             (subject["id"], predicate, obj["id"]),
         ).fetchone()
         if existing:
-            merged = _merge_record_metadata(existing["metadata_json"], metadata, source=source)
+            merged = _merge_graph_record_metadata(
+                existing["metadata_json"],
+                metadata,
+                source=source,
+                graph_kind="relation",
+            )
             self.conn.execute(
                 "UPDATE graph_relations SET metadata_json = ? WHERE id = ?",
                 (json.dumps(merged, ensure_ascii=True, sort_keys=True), int(existing["id"])),
@@ -5937,7 +6062,11 @@ class BrainstackStore:
             )
             self.conn.commit()
             return int(existing["id"])
-        normalized_metadata = _normalize_record_metadata(metadata, source=source)
+        normalized_metadata = _normalize_graph_record_metadata(
+            metadata,
+            source=source,
+            graph_kind="relation",
+        )
         cur = self.conn.execute(
             """
             INSERT INTO graph_relations (
@@ -5986,7 +6115,12 @@ class BrainstackStore:
             (subject["id"], predicate, obj["id"]),
         ).fetchone()
         if existing:
-            merged = _merge_record_metadata(existing["metadata_json"], metadata, source=source)
+            merged = _merge_graph_record_metadata(
+                existing["metadata_json"],
+                metadata,
+                source=source,
+                graph_kind="relation",
+            )
             self.conn.execute(
                 "UPDATE graph_relations SET metadata_json = ? WHERE id = ?",
                 (json.dumps(merged, ensure_ascii=True, sort_keys=True), int(existing["id"])),
@@ -6001,7 +6135,11 @@ class BrainstackStore:
             )
             self.conn.commit()
             return {"status": "unchanged", "relation_id": int(existing["id"])}
-        normalized_metadata = _normalize_record_metadata(metadata, source=source)
+        normalized_metadata = _normalize_graph_record_metadata(
+            metadata,
+            source=source,
+            graph_kind="relation",
+        )
         cur = self.conn.execute(
             """
             INSERT INTO graph_relations (
@@ -6062,9 +6200,11 @@ class BrainstackStore:
             self.conn.commit()
             return {"status": "shadowed", "relation_id": int(explicit["id"])}
 
-        normalized_metadata = _normalize_record_metadata(metadata, source=source)
-        normalized_metadata.setdefault("source_kind", "inferred")
-        normalized_metadata.setdefault("graph_kind", "relation")
+        normalized_metadata = _normalize_graph_record_metadata(
+            metadata,
+            source=source,
+            graph_kind="inferred_relation",
+        )
         existing = self.conn.execute(
             """
             SELECT id, metadata_json FROM graph_inferred_relations
@@ -6074,7 +6214,12 @@ class BrainstackStore:
             (subject["id"], predicate, obj["id"]),
         ).fetchone()
         if existing:
-            merged = _merge_record_metadata(existing["metadata_json"], normalized_metadata, source=source)
+            merged = _merge_graph_record_metadata(
+                existing["metadata_json"],
+                normalized_metadata,
+                source=source,
+                graph_kind="inferred_relation",
+            )
             self.conn.execute(
                 """
                 UPDATE graph_inferred_relations
@@ -6120,9 +6265,11 @@ class BrainstackStore:
     ) -> Dict[str, Any]:
         now = utc_now_iso()
         entity = self.get_or_create_entity(subject_name)
-        normalized_metadata = _normalize_record_metadata(metadata, source=source)
-        normalized_metadata.setdefault("source_kind", "explicit")
-        normalized_metadata.setdefault("graph_kind", "state")
+        normalized_metadata = _normalize_graph_record_metadata(
+            metadata,
+            source=source,
+            graph_kind="state",
+        )
         temporal = merge_temporal(
             normalized_metadata.get("temporal"),
             {"observed_at": normalized_metadata.get("temporal", {}).get("observed_at") or now},
@@ -6144,7 +6291,12 @@ class BrainstackStore:
         normalized_new = " ".join(value_text.lower().split())
 
         if current and " ".join(str(current["value_text"]).lower().split()) == normalized_new:
-            merged = _merge_record_metadata(current["metadata_json"], normalized_metadata, source=source)
+            merged = _merge_graph_record_metadata(
+                current["metadata_json"],
+                normalized_metadata,
+                source=source,
+                graph_kind="state",
+            )
             merged_valid_to = str((merged.get("temporal") or {}).get("valid_to") or current["valid_to"] or "")
             self.conn.execute(
                 "UPDATE graph_states SET metadata_json = ?, valid_to = ? WHERE id = ?",
@@ -6179,7 +6331,12 @@ class BrainstackStore:
                 (entity["id"], attribute, int(current["id"]), value_text.strip()),
             ).fetchone()
             if conflict:
-                merged = _merge_record_metadata(conflict["metadata_json"], normalized_metadata, source=source)
+                merged = _merge_graph_record_metadata(
+                    conflict["metadata_json"],
+                    normalized_metadata,
+                    source=source,
+                    graph_kind="state_conflict",
+                )
                 self.conn.execute(
                     """
                     UPDATE graph_conflicts
@@ -6195,10 +6352,11 @@ class BrainstackStore:
                 )
                 self.conn.commit()
                 return {"status": "conflict", "entity_id": entity["id"], "conflict_id": int(conflict["id"])}
-            conflict_metadata = _merge_record_metadata(
+            conflict_metadata = _merge_graph_record_metadata(
                 None,
                 normalized_metadata,
                 source=source,
+                graph_kind="state_conflict",
             )
             cur = self.conn.execute(
                 """
@@ -6237,6 +6395,11 @@ class BrainstackStore:
                 prior_metadata["temporal"] = prior_temporal
             if prior_provenance:
                 prior_metadata["provenance"] = prior_provenance
+            prior_metadata = attach_graph_source_lineage(
+                prior_metadata,
+                source=source,
+                graph_kind="state",
+            )
             self.conn.execute(
                 """
                 UPDATE graph_states
@@ -6250,7 +6413,12 @@ class BrainstackStore:
                 ),
             )
 
-        state_metadata = _merge_record_metadata(None, normalized_metadata, source=source)
+        state_metadata = _merge_graph_record_metadata(
+            None,
+            normalized_metadata,
+            source=source,
+            graph_kind="state",
+        )
         cur = self.conn.execute(
             """
             INSERT INTO graph_states (
@@ -6281,6 +6449,11 @@ class BrainstackStore:
                 updated_prior_metadata.get("provenance"),
                 {"source_ids": [source], "replacement_record_id": str(new_state_id)},
             )
+            updated_prior_metadata = attach_graph_source_lineage(
+                updated_prior_metadata,
+                source=source,
+                graph_kind="state",
+            )
             self.conn.execute(
                 "UPDATE graph_states SET metadata_json = ? WHERE id = ?",
                 (
@@ -6288,13 +6461,14 @@ class BrainstackStore:
                     int(current["id"]),
                 ),
             )
-            new_state_metadata = _merge_record_metadata(
+            new_state_metadata = _merge_graph_record_metadata(
                 state_metadata,
                 {
                     "temporal": {"supersedes": str(current["id"]), "valid_from": valid_from},
                     "provenance": {"replacement_record_id": str(current["id"])},
                 },
                 source=source,
+                graph_kind="state",
             )
             self.conn.execute(
                 "UPDATE graph_states SET metadata_json = ? WHERE id = ?",
@@ -6510,6 +6684,11 @@ class BrainstackStore:
             if str(item.get("matched_alias") or "").strip() and not str(existing.get("matched_alias") or "").strip():
                 deduped[row_key] = item
         parsed = list(deduped.values())
+        for item in parsed:
+            field_score = _graph_structured_field_match_score(item, query=query)
+            if field_score:
+                item["_brainstack_graph_field_match_score"] = field_score
+                item["keyword_score"] = max(float(item.get("keyword_score") or 0.0), field_score)
         parsed = [item for item in parsed if _graph_sort_key(item)[0] > 0]
         parsed.sort(key=_graph_sort_key, reverse=True)
         return parsed[:limit]

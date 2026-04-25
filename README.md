@@ -3,11 +3,11 @@
 
 # Brainstack
 
-`Hermes-native` `local-first` `experimental`
+`Hermes-native` `local-first` `donor-grounded`
 
 Brainstack gives Hermes a memory model instead of a memory blob.
 
-It is a composite `MemoryProvider` for persistent agents: profile memory, session continuity, temporal graph truth, and corpus retrieval under one runtime owner.
+It is a composite `MemoryProvider` for persistent agents: profile memory, session continuity, temporal graph truth, and corpus retrieval under one memory owner inside Hermes.
 
 The promise is simple:
 
@@ -92,11 +92,11 @@ Transcript is evidence. Graph is truth. Corpus is corpus. Profile is profile. Th
 
 - runs inside Hermes-Agent as a direct `MemoryProvider` plugin
 - augments Hermes through the native explicit-memory seam instead of replacing builtin user/profile writes
-- keeps runtime ownership in Brainstack while storage is split by responsibility
+- keeps memory ownership in Brainstack while storage is split by responsibility
 - uses `SQLite` for shell, session, profile, transcript, and lexical fallback state
 - supports embedded `Kuzu` for L2 graph truth and reports explicitly if it is unavailable
 - supports embedded `Chroma` for L3 semantic corpus retrieval and reports explicitly if it is unavailable
-- is experimental and actively audited against the donor-first native-seam model
+- is actively audited against the donor-first native-seam model
 - explicit user/addressing truth remains Hermes-host owned
 - transport-handle precedence and explicit-truth atomicity on live chat surfaces remain Hermes host seams, not Brainstack plugin seams
 - explicit multi-rule pack fidelity and ordinary-turn compliance are proven on the Hermes host path, not by reintroducing Brainstack-owned behavior governance
@@ -130,9 +130,9 @@ Brainstack is built from three donor lines, then re-composed into a single Herme
 
 1. **[Hindsight](https://github.com/vectorize-io/hindsight)** - For temporal state preservation, bounded history, and preserving old states rather than destructively overwriting past knowledge.
 2. **[Graphiti](https://github.com/getzep/graphiti)** - For explicitly surfacing graph conflicts, tracking entity relationships, and managing temporal truths natively.
-3. **[MemPalace](https://github.com/yepyhun/MemPalace)** - For modular, high-performance retrieval and FTS/Semantic FUSION handling of large corpuses without massive token overhead.
+3. **[MemPalace](https://github.com/MemPalace/mempalace)** - For modular, high-performance retrieval and FTS/Semantic FUSION handling of large corpuses without massive token overhead.
 
-That donor base is not the whole point. Brainstack's value is that it gives Hermes one runtime owner for these jobs instead of leaving them as separate memory-shaped subsystems.
+That donor base is not the whole point. Brainstack's value is that it gives Hermes one memory owner for these jobs instead of leaving them as separate memory-shaped subsystems.
 
 This shows up as a strict internal separation of concerns:
 
@@ -203,20 +203,12 @@ What is currently true:
 - workstream recap evidence is typed and scoped, so compact operating state can anchor recap answers before broad continuity or corpus fallback
 - explicit scoped workstream recap capture can create idempotent operating anchors without guessing workstream identity from prose
 
-What is not claimed:
+Release posture:
 
-- that every retrieval or packing tradeoff is finished
-- that every donor refresh is zero-touch
-- that old benchmark artifacts remain a source of truth for the current runtime shape
-
-## What this repo is not claiming
-
-- It is not a standalone API-first memory product yet.
-- It is not a one-click upstream auto-update system.
-- It is not the full Hermes repository.
-- It does not claim automatic donor compatibility without review.
-
-The current framing is simple: native Hermes integration first, shared local store second, standalone API later, only if it is intentionally built.
+- Brainstack is optimized for native Hermes integration first
+- donor refreshes are explicit and reviewable, not silent rewrites
+- benchmark artifacts are treated as supporting evidence, not runtime authority
+- public payloads exclude private runtime state, local auth, sessions, and planning files
 
 ## Repo scope
 
@@ -313,13 +305,12 @@ What the installer does:
 | Docker support | Generates `scripts/hermes-brainstack-start.sh`, adds a readiness-aware healthcheck, and supports the same install flow as local mode |
 | Verification | Writes a sanitized install manifest and can run doctor checks immediately |
 
-What it intentionally does not do:
+Safety boundaries:
 
-- it does not guess unknown upstream host changes
-- it does not inject secrets
-- it does not ship private Hermes runtime config, local auth, session state, or `.planning/`
-- it does not pretend API-first deployment already exists
-- it does not claim donor auto-merge
+- unknown upstream host changes are surfaced through doctor checks
+- secrets, private Hermes runtime config, local auth, session state, and `.planning/` stay out of release payloads
+- donor refreshes stay explicit and inspectable
+- API-first deployment remains separate from the Hermes-native plugin path
 
 ## Upstream Hermes refresh workflow
 
@@ -342,7 +333,7 @@ Current updateability is the middle path:
 - bounded refresh reporting
 - local smoke verification
 
-That is much cleaner than silent donor drift, but it is still not full automatic upstream syncing.
+That keeps donor drift inspectable without turning updates into silent rewrites.
 
 ## Docker helper after install
 
