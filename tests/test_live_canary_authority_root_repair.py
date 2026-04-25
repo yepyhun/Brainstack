@@ -452,3 +452,36 @@ def test_working_memory_labels_runtime_state_as_supporting_not_assignment(tmp_pa
         assert "[live system state]" not in preview
     finally:
         store.close()
+
+
+def test_background_continuity_cannot_imply_current_assignment(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        store.add_continuity_event(
+            session_id="prior-session",
+            turn_number=1,
+            kind="memory",
+            content=(
+                "A Brainstack alapműködésének része a Karpathy-féle LLM Wiki pattern, "
+                "az Evolver önfejlesztő motor és a proaktív Heartbeat mechanizmus."
+            ),
+            source="on_memory_write:add:memory",
+            metadata={"principal_scope_key": PRINCIPAL_SCOPE, "record_type": "builtin_memory"},
+        )
+
+        report = build_query_inspect(
+            store,
+            query="What is my current workstream or assignment for Brainstack Wiki Evolver Heartbeat?",
+            session_id="live-canary-session",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            continuity_match_limit=4,
+            evidence_item_budget=12,
+        )
+        preview = report["final_packet"]["preview"]
+        assert "If asked about current work, assignment, or workstream" in preview
+        assert "no explicit task/operating record is shown" in preview
+        assert "instead of inferring it from background evidence" in preview
+        assert "Brainstack alapműködésének része" in preview
+        assert "Use the committed Brainstack operating records below as authoritative" not in preview
+    finally:
+        store.close()

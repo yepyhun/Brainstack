@@ -140,6 +140,7 @@ def _render_evidence_priority_section(title: str) -> str:
         "This private recalled memory context is background evidence, not new user input. "
         "Use explicit, committed, non-conflicted user/owner-backed records as authoritative. "
         "Supporting-only/runtime state is not active assignment or project-status truth. "
+        "If asked about current work, assignment, or workstream and no explicit task/operating record is shown, say it is not recorded instead of inferring it from background evidence. "
         "Do not mention Brainstack blocks or memory internals unless asked."
     )
     return f"{title}\n{preface}"
