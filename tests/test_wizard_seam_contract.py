@@ -50,7 +50,7 @@ def test_legacy_host_patch_mode_can_still_apply_prompt_builder_patch(tmp_path: P
     )
 
 
-def test_core_memory_manager_patch_only_adds_metadata_seam(tmp_path: Path) -> None:
+def test_core_memory_manager_patch_skips_metadata_compat_seam(tmp_path: Path) -> None:
     memory_manager = tmp_path / "memory_manager.py"
     memory_manager.write_text(
         "class MemoryManager:\n"
@@ -68,6 +68,32 @@ def test_core_memory_manager_patch_only_adds_metadata_seam(tmp_path: Path) -> No
         memory_manager,
         dry_run=False,
         host_patch_mode="core",
+    )
+    text = memory_manager.read_text(encoding="utf-8")
+
+    assert actions == []
+    assert "metadata: dict | None = None" not in text
+    assert "private recalled memory context" not in text
+
+
+def test_compat_memory_manager_patch_adds_metadata_seam(tmp_path: Path) -> None:
+    memory_manager = tmp_path / "memory_manager.py"
+    memory_manager.write_text(
+        "class MemoryManager:\n"
+        "    def on_memory_write(self, action: str, target: str, content: str) -> None:\n"
+        "        for provider in self.providers:\n"
+        "            try:\n"
+        "                provider.on_memory_write(action, target, content)\n"
+        "            except Exception:\n"
+        "                pass\n",
+        encoding="utf-8",
+    )
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_memory_manager_required_seam",
+        memory_manager,
+        dry_run=False,
+        host_patch_mode="compat",
     )
     text = memory_manager.read_text(encoding="utf-8")
 

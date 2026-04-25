@@ -43,17 +43,17 @@ HOST_PATCH_MODE_CATEGORIES: dict[str, set[str]] = {
 
 HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
     "_patch_run_agent": {
-        "category": "required_seam",
+        "category": "compat_hotfix",
         "owner": "host-seam",
         "removal_condition": "Hermes exposes structured write-origin metadata and interrupted-turn sync suppression natively.",
     },
     "_patch_memory_provider": {
-        "category": "required_seam",
+        "category": "compat_hotfix",
         "owner": "host-seam",
         "removal_condition": "Hermes MemoryProvider.on_memory_write accepts optional metadata natively.",
     },
     "_patch_memory_manager_required_seam": {
-        "category": "required_seam",
+        "category": "compat_hotfix",
         "owner": "host-seam",
         "removal_condition": "Hermes MemoryManager forwards optional write metadata natively.",
     },
