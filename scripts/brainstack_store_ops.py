@@ -16,6 +16,13 @@ from scripts._brainstack_host_shim import install_host_shim_if_needed  # noqa: E
 install_host_shim_if_needed()
 
 from brainstack.db_ops import backup_sqlite_store, migration_dry_run_report, restore_sqlite_store  # noqa: E402
+from brainstack.shelf_export import (  # noqa: E402
+    dry_run_import_shelf_bundle,
+    export_shelf_bundle,
+    load_shelf_export_bundle,
+    write_shelf_export_bundle,
+)
+from brainstack.db import BrainstackStore  # noqa: E402
 
 
 def _print_json(payload: dict[str, Any]) -> None:
@@ -40,6 +47,33 @@ def _cmd_migration_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_shelves(raw: str) -> tuple[str, ...]:
+    return tuple(part.strip() for part in str(raw or "").split(",") if part.strip())
+
+
+def _cmd_shelf_export(args: argparse.Namespace) -> int:
+    store = BrainstackStore(str(args.db))
+    try:
+        store.open()
+        bundle = export_shelf_bundle(
+            store,
+            shelves=_parse_shelves(args.shelves),
+            principal_scope_key=str(args.principal_scope_key or ""),
+        )
+    finally:
+        store.close()
+    receipt = write_shelf_export_bundle(bundle, args.out)
+    _print_json({"schema": "brainstack.shelf_export_cli_receipt.v1", "status": "completed", "receipt": receipt})
+    return 0
+
+
+def _cmd_shelf_import_dry_run(args: argparse.Namespace) -> int:
+    bundle = load_shelf_export_bundle(args.bundle)
+    report = dry_run_import_shelf_bundle(bundle, target_path=args.target_db)
+    _print_json(report)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Explicit Brainstack SQLite store backup, restore, and migration reporting.",
@@ -60,6 +94,25 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--db", required=True, type=Path, help="Brainstack SQLite DB path.")
     report.add_argument("--json", action="store_true", help="Retained for explicit machine-readable output; JSON is always used.")
     report.set_defaults(func=_cmd_migration_report)
+
+    shelf_export = subparsers.add_parser("shelf-export", help="Write a redacted shelf-aware export bundle.")
+    shelf_export.add_argument("--db", required=True, type=Path, help="Brainstack SQLite DB path.")
+    shelf_export.add_argument("--out", required=True, type=Path, help="Shelf export bundle output path.")
+    shelf_export.add_argument(
+        "--shelves",
+        default="profile,continuity,operating,task,graph,corpus",
+        help="Comma-separated shelves to export.",
+    )
+    shelf_export.add_argument("--principal-scope-key", default="", help="Optional principal scope filter.")
+    shelf_export.set_defaults(func=_cmd_shelf_export)
+
+    shelf_import = subparsers.add_parser(
+        "shelf-import-dry-run",
+        help="Validate a shelf export bundle against an explicit target DB without mutating it.",
+    )
+    shelf_import.add_argument("--bundle", required=True, type=Path, help="Shelf export bundle path.")
+    shelf_import.add_argument("--target-db", required=True, type=Path, help="Explicit target DB path.")
+    shelf_import.set_defaults(func=_cmd_shelf_import_dry_run)
 
     return parser
 

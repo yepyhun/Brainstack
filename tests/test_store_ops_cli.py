@@ -22,6 +22,14 @@ def _create_store(path: Path) -> None:
             content="ops cli safety proof",
             source="test",
         )
+        store.upsert_profile_item(
+            stable_key="ops-cli-profile",
+            category="preference",
+            content="store ops cli profile token=must-redact",
+            source="test",
+            confidence=0.9,
+            metadata={"api_key": "sk-storeopssecret123456"},
+        )
     finally:
         store.close()
 
@@ -82,3 +90,30 @@ def test_store_ops_cli_missing_db_fails_clearly(tmp_path: Path) -> None:
     assert payload["status"] == "error"
     assert payload["error_type"] == "FileNotFoundError"
     assert str(missing) in payload["message"]
+
+
+def test_store_ops_cli_shelf_export_and_import_dry_run(tmp_path: Path) -> None:
+    source = tmp_path / "brainstack.sqlite"
+    target = tmp_path / "target.sqlite"
+    bundle = tmp_path / "bundle.json"
+    _create_store(source)
+    _create_store(target)
+    target_before = target.read_bytes()
+
+    export_result = _run("shelf-export", "--db", source, "--out", bundle, "--shelves", "profile")
+    dry_run_result = _run("shelf-import-dry-run", "--bundle", bundle, "--target-db", target)
+
+    assert export_result.returncode == 0, export_result.stderr
+    assert dry_run_result.returncode == 0, dry_run_result.stderr
+    export_receipt = _json(export_result.stdout)
+    dry_run = _json(dry_run_result.stdout)
+    bundle_text = bundle.read_text(encoding="utf-8")
+
+    assert export_receipt["schema"] == "brainstack.shelf_export_cli_receipt.v1"
+    assert dry_run["schema"] == "brainstack.shelf_import_dry_run.v1"
+    assert dry_run["mutates"] is False
+    assert dry_run["status"] == "blocked_write_import"
+    assert "profile" in dry_run["duplicate_shelves"]
+    assert "sk-storeopssecret123456" not in bundle_text
+    assert "token=must-redact" not in bundle_text
+    assert target.read_bytes() == target_before
