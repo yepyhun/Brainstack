@@ -290,6 +290,8 @@ python install_into_hermes.py /path/to/hermes-agent --enable --doctor --dry-run 
 
 By default the installer uses `--host-patch-mode core`, which applies only Brainstack payload/config/dependency work plus minimal memory-provider seams. Use `--host-patch-mode compat` only for explicit host-runtime compatibility hotfixes, and `--host-patch-mode legacy` only for emergency rollback/testing of the previous broad host patch behavior.
 
+The installer also uses `--gateway-patch-mode auto` by default. This detects whether the target Hermes checkout already contains the required Gateway TurnContract/tool-profile/context-budget/SLO/renderer support. If upstream support is missing, it applies the bundled Hermes Gateway patch set and records the bundle hash in `.brainstack-install-manifest.json`. Use `--gateway-patch-mode skip` only when you intentionally want raw upstream Hermes without the optimized Bestie/Discord gateway path.
+
 Real install:
 
 ```bash
@@ -309,6 +311,7 @@ What the installer does:
 | Plugin payload | Copies `brainstack/` into `plugins/memory/brainstack/` |
 | Host helper | Copies only Brainstack-specific runtime helpers; RTK sidecar wiring is not installed because upstream Hermes already owns tool-result budgeting natively |
 | Host patching | Defaults to `--host-patch-mode core`; compatibility host edits require an explicit `compat` or `legacy` mode |
+| Gateway patching | Defaults to `--gateway-patch-mode auto`; applies the bundled Gateway patch set only when equivalent upstream support is missing |
 | Config | Sets `memory.provider: brainstack`, keeps builtin memory and builtin user profile enabled, and wires the `Kuzu` and `Chroma` paths |
 | Docker support | Generates `scripts/hermes-brainstack-start.sh`, adds a readiness-aware healthcheck, and supports the same install flow as local mode |
 | Verification | Writes a sanitized install manifest and can run doctor checks immediately |

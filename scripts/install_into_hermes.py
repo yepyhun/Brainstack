@@ -24,6 +24,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hermes_gateway_patch_support import (
+    apply_gateway_patch_bundle,
+    inspect_gateway_patch_support,
+)
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PLUGIN = REPO_ROOT / "brainstack"
@@ -3190,6 +3195,21 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--gateway-patch-mode",
+        choices=("auto", "skip", "require"),
+        default="auto",
+        help=(
+            "Hermes Gateway patch policy: auto=apply Brainstack-approved Gateway patches "
+            "when upstream support is missing; skip=only report status; require=fail unless "
+            "upstream support exists or the patch bundle applies cleanly."
+        ),
+    )
+    parser.add_argument(
+        "--skip-hermes-gateway-patches",
+        action="store_true",
+        help="Deprecated alias for --gateway-patch-mode skip.",
+    )
+    parser.add_argument(
         "--check-release-hygiene",
         action="store_true",
         help="Fail if tracked or staged files include private runtime paths or high-confidence secrets.",
@@ -3292,6 +3312,18 @@ def main() -> int:
 
     host_helper_files: list[dict[str, str]] = []
 
+    gateway_patch_mode = "skip" if args.skip_hermes_gateway_patches else args.gateway_patch_mode
+    try:
+        if gateway_patch_mode == "skip":
+            hermes_gateway_patches = inspect_gateway_patch_support(target)
+            hermes_gateway_patches["mode"] = "skip"
+        else:
+            hermes_gateway_patches = apply_gateway_patch_bundle(target, dry_run=args.dry_run)
+            hermes_gateway_patches["mode"] = gateway_patch_mode
+    except RuntimeError as exc:
+        print(f"FAIL Hermes Gateway patch support: {exc}", file=sys.stderr)
+        return 2
+
     host_patches: list[str] = []
     host_patches.extend(_run_host_patch("_patch_run_agent", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_prompt_builder", target / "agent" / "prompt_builder.py", args.dry_run, host_patch_mode=args.host_patch_mode))
@@ -3341,6 +3373,7 @@ def main() -> int:
         "host_helper_files": host_helper_files,
         "host_patches": host_patches,
         "host_patch_inventory": _selected_host_patch_inventory(args.runtime, args.host_patch_mode),
+        "hermes_gateway_patches": hermes_gateway_patches,
         "release_hygiene": release_hygiene,
         "generated_files": generated_files,
         "config_path": str(config_path) if config_path is not None else None,
@@ -3377,6 +3410,8 @@ def main() -> int:
         print(f"{action} host helper files: {len(host_helper_files)}")
     if host_patches:
         print(f"{action} host patches: {len(host_patches)}")
+    if hermes_gateway_patches:
+        print(f"{action} Hermes Gateway patches: {hermes_gateway_patches.get('status')}")
     if generated_files:
         print(f"{action} generated files: {len(generated_files)}")
     if config_result:

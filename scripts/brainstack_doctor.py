@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hermes_gateway_patch_support import inspect_gateway_patch_support
+
 
 REQUIRED_PLUGIN_FILES = [
     "__init__.py",
@@ -279,7 +281,7 @@ def _has_brainstack_evidence_use_contract(text: str) -> bool:
     )
 
 
-def _check_host_surfaces(target: Path) -> list[Check]:
+def _check_host_surfaces(target: Path, *, planned_install: bool = False) -> list[Check]:
     checks: list[Check] = []
     memory_provider = _read(target / "agent" / "memory_provider.py")
     memory_manager = _read(target / "agent" / "memory_manager.py")
@@ -437,6 +439,18 @@ def _check_host_surfaces(target: Path) -> list[Check]:
         checks.append(Check("discord_readiness_gate", "pass", "Discord readiness is decoupled from slash command sync"))
     else:
         checks.append(Check("discord_readiness_gate", "fail", "Discord startup still blocks readiness on slash command sync"))
+
+    gateway_patch_status = inspect_gateway_patch_support(target)
+    status = str(gateway_patch_status.get("status") or "unknown")
+    if status == "upstream_gateway_supported":
+        checks.append(Check("hermes_gateway_patch_support", "pass", "Hermes Gateway optimization support is present"))
+    elif planned_install and status == "gateway_patch_missing":
+        checks.append(Check("hermes_gateway_patch_support", "pass", "Installer will apply Hermes Gateway optimization patch bundle"))
+    elif status == "gateway_patch_missing":
+        checks.append(Check("hermes_gateway_patch_support", "fail", "Hermes Gateway optimization support is missing; run Brainstack installer with gateway patch mode enabled"))
+    else:
+        missing = ", ".join(gateway_patch_status.get("missing_files") or [])
+        checks.append(Check("hermes_gateway_patch_support", "fail", f"Hermes Gateway patch state is partial; missing: {missing}"))
 
     return checks
 
@@ -1150,7 +1164,7 @@ def run_doctor(args: argparse.Namespace) -> tuple[int, list[Check]]:
     else:
         checks.append(Check("python_target", "warn", "No target Python detected; dependency checks fall back to the current interpreter"))
     checks.extend(_check_target_shape(target))
-    checks.extend(_check_host_surfaces(target))
+    checks.extend(_check_host_surfaces(target, planned_install=args.planned_install))
     checks.extend(_check_plugin(target, planned_install=args.planned_install))
     if config_path is None:
         checks.append(Check("config_path", "fail", "Could not uniquely resolve a Hermes agent config; pass --config explicitly"))
