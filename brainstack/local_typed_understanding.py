@@ -4,21 +4,14 @@ import json
 from datetime import datetime
 from typing import Any, Dict, Mapping
 
-from .operating_truth import OPERATING_RECORD_TYPES, recent_work_authority_rank
 from .semantic_evidence import normalize_semantic_terms, semantic_similarity
 from .structured_understanding import (
     ROUTE_MODES,
     current_local_date,
     resolve_user_timezone,
 )
-from .task_memory import ITEM_TYPE_COMMITMENT, ITEM_TYPE_TASK
 from .tier2_extractor import _extract_json_object
 
-
-ITEM_TYPES = {
-    ITEM_TYPE_TASK,
-    ITEM_TYPE_COMMITMENT,
-}
 
 SESSION_RECOVERY_CONTRACT_VERSION = 1
 VOLATILE_OPERATING_RECORD_TYPES = {"live_system_state", "session_state"}
@@ -36,6 +29,30 @@ DATE_SCOPE_VALUES = {
 
 def _normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
+
+
+def _item_type_task() -> str:
+    from .task_memory import ITEM_TYPE_TASK
+
+    return ITEM_TYPE_TASK
+
+
+def _item_types() -> set[str]:
+    from .task_memory import ITEM_TYPE_COMMITMENT, ITEM_TYPE_TASK
+
+    return {ITEM_TYPE_TASK, ITEM_TYPE_COMMITMENT}
+
+
+def _operating_record_types() -> tuple[str, ...]:
+    from .operating_truth import OPERATING_RECORD_TYPES
+
+    return tuple(OPERATING_RECORD_TYPES)
+
+
+def _recent_work_authority_rank(row: Mapping[str, Any]) -> int:
+    from .operating_truth import recent_work_authority_rank
+
+    return recent_work_authority_rank(dict(row))
 
 
 def _normalize_json_value(value: Any) -> Any:
@@ -120,8 +137,8 @@ def _normalize_route_payload(payload: Mapping[str, Any] | None) -> Dict[str, Any
 def _normalize_task_lookup_payload(payload: Mapping[str, Any] | None) -> Dict[str, Any] | None:
     if not isinstance(payload, Mapping):
         return None
-    item_type = _normalize_text(payload.get("item_type")).lower() or ITEM_TYPE_TASK
-    if item_type not in ITEM_TYPES:
+    item_type = _normalize_text(payload.get("item_type")).lower() or _item_type_task()
+    if item_type not in _item_types():
         return None
     due_date = _normalize_due_date(payload.get("due_date"))
     date_scope = _normalize_date_scope(payload.get("date_scope"), due_date=due_date)
@@ -139,7 +156,7 @@ def _normalize_operating_lookup_payload(payload: Mapping[str, Any] | None) -> Di
     record_types = [
         str(value or "").strip()
         for value in (payload.get("record_types") or ())
-        if str(value or "").strip() in OPERATING_RECORD_TYPES
+        if str(value or "").strip() in _operating_record_types()
     ]
     if not record_types:
         return None
@@ -149,8 +166,8 @@ def _normalize_operating_lookup_payload(payload: Mapping[str, Any] | None) -> Di
 def _normalize_task_capture_payload(payload: Mapping[str, Any] | None) -> Dict[str, Any] | None:
     if not isinstance(payload, Mapping):
         return None
-    item_type = _normalize_text(payload.get("item_type")).lower() or ITEM_TYPE_TASK
-    if item_type not in ITEM_TYPES:
+    item_type = _normalize_text(payload.get("item_type")).lower() or _item_type_task()
+    if item_type not in _item_types():
         return None
     due_date = _normalize_due_date(payload.get("due_date"))
     date_scope = _normalize_date_scope(payload.get("date_scope"), due_date=due_date)
@@ -193,7 +210,7 @@ def _normalize_operating_capture_payload(payload: Mapping[str, Any] | None) -> D
             continue
         record_type = str(raw.get("record_type") or "").strip()
         content = _normalize_text(raw.get("content"))
-        if record_type not in OPERATING_RECORD_TYPES or not content:
+        if record_type not in _operating_record_types() or not content:
             continue
         items.append(
             {
@@ -316,7 +333,7 @@ def _operating_projection(row: Mapping[str, Any]) -> str:
 def _operating_record_type_priority(row: Mapping[str, Any]) -> float:
     record_type = str(row.get("record_type") or "").strip()
     if record_type == "recent_work_summary":
-        return 1.0 if recent_work_authority_rank(dict(row)) >= 200 else 0.1
+        return 1.0 if _recent_work_authority_rank(row) >= 200 else 0.1
     if record_type in {
         "completed_outcome",
         "discarded_work",
@@ -401,7 +418,7 @@ def _probe_operating_lookup(
     record_types = [
         str(row.get("record_type") or "").strip()
         for row in rows
-        if str(row.get("record_type") or "").strip() in OPERATING_RECORD_TYPES
+        if str(row.get("record_type") or "").strip() in _operating_record_types()
     ]
     if not record_types:
         return None
