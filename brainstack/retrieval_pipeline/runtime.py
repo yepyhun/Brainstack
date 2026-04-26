@@ -1412,6 +1412,163 @@ def _channel_status(name: str, rows: List[Dict[str, Any]], *, reason: str = "", 
     )
 
 
+@dataclass
+class _SelectionBuckets:
+    profile_items: List[Dict[str, Any]] = field(default_factory=list)
+    matched: List[Dict[str, Any]] = field(default_factory=list)
+    recent: List[Dict[str, Any]] = field(default_factory=list)
+    transcript_rows: List[Dict[str, Any]] = field(default_factory=list)
+    operating_rows: List[Dict[str, Any]] = field(default_factory=list)
+    graph_rows: List[Dict[str, Any]] = field(default_factory=list)
+    corpus_rows: List[Dict[str, Any]] = field(default_factory=list)
+
+    seen_profile_keys: set[str] = field(default_factory=set)
+    seen_continuity_ids: set[int] = field(default_factory=set)
+    seen_transcript_ids: set[int] = field(default_factory=set)
+    seen_operating_keys: set[str] = field(default_factory=set)
+    seen_graph_keys: set[tuple[str, int]] = field(default_factory=set)
+    seen_corpus_keys: set[tuple[int, int]] = field(default_factory=set)
+    evidence_items_used: int = 0
+
+    def add(
+        self,
+        candidate: EvidenceCandidate,
+        row: Dict[str, Any],
+        *,
+        profile_limit: int,
+        continuity_match_limit: int,
+        continuity_recent_limit: int,
+        transcript_limit: int,
+        operating_limit: int,
+        graph_limit: int,
+        corpus_limit: int,
+        evidence_item_budget: int,
+    ) -> None:
+        if candidate.shelf == "profile" and len(self.profile_items) < profile_limit:
+            stable_key = str(row.get("stable_key") or "").strip()
+            if stable_key and stable_key not in self.seen_profile_keys:
+                self.seen_profile_keys.add(stable_key)
+                self.profile_items.append(row)
+            return
+
+        if evidence_item_budget > 0 and self.evidence_items_used >= evidence_item_budget and not _candidate_has_authority_floor(candidate):
+            candidate.row["_brainstack_suppression_reason"] = "not_selected_by_global_evidence_budget"
+            return
+
+        if candidate.shelf == "continuity_match" and len(self.matched) < continuity_match_limit:
+            row_id = int(row.get("id") or 0)
+            if row_id > 0 and row_id not in self.seen_continuity_ids:
+                self.seen_continuity_ids.add(row_id)
+                self.matched.append(row)
+                self.evidence_items_used += 1
+            return
+
+        if candidate.shelf == "continuity_recent" and len(self.recent) < continuity_recent_limit:
+            row_id = int(row.get("id") or 0)
+            if row_id > 0 and row_id not in self.seen_continuity_ids:
+                self.seen_continuity_ids.add(row_id)
+                self.recent.append(row)
+                self.evidence_items_used += 1
+            return
+
+        if candidate.shelf == "transcript" and len(self.transcript_rows) < transcript_limit:
+            row_id = int(row.get("id") or 0)
+            if row_id > 0 and row_id not in self.seen_transcript_ids:
+                self.seen_transcript_ids.add(row_id)
+                self.transcript_rows.append(row)
+                self.evidence_items_used += 1
+            return
+
+        if candidate.shelf == "operating" and len(self.operating_rows) < operating_limit:
+            stable_key = str(row.get("stable_key") or "").strip()
+            if stable_key and stable_key not in self.seen_operating_keys:
+                self.seen_operating_keys.add(stable_key)
+                self.operating_rows.append(row)
+                self.evidence_items_used += 1
+            return
+
+        if candidate.shelf == "graph" and len(self.graph_rows) < graph_limit:
+            row_key = (str(row.get("row_type") or ""), int(row.get("row_id") or 0))
+            if row_key[1] > 0 and row_key not in self.seen_graph_keys:
+                self.seen_graph_keys.add(row_key)
+                self.graph_rows.append(row)
+                self.evidence_items_used += 1
+            return
+
+        if candidate.shelf == "corpus" and len(self.corpus_rows) < corpus_limit:
+            corpus_row_key = (int(row.get("document_id") or 0), int(row.get("section_index") or 0))
+            if corpus_row_key[0] > 0 and corpus_row_key not in self.seen_corpus_keys:
+                self.seen_corpus_keys.add(corpus_row_key)
+                self.corpus_rows.append(row)
+                self.evidence_items_used += 1
+
+    def as_selected(self) -> Dict[str, List[Dict[str, Any]]]:
+        return {
+            "profile_items": self.profile_items,
+            "matched": self.matched,
+            "recent": self.recent,
+            "transcript_rows": self.transcript_rows,
+            "operating_rows": self.operating_rows,
+            "graph_rows": self.graph_rows,
+            "corpus_rows": self.corpus_rows,
+        }
+
+
+def _materialize_candidate(candidate: EvidenceCandidate) -> Dict[str, Any]:
+    row = dict(candidate.row)
+    row["_brainstack_rrf_score"] = candidate.rrf_score
+    row["_brainstack_channels"] = sorted(candidate.channel_ranks)
+    row["_brainstack_channel_ranks"] = dict(candidate.channel_ranks)
+    authority_floor = _candidate_authority_floor(candidate)
+    row["_brainstack_authority_floor"] = authority_floor
+    row["_brainstack_authority_floor_applied"] = authority_floor >= AUTHORITY_FLOOR_SCORE
+    return row
+
+
+def _selection_suppression_reason(
+    candidate: EvidenceCandidate,
+    *,
+    query: str,
+    has_scoped_recap_anchor: bool,
+    scoped_recap_anchor_workstream_ids: set[str],
+) -> str:
+    suppression_reason = _weak_cross_session_keyword_residue_reason(candidate)
+    if suppression_reason:
+        return suppression_reason
+    suppression_reason = _assistant_assignment_residue_reason(candidate, query=query)
+    if suppression_reason:
+        return suppression_reason
+    suppression_reason = _tier2_graph_assignment_residue_reason(candidate, query=query)
+    if suppression_reason:
+        return suppression_reason
+    if (
+        has_scoped_recap_anchor
+        and candidate.shelf in {"continuity_match", "continuity_recent"}
+        and bool(candidate.row.get("_brainstack_supporting_evidence_only"))
+    ):
+        return str(
+            candidate.row.get("_brainstack_workstream_recap_reason")
+            or "supporting_only_unscoped_workstream_recap_evidence"
+        )
+    suppression_reason = workstream_bank_mismatch_reason(
+        anchor_workstream_ids=scoped_recap_anchor_workstream_ids,
+        shelf=candidate.shelf,
+        row=candidate.row,
+    )
+    if suppression_reason:
+        return suppression_reason
+    if (
+        has_scoped_recap_anchor
+        and candidate.shelf == "operating"
+        and bool(candidate.row.get("_brainstack_runtime_state_only"))
+    ):
+        return (
+            "runtime_state_only: scheduler/live-state evidence is supporting context, "
+            "not assignment truth when scoped workstream authority is present"
+        )
+    return str(candidate.row.get("_brainstack_suppression_reason") or "")
+
+
 def _select_rows(
     candidates: List[EvidenceCandidate],
     *,
@@ -1425,22 +1582,7 @@ def _select_rows(
     evidence_item_budget: int,
     query: str = "",
 ) -> Dict[str, List[Dict[str, Any]]]:
-    profile_items: List[Dict[str, Any]] = []
-    matched: List[Dict[str, Any]] = []
-    recent: List[Dict[str, Any]] = []
-    transcript_rows: List[Dict[str, Any]] = []
-    operating_rows: List[Dict[str, Any]] = []
-    graph_rows: List[Dict[str, Any]] = []
-    corpus_rows: List[Dict[str, Any]] = []
-
-    seen_profile_keys: set[str] = set()
-    seen_continuity_ids: set[int] = set()
-    seen_transcript_ids: set[int] = set()
-    seen_operating_keys: set[str] = set()
-    seen_graph_keys: set[tuple[str, int]] = set()
-    seen_corpus_keys: set[tuple[int, int]] = set()
-    evidence_items_used = 0
-    shared_budget_enabled = evidence_item_budget > 0
+    buckets = _SelectionBuckets()
     has_scoped_recap_anchor = any(
         candidate.shelf == "operating" and bool(candidate.row.get("_brainstack_recap_surface"))
         for candidate in candidates
@@ -1452,126 +1594,27 @@ def _select_rows(
         for workstream_id in (row_workstream_id(candidate.row),)
         if workstream_id
     }
-
-    def materialize(candidate: EvidenceCandidate) -> Dict[str, Any]:
-        row = dict(candidate.row)
-        row["_brainstack_rrf_score"] = candidate.rrf_score
-        row["_brainstack_channels"] = sorted(candidate.channel_ranks)
-        row["_brainstack_channel_ranks"] = dict(candidate.channel_ranks)
-        authority_floor = _candidate_authority_floor(candidate)
-        row["_brainstack_authority_floor"] = authority_floor
-        row["_brainstack_authority_floor_applied"] = authority_floor >= AUTHORITY_FLOOR_SCORE
-        return row
-
     for candidate in candidates:
-        row = materialize(candidate)
-        suppression_reason = _weak_cross_session_keyword_residue_reason(candidate)
-        if suppression_reason:
-            candidate.row["_brainstack_suppression_reason"] = suppression_reason
-            continue
-        suppression_reason = _assistant_assignment_residue_reason(candidate, query=query)
-        if suppression_reason:
-            candidate.row["_brainstack_suppression_reason"] = suppression_reason
-            continue
-        suppression_reason = _tier2_graph_assignment_residue_reason(candidate, query=query)
-        if suppression_reason:
-            candidate.row["_brainstack_suppression_reason"] = suppression_reason
-            continue
-        if (
-            has_scoped_recap_anchor
-            and candidate.shelf in {"continuity_match", "continuity_recent"}
-            and bool(candidate.row.get("_brainstack_supporting_evidence_only"))
-        ):
-            candidate.row["_brainstack_suppression_reason"] = str(
-                candidate.row.get("_brainstack_workstream_recap_reason")
-                or "supporting_only_unscoped_workstream_recap_evidence"
-            )
-            continue
-        suppression_reason = workstream_bank_mismatch_reason(
-            anchor_workstream_ids=scoped_recap_anchor_workstream_ids,
-            shelf=candidate.shelf,
-            row=candidate.row,
+        row = _materialize_candidate(candidate)
+        suppression_reason = _selection_suppression_reason(
+            candidate,
+            query=query,
+            has_scoped_recap_anchor=has_scoped_recap_anchor,
+            scoped_recap_anchor_workstream_ids=scoped_recap_anchor_workstream_ids,
         )
         if suppression_reason:
             candidate.row["_brainstack_suppression_reason"] = suppression_reason
             continue
-        if (
-            has_scoped_recap_anchor
-            and candidate.shelf == "operating"
-            and bool(candidate.row.get("_brainstack_runtime_state_only"))
-        ):
-            candidate.row["_brainstack_suppression_reason"] = (
-                "runtime_state_only: scheduler/live-state evidence is supporting context, "
-                "not assignment truth when scoped workstream authority is present"
-            )
-            continue
-        if str(candidate.row.get("_brainstack_suppression_reason") or ""):
-            continue
-        if candidate.shelf == "profile" and len(profile_items) < profile_limit:
-            stable_key = str(row.get("stable_key") or "").strip()
-            if stable_key and stable_key not in seen_profile_keys:
-                seen_profile_keys.add(stable_key)
-                profile_items.append(row)
-            continue
-
-        if shared_budget_enabled and evidence_items_used >= evidence_item_budget and not _candidate_has_authority_floor(candidate):
-            candidate.row["_brainstack_suppression_reason"] = "not_selected_by_global_evidence_budget"
-            continue
-
-        if candidate.shelf == "continuity_match" and len(matched) < continuity_match_limit:
-            row_id = int(row.get("id") or 0)
-            if row_id > 0 and row_id not in seen_continuity_ids:
-                seen_continuity_ids.add(row_id)
-                matched.append(row)
-                evidence_items_used += 1
-            continue
-
-        if candidate.shelf == "continuity_recent" and len(recent) < continuity_recent_limit:
-            row_id = int(row.get("id") or 0)
-            if row_id > 0 and row_id not in seen_continuity_ids:
-                seen_continuity_ids.add(row_id)
-                recent.append(row)
-                evidence_items_used += 1
-            continue
-
-        if candidate.shelf == "transcript" and len(transcript_rows) < transcript_limit:
-            row_id = int(row.get("id") or 0)
-            if row_id > 0 and row_id not in seen_transcript_ids:
-                seen_transcript_ids.add(row_id)
-                transcript_rows.append(row)
-                evidence_items_used += 1
-            continue
-
-        if candidate.shelf == "operating" and len(operating_rows) < operating_limit:
-            stable_key = str(row.get("stable_key") or "").strip()
-            if stable_key and stable_key not in seen_operating_keys:
-                seen_operating_keys.add(stable_key)
-                operating_rows.append(row)
-                evidence_items_used += 1
-            continue
-
-        if candidate.shelf == "graph" and len(graph_rows) < graph_limit:
-            row_key = (str(row.get("row_type") or ""), int(row.get("row_id") or 0))
-            if row_key[1] > 0 and row_key not in seen_graph_keys:
-                seen_graph_keys.add(row_key)
-                graph_rows.append(row)
-                evidence_items_used += 1
-            continue
-
-        if candidate.shelf == "corpus" and len(corpus_rows) < corpus_limit:
-            corpus_row_key = (int(row.get("document_id") or 0), int(row.get("section_index") or 0))
-            if corpus_row_key[0] > 0 and corpus_row_key not in seen_corpus_keys:
-                seen_corpus_keys.add(corpus_row_key)
-                corpus_rows.append(row)
-                evidence_items_used += 1
-            continue
-
-    return {
-        "profile_items": profile_items,
-        "matched": matched,
-        "recent": recent,
-        "transcript_rows": transcript_rows,
-        "operating_rows": operating_rows,
-        "graph_rows": graph_rows,
-        "corpus_rows": corpus_rows,
-    }
+        buckets.add(
+            candidate,
+            row,
+            profile_limit=profile_limit,
+            continuity_match_limit=continuity_match_limit,
+            continuity_recent_limit=continuity_recent_limit,
+            transcript_limit=transcript_limit,
+            operating_limit=operating_limit,
+            graph_limit=graph_limit,
+            corpus_limit=corpus_limit,
+            evidence_item_budget=evidence_item_budget,
+        )
+    return buckets.as_selected()
