@@ -459,6 +459,108 @@ def _summarize_rows(shelf: str, rows: list[Dict[str, Any]]) -> list[Dict[str, An
     return output
 
 
+def _selected_by_shelf_from_packet(packet: Mapping[str, Any]) -> dict[str, list[Dict[str, Any]]]:
+    return {
+        "profile": _summarize_rows("profile", list(packet.get("profile_items") or [])),
+        "task": _summarize_rows("task", list(packet.get("task_rows") or [])),
+        "operating": _summarize_rows("operating", list(packet.get("operating_rows") or [])),
+        "continuity_match": _summarize_rows("continuity_match", list(packet.get("matched") or [])),
+        "continuity_recent": _summarize_rows("continuity_recent", list(packet.get("recent") or [])),
+        "transcript": _summarize_rows("transcript", list(packet.get("transcript_rows") or [])),
+        "graph": _summarize_rows("graph", list(packet.get("graph_rows") or [])),
+        "corpus": _summarize_rows("corpus", list(packet.get("corpus_rows") or [])),
+    }
+
+
+def _selected_evidence_keys(selected_by_shelf: Mapping[str, list[Dict[str, Any]]]) -> set[str]:
+    return {
+        item["evidence_key"]
+        for rows in selected_by_shelf.values()
+        for item in rows
+        if item.get("evidence_key")
+    }
+
+
+def _suppressed_evidence_from_packet(packet: Mapping[str, Any], *, selected_keys: set[str]) -> list[Dict[str, Any]]:
+    suppressed: list[Dict[str, Any]] = []
+    for candidate in list(packet.get("fused_candidates") or [])[:40]:
+        shelf = str(candidate.get("shelf") or "")
+        evidence_key = _candidate_evidence_key(shelf, candidate)
+        if evidence_key in selected_keys:
+            continue
+        suppressed.append(
+            {
+                "evidence_key": evidence_key,
+                "shelf": shelf,
+                "reason": "Candidate was not selected by route, authority, dedupe, or packet budget.",
+                "suppression_reason": str(candidate.get("suppression_reason") or ""),
+                "retrieval_source": str(candidate.get("retrieval_source") or ""),
+                "match_mode": str(candidate.get("match_mode") or ""),
+                "row_type": str(candidate.get("row_type") or ""),
+                "fact_class": str(candidate.get("fact_class") or ""),
+                "matched_alias": str(candidate.get("matched_alias") or ""),
+                "entity_resolution_source": str(candidate.get("entity_resolution_source") or ""),
+                "entity_resolution_reason": str(candidate.get("entity_resolution_reason") or ""),
+                "entity_resolution_confidence": float(candidate.get("entity_resolution_confidence") or 0.0),
+                "entity_resolution_merge_eligible": bool(candidate.get("entity_resolution_merge_eligible")),
+                "graph_backend_status": str(candidate.get("graph_backend_status") or ""),
+                "graph_backend_requested": str(candidate.get("graph_backend_requested") or ""),
+                "graph_fallback_reason": str(candidate.get("graph_fallback_reason") or ""),
+                "authority_level": str(candidate.get("operating_authority_level") or ""),
+                "workstream_id": str(candidate.get("workstream_id") or ""),
+                "owner_role": str(candidate.get("operating_owner_role") or ""),
+                "recap_surface": bool(candidate.get("recap_surface")),
+                "supporting_evidence_only": bool(candidate.get("supporting_evidence_only")),
+                "runtime_state_only": bool(candidate.get("runtime_state_only")),
+                "workstream_recap_reason": str(candidate.get("workstream_recap_reason") or ""),
+                "channel_ranks": dict(candidate.get("channel_ranks") or {}),
+                "selection_status": str(candidate.get("selection_status") or ""),
+                "selection_reason": str(candidate.get("selection_reason") or ""),
+                "keyword_score": float(candidate.get("keyword_score") or 0.0),
+                "semantic_score": float(candidate.get("semantic_score") or 0.0),
+                "query_token_overlap": int(candidate.get("query_token_overlap") or 0),
+                "query_token_count": int(candidate.get("query_token_count") or 0),
+                "excerpt": str(candidate.get("content_excerpt") or "")[:220],
+            }
+        )
+    return suppressed
+
+
+def _packet_sections(block: str) -> list[str]:
+    return [line[3:].strip() for line in block.splitlines() if line.startswith("## ")]
+
+
+def _explicit_truth_parity_from_selected(selected_by_shelf: Mapping[str, list[Dict[str, Any]]]) -> list[Dict[str, Any]]:
+    return [
+        dict(item.get("explicit_truth_parity") or {})
+        for rows in selected_by_shelf.values()
+        for item in rows
+        if isinstance(item.get("explicit_truth_parity"), dict) and item.get("explicit_truth_parity")
+    ]
+
+
+def _final_packet_diagnostic_payload(
+    *,
+    block: str,
+    sections: list[str],
+    policy_snapshot: Mapping[str, Any],
+    packet_answerability: Mapping[str, Any],
+    explicit_truth_parity: list[Dict[str, Any]],
+    selected_by_shelf: Mapping[str, list[Dict[str, Any]]],
+) -> dict[str, Any]:
+    return {
+        "char_count": len(block),
+        "section_count": len(sections),
+        "sections": sections,
+        "preview": block[:1200],
+        "policy": dict(policy_snapshot),
+        "memory_answerability": dict(packet_answerability),
+        "explicit_truth_parity": explicit_truth_parity,
+        "diagnostic_evidence_count": sum(len(rows) for rows in selected_by_shelf.values()),
+        "answerable_evidence_count": len(packet_answerability.get("answer_evidence_ids") or []),
+    }
+
+
 def build_query_inspect(
     store: BrainstackStore,
     *,
@@ -502,65 +604,11 @@ def build_query_inspect(
         render_ordinary_contract=render_ordinary_contract,
         record_retrievals=False,
     )
-    selected_by_shelf = {
-        "profile": _summarize_rows("profile", list(packet.get("profile_items") or [])),
-        "task": _summarize_rows("task", list(packet.get("task_rows") or [])),
-        "operating": _summarize_rows("operating", list(packet.get("operating_rows") or [])),
-        "continuity_match": _summarize_rows("continuity_match", list(packet.get("matched") or [])),
-        "continuity_recent": _summarize_rows("continuity_recent", list(packet.get("recent") or [])),
-        "transcript": _summarize_rows("transcript", list(packet.get("transcript_rows") or [])),
-        "graph": _summarize_rows("graph", list(packet.get("graph_rows") or [])),
-        "corpus": _summarize_rows("corpus", list(packet.get("corpus_rows") or [])),
-    }
-    selected_keys = {
-        item["evidence_key"]
-        for rows in selected_by_shelf.values()
-        for item in rows
-        if item.get("evidence_key")
-    }
-    suppressed: list[Dict[str, Any]] = []
-    for candidate in list(packet.get("fused_candidates") or [])[:40]:
-        shelf = str(candidate.get("shelf") or "")
-        evidence_key = _candidate_evidence_key(shelf, candidate)
-        if evidence_key in selected_keys:
-            continue
-        suppressed.append(
-            {
-                "evidence_key": evidence_key,
-                "shelf": shelf,
-                "reason": "Candidate was not selected by route, authority, dedupe, or packet budget.",
-                "suppression_reason": str(candidate.get("suppression_reason") or ""),
-                "retrieval_source": str(candidate.get("retrieval_source") or ""),
-                "match_mode": str(candidate.get("match_mode") or ""),
-                "row_type": str(candidate.get("row_type") or ""),
-                "fact_class": str(candidate.get("fact_class") or ""),
-                "matched_alias": str(candidate.get("matched_alias") or ""),
-                "entity_resolution_source": str(candidate.get("entity_resolution_source") or ""),
-                "entity_resolution_reason": str(candidate.get("entity_resolution_reason") or ""),
-                "entity_resolution_confidence": float(candidate.get("entity_resolution_confidence") or 0.0),
-                "entity_resolution_merge_eligible": bool(candidate.get("entity_resolution_merge_eligible")),
-                "graph_backend_status": str(candidate.get("graph_backend_status") or ""),
-                "graph_backend_requested": str(candidate.get("graph_backend_requested") or ""),
-                "graph_fallback_reason": str(candidate.get("graph_fallback_reason") or ""),
-                "authority_level": str(candidate.get("operating_authority_level") or ""),
-                "workstream_id": str(candidate.get("workstream_id") or ""),
-                "owner_role": str(candidate.get("operating_owner_role") or ""),
-                "recap_surface": bool(candidate.get("recap_surface")),
-                "supporting_evidence_only": bool(candidate.get("supporting_evidence_only")),
-                "runtime_state_only": bool(candidate.get("runtime_state_only")),
-                "workstream_recap_reason": str(candidate.get("workstream_recap_reason") or ""),
-                "channel_ranks": dict(candidate.get("channel_ranks") or {}),
-                "selection_status": str(candidate.get("selection_status") or ""),
-                "selection_reason": str(candidate.get("selection_reason") or ""),
-                "keyword_score": float(candidate.get("keyword_score") or 0.0),
-                "semantic_score": float(candidate.get("semantic_score") or 0.0),
-                "query_token_overlap": int(candidate.get("query_token_overlap") or 0),
-                "query_token_count": int(candidate.get("query_token_count") or 0),
-                "excerpt": str(candidate.get("content_excerpt") or "")[:220],
-            }
-        )
+    selected_by_shelf = _selected_by_shelf_from_packet(packet)
+    selected_keys = _selected_evidence_keys(selected_by_shelf)
+    suppressed = _suppressed_evidence_from_packet(packet, selected_keys=selected_keys)
     block = str(packet.get("block") or "")
-    sections = [line[3:].strip() for line in block.splitlines() if line.startswith("## ")]
+    sections = _packet_sections(block)
     candidate_trace = build_candidate_trace(
         selected_by_shelf=selected_by_shelf,
         suppressed_rows=suppressed,
@@ -579,12 +627,7 @@ def build_query_inspect(
         selected_by_shelf=selected_by_shelf,
         packet_text=block,
     )
-    explicit_truth_parity = [
-        dict(item.get("explicit_truth_parity") or {})
-        for rows in selected_by_shelf.values()
-        for item in rows
-        if isinstance(item.get("explicit_truth_parity"), dict) and item.get("explicit_truth_parity")
-    ]
+    explicit_truth_parity = _explicit_truth_parity_from_selected(selected_by_shelf)
     return {
         "schema": "brainstack.query_inspect.v1",
         "query": str(query or ""),
@@ -608,15 +651,12 @@ def build_query_inspect(
             enabled=True,
         ),
         "capability_health": capability_health,
-        "final_packet": {
-            "char_count": len(block),
-            "section_count": len(sections),
-            "sections": sections,
-            "preview": block[:1200],
-            "policy": policy_snapshot,
-            "memory_answerability": packet_answerability,
-            "explicit_truth_parity": explicit_truth_parity,
-            "diagnostic_evidence_count": sum(len(rows) for rows in selected_by_shelf.values()),
-            "answerable_evidence_count": len(packet_answerability.get("answer_evidence_ids") or []),
-        },
+        "final_packet": _final_packet_diagnostic_payload(
+            block=block,
+            sections=sections,
+            policy_snapshot=policy_snapshot,
+            packet_answerability=packet_answerability,
+            explicit_truth_parity=explicit_truth_parity,
+            selected_by_shelf=selected_by_shelf,
+        ),
     }
