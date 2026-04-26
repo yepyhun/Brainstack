@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import re
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Mapping
 
 
 OPERATING_RECORD_ACTIVE_WORK = "active_work"
@@ -86,6 +86,13 @@ RECENT_WORK_OWNER_ROLES = {
     RECENT_WORK_OWNER_AGENT_ASSIGNMENT,
     RECENT_WORK_OWNER_RUNTIME_SYSTEM,
     RECENT_WORK_OWNER_UNKNOWN,
+}
+
+CURRENT_ASSIGNMENT_AUTHORITY_SCHEMA = "brainstack.current_assignment_authority.v1"
+BACKGROUND_OPERATING_SOURCE_KINDS = {
+    RECENT_WORK_SOURCE_TIER2_IDLE,
+    RECENT_WORK_SOURCE_TIER2_BATCH,
+    RECENT_WORK_SOURCE_SESSION_CONSOLIDATION,
 }
 
 
@@ -258,16 +265,39 @@ def operating_record_source_kind(row: Dict[str, Any]) -> str:
     return ""
 
 
+def is_background_operating_source(*, source: str, metadata: Mapping[str, Any] | None = None) -> bool:
+    """Return true for weak/background producers that cannot create operating authority."""
+
+    row = {"source": source, "metadata": dict(metadata or {})}
+    return operating_record_source_kind(row) in BACKGROUND_OPERATING_SOURCE_KINDS
+
+
+def should_promote_open_decision(*, source: str, metadata: Mapping[str, Any] | None = None) -> bool:
+    """Open decisions need trusted/explicit provenance before becoming operating truth."""
+
+    return not is_background_operating_source(source=source, metadata=metadata)
+
+
+def is_current_assignment_authority_metadata(metadata: Mapping[str, Any] | None) -> bool:
+    """Positive typed authority for current assignment.
+
+    Owner role alone is not enough. Background summaries, graph facts, transcripts,
+    or session recaps can discuss work; they cannot instantiate current assignment.
+    """
+
+    payload = metadata if isinstance(metadata, Mapping) else {}
+    return bool(payload.get("current_assignment_authority")) and (
+        str(payload.get("current_assignment_authority_schema") or "").strip()
+        == CURRENT_ASSIGNMENT_AUTHORITY_SCHEMA
+    )
+
+
 def is_background_operating_record(row: Dict[str, Any]) -> bool:
     record_type = str(row.get("record_type") or "").strip()
     if is_background_recent_work(row):
         return True
     if record_type == OPERATING_RECORD_OPEN_DECISION:
-        return operating_record_source_kind(row) in {
-            RECENT_WORK_SOURCE_TIER2_IDLE,
-            RECENT_WORK_SOURCE_TIER2_BATCH,
-            RECENT_WORK_SOURCE_SESSION_CONSOLIDATION,
-        }
+        return operating_record_source_kind(row) in BACKGROUND_OPERATING_SOURCE_KINDS
     return False
 
 

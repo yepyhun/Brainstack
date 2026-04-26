@@ -55,6 +55,7 @@ from .operating_truth import (
     normalize_recent_work_metadata,
     parse_operating_capture,
     recent_work_stable_key,
+    should_promote_open_decision,
 )
 from .output_contract import validate_output_against_contract
 from .provider_diagnostics import (
@@ -1058,6 +1059,12 @@ class BrainstackMemoryProvider(MemoryProvider):
         source: str,
         metadata: Dict[str, Any] | None = None,
     ) -> int:
+        if not should_promote_open_decision(source=source, metadata=metadata):
+            self._set_memory_operation_trace(
+                surface="operating_open_decision_rejected",
+                note="Background/Tier-2/session-derived open decisions are supporting evidence, not operating authority.",
+            )
+            return 0
         promoted = 0
         for decision in decisions or ():
             normalized_decision = trim_text_boundary(_normalize_compact_text(decision), max_len=220)
@@ -1571,6 +1578,7 @@ class BrainstackMemoryProvider(MemoryProvider):
                 "write_invoker": "trusted_host" if trusted_operator_origin else "model_tool",
                 "trusted_write_origin": trusted_operator_origin,
                 "workstream_recap_capture_schema": "brainstack.workstream_recap_capture.v1",
+                "current_assignment_authority": False,
             }
         )
         metadata = normalize_recent_work_metadata(

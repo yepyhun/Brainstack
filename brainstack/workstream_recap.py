@@ -38,6 +38,28 @@ def _workstream_id(row: Mapping[str, Any]) -> str:
     return str(metadata.get("workstream_id") or row.get("workstream_id") or "").strip()
 
 
+def row_workstream_id(row: Mapping[str, Any]) -> str:
+    """Return normalized workstream/bank id from candidate or row metadata."""
+    direct = str(row.get("_brainstack_workstream_id") or row.get("workstream_id") or "").strip()
+    if direct:
+        return direct
+    return _workstream_id(row)
+
+
+def workstream_bank_mismatch_reason(
+    *,
+    anchor_workstream_ids: set[str],
+    shelf: str,
+    row: Mapping[str, Any],
+) -> str:
+    if not anchor_workstream_ids or shelf not in {"continuity_match", "continuity_recent"}:
+        return ""
+    candidate_workstream_id = row_workstream_id(row)
+    if not candidate_workstream_id or candidate_workstream_id in anchor_workstream_ids:
+        return ""
+    return "workstream_bank_mismatch: continuity evidence belongs to a different scoped memory bank"
+
+
 def is_workstream_recap_anchor(row: Mapping[str, Any]) -> bool:
     record_type = str(row.get("record_type") or "").strip()
     if record_type not in WORKSTREAM_RECAP_ANCHOR_RECORD_TYPES:
@@ -104,4 +126,3 @@ def annotate_workstream_recap_row(row: Dict[str, Any], *, shelf: str) -> Dict[st
     row["_brainstack_supporting_evidence_only"] = bool(flags["supporting_evidence_only"])
     row["_brainstack_workstream_recap_reason"] = str(flags["reason"] or "")
     return row
-

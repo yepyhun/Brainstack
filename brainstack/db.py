@@ -5916,16 +5916,29 @@ class BrainstackStore:
             }
         valid_from = str(normalized_metadata.get("temporal", {}).get("valid_from") or now)
         valid_to = str(normalized_metadata.get("temporal", {}).get("valid_to") or "")
-        current = self.conn.execute(
+        current_candidates = self.conn.execute(
             """
             SELECT id, value_text, source, metadata_json, valid_from, valid_to
             FROM graph_states
             WHERE entity_id = ? AND attribute = ? AND is_current = 1
             ORDER BY valid_from DESC, id DESC
-            LIMIT 1
             """,
             (entity["id"], attribute),
-        ).fetchone()
+        ).fetchall()
+        new_scope_key = _principal_scope_key_from_metadata(normalized_metadata)
+        current = None
+        for candidate in current_candidates:
+            candidate_scope_key = _principal_scope_key_from_metadata(_decode_json_object(candidate["metadata_json"]))
+            if new_scope_key:
+                if candidate_scope_key == new_scope_key:
+                    current = candidate
+                    break
+                continue
+            if not candidate_scope_key:
+                current = candidate
+                break
+        if current is None and not new_scope_key and current_candidates:
+            current = current_candidates[0]
         normalized_new = " ".join(value_text.lower().split())
 
         if current and " ".join(str(current["value_text"]).lower().split()) == normalized_new:
@@ -6525,6 +6538,10 @@ class BrainstackStore:
         scored: List[Dict[str, Any]] = []
         for row in keyword_rows:
             item = dict(row)
+            if str(item.get("row_type") or "") == "conflict":
+                conflict_scope_key = _principal_scope_key_from_metadata(item.get("conflict_metadata"))
+                if principal_scope_key and conflict_scope_key and conflict_scope_key != principal_scope_key:
+                    continue
             if not _annotate_principal_scope(item, principal_scope_key=principal_scope_key):
                 continue
             item.setdefault("retrieval_source", retrieval_source)

@@ -169,6 +169,75 @@ def _tier2_capability(tier2_state: Mapping[str, Any] | None) -> Dict[str, Any]:
     }
 
 
+def _capability_issue_severity(capability: Mapping[str, Any]) -> str:
+    status = str(capability.get("status") or "unavailable").strip()
+    kind = str(capability.get("kind") or "").strip()
+    if kind == "db_substrate" and status != "active":
+        return "fatal"
+    if status == "unavailable" and capability.get("requested"):
+        return "error"
+    if status == "degraded":
+        return "warn"
+    return "info"
+
+
+def _named_backend_health(capability: Mapping[str, Any], *, backend_name: str) -> Dict[str, Any]:
+    requested = str(capability.get("requested") or "").strip().lower()
+    expected = str(backend_name or "").strip().lower()
+    if requested != expected:
+        return {
+            "kind": expected,
+            "requested": False,
+            "active": False,
+            "status": "not_requested",
+            "reason": f"{expected} backend was not requested for this query path.",
+        }
+    return {
+        "kind": expected,
+        "requested": True,
+        "active": bool(capability.get("active")),
+        "status": str(capability.get("status") or "unavailable"),
+        "reason": str(capability.get("reason") or ""),
+        "error": str(capability.get("error") or ""),
+        "error_class": str(capability.get("error_class") or ""),
+    }
+
+
+def _query_capability_health(store: BrainstackStore) -> Dict[str, Any]:
+    doctor = build_memory_kernel_doctor(store, strict=False)
+    capabilities = doctor.get("capabilities")
+    capability_map: Mapping[str, Any] = capabilities if isinstance(capabilities, Mapping) else {}
+    raw_graph = capability_map.get("graph")
+    raw_corpus = capability_map.get("corpus")
+    graph: Mapping[str, Any] = raw_graph if isinstance(raw_graph, Mapping) else {}
+    corpus: Mapping[str, Any] = raw_corpus if isinstance(raw_corpus, Mapping) else {}
+    db_substrate_raw = capability_map.get("db_substrate")
+    semantic_index_raw = capability_map.get("semantic_index")
+    graph_recall_raw = capability_map.get("graph_recall")
+    db_substrate: Mapping[str, Any] = db_substrate_raw if isinstance(db_substrate_raw, Mapping) else {}
+    semantic_index: Mapping[str, Any] = semantic_index_raw if isinstance(semantic_index_raw, Mapping) else {}
+    graph_recall: Mapping[str, Any] = graph_recall_raw if isinstance(graph_recall_raw, Mapping) else {}
+    return {
+        "schema": "brainstack.query_capability_health.v1",
+        "verdict": str(doctor.get("verdict") or "degraded"),
+        "sqlite": dict(db_substrate),
+        "graph": dict(graph),
+        "corpus": dict(corpus),
+        "kuzu": _named_backend_health(graph, backend_name="kuzu"),
+        "chroma": _named_backend_health(corpus, backend_name="chroma"),
+        "semantic_index": dict(semantic_index),
+        "graph_recall": dict(graph_recall),
+        "lexical_index": {
+            "kind": "lexical_index",
+            "requested": True,
+            "active": True,
+            "status": "active",
+            "reason": "SQLite FTS/LIKE lexical fallback is available for scoped local recall.",
+        },
+        "issues": list(doctor.get("issues") or []),
+    }
+
+
 def build_memory_kernel_doctor(
     store: BrainstackStore,
     *,
@@ -223,6 +292,7 @@ def build_memory_kernel_doctor(
                 {
                     "capability": str(capability.get("kind") or "tier2"),
                     "status": str(capability.get("status") or "unavailable"),
+                    "severity": _capability_issue_severity(capability),
                     "reason": str(capability.get("reason") or ""),
                 }
             )
@@ -332,6 +402,8 @@ def _summarize_rows(shelf: str, rows: list[Dict[str, Any]]) -> list[Dict[str, An
                 "workstream_id": metadata.get("workstream_id", ""),
                 "owner_role": metadata.get("owner_role", ""),
                 "source_kind": metadata.get("source_kind", ""),
+                "current_assignment_authority": bool(metadata.get("current_assignment_authority")),
+                "current_assignment_authority_schema": metadata.get("current_assignment_authority_schema", ""),
                 "consolidation_source": dict(metadata.get("consolidation_source") or {})
                 if isinstance(metadata.get("consolidation_source"), dict)
                 else {},
@@ -488,6 +560,7 @@ def build_query_inspect(
             candidate_budget=int(policy_snapshot.get("evidence_item_budget") or evidence_item_budget or 1),
             enabled=True,
         ),
+        "capability_health": _query_capability_health(store),
         "final_packet": {
             "char_count": len(block),
             "section_count": len(sections),

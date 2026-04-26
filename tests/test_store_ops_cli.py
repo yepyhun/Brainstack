@@ -28,7 +28,7 @@ def _create_store(path: Path) -> None:
             content="store ops cli profile token=must-redact",
             source="test",
             confidence=0.9,
-            metadata={"api_key": "sk-storeopssecret123456"},
+            metadata={"api_key": "DUMMY_STORE_OPS_SECRET_123456"},
         )
     finally:
         store.close()
@@ -114,6 +114,6 @@ def test_store_ops_cli_shelf_export_and_import_dry_run(tmp_path: Path) -> None:
     assert dry_run["mutates"] is False
     assert dry_run["status"] == "blocked_write_import"
     assert "profile" in dry_run["duplicate_shelves"]
-    assert "sk-storeopssecret123456" not in bundle_text
+    assert "DUMMY_STORE_OPS_SECRET_123456" not in bundle_text
     assert "token=must-redact" not in bundle_text
     assert target.read_bytes() == target_before

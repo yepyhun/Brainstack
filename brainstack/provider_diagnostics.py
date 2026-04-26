@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from .diagnostics import build_memory_kernel_doctor, build_query_inspect
+from .operating_truth import is_current_assignment_authority_metadata
 
 
 def _normalize_compact_text(value: Any) -> str:
@@ -38,7 +39,14 @@ def _is_current_assignment_authority(item: Mapping[str, Any]) -> bool:
     if bool(item.get("runtime_state_only")) or bool(item.get("supporting_evidence_only")):
         return False
     if shelf == "operating":
-        return _normalize_compact_text(item.get("owner_role")) == "agent_assignment"
+        return is_current_assignment_authority_metadata(
+            {
+                "current_assignment_authority": bool(item.get("current_assignment_authority")),
+                "current_assignment_authority_schema": _normalize_compact_text(
+                    item.get("current_assignment_authority_schema")
+                ),
+            }
+        )
     if shelf == "task":
         return True
     return False
@@ -63,6 +71,9 @@ def _compact_evidence_card(item: Mapping[str, Any]) -> dict[str, Any]:
         "runtime_state_only": runtime_state_only,
         "supporting_evidence_only": supporting_evidence_only,
         "current_assignment_authority": current_assignment_authority,
+        "current_assignment_authority_schema": _normalize_compact_text(
+            item.get("current_assignment_authority_schema")
+        ),
         "citation_id": _normalize_compact_text(item.get("citation_id")),
         "created_at": _normalize_compact_text(item.get("created_at")),
         "excerpt": _trim_compact_text(item.get("excerpt"), limit=180),
@@ -268,11 +279,17 @@ def handle_brainstack_recall(
             "selected_evidence_use": "diagnostic support only; do not override final_packet authority notes",
             "current_assignment_rule": (
                 "Treat current work, assignment, or workstream as recorded only when a selected task card exists "
-                "or an operating card has current_assignment_authority=true."
+                "or an operating card has typed current_assignment_authority=true."
+            ),
+            "current_assignment_negative_rule": (
+                "Do not determine active work from continuity, transcript/session history, profile shared_work, "
+                "graph/background facts, runtime scheduler state, or Pulse evidence unless it is selected task "
+                "evidence or selected operating evidence with typed current_assignment_authority=true."
             ),
             "non_authority_sources": [
                 "profile shared_work",
                 "continuity/transcript/session summaries",
+                "graph/background facts without current_assignment_authority",
                 "runtime_state_only scheduler or pulse rows",
                 "external/session-search summaries",
             ],

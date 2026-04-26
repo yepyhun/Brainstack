@@ -30,7 +30,7 @@ def _seed_store(path: Path) -> None:
         metadata = {
             "principal_scope_key": PRINCIPAL_SCOPE,
             "private_path": "/home/lauratom/private/should-redact.md",
-            "api_key": "sk-testsecretvalue123456",
+            "api_key": "DUMMY_SECRET_VALUE_TEST_123456",
         }
         store.upsert_profile_item(
             stable_key="preference:export",
@@ -108,7 +108,7 @@ def test_shelf_export_has_manifest_redaction_report_and_migration_snapshot(tmp_p
     assert manifest["redaction_report"]["reason_counts"]["secret_key_redacted"] >= 1
     assert manifest["redaction_report"]["reason_counts"]["private_path_redacted"] >= 1
     serialized = json.dumps(bundle, sort_keys=True)
-    assert "sk-testsecretvalue123456" not in serialized
+    assert "DUMMY_SECRET_VALUE_TEST_123456" not in serialized
     assert "token=super-secret-value" not in serialized
     assert "/home/lauratom/private" not in serialized
     assert "/private/source" not in serialized

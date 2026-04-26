@@ -34,7 +34,7 @@ from .temporal import record_is_effective_at, record_temporal_status
 from .tier2_extractor import _default_llm_caller, _extract_json_object, _extract_text_content
 from .transcript import primary_user_turn_content, split_turn_content
 from .usefulness import graph_priority_adjustment, profile_priority_adjustment
-from .workstream_recap import annotate_workstream_recap_row
+from .workstream_recap import annotate_workstream_recap_row, row_workstream_id, workstream_bank_mismatch_reason
 
 RRF_K = 60
 ROUTE_FACT = "fact"
@@ -356,6 +356,85 @@ def _weak_cross_session_keyword_residue_reason(candidate: EvidenceCandidate) -> 
     return (
         "weak_cross_session_keyword_residue: broad query matched fewer than "
         "two informative tokens on a transcript-like shelf"
+    )
+
+
+_CURRENT_ASSIGNMENT_MARKERS = {
+    "active",
+    "aktualis",
+    "current",
+    "jelenlegi",
+    "most",
+    "now",
+}
+
+_ASSIGNMENT_DOMAIN_MARKERS = {
+    "assigned",
+    "assignment",
+    "feladat",
+    "feladatod",
+    "munka",
+    "task",
+    "work",
+    "workstream",
+}
+
+
+def _current_assignment_lookup_requested(query: str) -> bool:
+    """Return true when the query asks for current assigned work authority.
+
+    This is a narrow authority gate, not a semantic router: current assignment
+    truth must come from task/operating owner records, never assistant-authored
+    transcript residue or Tier-2 background graph guesses.
+    """
+    normalized = _normalize_text(query).casefold()
+    tokens = {
+        token
+        for token in re.findall(r"[^\W_]+", normalized, flags=re.UNICODE)
+        if len(token) >= 3
+    }
+    has_current_marker = bool(tokens & _CURRENT_ASSIGNMENT_MARKERS)
+    has_assignment_marker = bool(tokens & _ASSIGNMENT_DOMAIN_MARKERS)
+    return has_current_marker and has_assignment_marker
+
+
+def _assistant_assignment_residue_reason(candidate: EvidenceCandidate, *, query: str) -> str:
+    if not _current_assignment_lookup_requested(query):
+        return ""
+    if candidate.shelf not in {"transcript", "continuity_match", "continuity_recent"}:
+        return ""
+    row = candidate.row
+    if str(row.get("owner_role") or "").strip() == "agent_assignment":
+        return ""
+    text = _normalize_text(
+        row.get("content")
+        or row.get("excerpt")
+        or row.get("content_excerpt")
+        or row.get("summary")
+        or ""
+    ).casefold()
+    if "assistant:" not in text and "| assistant:" not in text:
+        return ""
+    return (
+        "assistant_authored_current_assignment_residue: transcript/continuity "
+        "assistant text is supporting history, not current assignment authority"
+    )
+
+
+def _tier2_graph_assignment_residue_reason(candidate: EvidenceCandidate, *, query: str) -> str:
+    if not _current_assignment_lookup_requested(query):
+        return ""
+    if candidate.shelf != "graph":
+        return ""
+    row = candidate.row
+    if str(row.get("owner_role") or "").strip() == "agent_assignment":
+        return ""
+    source = str(row.get("source") or "").strip()
+    if not source.startswith("tier2:"):
+        return ""
+    return (
+        "tier2_graph_current_assignment_residue: Tier-2 graph state is "
+        "supporting evidence, not current assignment authority"
     )
 
 
@@ -1334,6 +1413,7 @@ def _select_rows(
     graph_limit: int,
     corpus_limit: int,
     evidence_item_budget: int,
+    query: str = "",
 ) -> Dict[str, List[Dict[str, Any]]]:
     profile_items: List[Dict[str, Any]] = []
     matched: List[Dict[str, Any]] = []
@@ -1355,6 +1435,13 @@ def _select_rows(
         candidate.shelf == "operating" and bool(candidate.row.get("_brainstack_recap_surface"))
         for candidate in candidates
     )
+    scoped_recap_anchor_workstream_ids = {
+        workstream_id
+        for candidate in candidates
+        if candidate.shelf == "operating" and bool(candidate.row.get("_brainstack_recap_surface"))
+        for workstream_id in (row_workstream_id(candidate.row),)
+        if workstream_id
+    }
 
     def materialize(candidate: EvidenceCandidate) -> Dict[str, Any]:
         row = dict(candidate.row)
@@ -1372,6 +1459,14 @@ def _select_rows(
         if suppression_reason:
             candidate.row["_brainstack_suppression_reason"] = suppression_reason
             continue
+        suppression_reason = _assistant_assignment_residue_reason(candidate, query=query)
+        if suppression_reason:
+            candidate.row["_brainstack_suppression_reason"] = suppression_reason
+            continue
+        suppression_reason = _tier2_graph_assignment_residue_reason(candidate, query=query)
+        if suppression_reason:
+            candidate.row["_brainstack_suppression_reason"] = suppression_reason
+            continue
         if (
             has_scoped_recap_anchor
             and candidate.shelf in {"continuity_match", "continuity_recent"}
@@ -1381,6 +1476,14 @@ def _select_rows(
                 candidate.row.get("_brainstack_workstream_recap_reason")
                 or "supporting_only_unscoped_workstream_recap_evidence"
             )
+            continue
+        suppression_reason = workstream_bank_mismatch_reason(
+            anchor_workstream_ids=scoped_recap_anchor_workstream_ids,
+            shelf=candidate.shelf,
+            row=candidate.row,
+        )
+        if suppression_reason:
+            candidate.row["_brainstack_suppression_reason"] = suppression_reason
             continue
         if (
             has_scoped_recap_anchor
@@ -1678,7 +1781,7 @@ def retrieve_executive_context(
             record_types=RECENT_WORK_RECAP_RECORD_TYPES,
             limit=max(operating_limit * 4, 8),
         )
-        if not recent_work_operating_source_rows:
+        if not recent_work_operating_source_rows and _current_assignment_lookup_requested(query):
             recent_work_operating_source_rows = [
                 {
                     **dict(row),
@@ -1958,6 +2061,7 @@ def retrieve_executive_context(
 
     fact_selected = _select_rows(
         fused,
+        query=query,
         profile_limit=profile_limit,
         continuity_match_limit=continuity_match_limit,
         continuity_recent_limit=continuity_recent_limit,

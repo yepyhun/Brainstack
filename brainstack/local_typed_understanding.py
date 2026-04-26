@@ -21,7 +21,7 @@ ITEM_TYPES = {
 }
 
 SESSION_RECOVERY_CONTRACT_VERSION = 1
-VOLATILE_OPERATING_RECORD_TYPES = {"session_state"}
+VOLATILE_OPERATING_RECORD_TYPES = {"live_system_state", "session_state"}
 
 DATE_SCOPE_VALUES = {
     "",

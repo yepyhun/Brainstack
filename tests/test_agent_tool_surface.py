@@ -75,6 +75,11 @@ def test_brainstack_recall_tool_returns_evidence_without_mutating_profile(tmp_pa
         assert payload["read_only"] is True
         assert payload["model_use_contract"]["primary_answer_source"] == "final_packet.preview"
         assert "current_assignment_authority=true" in payload["model_use_contract"]["current_assignment_rule"]
+        assert "Do not determine active work" in payload["model_use_contract"]["current_assignment_negative_rule"]
+        assert (
+            "graph/background facts without current_assignment_authority"
+            in payload["model_use_contract"]["non_authority_sources"]
+        )
         assert payload["evidence_count"] >= 1
         assert payload["diagnostic_detail_tool"] == "brainstack_inspect"
         assert payload["selected_evidence"]["profile"]

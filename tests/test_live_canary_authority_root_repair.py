@@ -8,6 +8,7 @@ from brainstack.db import BrainstackStore
 from brainstack.diagnostics import build_query_inspect
 from brainstack.operating_context import build_operating_context_snapshot, render_operating_context_section
 from brainstack.operating_truth import (
+    CURRENT_ASSIGNMENT_AUTHORITY_SCHEMA,
     OPERATING_RECORD_ACTIVE_WORK,
     OPERATING_RECORD_LIVE_SYSTEM_STATE,
     OPERATING_RECORD_OPEN_DECISION,
@@ -41,6 +42,103 @@ def _open_store(tmp_path: Path) -> BrainstackStore:
     store = BrainstackStore(str(tmp_path / "brainstack.sqlite3"), graph_backend="sqlite", corpus_backend="sqlite")
     store.open()
     return store
+
+
+def test_tier2_open_decisions_are_not_promoted_to_operating_records(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        assert provider._store is not None
+        promoted = provider._promote_open_decisions(
+            decisions=[
+                "Use session transcripts and Graph Truth for task determination when no workstream is assigned."
+            ],
+            source="tier2:idle_window:open_decision",
+            metadata={"session_id": "live-canary-session", "turn_number": 4, "batch_reason": "idle_window"},
+        )
+
+        assert promoted == 0
+        rows = provider._store.list_operating_records(
+            principal_scope_key=provider._principal_scope_key,
+            record_types=[OPERATING_RECORD_OPEN_DECISION],
+            limit=10,
+        )
+        assert rows == []
+        trace = provider._last_memory_operation_trace
+        assert trace is not None
+        assert trace["surface"] == "operating_open_decision_rejected"
+    finally:
+        provider.shutdown()
+
+
+def test_session_consolidation_open_decisions_are_not_promoted_to_operating_records(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        assert provider._store is not None
+        promoted = provider._promote_open_decisions(
+            decisions=["Treat the current background project as the assigned workstream."],
+            source="on_session_end:recent_work_consolidation",
+            metadata={"session_id": "live-canary-session", "turn_number": 5},
+        )
+
+        assert promoted == 0
+        rows = provider._store.list_operating_records(
+            principal_scope_key=provider._principal_scope_key,
+            record_types=[OPERATING_RECORD_OPEN_DECISION],
+            limit=10,
+        )
+        assert rows == []
+    finally:
+        provider.shutdown()
+
+
+def test_operating_current_assignment_authority_requires_typed_authority(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        assert provider._store is not None
+        provider._store.upsert_operating_record(
+            stable_key="operating:assignment:loose",
+            principal_scope_key=provider._principal_scope_key,
+            record_type=OPERATING_RECORD_ACTIVE_WORK,
+            content="Zero-human research is the current assignment but lacks typed authority.",
+            owner="brainstack.operating_truth",
+            source="fixture:loose_assignment",
+            metadata={
+                "owner_role": "agent_assignment",
+                "source_kind": "explicit_operating_truth",
+                "workstream_id": "zero-human-research",
+            },
+        )
+
+        loose_payload = json.loads(
+            provider.handle_tool_call("brainstack_recall", {"query": "current assignment zero-human research"})
+        )
+        loose_operating = loose_payload["selected_evidence"].get("operating", [])
+        assert loose_operating
+        assert not any(card["current_assignment_authority"] for card in loose_operating)
+
+        provider._store.upsert_operating_record(
+            stable_key="operating:assignment:typed",
+            principal_scope_key=provider._principal_scope_key,
+            record_type=OPERATING_RECORD_ACTIVE_WORK,
+            content="Zero-human research is the typed current assignment.",
+            owner="brainstack.operating_truth",
+            source="fixture:typed_assignment",
+            metadata={
+                "owner_role": "agent_assignment",
+                "source_kind": "explicit_operating_truth",
+                "workstream_id": "zero-human-research",
+                "current_assignment_authority": True,
+                "current_assignment_authority_schema": CURRENT_ASSIGNMENT_AUTHORITY_SCHEMA,
+            },
+        )
+
+        typed_payload = json.loads(
+            provider.handle_tool_call("brainstack_recall", {"query": "typed current assignment zero-human research"})
+        )
+        typed_operating = typed_payload["selected_evidence"].get("operating", [])
+        assert any(card["current_assignment_authority"] for card in typed_operating)
+    finally:
+        provider.shutdown()
 
 
 def test_workstream_recap_model_tool_rejects_operator_role_but_trusted_host_can_write(tmp_path: Path) -> None:
@@ -487,6 +585,92 @@ def test_background_continuity_cannot_imply_current_assignment(tmp_path: Path) -
         store.close()
 
 
+def test_assignment_lookup_suppresses_assistant_authored_transcript_residue(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        store.add_transcript_entry(
+            session_id="prior-session",
+            turn_number=1,
+            kind="turn",
+            content=(
+                "User: [LauraTom] Emlékszel, mi a különbség a Brainstack fejlesztési státusz "
+                "és a zero-human workstream között? Most melyik a te aktuális feladatod? "
+                "Assistant: A Brainstack Graph Truth szerint a state:current most is "
+                "brainstack development, tehát ez az aktuális feladatom."
+            ),
+            source="sync_turn",
+            metadata={"principal_scope_key": PRINCIPAL_SCOPE},
+        )
+        store.add_continuity_event(
+            session_id="prior-session",
+            turn_number=1,
+            kind="turn",
+            content=(
+                "user: current workstream? | assistant: Maybe Brainstack development "
+                "is the current assigned workstream."
+            ),
+            source="sync_turn",
+            metadata={"principal_scope_key": PRINCIPAL_SCOPE},
+        )
+
+        report = build_query_inspect(
+            store,
+            query="Most melyik az aktuális assigned workstream feladatod?",
+            session_id="live-canary-session",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            continuity_match_limit=6,
+            transcript_match_limit=6,
+            evidence_item_budget=12,
+        )
+
+        selected_transcript_ids = {
+            int(item["id"]) for item in report["selected_evidence"]["transcript"] if str(item.get("id") or "").isdigit()
+        }
+        selected_continuity_ids = {
+            int(item["id"])
+            for item in report["selected_evidence"]["continuity_match"]
+            if str(item.get("id") or "").isdigit()
+        }
+        assert selected_transcript_ids == set()
+        assert selected_continuity_ids == set()
+        assert any(
+            item["suppression_reason"].startswith("assistant_authored_current_assignment_residue")
+            for item in report["suppressed_evidence"]
+        )
+    finally:
+        store.close()
+
+
+def test_assignment_lookup_suppresses_tier2_graph_runtime_state(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        store.upsert_graph_state(
+            subject_name="Tomi",
+            attribute="testing_status",
+            value_text="active testing of brainstack",
+            source="tier2:idle_window",
+            metadata={"principal_scope_key": PRINCIPAL_SCOPE, "source_kind": "tier2"},
+        )
+
+        report = build_query_inspect(
+            store,
+            query="Brainstack current assigned workstream feladat",
+            session_id="live-canary-session",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            graph_limit=6,
+            evidence_item_budget=12,
+        )
+
+        assert report["selected_evidence"]["graph"] == []
+        assert any(
+            item["shelf"] == "graph"
+            and item["suppression_reason"].startswith("tier2_graph_current_assignment_residue")
+            for item in report["suppressed_evidence"]
+        )
+    finally:
+        store.close()
+
+
 def test_recall_tool_marks_runtime_and_profile_as_non_assignment_authority(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     try:
@@ -521,7 +705,12 @@ def test_recall_tool_marks_runtime_and_profile_as_non_assignment_authority(tmp_p
         )
 
         assert payload["model_use_contract"]["primary_answer_source"] == "final_packet.preview"
+        assert "Do not determine active work" in payload["model_use_contract"]["current_assignment_negative_rule"]
         assert "profile shared_work" in payload["model_use_contract"]["non_authority_sources"]
+        assert (
+            "graph/background facts without current_assignment_authority"
+            in payload["model_use_contract"]["non_authority_sources"]
+        )
         assert "runtime_state_only scheduler or pulse rows" in payload["model_use_contract"]["non_authority_sources"]
         profile_cards = payload["selected_evidence"].get("profile", [])
         operating_cards = payload["selected_evidence"].get("operating", [])
@@ -530,5 +719,68 @@ def test_recall_tool_marks_runtime_and_profile_as_non_assignment_authority(tmp_p
         assert not any(card["current_assignment_authority"] for card in profile_cards)
         assert not any(card["current_assignment_authority"] for card in operating_cards)
         assert all(card["supporting_evidence_only"] for card in operating_cards if card["runtime_state_only"])
+    finally:
+        provider.shutdown()
+
+
+def test_unrelated_query_does_not_pull_recent_work_assignment(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        assert provider._store is not None
+        committed = json.loads(
+            provider.handle_tool_call(
+                "brainstack_workstream_recap",
+                {
+                    "workstream_id": "zero-human-research",
+                    "summary": "Zero-human research is the agent assigned workstream.",
+                    "source_role": "user",
+                    "owner_role": "agent_assignment",
+                    "source_kind": "explicit_operating_truth",
+                },
+            )
+        )
+        assert committed["status"] == "committed"
+
+        report = build_query_inspect(
+            provider._store,
+            query="How should corpus citations be handled in a memory packet?",
+            session_id="live-canary-session",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            operating_match_limit=6,
+            evidence_item_budget=12,
+        )
+
+        assert report["selected_evidence"]["operating"] == []
+    finally:
+        provider.shutdown()
+
+
+def test_recall_tool_does_not_surface_assignment_for_unrelated_query(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        committed = json.loads(
+            provider.handle_tool_call(
+                "brainstack_workstream_recap",
+                {
+                    "workstream_id": "zero-human-research",
+                    "summary": "Zero-human research is the agent assigned workstream.",
+                    "source_role": "user",
+                    "owner_role": "agent_assignment",
+                    "source_kind": "explicit_operating_truth",
+                },
+            )
+        )
+        assert committed["status"] == "committed"
+
+        payload = json.loads(
+            provider.handle_tool_call(
+                "brainstack_recall",
+                {"query": "How should corpus citations be handled in a memory packet?"},
+            )
+        )
+
+        assert payload["model_use_contract"]["primary_answer_source"] == "final_packet.preview"
+        assert "Do not determine active work" in payload["model_use_contract"]["current_assignment_negative_rule"]
+        assert payload["selected_evidence"].get("operating", []) == []
     finally:
         provider.shutdown()

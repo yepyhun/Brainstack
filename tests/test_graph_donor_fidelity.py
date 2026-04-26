@@ -586,6 +586,43 @@ def test_entity_alias_merge_is_inspectable_and_searchable_without_collapsing_nam
         store.close()
 
 
+def test_graph_state_conflict_detection_is_principal_scoped(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    other_scope = "platform:test|user_id:other|agent_identity:agent-smoke|agent_workspace:workspace"
+    try:
+        store.upsert_graph_state(
+            subject_name="Aurora",
+            attribute="deployment",
+            value_text="green",
+            source="scope-fixture",
+            metadata={"principal_scope_key": PRINCIPAL_SCOPE},
+        )
+        outcome = store.upsert_graph_state(
+            subject_name="Aurora",
+            attribute="deployment",
+            value_text="OTHER_SCOPE_RED",
+            source="scope-fixture",
+            metadata={"principal_scope_key": other_scope},
+        )
+
+        assert outcome["status"] == "inserted"
+        report = build_query_inspect(
+            store,
+            query="Aurora deployment OTHER_SCOPE_RED green",
+            session_id="session:scope",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            graph_limit=4,
+        )
+
+        graph_rows = _selected_graph(report)
+        assert graph_rows
+        assert not any(row["row_type"] == "conflict" for row in graph_rows)
+        assert not any(row.get("object_value") == "OTHER_SCOPE_RED" for row in graph_rows)
+        assert any(row.get("object_value") == "green" for row in graph_rows)
+    finally:
+        store.close()
+
+
 def test_graph_search_trace_reports_sqlite_and_degraded_external_modes(tmp_path: Path) -> None:
     store = _open_store(tmp_path)
     try:
