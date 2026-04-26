@@ -183,6 +183,252 @@ def _initial_policy(
     return policy
 
 
+def _apply_route_policy(
+    policy: WorkingMemoryPolicy,
+    routing: Mapping[str, Any],
+    *,
+    continuity_recent_limit: int,
+    continuity_match_limit: int,
+    transcript_match_limit: int,
+    transcript_char_budget: int,
+    evidence_item_budget: int,
+    graph_limit: int,
+    corpus_limit: int,
+    corpus_char_budget: int,
+    operating_match_limit: int,
+) -> None:
+    applied_mode = routing.get("applied_mode")
+    if applied_mode == "temporal":
+        policy.transcript_char_budget = max(policy.transcript_char_budget, 720)
+        policy.show_graph_history = True
+        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 4))
+        policy.continuity_match_limit = max(policy.continuity_match_limit, min(continuity_match_limit, 3))
+        policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
+        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
+        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 2))
+        policy.evidence_item_budget = max(policy.evidence_item_budget, min(evidence_item_budget, 8))
+    elif applied_mode == "aggregate":
+        policy.transcript_char_budget = max(policy.transcript_char_budget, 960)
+        policy.show_graph_history = True
+        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 3))
+        policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 3))
+        policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 650))
+        policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
+        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
+        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 3))
+        policy.evidence_item_budget = max(policy.evidence_item_budget, min(evidence_item_budget, 9))
+    elif applied_mode == "style_contract":
+        policy.style_contract_char_budget = max(policy.style_contract_char_budget, 2400)
+        policy.show_authoritative_contract = True
+
+
+def _profile_support_present(
+    *,
+    analysis: QueryAnalysis,
+    routing: Mapping[str, Any],
+    profile_items: list[dict[str, Any]],
+) -> bool:
+    return bool(
+        profile_items
+        and (
+            analysis.profile_slot_targets
+            or routing.get("applied_mode") == "style_contract"
+            or any(str(row.get("category") or "").strip() == "preference" for row in profile_items)
+        )
+    )
+
+
+def _thin_support_without_contract(
+    *,
+    profile_items: list[dict[str, Any]],
+    matched: list[dict[str, Any]],
+    recent: list[dict[str, Any]],
+    transcript_rows: list[dict[str, Any]],
+    task_rows: list[dict[str, Any]],
+    operating_rows: list[dict[str, Any]],
+    graph_rows: list[dict[str, Any]],
+    corpus_rows: list[dict[str, Any]],
+) -> bool:
+    return not any(
+        (
+            profile_items,
+            matched,
+            recent,
+            transcript_rows,
+            task_rows,
+            operating_rows,
+            graph_rows,
+            corpus_rows,
+        )
+    )
+
+
+def _apply_support_policy(
+    policy: WorkingMemoryPolicy,
+    *,
+    analysis: QueryAnalysis,
+    routing: Mapping[str, Any],
+    compiled_behavior_policy: Any,
+    profile_support_present: bool,
+    thin_support_without_contract: bool,
+    conflict_present: bool,
+    graph_rows: list[dict[str, Any]],
+    profile_match_limit: int,
+    continuity_recent_limit: int,
+    continuity_match_limit: int,
+    transcript_match_limit: int,
+    transcript_char_budget: int,
+    graph_limit: int,
+    corpus_limit: int,
+    corpus_char_budget: int,
+    operating_match_limit: int,
+) -> None:
+    if profile_support_present:
+        policy.mode = "balanced"
+        policy.collapse_mode = "balanced"
+        policy.profile_limit = max(policy.profile_limit, min(profile_match_limit, 4))
+        policy.continuity_match_limit = max(1, min(continuity_match_limit, 2))
+        policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
+        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
+        policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 560))
+        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 2))
+        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 2))
+        policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 2))
+        policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 320))
+        if routing.get("applied_mode") != "style_contract":
+            policy.show_authoritative_contract = False
+            policy.suppress_contract_if_in_system_substrate = False
+
+    if compiled_behavior_policy is not None and thin_support_without_contract and routing.get("applied_mode") != "style_contract":
+        policy.suppress_contract_if_in_system_substrate = False
+
+    if conflict_present:
+        policy.mode = "deep"
+        policy.collapse_mode = "minimal"
+        policy.provenance_mode = "expanded"
+        policy.show_graph_history = True
+        policy.conflict_escalation = True
+        policy.show_policy = True
+    elif _has_current_and_prior_graph_states(graph_rows) and routing.get("applied_mode") == "temporal":
+        policy.show_graph_history = True
+        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 4))
+        policy.continuity_match_limit = max(policy.continuity_match_limit, min(continuity_match_limit, 3))
+        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
+
+
+def _support_channel_count(channels: list[dict[str, Any]]) -> int:
+    return sum(
+        1
+        for channel in channels
+        if channel.get("status") == "active" and int(channel.get("candidate_count") or 0) > 0
+    )
+
+
+def _apply_confidence_policy(
+    policy: WorkingMemoryPolicy,
+    *,
+    analysis: QueryAnalysis,
+    routing: Mapping[str, Any],
+    support_channels: int,
+    conflict_present: bool,
+    profile_support_present: bool,
+    profile_items: list[dict[str, Any]],
+    transcript_rows: list[dict[str, Any]],
+    graph_rows: list[dict[str, Any]],
+    operating_rows: list[dict[str, Any]],
+) -> None:
+    if analysis.operating_like and operating_rows and not conflict_present:
+        policy.confidence_band = "high"
+    elif profile_support_present and not conflict_present:
+        policy.confidence_band = "high"
+    elif routing.get("applied_mode") == "style_contract" and profile_items and not conflict_present:
+        policy.confidence_band = "high"
+    elif analysis.profile_slot_targets and profile_items and not conflict_present:
+        policy.confidence_band = "high"
+    elif routing.get("applied_mode") == "temporal" and graph_rows and not conflict_present:
+        policy.confidence_band = "high" if support_channels >= 2 else "medium"
+    elif transcript_rows and not conflict_present:
+        policy.confidence_band = "medium"
+    elif support_channels >= 3 and not conflict_present:
+        policy.confidence_band = "high"
+    elif support_channels >= 1 and not conflict_present:
+        policy.confidence_band = "medium"
+    else:
+        policy.confidence_band = "low"
+
+    if policy.confidence_band == "low":
+        policy.provenance_mode = "expanded"
+        policy.show_policy = True
+
+
+def _apply_tool_avoidance_policy(policy: WorkingMemoryPolicy, *, conflict_present: bool) -> None:
+    if conflict_present:
+        policy.tool_avoidance_allowed = False
+        policy.tool_avoidance_reason = "open graph conflict requires verification before relying on memory only"
+    elif policy.confidence_band == "low":
+        policy.tool_avoidance_allowed = False
+        policy.tool_avoidance_reason = "memory support is too thin for a memory-only response"
+    else:
+        policy.tool_avoidance_allowed = True
+        policy.tool_avoidance_reason = "memory support is sufficient for a first response"
+
+
+def _policy_payload(
+    *,
+    policy: WorkingMemoryPolicy,
+    behavior_policy_snapshot: Any,
+    compiled_behavior_policy: Any,
+    retrieval: Mapping[str, Any],
+) -> dict[str, Any]:
+    policy_payload = asdict(policy)
+    if isinstance(behavior_policy_snapshot, dict):
+        policy_payload["behavior_policy_snapshot"] = behavior_policy_snapshot
+    if compiled_behavior_policy is not None:
+        compiled_policy_payload = (
+            dict(compiled_behavior_policy.get("policy") or {}) if isinstance(compiled_behavior_policy, dict) else {}
+        )
+        if compiled_policy_payload:
+            policy_payload["compiled_behavior_policy"] = compiled_policy_payload
+    lookup_semantics = retrieval.get("lookup_semantics")
+    if isinstance(lookup_semantics, dict):
+        policy_payload["lookup_semantics"] = lookup_semantics
+    return policy_payload
+
+
+def _record_working_memory_retrievals(
+    store: BrainstackStore,
+    *,
+    record_retrievals: bool,
+    retrieval: Mapping[str, Any],
+    profile_items: list[dict[str, Any]],
+    graph_rows: list[dict[str, Any]],
+    corpus_rows: list[dict[str, Any]],
+) -> None:
+    if record_retrievals and profile_items:
+        matched_profile_keys = {
+            str(item.get("stable_key") or "").strip()
+            for item in retrieval["profile_items"]
+            if str(item.get("stable_key") or "").strip()
+        }
+        store.record_profile_retrievals(
+            rows=[
+                {
+                    "stable_key": row.get("stable_key"),
+                    "storage_key": row.get("storage_key"),
+                    "category": row.get("category"),
+                    "principal_scope_key": row.get("principal_scope_key"),
+                    "matched": str(row.get("stable_key") or "").strip() in matched_profile_keys,
+                    "fallback": False,
+                }
+                for row in profile_items
+            ]
+        )
+    if record_retrievals and graph_rows:
+        store.record_graph_retrievals(rows=graph_rows)
+    if record_retrievals and corpus_rows:
+        store.record_corpus_retrievals(rows=corpus_rows)
+
+
 def build_working_memory_packet(
     store: BrainstackStore,
     *,
@@ -250,139 +496,75 @@ def build_working_memory_packet(
     channels = retrieval["channels"]
     routing = retrieval.get("routing", {"requested_mode": "fact", "applied_mode": "fact"})
 
-    if routing.get("applied_mode") == "temporal":
-        policy.transcript_char_budget = max(policy.transcript_char_budget, 720)
-        policy.show_graph_history = True
-        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 4))
-        policy.continuity_match_limit = max(policy.continuity_match_limit, min(continuity_match_limit, 3))
-        policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
-        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
-        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 2))
-        policy.evidence_item_budget = max(policy.evidence_item_budget, min(evidence_item_budget, 8))
-    elif routing.get("applied_mode") == "aggregate":
-        policy.transcript_char_budget = max(policy.transcript_char_budget, 960)
-        policy.show_graph_history = True
-        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 3))
-        policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 3))
-        policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 650))
-        policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
-        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
-        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 3))
-        policy.evidence_item_budget = max(policy.evidence_item_budget, min(evidence_item_budget, 9))
-    elif routing.get("applied_mode") == "style_contract":
-        policy.style_contract_char_budget = max(policy.style_contract_char_budget, 2400)
-        policy.show_authoritative_contract = True
-
-    support_channels = sum(
-        1
-        for channel in channels
-        if channel.get("status") == "active" and int(channel.get("candidate_count") or 0) > 0
+    _apply_route_policy(
+        policy,
+        routing,
+        continuity_recent_limit=continuity_recent_limit,
+        continuity_match_limit=continuity_match_limit,
+        transcript_match_limit=transcript_match_limit,
+        transcript_char_budget=transcript_char_budget,
+        evidence_item_budget=evidence_item_budget,
+        graph_limit=graph_limit,
+        corpus_limit=corpus_limit,
+        corpus_char_budget=corpus_char_budget,
+        operating_match_limit=operating_match_limit,
     )
+    support_channels = _support_channel_count(channels)
     conflict_present = any(row["row_type"] == "conflict" for row in graph_rows)
-    profile_support_present = bool(
-        profile_items
-        and (
-            analysis.profile_slot_targets
-            or routing.get("applied_mode") == "style_contract"
-            or any(str(row.get("category") or "").strip() == "preference" for row in profile_items)
-        )
+    profile_support_present = _profile_support_present(
+        analysis=analysis,
+        routing=routing,
+        profile_items=profile_items,
     )
-    thin_support_without_contract = not any(
-        (
-            profile_items,
-            matched,
-            recent,
-            transcript_rows,
-            task_rows,
-            operating_rows,
-            graph_rows,
-            corpus_rows,
-        )
+    thin_support_without_contract = _thin_support_without_contract(
+        profile_items=profile_items,
+        matched=matched,
+        recent=recent,
+        transcript_rows=transcript_rows,
+        task_rows=task_rows,
+        operating_rows=operating_rows,
+        graph_rows=graph_rows,
+        corpus_rows=corpus_rows,
     )
 
-    if profile_support_present:
-        policy.mode = "balanced"
-        policy.collapse_mode = "balanced"
-        policy.profile_limit = max(policy.profile_limit, min(profile_match_limit, 4))
-        policy.continuity_match_limit = max(1, min(continuity_match_limit, 2))
-        policy.continuity_recent_limit = max(policy.continuity_recent_limit, min(continuity_recent_limit, 2))
-        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
-        policy.transcript_char_budget = max(policy.transcript_char_budget, min(transcript_char_budget, 560))
-        policy.operating_limit = max(policy.operating_limit, min(operating_match_limit, 2))
-        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 2))
-        policy.corpus_limit = max(policy.corpus_limit, min(corpus_limit, 2))
-        policy.corpus_char_budget = max(policy.corpus_char_budget, min(corpus_char_budget, 320))
-        if routing.get("applied_mode") != "style_contract":
-            policy.show_authoritative_contract = False
-            policy.suppress_contract_if_in_system_substrate = False
-
-    if (
-        compiled_behavior_policy is not None
-        and thin_support_without_contract
-        and routing.get("applied_mode") != "style_contract"
-    ):
-        policy.suppress_contract_if_in_system_substrate = False
-
-    if conflict_present:
-        policy.mode = "deep"
-        policy.collapse_mode = "minimal"
-        policy.provenance_mode = "expanded"
-        policy.show_graph_history = True
-        policy.conflict_escalation = True
-        policy.show_policy = True
-    elif _has_current_and_prior_graph_states(graph_rows) and routing.get("applied_mode") == "temporal":
-        policy.show_graph_history = True
-        policy.graph_limit = max(policy.graph_limit, min(graph_limit, 4))
-        policy.continuity_match_limit = max(policy.continuity_match_limit, min(continuity_match_limit, 3))
-        policy.transcript_limit = max(policy.transcript_limit, min(transcript_match_limit, 2))
-
-    if analysis.operating_like and operating_rows and not conflict_present:
-        policy.confidence_band = "high"
-    elif profile_support_present and not conflict_present:
-        policy.confidence_band = "high"
-    elif routing.get("applied_mode") == "style_contract" and profile_items and not conflict_present:
-        policy.confidence_band = "high"
-    elif analysis.profile_slot_targets and profile_items and not conflict_present:
-        policy.confidence_band = "high"
-    elif routing.get("applied_mode") == "temporal" and graph_rows and not conflict_present:
-        policy.confidence_band = "high" if support_channels >= 2 else "medium"
-    elif transcript_rows and not conflict_present:
-        policy.confidence_band = "medium"
-    elif support_channels >= 3 and not conflict_present:
-        policy.confidence_band = "high"
-    elif support_channels >= 1 and not conflict_present:
-        policy.confidence_band = "medium"
-    else:
-        policy.confidence_band = "low"
-
-    if policy.confidence_band == "low":
-        policy.provenance_mode = "expanded"
-        policy.show_policy = True
-
-    if conflict_present:
-        policy.tool_avoidance_allowed = False
-        policy.tool_avoidance_reason = "open graph conflict requires verification before relying on memory only"
-    elif policy.confidence_band == "low":
-        policy.tool_avoidance_allowed = False
-        policy.tool_avoidance_reason = "memory support is too thin for a memory-only response"
-    else:
-        policy.tool_avoidance_allowed = True
-        policy.tool_avoidance_reason = "memory support is sufficient for a first response"
-
-    policy_payload = asdict(policy)
-    if isinstance(behavior_policy_snapshot, dict):
-        policy_payload["behavior_policy_snapshot"] = behavior_policy_snapshot
-    if compiled_behavior_policy is not None:
-        compiled_policy_payload = (
-            dict(compiled_behavior_policy.get("policy") or {})
-            if isinstance(compiled_behavior_policy, dict)
-            else {}
-        )
-        if compiled_policy_payload:
-            policy_payload["compiled_behavior_policy"] = compiled_policy_payload
-    lookup_semantics = retrieval.get("lookup_semantics")
-    if isinstance(lookup_semantics, dict):
-        policy_payload["lookup_semantics"] = lookup_semantics
+    _apply_support_policy(
+        policy,
+        analysis=analysis,
+        routing=routing,
+        compiled_behavior_policy=compiled_behavior_policy,
+        profile_support_present=profile_support_present,
+        thin_support_without_contract=thin_support_without_contract,
+        conflict_present=conflict_present,
+        graph_rows=graph_rows,
+        profile_match_limit=profile_match_limit,
+        continuity_recent_limit=continuity_recent_limit,
+        continuity_match_limit=continuity_match_limit,
+        transcript_match_limit=transcript_match_limit,
+        transcript_char_budget=transcript_char_budget,
+        graph_limit=graph_limit,
+        corpus_limit=corpus_limit,
+        corpus_char_budget=corpus_char_budget,
+        operating_match_limit=operating_match_limit,
+    )
+    _apply_confidence_policy(
+        policy,
+        analysis=analysis,
+        routing=routing,
+        support_channels=support_channels,
+        conflict_present=conflict_present,
+        profile_support_present=profile_support_present,
+        profile_items=profile_items,
+        transcript_rows=transcript_rows,
+        graph_rows=graph_rows,
+        operating_rows=operating_rows,
+    )
+    _apply_tool_avoidance_policy(policy, conflict_present=conflict_present)
+    policy_payload = _policy_payload(
+        policy=policy,
+        behavior_policy_snapshot=behavior_policy_snapshot,
+        compiled_behavior_policy=compiled_behavior_policy,
+        retrieval=retrieval,
+    )
 
     block = render_working_memory_block(
         policy=policy_payload,
@@ -398,29 +580,14 @@ def build_working_memory_packet(
         system_substrate=system_substrate,
     )
 
-    if record_retrievals and profile_items:
-        matched_profile_keys = {
-            str(item.get("stable_key") or "").strip()
-            for item in retrieval["profile_items"]
-            if str(item.get("stable_key") or "").strip()
-        }
-        store.record_profile_retrievals(
-            rows=[
-                {
-                    "stable_key": row.get("stable_key"),
-                    "storage_key": row.get("storage_key"),
-                    "category": row.get("category"),
-                    "principal_scope_key": row.get("principal_scope_key"),
-                    "matched": str(row.get("stable_key") or "").strip() in matched_profile_keys,
-                    "fallback": False,
-                }
-                for row in profile_items
-            ]
-        )
-    if record_retrievals and graph_rows:
-        store.record_graph_retrievals(rows=graph_rows)
-    if record_retrievals and corpus_rows:
-        store.record_corpus_retrievals(rows=corpus_rows)
+    _record_working_memory_retrievals(
+        store,
+        record_retrievals=record_retrievals,
+        retrieval=retrieval,
+        profile_items=profile_items,
+        graph_rows=graph_rows,
+        corpus_rows=corpus_rows,
+    )
     return {
         "analysis": asdict(analysis),
         "policy": policy_payload,
