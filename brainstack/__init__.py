@@ -20,7 +20,16 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Mapping, Sequence
 
-from agent.memory_provider import MemoryProvider
+try:
+    from agent.memory_provider import MemoryProvider
+except ModuleNotFoundError as exc:
+    if exc.name not in {"agent", "agent.memory_provider"}:
+        raise
+
+    class MemoryProvider:  # type: ignore[no-redef]
+        """Fallback base for importing Brainstack contracts outside Hermes."""
+
+        pass
 
 from .control_plane import build_working_memory_packet
 from .consolidation import build_consolidation_source
