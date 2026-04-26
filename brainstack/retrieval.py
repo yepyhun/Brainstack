@@ -791,6 +791,246 @@ def _suppress_overlapping_rows(
     return kept
 
 
+def _style_contract_render_state(
+    *,
+    policy: Mapping[str, Any],
+    route_mode: str,
+    profile_items: List[Dict[str, Any]],
+    provenance_mode: str,
+) -> tuple[str, set[str], bool, bool]:
+    behavior_snapshot = policy.get("behavior_policy_snapshot") if isinstance(policy, dict) else None
+    canonical_style_present = bool(
+        isinstance(behavior_snapshot, Mapping)
+        and isinstance(behavior_snapshot.get("raw_contract"), Mapping)
+        and bool(behavior_snapshot.get("raw_contract", {}).get("present"))
+    )
+    exact_contract_section = ""
+    hidden_profile_keys: set[str] = set()
+    style_contract_row = _extract_style_contract_profile_row(profile_items)
+    native_explicit_style_present = _has_native_explicit_style_generation(profile_items)
+    if route_mode != "style_contract":
+        return exact_contract_section, hidden_profile_keys, canonical_style_present, native_explicit_style_present
+
+    exact_contract_section = _render_exact_contract_section(
+        "## Brainstack Canonical Rule Pack",
+        style_contract_row,
+        char_budget=max(480, int(policy.get("style_contract_char_budget", 2400))),
+        provenance_mode=provenance_mode,
+    )
+    if exact_contract_section or not native_explicit_style_present:
+        return exact_contract_section, hidden_profile_keys, canonical_style_present, native_explicit_style_present
+
+    for row in profile_items:
+        if not is_native_explicit_style_item(row):
+            continue
+        hidden_profile_keys.add(str(row.get("stable_key") or "").strip())
+        exact_contract_section = _render_exact_contract_section(
+            "## Brainstack Mirrored Native Rule Pack",
+            row,
+            char_budget=max(480, int(policy.get("style_contract_char_budget", 2400))),
+            provenance_mode=provenance_mode,
+        )
+        if exact_contract_section:
+            break
+    return exact_contract_section, hidden_profile_keys, canonical_style_present, native_explicit_style_present
+
+
+def _render_working_memory_policy_section(policy: Mapping[str, Any], *, provenance_mode: str) -> str:
+    if not policy.get("show_policy"):
+        return ""
+    lines = [
+        f"[mode] {policy.get('mode', 'balanced')}",
+        f"[confidence] {policy.get('confidence_band', 'medium')}",
+        f"[provenance] {provenance_mode}",
+        (
+            "[tool-avoidance] allowed"
+            if policy.get("tool_avoidance_allowed")
+            else f"[tool-avoidance] disallowed: {policy.get('tool_avoidance_reason', '')}"
+        ),
+    ]
+    if policy.get("conflict_escalation"):
+        lines.append("[escalation] open conflict present; verification required")
+    return "## Brainstack Working Memory Policy\n" + _render_items(lines)
+
+
+def _render_continuation_guidance_section(policy: Mapping[str, Any]) -> str:
+    if not policy.get("continuation_emphasis"):
+        return ""
+    return (
+        "## Brainstack Continuation Guidance\n"
+        + _render_items(
+            [
+                "The user is resuming an existing thread. Carry forward still-relevant concrete details, constraints, named participants, venues, and unresolved tasks from the recalled evidence below.",
+                "Do not invent missing details or add constraints that are not grounded in the recalled evidence.",
+            ]
+        )
+    )
+
+
+def _filtered_profile_items_for_packet(
+    profile_items: List[Dict[str, Any]],
+    *,
+    route_mode: str,
+    hidden_profile_keys: set[str],
+    substrate_profile_keys: set[str],
+    canonical_style_present: bool,
+    native_explicit_style_present: bool,
+    exact_contract_section: str,
+    compiled_policy_active: bool,
+) -> List[Dict[str, Any]]:
+    if compiled_policy_active:
+        filtered_profile_items = _filter_compiled_behavior_profile_items(profile_items, route_mode=route_mode)
+    else:
+        filtered_profile_items = [
+            item
+            for item in profile_items
+            if str(item.get("stable_key") or "").strip() not in hidden_profile_keys
+            and str(item.get("stable_key") or "").strip() not in substrate_profile_keys
+        ]
+        if route_mode != "style_contract":
+            filtered_profile_items = [
+                item for item in filtered_profile_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT
+            ]
+    if canonical_style_present or native_explicit_style_present or exact_contract_section:
+        filtered_profile_items = [item for item in filtered_profile_items if not _is_style_authority_residue_profile_item(item)]
+    if exact_contract_section:
+        filtered_profile_items = [
+            item for item in filtered_profile_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT
+        ]
+    return [item for item in filtered_profile_items if not _is_native_profile_mirror_receipt(item)]
+
+
+def _render_profile_match_section(
+    profile_items: List[Dict[str, Any]],
+    *,
+    policy: Mapping[str, Any],
+    route_mode: str,
+    provenance_mode: str,
+) -> str:
+    if not profile_items:
+        return ""
+    style_contract_char_budget = max(320, int(policy.get("style_contract_char_budget", 2400)))
+    lines = []
+    for item in profile_items:
+        content = redact_literal_text(str(item.get("content") or ""))
+        stable_key = str(item.get("stable_key") or "").strip()
+        rendered_content = (
+            _trim(content, style_contract_char_budget)
+            if stable_key == STYLE_CONTRACT_SLOT
+            and (route_mode == "style_contract" or bool(policy.get("show_authoritative_contract")))
+            else _trim(content, 160)
+        )
+        lines.append(
+            _with_provenance(
+                f"[{item['category'].replace('_', ' ')}] {rendered_content}",
+                source=str(item.get("source", "")),
+                provenance_mode=provenance_mode,
+                metadata=item.get("metadata"),
+            )
+        )
+    return "## Brainstack Profile Match\n" + _render_items(lines)
+
+
+def _render_continuity_or_aggregate_sections(
+    *,
+    route_mode: str,
+    matched: List[Dict[str, Any]],
+    recent: List[Dict[str, Any]],
+    transcript_rows: List[Dict[str, Any]],
+    policy: Mapping[str, Any],
+    provenance_mode: str,
+) -> List[str]:
+    if route_mode == "aggregate":
+        packed_aggregate = _pack_aggregate_rows(
+            [*matched, *recent, *transcript_rows],
+            char_budget=max(960, int(policy.get("transcript_char_budget", 320))),
+            provenance_mode=provenance_mode,
+        )
+        if not packed_aggregate:
+            return []
+        return [
+            "## Brainstack Aggregate Evidence\n"
+            "Each numbered line below is a separate recalled item. Combine only the items that actually match the user question.\n"
+            + _render_numbered_items(packed_aggregate)
+        ]
+
+    deduped_matched = _suppress_overlapping_rows(matched)
+    deduped_recent = _suppress_overlapping_rows(
+        recent,
+        seen_markers={marker for row in deduped_matched for marker in _row_overlap_markers(row)},
+    )
+    deduped_transcript = _suppress_overlapping_rows(
+        transcript_rows,
+        seen_markers={marker for row in [*deduped_matched, *deduped_recent] for marker in _row_overlap_markers(row)},
+        transcript_like=True,
+    )
+    if not deduped_transcript and transcript_rows:
+        deduped_transcript = [dict(transcript_rows[0])]
+
+    sections: List[str] = []
+    if deduped_matched:
+        lines = _pack_continuity_rows(
+            deduped_matched,
+            char_budget=max(320, min(900, 260 * max(1, len(deduped_matched)))),
+            provenance_mode=provenance_mode,
+        )
+        sections.append("## Brainstack Continuity Match\n" + _render_items(lines))
+    if deduped_recent:
+        lines = _pack_continuity_rows(
+            deduped_recent,
+            char_budget=max(240, min(640, 220 * max(1, len(deduped_recent)))),
+            provenance_mode=provenance_mode,
+        )
+        sections.append("## Brainstack Recent Continuity\n" + _render_items(lines))
+    packed_transcript = _pack_transcript_rows(
+        deduped_transcript,
+        char_budget=int(policy.get("transcript_char_budget", 320)),
+        provenance_mode=provenance_mode,
+    )
+    if packed_transcript:
+        sections.append("## Brainstack Transcript Evidence\n" + _render_items(packed_transcript))
+    return sections
+
+
+def _render_graph_truth_section(
+    graph_rows: List[Dict[str, Any]],
+    *,
+    policy: Mapping[str, Any],
+    provenance_mode: str,
+) -> str:
+    if not graph_rows:
+        return ""
+    show_graph_history = bool(policy.get("show_graph_history", False))
+    current_truth = [
+        row for row in graph_rows if _graph_fact_class(row) in {"explicit_state_current", "explicit_relation"}
+    ]
+    conflicts = [row for row in graph_rows if _graph_fact_class(row) == "conflict"]
+    historical_truth = [
+        row for row in graph_rows if _graph_fact_class(row) in {"explicit_state_prior", "explicit_state_expired"}
+    ]
+    inferred_links = [
+        row for row in graph_rows if _graph_fact_class(row) == "inferred_relation"
+    ][: max(0, int(policy.get("graph_inferred_limit", 2)))]
+
+    graph_sections: List[str] = []
+    current_lines = _render_graph_rows(current_truth, provenance_mode=provenance_mode)
+    if current_lines:
+        graph_sections.append("### Current Truth\n" + _render_items(current_lines))
+    conflict_lines = _render_graph_rows(conflicts, provenance_mode=provenance_mode)
+    if conflict_lines:
+        graph_sections.append("### Open Conflicts\n" + _render_items(conflict_lines))
+    if show_graph_history or conflicts or any(_graph_fact_class(row) == "explicit_state_expired" for row in historical_truth):
+        history_lines = _render_graph_rows(historical_truth, provenance_mode=provenance_mode)
+        if history_lines:
+            graph_sections.append("### Historical Truth\n" + _render_items(history_lines))
+    inferred_lines = _render_graph_rows(inferred_links, provenance_mode=provenance_mode)
+    if inferred_lines:
+        graph_sections.append("### Inferred Links\n" + _render_items(inferred_lines))
+    if not graph_sections:
+        return ""
+    return "## Brainstack Graph Truth\n" + "\n\n".join(graph_sections)
+
+
 def render_working_memory_block(
     *,
     policy: Dict[str, Any],
@@ -807,58 +1047,24 @@ def render_working_memory_block(
 ) -> str:
     sections: List[str] = []
     provenance_mode = str(policy.get("provenance_mode", "compact"))
-    behavior_snapshot = policy.get("behavior_policy_snapshot") if isinstance(policy, dict) else None
-    canonical_style_present = bool(
-        isinstance(behavior_snapshot, Mapping)
-        and isinstance(behavior_snapshot.get("raw_contract"), Mapping)
-        and bool(behavior_snapshot.get("raw_contract", {}).get("present"))
-    )
     compiled_policy_active = False
-    exact_contract_section = ""
-    hidden_profile_keys: set[str] = set()
-    graph_rows_for_sections = graph_rows
     system_substrate = system_substrate if isinstance(system_substrate, Mapping) else {}
     suppress_evidence_priority = bool(system_substrate.get("truthful_memory_operations_present"))
     substrate_profile_keys = {
         str(key).strip() for key in (system_substrate.get("rendered_profile_keys") or ()) if str(key).strip()
     }
-    style_contract_row = _extract_style_contract_profile_row(profile_items)
-    native_explicit_style_present = _has_native_explicit_style_generation(profile_items)
-    if route_mode == "style_contract":
-        exact_contract_section = _render_exact_contract_section(
-            "## Brainstack Canonical Rule Pack",
-            style_contract_row,
-            char_budget=max(480, int(policy.get("style_contract_char_budget", 2400))),
+    exact_contract_section, hidden_profile_keys, canonical_style_present, native_explicit_style_present = (
+        _style_contract_render_state(
+            policy=policy,
+            route_mode=route_mode,
+            profile_items=profile_items,
             provenance_mode=provenance_mode,
         )
-        if not exact_contract_section and native_explicit_style_present:
-            for row in profile_items:
-                if not is_native_explicit_style_item(row):
-                    continue
-                hidden_profile_keys.add(str(row.get("stable_key") or "").strip())
-                exact_contract_section = _render_exact_contract_section(
-                    "## Brainstack Mirrored Native Rule Pack",
-                    row,
-                    char_budget=max(480, int(policy.get("style_contract_char_budget", 2400))),
-                    provenance_mode=provenance_mode,
-                )
-                if exact_contract_section:
-                    break
+    )
 
-    if policy.get("show_policy"):
-        lines = [
-            f"[mode] {policy.get('mode', 'balanced')}",
-            f"[confidence] {policy.get('confidence_band', 'medium')}",
-            f"[provenance] {provenance_mode}",
-            (
-                "[tool-avoidance] allowed"
-                if policy.get("tool_avoidance_allowed")
-                else f"[tool-avoidance] disallowed: {policy.get('tool_avoidance_reason', '')}"
-            ),
-        ]
-        if policy.get("conflict_escalation"):
-            lines.append("[escalation] open conflict present; verification required")
-        sections.append("## Brainstack Working Memory Policy\n" + _render_items(lines))
+    policy_section = _render_working_memory_policy_section(policy, provenance_mode=provenance_mode)
+    if policy_section:
+        sections.append(policy_section)
 
     if not suppress_evidence_priority:
         sections.append(_render_evidence_priority_section("## Brainstack Evidence Priority"))
@@ -875,162 +1081,46 @@ def render_working_memory_block(
     if operating_truth_section:
         sections.append(operating_truth_section)
 
-    if policy.get("continuation_emphasis"):
-        sections.append(
-            "## Brainstack Continuation Guidance\n"
-            + _render_items(
-                [
-                    "The user is resuming an existing thread. Carry forward still-relevant concrete details, constraints, named participants, venues, and unresolved tasks from the recalled evidence below.",
-                    "Do not invent missing details or add constraints that are not grounded in the recalled evidence.",
-                ]
-            )
-        )
+    continuation_section = _render_continuation_guidance_section(policy)
+    if continuation_section:
+        sections.append(continuation_section)
 
     if exact_contract_section:
         sections.append(exact_contract_section)
 
-    if compiled_policy_active:
-        filtered_profile_items = _filter_compiled_behavior_profile_items(profile_items, route_mode=route_mode)
-    else:
-        filtered_profile_items = [
-            item
-            for item in profile_items
-            if str(item.get("stable_key") or "").strip() not in hidden_profile_keys
-            and str(item.get("stable_key") or "").strip() not in substrate_profile_keys
-        ]
-        if route_mode != "style_contract":
-            filtered_profile_items = [
-                item for item in filtered_profile_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT
-            ]
-    if canonical_style_present or native_explicit_style_present or exact_contract_section:
-        filtered_profile_items = [
-            item for item in filtered_profile_items if not _is_style_authority_residue_profile_item(item)
-        ]
-    if exact_contract_section:
-        filtered_profile_items = [
-            item for item in filtered_profile_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT
-        ]
-    filtered_profile_items = [
-        item for item in filtered_profile_items if not _is_native_profile_mirror_receipt(item)
-    ]
-    if filtered_profile_items:
-        style_contract_char_budget = max(320, int(policy.get("style_contract_char_budget", 2400)))
-        lines = []
-        for item in filtered_profile_items:
-            content = redact_literal_text(str(item.get("content") or ""))
-            stable_key = str(item.get("stable_key") or "").strip()
-            rendered_content = (
-                _trim(content, style_contract_char_budget)
-                if stable_key == STYLE_CONTRACT_SLOT
-                and (route_mode == "style_contract" or bool(policy.get("show_authoritative_contract")))
-                else _trim(content, 160)
-            )
-            lines.append(
-                _with_provenance(
-                    f"[{item['category'].replace('_', ' ')}] {rendered_content}",
-                    source=str(item.get("source", "")),
-                    provenance_mode=provenance_mode,
-                    metadata=item.get("metadata"),
-                )
-            )
-        sections.append("## Brainstack Profile Match\n" + _render_items(lines))
+    filtered_profile_items = _filtered_profile_items_for_packet(
+        profile_items,
+        route_mode=route_mode,
+        hidden_profile_keys=hidden_profile_keys,
+        substrate_profile_keys=substrate_profile_keys,
+        canonical_style_present=canonical_style_present,
+        native_explicit_style_present=native_explicit_style_present,
+        exact_contract_section=exact_contract_section,
+        compiled_policy_active=compiled_policy_active,
+    )
+    profile_section = _render_profile_match_section(
+        filtered_profile_items,
+        policy=policy,
+        route_mode=route_mode,
+        provenance_mode=provenance_mode,
+    )
+    if profile_section:
+        sections.append(profile_section)
 
-    if route_mode == "aggregate":
-        aggregate_rows = [*matched, *recent, *transcript_rows]
-        packed_aggregate = _pack_aggregate_rows(
-            aggregate_rows,
-            char_budget=max(960, int(policy.get("transcript_char_budget", 320))),
+    sections.extend(
+        _render_continuity_or_aggregate_sections(
+            route_mode=route_mode,
+            matched=matched,
+            recent=recent,
+            transcript_rows=transcript_rows,
+            policy=policy,
             provenance_mode=provenance_mode,
         )
-        if packed_aggregate:
-            sections.append(
-                "## Brainstack Aggregate Evidence\n"
-                "Each numbered line below is a separate recalled item. Combine only the items that actually match the user question.\n"
-                + _render_numbered_items(packed_aggregate)
-            )
-    else:
-        deduped_matched = _suppress_overlapping_rows(matched)
-        deduped_recent = _suppress_overlapping_rows(
-            recent,
-            seen_markers={
-                marker
-                for row in deduped_matched
-                for marker in _row_overlap_markers(row)
-            },
-        )
-        deduped_transcript = _suppress_overlapping_rows(
-            transcript_rows,
-            seen_markers={
-                marker
-                for row in [*deduped_matched, *deduped_recent]
-                for marker in _row_overlap_markers(row)
-            },
-            transcript_like=True,
-        )
-        if not deduped_transcript and transcript_rows:
-            deduped_transcript = [dict(transcript_rows[0])]
+    )
 
-        if deduped_matched:
-            lines = _pack_continuity_rows(
-                deduped_matched,
-                char_budget=max(320, min(900, 260 * max(1, len(deduped_matched)))),
-                provenance_mode=provenance_mode,
-            )
-            sections.append("## Brainstack Continuity Match\n" + _render_items(lines))
-
-        if deduped_recent:
-            lines = _pack_continuity_rows(
-                deduped_recent,
-                char_budget=max(240, min(640, 220 * max(1, len(deduped_recent)))),
-                provenance_mode=provenance_mode,
-            )
-            sections.append("## Brainstack Recent Continuity\n" + _render_items(lines))
-
-        packed_transcript = _pack_transcript_rows(
-            deduped_transcript,
-            char_budget=int(policy.get("transcript_char_budget", 320)),
-            provenance_mode=provenance_mode,
-        )
-        if packed_transcript:
-            sections.append("## Brainstack Transcript Evidence\n" + _render_items(packed_transcript))
-
-    if graph_rows_for_sections:
-        show_graph_history = bool(policy.get("show_graph_history", False))
-        current_truth = [
-            row
-            for row in graph_rows_for_sections
-            if _graph_fact_class(row) in {"explicit_state_current", "explicit_relation"}
-        ]
-        conflicts = [row for row in graph_rows_for_sections if _graph_fact_class(row) == "conflict"]
-        historical_truth = [
-            row
-            for row in graph_rows_for_sections
-            if _graph_fact_class(row) in {"explicit_state_prior", "explicit_state_expired"}
-        ]
-        inferred_links = [
-            row for row in graph_rows_for_sections if _graph_fact_class(row) == "inferred_relation"
-        ][: max(0, int(policy.get("graph_inferred_limit", 2)))]
-
-        graph_sections: List[str] = []
-        current_lines = _render_graph_rows(current_truth, provenance_mode=provenance_mode)
-        if current_lines:
-            graph_sections.append("### Current Truth\n" + _render_items(current_lines))
-
-        conflict_lines = _render_graph_rows(conflicts, provenance_mode=provenance_mode)
-        if conflict_lines:
-            graph_sections.append("### Open Conflicts\n" + _render_items(conflict_lines))
-
-        if show_graph_history or conflicts or any(_graph_fact_class(row) == "explicit_state_expired" for row in historical_truth):
-            history_lines = _render_graph_rows(historical_truth, provenance_mode=provenance_mode)
-            if history_lines:
-                graph_sections.append("### Historical Truth\n" + _render_items(history_lines))
-
-        inferred_lines = _render_graph_rows(inferred_links, provenance_mode=provenance_mode)
-        if inferred_lines:
-            graph_sections.append("### Inferred Links\n" + _render_items(inferred_lines))
-
-        if graph_sections:
-            sections.append("## Brainstack Graph Truth\n" + "\n\n".join(graph_sections))
+    graph_section = _render_graph_truth_section(graph_rows, policy=policy, provenance_mode=provenance_mode)
+    if graph_section:
+        sections.append(graph_section)
 
     packed_corpus = _pack_corpus_rows(
         corpus_rows,
