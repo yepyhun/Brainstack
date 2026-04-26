@@ -73,6 +73,7 @@ def test_core_host_patch_inventory_skips_native_metadata_compat_seams() -> None:
     assert inventory["_patch_memory_manager_required_seam"]["selected"] is False
     assert inventory["_patch_dockerfile_backend_dependencies"]["selected"] is True
     assert inventory["_patch_dockerignore"]["selected"] is True
+    assert inventory["_patch_compose_plugin_pythonpath"]["selected"] is True
 
 
 def test_host_seam_audit_classifies_native_write_metadata_as_narrow(tmp_path: Path) -> None:

@@ -72,7 +72,7 @@ class ProviderInspectionMixin(ProviderRuntimeBase):
             "snapshot": snapshot_after,
         }
 
-        trace = dict(self._last_behavior_policy_trace or {})
+        trace = dict(getattr(self, "_last_behavior_policy_trace", None) or {})
         authority_trace = dict(trace.get("authority_bootstrap") or {})
         authority_trace[surface] = {
             "surface": surface,
@@ -91,6 +91,11 @@ class ProviderInspectionMixin(ProviderRuntimeBase):
         if self._last_behavior_policy_trace is None:
             return None
         return json.loads(json.dumps(self._last_behavior_policy_trace, ensure_ascii=True))
+
+    def behavior_policy_snapshot(self) -> Dict[str, Any] | None:
+        if not self._store:
+            return None
+        return self._store.get_behavior_policy_snapshot(principal_scope_key=self._principal_scope_key)
 
     def memory_authority_debug(self) -> Dict[str, Any] | None:
         if self._last_memory_authority_debug is None:

@@ -97,6 +97,11 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "owner": "private-runtime",
         "removal_condition": "Runtime deployment provides UID/GID mapping outside source patching.",
     },
+    "_patch_compose_plugin_pythonpath": {
+        "category": "required_seam",
+        "owner": "docker-runtime-seam",
+        "removal_condition": "Hermes Docker runtime adds project plugin roots before mutable runtime state paths.",
+    },
     "_patch_prompt_builder": {
         "category": "legacy_host_patch",
         "owner": "host-prompt-legacy",
@@ -309,6 +314,14 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_modes": ("docker",),
         "purpose": "Align runtime UID/GID and mounted state paths with the generated Brainstack Docker flow.",
         "why": "Prevents permission drift and runtime ownership breakage in containerized installs.",
+    },
+    {
+        "patcher": "_patch_compose_plugin_pythonpath",
+        "target": "docker-compose*.yml",
+        "scope": "docker-runtime-seam",
+        "runtime_modes": ("docker",),
+        "purpose": "Put the Hermes project plugin root ahead of mutable runtime state for Python imports.",
+        "why": "Prevents /opt/data/brainstack runtime storage from shadowing the installed Brainstack plugin package.",
     },
     {
         "patcher": "_patch_dockerignore",
@@ -2808,6 +2821,7 @@ services:
     environment:
       HERMES_HOME: /opt/data
       HERMES_ENABLE_PROJECT_PLUGINS: "true"
+      PYTHONPATH: /opt/hermes/plugins/memory
       HERMES_UID: "${{HERMES_UID:-1000}}"
       HERMES_GID: "${{HERMES_GID:-1000}}"
 {tei_environment}
@@ -2854,6 +2868,27 @@ def _patch_compose_runtime_identity(path: Path, dry_run: bool) -> list[str]:
     if not dry_run:
         path.write_text(text, encoding="utf-8")
     return applied
+
+
+def _patch_compose_plugin_pythonpath(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    if "PYTHONPATH:" in text:
+        if "/opt/hermes/plugins/memory" in text:
+            return []
+        raise RuntimeError(f"Refusing to overwrite existing compose PYTHONPATH in {path}")
+    anchors = [
+        '      HERMES_ENABLE_PROJECT_PLUGINS: "true"\n',
+        "      HERMES_ENABLE_PROJECT_PLUGINS: 'true'\n",
+    ]
+    for anchor in anchors:
+        if anchor in text:
+            text = text.replace(anchor, anchor + "      PYTHONPATH: /opt/hermes/plugins/memory\n", 1)
+            if not dry_run:
+                path.write_text(text, encoding="utf-8")
+            return ["compose:plugin_pythonpath"]
+    raise RuntimeError(f"Installer patch anchor missing for compose plugin PYTHONPATH in {path}")
 
 
 def _patch_dockerignore(path: Path, dry_run: bool) -> list[str]:
@@ -3275,6 +3310,7 @@ def main() -> int:
         assert compose_path is not None
         host_patches.extend(_run_host_patch("_patch_compose_healthcheck", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_compose_runtime_identity", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
+        host_patches.extend(_run_host_patch("_patch_compose_plugin_pythonpath", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_dockerignore", target / ".dockerignore", args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_dockerfile_backend_dependencies", target / "Dockerfile", args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_docker_entrypoint", target / "docker" / "entrypoint.sh", args.dry_run, host_patch_mode=args.host_patch_mode))

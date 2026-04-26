@@ -29,6 +29,7 @@ def test_generated_docker_compose_includes_local_tei_jina_runtime(tmp_path):
     assert "BRAINSTACK_DISABLE_CHROMA_DEFAULT_EMBEDDING: \"true\"" in text
     assert "condition: service_healthy" in text
     assert "tei-model-cache:" in text
+    assert "PYTHONPATH: /opt/hermes/plugins/memory" in text
 
 
 def test_generated_docker_compose_allows_external_embedding_runtime(tmp_path):
@@ -49,6 +50,28 @@ def test_generated_docker_compose_allows_external_embedding_runtime(tmp_path):
     text = compose.read_text(encoding="utf-8")
     assert "tei-jina:" not in text
     assert "BRAINSTACK_EMBEDDINGS_URL" not in text
+    assert "PYTHONPATH: /opt/hermes/plugins/memory" in text
+
+
+def test_compose_plugin_pythonpath_patch_prevents_runtime_state_shadowing(tmp_path):
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        """
+services:
+  hermes-bestie:
+    environment:
+      HERMES_HOME: /opt/data
+      HERMES_ENABLE_PROJECT_PLUGINS: "true"
+""",
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_compose_plugin_pythonpath(compose, dry_run=False)
+
+    text = compose.read_text(encoding="utf-8")
+    assert applied == ["compose:plugin_pythonpath"]
+    assert "PYTHONPATH: /opt/hermes/plugins/memory" in text
+    assert text.index("HERMES_ENABLE_PROJECT_PLUGINS") < text.index("PYTHONPATH")
 
 
 def test_doctor_accepts_fenced_private_recall_wrapper():
