@@ -9,11 +9,14 @@ Brainstack gives Hermes a memory model instead of a memory blob.
 
 It is a composite `MemoryProvider` for persistent agents: profile memory, session continuity, temporal graph truth, and corpus retrieval under one memory owner inside Hermes.
 
+The current installer also carries the optimized Hermes Gateway runtime path with it: fresh Hermes checkouts can receive the TurnContract, tool-profile, context-budget, provider-SLO, simple-renderer, stale-response, and heavy-tool metadata support Brainstack expects for fast stateful conversation.
+
 The promise is simple:
 
 - better long-horizon memory for always-on Hermes agents
 - less prompt sludge from blind transcript stuffing
 - cleaner truth handling when preferences, facts, and large recalled bodies need different treatment
+- one wizard path from fresh Hermes clone to memory-aware, Gateway-ready runtime
 
 This repo is for people building serious Hermes-based second-brain systems. It is not trying to pretend that transcript search, vector recall, and profile tables are the same job.
 
