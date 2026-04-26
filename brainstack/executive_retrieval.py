@@ -14,6 +14,7 @@ from .entity_resolver import (
     filter_graph_rows_to_entity_resolution_candidates,
     resolve_entity_candidates,
 )
+from .literal_index import literal_slot_match
 from .operating_truth import (
     OPERATING_RECORD_ACTIVE_WORK,
     OPERATING_RECORD_CANONICAL_POLICY,
@@ -1195,11 +1196,19 @@ def _annotate_query_flags(rows: Iterable[Dict[str, Any]], *, query: str) -> List
             for token in re.findall(r"[^\W_]+", content.casefold(), flags=re.UNICODE)
             if len(token) >= 3
         }
+        literal_match = literal_slot_match(
+            query=query,
+            text=content,
+            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {},
+        )
         payload["_brainstack_query_token_count"] = query_token_count
         payload["_brainstack_query_token_overlap"] = max(
             int(payload.get("_brainstack_query_token_overlap") or 0),
             len(query_tokens & row_tokens),
+            2 if literal_match.get("matched") else 0,
         )
+        if literal_match.get("matched"):
+            payload["_brainstack_literal_slot_match"] = literal_match
         annotated.append(payload)
     return annotated
 

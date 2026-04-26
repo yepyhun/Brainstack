@@ -3,6 +3,52 @@ from __future__ import annotations
 from argparse import Namespace
 
 from scripts import brainstack_doctor
+from scripts import install_into_hermes
+
+
+def test_generated_docker_compose_includes_local_tei_jina_runtime(tmp_path):
+    target = tmp_path / "hermes"
+    config = target / "hermes-config" / "bestie" / "config.yaml"
+    compose = target / "docker-compose.bestie.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text("{}", encoding="utf-8")
+
+    install_into_hermes._write_docker_compose_file(
+        target,
+        config,
+        compose,
+        dry_run=False,
+        embedding_runtime="local-tei-jina",
+    )
+
+    text = compose.read_text(encoding="utf-8")
+    assert "tei-jina:" in text
+    assert "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9" in text
+    assert "jinaai/jina-embeddings-v5-text-small-retrieval" in text
+    assert "BRAINSTACK_EMBEDDINGS_URL: http://127.0.0.1:7997/embed" in text
+    assert "BRAINSTACK_DISABLE_CHROMA_DEFAULT_EMBEDDING: \"true\"" in text
+    assert "condition: service_healthy" in text
+    assert "tei-model-cache:" in text
+
+
+def test_generated_docker_compose_allows_external_embedding_runtime(tmp_path):
+    target = tmp_path / "hermes"
+    config = target / "hermes-config" / "bestie" / "config.yaml"
+    compose = target / "docker-compose.bestie.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text("{}", encoding="utf-8")
+
+    install_into_hermes._write_docker_compose_file(
+        target,
+        config,
+        compose,
+        dry_run=False,
+        embedding_runtime="external",
+    )
+
+    text = compose.read_text(encoding="utf-8")
+    assert "tei-jina:" not in text
+    assert "BRAINSTACK_EMBEDDINGS_URL" not in text
 
 
 def test_doctor_accepts_fenced_private_recall_wrapper():
@@ -104,6 +150,56 @@ def test_planned_install_treats_missing_backend_dependencies_as_planned(monkeypa
         "graph_backend_dependency": "pass",
         "corpus_backend_dependency": "pass",
     }
+
+
+def test_docker_doctor_treats_live_kuzu_lock_as_warn(monkeypatch, tmp_path):
+    config = tmp_path / "config.yaml"
+    compose = tmp_path / "docker-compose.yml"
+    config.write_text("{}", encoding="utf-8")
+    compose.write_text("services: {}\n", encoding="utf-8")
+
+    monkeypatch.setattr(brainstack_doctor, "_docker_python_can_import", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        brainstack_doctor,
+        "_run_docker_python_probe",
+        lambda *_args, **_kwargs: {
+            "path": "/opt/data/brainstack/brainstack.kuzu",
+            "exists": True,
+            "openable": False,
+            "error_class": "RuntimeError",
+            "error": "IO exception: Could not set lock on file : /opt/data/brainstack/brainstack.kuzu",
+        },
+    )
+    monkeypatch.setattr(
+        brainstack_doctor,
+        "_load_yaml",
+        lambda _path: {
+            "memory": {
+                "provider": "brainstack",
+                "memory_enabled": True,
+                "user_profile_enabled": True,
+            },
+            "plugins": {
+                "brainstack": {
+                    "graph_backend": "kuzu",
+                    "graph_db_path": "$HERMES_HOME/brainstack/brainstack.kuzu",
+                    "corpus_backend": "sqlite",
+                }
+            },
+        },
+    )
+
+    checks = brainstack_doctor._check_config(
+        config,
+        planned_install=False,
+        python_bin=None,
+        runtime="docker",
+        compose_path=compose,
+    )
+
+    graph_open = {check.name: check for check in checks}["graph_backend_open"]
+    assert graph_open.status == "warn"
+    assert "locked by the active Docker runtime" in graph_open.message
 
 
 def test_local_doctor_does_not_require_docker_compose(monkeypatch, tmp_path):

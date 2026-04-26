@@ -4,6 +4,7 @@ from functools import wraps
 import hashlib
 import logging
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -51,6 +52,7 @@ from .live_system_state import (
     list_live_system_state_rows,
     search_live_system_state_rows,
 )
+from .literal_index import enrich_metadata_with_literal_sidecar, user_turn_event_sidecar
 from .profile_contract import (
     COMMUNICATION_CANONICAL_SLOTS,
     derive_transcript_identity_profile_items,
@@ -106,6 +108,15 @@ from .write_contract import build_write_decision_trace
 
 F = TypeVar("F", bound=Callable[..., Any])
 logger = logging.getLogger(__name__)
+
+
+def _env_truthy(name: str, *, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 NUMERIC_TOKEN_RE = re.compile(r"\d+(?::\d+)?(?:\.\d+)?")
 QUERY_TOKEN_RE = re.compile(r"[^\W_]+(?:[-_][^\W_]+)*", re.UNICODE)
 PROFILE_SCOPE_DELIMITER = "::principal_scope::"
@@ -505,6 +516,31 @@ def _principal_scope_key_from_metadata(metadata: Mapping[str, Any] | None) -> st
                     return scoped
         return ""
     return _scope_key_from_payload(nested, fields=PRINCIPAL_SCOPE_KEY_FIELDS)
+
+
+def _enrich_record_metadata_with_literals(
+    metadata: Mapping[str, Any] | None,
+    *,
+    text: str,
+    row_id: int | None = None,
+    session_id: str = "",
+    turn_number: int = 0,
+    kind: str = "",
+    include_event: bool = False,
+) -> Dict[str, Any]:
+    event = (
+        user_turn_event_sidecar(
+            row_id=row_id,
+            session_id=session_id,
+            turn_number=turn_number,
+            kind=kind,
+            content=text,
+            metadata=metadata,
+        )
+        if include_event
+        else None
+    )
+    return enrich_metadata_with_literal_sidecar(metadata, text=text, event=event)
 
 
 def _principal_scope_payload_from_metadata(metadata: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -1661,14 +1697,18 @@ class BrainstackStore:
     def _replay_corpus_publications_if_needed(self) -> None:
         if self._corpus_backend is None:
             return
+        statuses = ["pending"]
+        if _env_truthy("BRAINSTACK_REPLAY_FAILED_PUBLICATIONS_ON_OPEN", default=False):
+            statuses.append("failed")
+        placeholders = ", ".join("?" for _ in statuses)
         pending = self.conn.execute(
-            """
+            f"""
             SELECT object_kind, object_key
             FROM publish_journal
-            WHERE target_name = ? AND object_kind IN ('corpus_document', 'conversation_transcript') AND status IN ('pending', 'failed')
+            WHERE target_name = ? AND object_kind IN ('corpus_document', 'conversation_transcript') AND status IN ({placeholders})
             ORDER BY updated_at ASC, id ASC
             """,
-            (self._corpus_backend.target_name,),
+            (self._corpus_backend.target_name, *statuses),
         ).fetchall()
         seen: set[tuple[str, str]] = set()
         for row in pending:
@@ -2241,7 +2281,10 @@ class BrainstackStore:
         if created_at:
             metadata = dict(metadata or {})
             metadata.setdefault("observed_at", now)
-        normalized_metadata = _normalize_record_metadata(metadata, source=source)
+        normalized_metadata = _normalize_record_metadata(
+            _enrich_record_metadata_with_literals(metadata, text=content),
+            source=source,
+        )
         normalized_metadata.setdefault("source_kind", "explicit")
         normalized_metadata.setdefault("graph_kind", "relation")
         normalized_metadata.setdefault(
@@ -2273,6 +2316,19 @@ class BrainstackStore:
             ),
         )
         row_id = _cursor_lastrowid(cur)
+        normalized_metadata = _enrich_record_metadata_with_literals(
+            normalized_metadata,
+            text=content,
+            row_id=row_id,
+            session_id=session_id,
+            turn_number=turn_number,
+            kind=kind,
+            include_event=True,
+        )
+        self.conn.execute(
+            "UPDATE continuity_events SET metadata_json = ? WHERE id = ?",
+            (json.dumps(normalized_metadata, ensure_ascii=True, sort_keys=True), row_id),
+        )
         self.conn.execute(
             "INSERT INTO continuity_fts(rowid, content, session_id, kind) VALUES (?, ?, ?, ?)",
             (row_id, content, session_id, kind),
@@ -2300,7 +2356,10 @@ class BrainstackStore:
         if created_at:
             metadata = dict(metadata or {})
             metadata.setdefault("observed_at", now)
-        normalized_metadata = _normalize_record_metadata(metadata, source=source)
+        normalized_metadata = _normalize_record_metadata(
+            _enrich_record_metadata_with_literals(metadata, text=content),
+            source=source,
+        )
         normalized_metadata.setdefault("source_kind", "explicit")
         normalized_metadata.setdefault("graph_kind", "relation")
         cur = self.conn.execute(
@@ -2320,6 +2379,19 @@ class BrainstackStore:
             ),
         )
         row_id = _cursor_lastrowid(cur)
+        normalized_metadata = _enrich_record_metadata_with_literals(
+            normalized_metadata,
+            text=content,
+            row_id=row_id,
+            session_id=session_id,
+            turn_number=turn_number,
+            kind=kind,
+            include_event=True,
+        )
+        self.conn.execute(
+            "UPDATE transcript_entries SET metadata_json = ? WHERE id = ?",
+            (json.dumps(normalized_metadata, ensure_ascii=True, sort_keys=True), row_id),
+        )
         self.conn.execute(
             "INSERT INTO transcript_fts(rowid, content, session_id, kind) VALUES (?, ?, ?, ?)",
             (row_id, content, session_id, kind),
@@ -2918,7 +2990,7 @@ class BrainstackStore:
             existing = fallback_existing
         normalized_metadata = _merge_record_metadata(
             existing["metadata_json"] if existing else None,
-            metadata,
+            _enrich_record_metadata_with_literals(metadata, text=content),
             source=source,
         )
         if existing and str(existing["content"] or "").strip() == str(content or "").strip():
@@ -3298,7 +3370,7 @@ class BrainstackStore:
         meta_json = json.dumps(
             _merge_record_metadata(
                 existing["metadata_json"] if existing else None,
-                metadata,
+                _enrich_record_metadata_with_literals(metadata, text=title),
                 source=source,
             ),
             ensure_ascii=True,
@@ -3526,7 +3598,7 @@ class BrainstackStore:
             source=str(source or "").strip(),
             metadata=_merge_record_metadata(
                 existing["metadata_json"] if existing else None,
-                metadata,
+                _enrich_record_metadata_with_literals(metadata, text=content),
                 source=source,
             ),
         )
@@ -4266,7 +4338,8 @@ class BrainstackStore:
         active: bool = True,
     ) -> int:
         now = utc_now_iso()
-        meta_json = json.dumps(metadata or {}, ensure_ascii=True, sort_keys=True)
+        enriched_metadata = _enrich_record_metadata_with_literals(metadata, text=title)
+        meta_json = json.dumps(enriched_metadata, ensure_ascii=True, sort_keys=True)
         existing = self.conn.execute(
             "SELECT id FROM corpus_documents WHERE stable_key = ?",
             (stable_key,),
@@ -4319,7 +4392,8 @@ class BrainstackStore:
             if not content:
                 continue
             token_estimate = int(section.get("token_estimate", max(1, len(content) // 4)))
-            metadata_json = json.dumps(section.get("metadata", {}), ensure_ascii=True, sort_keys=True)
+            section_metadata = _enrich_record_metadata_with_literals(section.get("metadata", {}), text=content)
+            metadata_json = json.dumps(section_metadata, ensure_ascii=True, sort_keys=True)
             cur = self.conn.execute(
                 """
                 INSERT INTO corpus_sections (
@@ -4340,6 +4414,120 @@ class BrainstackStore:
 
         self.conn.commit()
         return inserted
+
+    @_locked
+    def backfill_literal_event_sidecars(self, *, dry_run: bool = True, limit: int = 0) -> Dict[str, Any]:
+        """Populate literal/event sidecars without rewriting record content or authority."""
+        specs = [
+            ("profile_items", "content", ""),
+            ("operating_records", "content", ""),
+            ("task_items", "title", ""),
+            ("corpus_documents", "title", ""),
+            ("corpus_sections", "content", ""),
+            ("continuity_events", "content", "event"),
+            ("transcript_entries", "content", "event"),
+        ]
+        report: Dict[str, Any] = {
+            "schema": "brainstack.literal_event_backfill.v1",
+            "dry_run": bool(dry_run),
+            "tables": {},
+            "updated": 0,
+            "scanned": 0,
+        }
+        remaining = int(limit or 0)
+        for table, text_column, mode in specs:
+            sql = f"SELECT * FROM {table} ORDER BY id ASC"
+            if remaining > 0:
+                sql += " LIMIT ?"
+                rows = self.conn.execute(sql, (remaining,)).fetchall()
+            else:
+                rows = self.conn.execute(sql).fetchall()
+            scanned = 0
+            updated = 0
+            for row in rows:
+                scanned += 1
+                metadata = _decode_json_object(row["metadata_json"]) if "metadata_json" in row.keys() else {}
+                text = str(row[text_column] or "")
+                event_payload = None
+                if mode == "event":
+                    event_payload = user_turn_event_sidecar(
+                        row_id=int(row["id"]),
+                        session_id=str(row["session_id"] or ""),
+                        turn_number=int(row["turn_number"] or 0),
+                        kind=str(row["kind"] or ""),
+                        content=text,
+                        metadata=metadata,
+                    )
+                enriched = enrich_metadata_with_literal_sidecar(metadata, text=text, event=event_payload)
+                if enriched == metadata:
+                    continue
+                updated += 1
+                if not dry_run:
+                    self.conn.execute(
+                        f"UPDATE {table} SET metadata_json = ? WHERE id = ?",
+                        (json.dumps(enriched, ensure_ascii=True, sort_keys=True), int(row["id"])),
+                    )
+            report["tables"][table] = {"scanned": scanned, "updated": updated}
+            report["scanned"] += scanned
+            report["updated"] += updated
+            if remaining > 0:
+                remaining = max(0, remaining - scanned)
+                if remaining == 0:
+                    break
+        if not dry_run:
+            self.conn.commit()
+        return report
+
+    @_locked
+    def annotate_explicit_truth_parity(
+        self,
+        *,
+        target: str,
+        stable_key: str,
+        category: str = "",
+        principal_scope_key: str = "",
+        parity: Mapping[str, Any],
+    ) -> bool:
+        """Attach parity diagnostics to the projected row without changing content or authority."""
+        normalized_target = str(target or "").strip()
+        normalized_key = str(stable_key or "").strip()
+        if not normalized_key or not isinstance(parity, Mapping):
+            return False
+
+        table = ""
+        where = ""
+        params: tuple[Any, ...] = ()
+        if normalized_target in {"user", "profile"}:
+            storage_key = _profile_storage_key(
+                stable_key=normalized_key,
+                category=str(category or "").strip(),
+                principal_scope_key=str(principal_scope_key or "").strip(),
+            )
+            table = "profile_items"
+            where = "stable_key = ?"
+            params = (storage_key,)
+        elif normalized_target == "operating":
+            table = "operating_records"
+            where = "stable_key = ?"
+            params = (normalized_key,)
+        elif normalized_target == "task":
+            table = "task_items"
+            where = "stable_key = ?"
+            params = (normalized_key,)
+        else:
+            return False
+
+        row = self.conn.execute(f"SELECT id, metadata_json FROM {table} WHERE {where}", params).fetchone()
+        if row is None:
+            return False
+        metadata = _decode_json_object(row["metadata_json"])
+        metadata["explicit_truth_parity"] = dict(parity)
+        self.conn.execute(
+            f"UPDATE {table} SET metadata_json = ? WHERE id = ?",
+            (json.dumps(metadata, ensure_ascii=True, sort_keys=True), int(row["id"])),
+        )
+        self.conn.commit()
+        return True
 
     @_locked
     def ingest_corpus_document(

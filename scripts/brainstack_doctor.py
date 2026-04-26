@@ -882,6 +882,13 @@ def _backend_probe_code(*, backend: str, configured_path: str, default_suffix: s
     )
 
 
+def _is_docker_runtime_kuzu_lock(*, backend: str, runtime: str, error: str) -> bool:
+    if backend != "kuzu" or runtime != "docker":
+        return False
+    lowered = error.casefold()
+    return "could not set lock on file" in lowered or "docs.kuzudb.com/concurrency" in lowered
+
+
 def _run_python_probe(
     code: str,
     *,
@@ -1000,6 +1007,14 @@ def _backend_openability_checks(
         return [Check(check_name, "pass", f"{backend} backend opens successfully at {path}")]
     error = str(payload.get("error") or "unknown backend open failure")
     error_class = str(payload.get("error_class") or "backend_open_failure")
+    if _is_docker_runtime_kuzu_lock(backend=backend, runtime=runtime, error=error):
+        return [
+            Check(
+                check_name,
+                "warn",
+                f"{backend} backend is locked by the active Docker runtime at {path}; dependency import and container health must be checked separately",
+            )
+        ]
     return [Check(check_name, "fail", f"{backend} backend exists but cannot be opened at {path}: {error_class}: {error}")]
 
 

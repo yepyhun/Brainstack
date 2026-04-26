@@ -33,6 +33,7 @@ from .explicit_capture import (
     receipt_excerpt,
     validate_explicit_capture_payload,
 )
+from .explicit_truth_parity import build_explicit_truth_parity, derive_host_trace_id
 from .extraction_pipeline import build_session_message_ingest_plan, build_turn_ingest_plan
 from .maintenance import (
     MAINTENANCE_CLASS_SEMANTIC_INDEX,
@@ -503,6 +504,25 @@ class BrainstackMemoryProvider(MemoryProvider):
         }
         if isinstance(extra, dict):
             receipt.update(extra)
+        parity_common = {
+            "source_role": str(receipt.get("source_role") or ""),
+            "stable_key": stable_key,
+            "principal_scope_key": self._principal_scope_key,
+            "content": content,
+            "brainstack_projection_receipt_id": str(receipt.get("receipt_id") or ""),
+            "host_receipt_id": str(receipt.get("host_receipt_id") or ""),
+            "host_receipt_source": str(receipt.get("host_receipt_source") or ""),
+            "host_content_hash": str(receipt.get("host_content_hash") or ""),
+            "host_stable_key": str(receipt.get("host_stable_key") or ""),
+            "host_scope": str(receipt.get("host_scope") or ""),
+            "host_temporal_status": str(receipt.get("host_temporal_status") or ""),
+            "brainstack_temporal_status": str(receipt.get("brainstack_temporal_status") or ""),
+            "authority_class": str(receipt.get("authority_class") or ""),
+        }
+        receipt["explicit_truth_parity"] = build_explicit_truth_parity(
+            projection_status="pending",
+            **parity_common,
+        )
 
         self._pending_explicit_write_count += 1
         self._last_write_receipt = dict(receipt)
@@ -513,6 +533,11 @@ class BrainstackMemoryProvider(MemoryProvider):
             failed = dict(receipt)
             failed["status"] = "failed"
             failed["error"] = str(exc)
+            failed["explicit_truth_parity"] = build_explicit_truth_parity(
+                projection_status="failed",
+                error=str(exc),
+                **parity_common,
+            )
             self._last_write_receipt = failed
             self._set_memory_operation_trace(surface="explicit_write_failed", note=str(exc))
             raise
@@ -521,6 +546,19 @@ class BrainstackMemoryProvider(MemoryProvider):
 
         committed = dict(receipt)
         committed["status"] = "committed"
+        committed_parity = build_explicit_truth_parity(
+            projection_status="committed",
+            **parity_common,
+        )
+        committed["explicit_truth_parity"] = committed_parity
+        if self._store is not None:
+            self._store.annotate_explicit_truth_parity(
+                target=target,
+                stable_key=stable_key,
+                category=category,
+                principal_scope_key=self._principal_scope_key,
+                parity=committed_parity,
+            )
         self._last_write_receipt = committed
         self._set_memory_operation_trace(surface="explicit_write_committed")
         return committed
@@ -1731,6 +1769,13 @@ class BrainstackMemoryProvider(MemoryProvider):
                 "content_excerpt": receipt_excerpt(content),
                 "supersedes_stable_key": str(capture.get("supersedes_stable_key") or ""),
                 "write_contract_trace": dict(capture.get("write_contract_trace") or {}),
+                "host_receipt_id": str(metadata.get("host_receipt_id") or ""),
+                "host_receipt_source": "host_receipt" if str(metadata.get("host_receipt_id") or "").strip() else "",
+                "host_content_hash": str(metadata.get("host_content_hash") or ""),
+                "host_stable_key": str(metadata.get("host_stable_key") or ""),
+                "host_scope": str(metadata.get("host_scope") or ""),
+                "host_temporal_status": str(metadata.get("host_temporal_status") or ""),
+                "brainstack_temporal_status": str(metadata.get("brainstack_temporal_status") or ""),
             },
         )
         receipt["read_only"] = False
@@ -2296,6 +2341,15 @@ class BrainstackMemoryProvider(MemoryProvider):
             return
         if target == "user":
             native_write_id = _stable_native_write_id(action=action, target=target, content=content)
+            host_receipt_id = str(write_metadata.get("host_receipt_id") or "").strip()
+            host_receipt_source = "host_receipt" if host_receipt_id else "derived_host_trace"
+            if not host_receipt_id:
+                host_receipt_id = derive_host_trace_id(
+                    action=action,
+                    target=target,
+                    content=content,
+                    metadata=write_metadata,
+                )
             mirror_payload = _native_profile_mirror_payload(
                 native_write_id=native_write_id,
                 action=action,
@@ -2369,6 +2423,11 @@ class BrainstackMemoryProvider(MemoryProvider):
                         "native_write_id": native_write_id,
                         "source_generation": native_write_id,
                         "mirrored_from": NATIVE_EXPLICIT_PROFILE_MIRROR_SOURCE,
+                        "host_receipt_id": host_receipt_id,
+                        "host_receipt_source": host_receipt_source,
+                        "host_scope": str(write_metadata.get("principal_scope_key") or self._principal_scope_key),
+                        "host_temporal_status": str(write_metadata.get("temporal_status") or ""),
+                        "brainstack_temporal_status": str(mirror_metadata.get("temporal_status") or ""),
                     },
                 )
             return

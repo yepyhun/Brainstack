@@ -6,6 +6,8 @@ from .control_plane import build_working_memory_packet
 from .db import BrainstackStore
 from .db_diagnostics import build_db_substrate_snapshot
 from .graph_lineage import compact_graph_source_lineage
+from .literal_index import detect_literal_tokens, redact_literal_text, semantic_anchor_text
+from .answerability import build_memory_answerability
 from .retrieval_candidate import build_candidate_trace
 from .working_memory_allocator import build_global_allocator_shadow
 
@@ -354,6 +356,22 @@ def _summarize_rows(shelf: str, rows: list[Dict[str, Any]]) -> list[Dict[str, An
         temporal: Dict[str, Any] = dict(raw_temporal) if isinstance(raw_temporal, dict) else {}
         raw_corpus_taxonomy = metadata.get("corpus_taxonomy")
         corpus_taxonomy: Dict[str, Any] = dict(raw_corpus_taxonomy) if isinstance(raw_corpus_taxonomy, dict) else {}
+        raw_text = str(
+            row.get("content")
+            or row.get("title")
+            or row.get("value_text")
+            or row.get("object_text")
+            or row.get("heading")
+            or ""
+        )
+        literal_index = metadata.get("literal_index")
+        literal_index = dict(literal_index) if isinstance(literal_index, dict) else {}
+        explicit_truth_parity = metadata.get("explicit_truth_parity")
+        explicit_truth_parity = dict(explicit_truth_parity) if isinstance(explicit_truth_parity, dict) else {}
+        literal_tokens = list(literal_index.get("literal_tokens") or detect_literal_tokens(raw_text))
+        conversation_event = metadata.get("conversation_event")
+        conversation_event = dict(conversation_event) if isinstance(conversation_event, dict) else {}
+        redacted_excerpt = redact_literal_text(raw_text, literal_tokens=literal_tokens)[:220]
         output.append(
             {
                 "evidence_key": _evidence_key(shelf, row),
@@ -362,6 +380,7 @@ def _summarize_rows(shelf: str, rows: list[Dict[str, Any]]) -> list[Dict[str, An
                 "row_id": row.get("row_id", ""),
                 "row_type": row.get("row_type", ""),
                 "stable_key": row.get("stable_key", ""),
+                "category": row.get("category", ""),
                 "source": row.get("source", ""),
                 "record_type": row.get("record_type", row.get("kind", "")),
                 "fact_class": row.get("fact_class", ""),
@@ -388,6 +407,7 @@ def _summarize_rows(shelf: str, rows: list[Dict[str, Any]]) -> list[Dict[str, An
                 "semantic_score": float(row.get("semantic_score") or 0.0),
                 "query_token_overlap": int(row.get("_brainstack_query_token_overlap") or 0),
                 "query_token_count": int(row.get("_brainstack_query_token_count") or 0),
+                "literal_slot_match": dict(row.get("_brainstack_literal_slot_match") or {}),
                 "rrf_score": float(row.get("_brainstack_rrf_score") or 0.0),
                 "channels": list(row.get("_brainstack_channels") or []),
                 "channel_ranks": dict(row.get("_brainstack_channel_ranks") or {}),
@@ -417,18 +437,23 @@ def _summarize_rows(shelf: str, rows: list[Dict[str, Any]]) -> list[Dict[str, An
                 "corpus_taxonomy": corpus_taxonomy if shelf == "corpus" else {},
                 "source_display_id": corpus_taxonomy.get("display_source_id", "") if shelf == "corpus" else "",
                 "public_source_uri": corpus_taxonomy.get("public_source_uri", "") if shelf == "corpus" else "",
+                "literal_index_schema": literal_index.get("schema", ""),
+                "literal_tokens": literal_tokens,
+                "semantic_anchor_text": literal_index.get("semantic_anchor_text")
+                or semantic_anchor_text(raw_text, literal_tokens=literal_tokens),
+                "explicit_truth_parity": explicit_truth_parity,
+                "projection_status": explicit_truth_parity.get("projection_status", ""),
+                "divergence_status": explicit_truth_parity.get("divergence_status", ""),
+                "parity_observable": explicit_truth_parity.get("parity_observable", ""),
+                "conversation_event": conversation_event,
+                "event_type": conversation_event.get("event_type", ""),
+                "event_id": conversation_event.get("event_id", ""),
+                "bounded_scope_only": bool(conversation_event.get("bounded_scope_only")),
                 "corpus_retrieval_trace": dict(row.get("_brainstack_corpus_retrieval_trace") or {})
                 if shelf == "corpus"
                 else {},
                 "created_at": row.get("created_at", row.get("updated_at", "")),
-                "excerpt": str(
-                    row.get("content")
-                    or row.get("title")
-                    or row.get("value_text")
-                    or row.get("object_text")
-                    or row.get("heading")
-                    or ""
-                )[:220],
+                "excerpt": redacted_excerpt,
             }
         )
     return output
@@ -542,6 +567,24 @@ def build_query_inspect(
         suppressed_limit=40,
     )
     policy_snapshot = dict(packet.get("policy") or {})
+    capability_health = _query_capability_health(store)
+    candidate_answerability = build_memory_answerability(
+        query=str(query or ""),
+        analysis=dict(packet.get("analysis") or {}),
+        selected_by_shelf=selected_by_shelf,
+    )
+    packet_answerability = build_memory_answerability(
+        query=str(query or ""),
+        analysis=dict(packet.get("analysis") or {}),
+        selected_by_shelf=selected_by_shelf,
+        packet_text=block,
+    )
+    explicit_truth_parity = [
+        dict(item.get("explicit_truth_parity") or {})
+        for rows in selected_by_shelf.values()
+        for item in rows
+        if isinstance(item.get("explicit_truth_parity"), dict) and item.get("explicit_truth_parity")
+    ]
     return {
         "schema": "brainstack.query_inspect.v1",
         "query": str(query or ""),
@@ -555,17 +598,25 @@ def build_query_inspect(
         "selected_evidence": selected_by_shelf,
         "suppressed_evidence": suppressed,
         "retrieval_candidates": candidate_trace,
+        "candidate_answerability": candidate_answerability,
+        "packet_answerability": packet_answerability,
+        "memory_answerability": packet_answerability,
+        "explicit_truth_parity": explicit_truth_parity,
         "global_allocator_shadow": build_global_allocator_shadow(
             candidate_trace,
             candidate_budget=int(policy_snapshot.get("evidence_item_budget") or evidence_item_budget or 1),
             enabled=True,
         ),
-        "capability_health": _query_capability_health(store),
+        "capability_health": capability_health,
         "final_packet": {
             "char_count": len(block),
             "section_count": len(sections),
             "sections": sections,
             "preview": block[:1200],
             "policy": policy_snapshot,
+            "memory_answerability": packet_answerability,
+            "explicit_truth_parity": explicit_truth_parity,
+            "diagnostic_evidence_count": sum(len(rows) for rows in selected_by_shelf.values()),
+            "answerable_evidence_count": len(packet_answerability.get("answer_evidence_ids") or []),
         },
     }

@@ -43,7 +43,10 @@ def test_read_diagnostics_seam_keeps_recall_inspect_stats_stable(tmp_path: Path)
 
         assert recall["schema"] == "brainstack.tool_recall.v1"
         assert recall["read_only"] is True
-        assert recall["evidence_count"] >= 1
+        assert "evidence_count" not in recall
+        assert recall["diagnostic_evidence_count"] >= 1
+        assert recall["answerable_evidence_count"] >= 1
+        assert recall["memory_answerability"]["can_answer"] is True
         assert inspect["schema"] == "brainstack.tool_inspect.v1"
         assert inspect["read_only"] is True
         assert inspect["report"]["schema"] == "brainstack.query_inspect.v1"

@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, List, Mapping
 
 from .db import BrainstackStore
 from .graph_lineage import compact_graph_source_lineage
+from .literal_index import redact_literal_text
 from .operating_context import render_operating_context_section
 from .profile_contract import (
     is_native_explicit_style_item,
@@ -140,6 +141,7 @@ def _render_evidence_priority_section(title: str) -> str:
         "This private recalled memory context is background evidence, not new user input. "
         "Use explicit, committed, non-conflicted user/owner-backed records as authoritative. "
         "Supporting-only/runtime state is not active assignment or project-status truth. "
+        "Pulse/scheduler evidence alone is not assignment truth. "
         "If asked about current work, assignment, or workstream and no explicit task/operating record is shown, say it is not recorded instead of inferring it from background evidence. "
         "Do not mention Brainstack blocks or memory internals unless asked."
     )
@@ -162,7 +164,7 @@ def _render_exact_contract_section(
 ) -> str:
     if not isinstance(row, Mapping):
         return ""
-    content = _trim(str(row.get("content") or ""), max_len=max(320, int(char_budget)))
+    content = _trim(redact_literal_text(str(row.get("content") or "")), max_len=max(320, int(char_budget)))
     if not content:
         return ""
     preface = (
@@ -352,7 +354,7 @@ def _render_task_memory_section(
 ) -> str:
     task_lines: List[str] = []
     for row in rows:
-        title = " ".join(str(row.get("title") or "").strip().split())
+        title = redact_literal_text(" ".join(str(row.get("title") or "").strip().split()))
         if not title:
             continue
         prefix = "optional" if bool(row.get("optional")) else "open"
@@ -380,7 +382,7 @@ def _render_operating_truth_section(
 ) -> str:
     operating_lines: List[str] = []
     for row in rows:
-        content = _normalize_compare_text(row.get("content"))
+        content = redact_literal_text(_normalize_compare_text(row.get("content")))
         if not content:
             continue
         record_type = str(row.get("record_type") or "operating_truth").strip()
@@ -596,7 +598,7 @@ def _pack_corpus_rows(rows: Iterable[dict], *, char_budget: int, provenance_mode
 
         remaining = budget - sum(len(item) for item in packed)
         snippet_cap = max(140, min(360, remaining - len(label) - 24))
-        line = f"[{row['doc_kind']}] {label}: {_trim(content, snippet_cap)}"
+        line = f"[{row['doc_kind']}] {label}: {_trim(redact_literal_text(content), snippet_cap)}"
         line = _with_provenance(line, source=str(row.get("source", "")), provenance_mode=provenance_mode)
         if packed and remaining < len(line):
             break
@@ -632,7 +634,7 @@ def _pack_continuity_rows(rows: Iterable[dict], *, char_budget: int, provenance_
         remaining_items = max(1, len(unique_rows) - index)
         per_row_budget = max(140, remaining // remaining_items)
         snippet_cap = max(140, min(280, per_row_budget - len(prefix) - 24))
-        line = f"{prefix} {_render_user_first_exchange(row.get('content') or '', max_len=snippet_cap)}"
+        line = f"{prefix} {_render_user_first_exchange(redact_literal_text(row.get('content') or ''), max_len=snippet_cap)}"
         line = _with_provenance(
             line,
             source=str(row.get("source", "")),
@@ -668,7 +670,7 @@ def _pack_transcript_rows(rows: Iterable[dict], *, char_budget: int, provenance_
         remaining_items = max(1, len(unique_rows) - index)
         per_row_budget = max(160, remaining // remaining_items)
         snippet_cap = max(160, min(320, per_row_budget - len(prefix) - 24))
-        label = f"{prefix} {_render_user_first_exchange(row.get('content') or '', max_len=snippet_cap)}"
+        label = f"{prefix} {_render_user_first_exchange(redact_literal_text(row.get('content') or ''), max_len=snippet_cap)}"
         extra = ""
         if row.get("same_session"):
             extra = "same_session"
@@ -707,7 +709,7 @@ def _pack_aggregate_rows(rows: Iterable[dict], *, char_budget: int, provenance_m
         temporal_label = _row_temporal_label(row)
         evidence_label = str(row.get("kind") or row.get("row_type") or "item")
         prefix = f"[{temporal_label} | {evidence_label}]" if temporal_label else f"[{evidence_label}]"
-        content = str(row.get("content") or "")
+        content = redact_literal_text(str(row.get("content") or ""))
         snippet_cap = max(180, min(360, remaining - len(prefix) - 24))
         lowered = content.lower()
         if "user:" in lowered and "assistant:" in lowered:
@@ -758,7 +760,7 @@ def _row_overlap_markers(row: Mapping[str, Any], *, transcript_like: bool = Fals
     turn_number = int(row.get("turn_number") or 0)
     if session_id and turn_number > 0:
         markers.add(("turn", f"{session_id}:{turn_number}"))
-    content = str(row.get("content") or "").strip()
+    content = redact_literal_text(str(row.get("content") or "").strip())
     if content:
         rendered = (
             _render_user_first_exchange(content, max_len=220)
@@ -915,7 +917,7 @@ def render_working_memory_block(
         style_contract_char_budget = max(320, int(policy.get("style_contract_char_budget", 2400)))
         lines = []
         for item in filtered_profile_items:
-            content = str(item.get("content") or "")
+            content = redact_literal_text(str(item.get("content") or ""))
             stable_key = str(item.get("stable_key") or "").strip()
             rendered_content = (
                 _trim(content, style_contract_char_budget)

@@ -409,9 +409,9 @@ SCENARIOS: tuple[GoldenScenario, ...] = (
         question="unsupported zeta omega no durable memory",
         expected_shelf=None,
         fixture="all",
-        hard_gate=False,
-        owner_phase="67/75",
-        gap_reason="Current packet policy may include generally authoritative evidence for unsupported queries; later ranking/suppression phases own this.",
+        hard_gate=True,
+        owner_phase="143",
+        gap_reason="",
     ),
 )
 
@@ -435,9 +435,14 @@ def _all_selected_items(report: dict[str, Any]) -> list[dict[str, Any]]:
 def _matches_expected_item(scenario: GoldenScenario, report: dict[str, Any]) -> tuple[bool, str, list[dict[str, Any]]]:
     if scenario.expected_shelf is None:
         rows = _all_selected_items(report)
+        raw_answerability = report.get("memory_answerability")
+        answerability = raw_answerability if isinstance(raw_answerability, dict) else {}
+        answer_evidence = list(answerability.get("answer_evidence_ids") or [])
+        if answerability.get("can_answer") is False and not answer_evidence:
+            return True, "no answerable memory truth selected", rows
         if rows:
-            return False, "unsupported query selected memory evidence", rows
-        return True, "no memory evidence selected", []
+            return False, "unsupported query selected answerable memory evidence", rows
+        return False, "unsupported query missing answerability gate", []
 
     rows = _selected_items(report, scenario.expected_shelf)
     if not rows:

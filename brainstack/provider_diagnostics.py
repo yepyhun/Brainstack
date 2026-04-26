@@ -3,8 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from .answerability import build_memory_answerability
+from .authority_policy import is_current_assignment_authority
 from .diagnostics import build_memory_kernel_doctor, build_query_inspect
-from .operating_truth import is_current_assignment_authority_metadata
 
 
 def _normalize_compact_text(value: Any) -> str:
@@ -35,21 +36,7 @@ def _compact_channel_cards(channels: list[Any], *, limit: int = 8) -> list[dict[
 
 
 def _is_current_assignment_authority(item: Mapping[str, Any]) -> bool:
-    shelf = _normalize_compact_text(item.get("shelf"))
-    if bool(item.get("runtime_state_only")) or bool(item.get("supporting_evidence_only")):
-        return False
-    if shelf == "operating":
-        return is_current_assignment_authority_metadata(
-            {
-                "current_assignment_authority": bool(item.get("current_assignment_authority")),
-                "current_assignment_authority_schema": _normalize_compact_text(
-                    item.get("current_assignment_authority_schema")
-                ),
-            }
-        )
-    if shelf == "task":
-        return True
-    return False
+    return is_current_assignment_authority(item)
 
 
 def _compact_evidence_card(item: Mapping[str, Any]) -> dict[str, Any]:
@@ -77,6 +64,14 @@ def _compact_evidence_card(item: Mapping[str, Any]) -> dict[str, Any]:
         "citation_id": _normalize_compact_text(item.get("citation_id")),
         "created_at": _normalize_compact_text(item.get("created_at")),
         "excerpt": _trim_compact_text(item.get("excerpt"), limit=180),
+        "literal_tokens": list(item.get("literal_tokens") or [])[:6],
+        "semantic_anchor_text": _trim_compact_text(item.get("semantic_anchor_text"), limit=140),
+        "explicit_truth_parity": dict(item.get("explicit_truth_parity") or {}),
+        "projection_status": _normalize_compact_text(item.get("projection_status")),
+        "divergence_status": _normalize_compact_text(item.get("divergence_status")),
+        "parity_observable": _normalize_compact_text(item.get("parity_observable")),
+        "event_type": _normalize_compact_text(item.get("event_type")),
+        "bounded_scope_only": bool(item.get("bounded_scope_only")),
     }
 
 
@@ -266,10 +261,22 @@ def handle_brainstack_recall(
     )
     raw_selected = report.get("selected_evidence")
     selected: Mapping[str, Any] = raw_selected if isinstance(raw_selected, Mapping) else {}
-    evidence_count = sum(len(rows or []) for rows in selected.values()) if isinstance(selected, Mapping) else 0
+    diagnostic_evidence_count = sum(len(rows or []) for rows in selected.values()) if isinstance(selected, Mapping) else 0
     raw_packet = report.get("final_packet")
     packet: Mapping[str, Any] = raw_packet if isinstance(raw_packet, Mapping) else {}
     compact_selected = _compact_selected_evidence(selected)
+    raw_answerability = report.get("memory_answerability")
+    answerability: Mapping[str, Any] = (
+        raw_answerability
+        if isinstance(raw_answerability, Mapping)
+        else build_memory_answerability(
+            query=query,
+            analysis=report.get("analysis") if isinstance(report.get("analysis"), Mapping) else {},
+            selected_by_shelf=selected,
+            packet_text=str(packet.get("preview") or ""),
+        )
+    )
+    answerable_evidence_count = len(list(answerability.get("answer_evidence_ids") or []))
     return {
         "schema": "brainstack.tool_recall.v1",
         "tool_name": "brainstack_recall",
@@ -284,7 +291,8 @@ def handle_brainstack_recall(
             "current_assignment_negative_rule": (
                 "Do not determine active work from continuity, transcript/session history, profile shared_work, "
                 "graph/background facts, runtime scheduler state, or Pulse evidence unless it is selected task "
-                "evidence or selected operating evidence with typed current_assignment_authority=true."
+                "evidence or selected operating evidence with typed current_assignment_authority=true. "
+                "Pulse output may describe background observations or candidate task rows, but it does not assign current work by itself."
             ),
             "non_authority_sources": [
                 "profile shared_work",
@@ -293,6 +301,10 @@ def handle_brainstack_recall(
                 "runtime_state_only scheduler or pulse rows",
                 "external/session-search summaries",
             ],
+            "answerability_rule": (
+                "Use memory_answerability for memory claims. Diagnostic selected evidence is not answer truth "
+                "unless listed in answer_evidence_ids."
+            ),
         },
         "principal_scope_key": principal_scope_key,
         "query": query,
@@ -302,9 +314,12 @@ def handle_brainstack_recall(
             "sections": list(packet.get("sections") or []),
             "char_count": int(packet.get("char_count") or 0),
             "preview": _trim_compact_text(packet.get("preview"), limit=1200),
+            "explicit_truth_parity": list(packet.get("explicit_truth_parity") or [])[:8],
         },
+        "memory_answerability": dict(answerability),
         "selected_evidence": compact_selected,
-        "evidence_count": evidence_count,
+        "diagnostic_evidence_count": diagnostic_evidence_count,
+        "answerable_evidence_count": answerable_evidence_count,
         "evidence_card_count": sum(len(rows) for rows in compact_selected.values()),
         "diagnostic_detail_tool": "brainstack_inspect",
     }

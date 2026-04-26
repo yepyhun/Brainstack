@@ -80,7 +80,11 @@ def test_brainstack_recall_tool_returns_evidence_without_mutating_profile(tmp_pa
             "graph/background facts without current_assignment_authority"
             in payload["model_use_contract"]["non_authority_sources"]
         )
-        assert payload["evidence_count"] >= 1
+        assert "evidence_count" not in payload
+        assert payload["diagnostic_evidence_count"] >= 1
+        assert payload["answerable_evidence_count"] >= 1
+        assert payload["memory_answerability"]["can_answer"] is True
+        assert payload["memory_answerability"]["max_claim_strength"] == "memory_truth"
         assert payload["diagnostic_detail_tool"] == "brainstack_inspect"
         assert payload["selected_evidence"]["profile"]
         assert payload["selected_evidence"]["profile"][0]["current_assignment_authority"] is False

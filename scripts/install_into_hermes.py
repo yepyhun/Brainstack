@@ -2727,14 +2727,74 @@ esac
     return script_path
 
 
-def _write_docker_compose_file(target: Path, config_path: Path, compose_path: Path, dry_run: bool) -> Path:
+def _write_docker_compose_file(
+    target: Path,
+    config_path: Path,
+    compose_path: Path,
+    dry_run: bool,
+    *,
+    embedding_runtime: str = "local-tei-jina",
+) -> Path:
     runtime_home = _docker_runtime_home_dir(target, config_path)
     runtime_ref = _relative_to_target_or_absolute(target, runtime_home)
     workspace_ref = "runtime/workspace"
     service_slug = _sanitize_compose_slug(runtime_home.name)
+    tei_service = ""
+    tei_depends_on = ""
+    tei_environment = ""
+    tei_volume = ""
+    if embedding_runtime == "local-tei-jina":
+        tei_service = """
+  tei-jina:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+    container_name: tei-jina-v5
+    restart: unless-stopped
+    command:
+      - --model-id
+      - jinaai/jina-embeddings-v5-text-small-retrieval
+      - --port
+      - "80"
+      - --pooling
+      - last-token
+      - --max-batch-tokens
+      - "4096"
+    ports:
+      - "7997:80"
+    volumes:
+      - tei-model-cache:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 300s
+"""
+        tei_depends_on = """    depends_on:
+      tei-jina:
+        condition: service_healthy
+"""
+        tei_environment = """      BRAINSTACK_EMBEDDINGS_PROVIDER: tei
+      BRAINSTACK_EMBEDDINGS_API: tei
+      BRAINSTACK_EMBEDDINGS_URL: http://127.0.0.1:7997/embed
+      BRAINSTACK_EMBEDDINGS_MODEL: jinaai/jina-embeddings-v5-text-small-retrieval
+      BRAINSTACK_EMBEDDINGS_QUERY_PREFIX: "query: "
+      BRAINSTACK_EMBEDDINGS_DOCUMENT_PREFIX: "document: "
+      BRAINSTACK_EMBEDDINGS_TIMEOUT_SECONDS: "15"
+      BRAINSTACK_DISABLE_CHROMA_DEFAULT_EMBEDDING: "true"
+      BRAINSTACK_TEMPORAL_EMBEDDINGS_URL: http://127.0.0.1:7997/embed
+      BRAINSTACK_TEMPORAL_EMBEDDINGS_MODEL: jinaai/jina-embeddings-v5-text-small-retrieval
+      BRAINSTACK_TEMPORAL_EMBEDDINGS_QUERY_PREFIX: "query: "
+      BRAINSTACK_TEMPORAL_EMBEDDINGS_DOCUMENT_PREFIX: "document: "
+      BRAINSTACK_TEMPORAL_EMBEDDINGS_TIMEOUT_SECONDS: "15"
+"""
+        tei_volume = """
+volumes:
+  tei-model-cache:
+"""
     content = f"""name: hermes-{service_slug}
 
 services:
+{tei_service}
   hermes-{service_slug}:
     build:
       context: .
@@ -2744,11 +2804,13 @@ services:
     restart: unless-stopped
     network_mode: host
     command: ["gateway", "run", "--replace"]
+{tei_depends_on}
     environment:
       HERMES_HOME: /opt/data
       HERMES_ENABLE_PROJECT_PLUGINS: "true"
       HERMES_UID: "${{HERMES_UID:-1000}}"
       HERMES_GID: "${{HERMES_GID:-1000}}"
+{tei_environment}
     volumes:
       - ./{runtime_ref}:/opt/data
       - ./{workspace_ref}:/workspace
@@ -2758,6 +2820,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+{tei_volume}
 """
     if not dry_run:
         compose_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3064,6 +3127,16 @@ def main() -> int:
     parser.add_argument("--python", type=Path, help="Target Hermes Python interpreter for dependency install and doctor checks")
     parser.add_argument("--runtime", choices=["auto", "docker", "local"], default="auto", help="Target runtime mode")
     parser.add_argument(
+        "--embedding-runtime",
+        choices=["local-tei-jina", "external", "none"],
+        default="local-tei-jina",
+        help=(
+            "Embedding runtime for generated Docker compose. "
+            "local-tei-jina adds a local TEI Jina v5 service and cache volume; "
+            "external expects operator-provided embedding env; none writes no embedding service."
+        ),
+    )
+    parser.add_argument(
         "--enable",
         action="store_true",
         help="Patch config.yaml to enable Brainstack while keeping Hermes builtin memory and user profile enabled",
@@ -3163,7 +3236,13 @@ def main() -> int:
             return 2
         assert compose_path is not None
         if not compose_path.exists():
-            generated_compose = _write_docker_compose_file(target, config_path, compose_path, args.dry_run)
+            generated_compose = _write_docker_compose_file(
+                target,
+                config_path,
+                compose_path,
+                args.dry_run,
+                embedding_runtime=args.embedding_runtime,
+            )
             generated_files.append({"source": "generated:docker-compose", "target": str(generated_compose)})
         docker_start = _write_docker_start_script(target, config_path, compose_path, args.dry_run)
         generated_files.append({"source": "generated:hermes-brainstack-start.sh", "target": str(docker_start)})

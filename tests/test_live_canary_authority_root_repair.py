@@ -706,6 +706,7 @@ def test_recall_tool_marks_runtime_and_profile_as_non_assignment_authority(tmp_p
 
         assert payload["model_use_contract"]["primary_answer_source"] == "final_packet.preview"
         assert "Do not determine active work" in payload["model_use_contract"]["current_assignment_negative_rule"]
+        assert "does not assign current work by itself" in payload["model_use_contract"]["current_assignment_negative_rule"]
         assert "profile shared_work" in payload["model_use_contract"]["non_authority_sources"]
         assert (
             "graph/background facts without current_assignment_authority"
@@ -781,6 +782,7 @@ def test_recall_tool_does_not_surface_assignment_for_unrelated_query(tmp_path: P
 
         assert payload["model_use_contract"]["primary_answer_source"] == "final_packet.preview"
         assert "Do not determine active work" in payload["model_use_contract"]["current_assignment_negative_rule"]
+        assert "does not assign current work by itself" in payload["model_use_contract"]["current_assignment_negative_rule"]
         assert payload["selected_evidence"].get("operating", []) == []
     finally:
         provider.shutdown()
