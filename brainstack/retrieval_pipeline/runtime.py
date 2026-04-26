@@ -1,0 +1,1577 @@
+# ruff: noqa: F401
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, Iterable, List, Mapping
+
+from ..associative_expansion import AssociativeExpansionBounds, build_associative_expansion
+from ..corpus_retrieval_trace import annotate_corpus_retrieval_trace
+from ..db import BrainstackStore
+from ..entity_resolver import (
+    annotate_graph_rows_with_entity_resolution,
+    filter_graph_rows_to_entity_resolution_candidates,
+    resolve_entity_candidates,
+)
+from ..literal_index import literal_slot_match
+from ..operating_truth import (
+    OPERATING_RECORD_ACTIVE_WORK,
+    OPERATING_RECORD_CANONICAL_POLICY,
+    OPERATING_RECORD_CURRENT_COMMITMENT,
+    OPERATING_RECORD_LIVE_SYSTEM_STATE,
+    OPERATING_RECORD_RUNTIME_APPROVAL_POLICY,
+    OPERATING_RECORD_TYPES,
+    RECENT_WORK_RECAP_RECORD_TYPES,
+    RECENT_WORK_AUTHORITY_CANONICAL,
+    background_operating_suppression_reason,
+    is_background_recent_work,
+    is_background_operating_record,
+    recent_work_authority_rank,
+)
+from ..profile_contract import is_native_explicit_style_item
+from ..style_contract import STYLE_CONTRACT_SLOT
+from ..temporal import record_is_effective_at, record_temporal_status
+from ..tier2_extractor import _default_llm_caller, _extract_json_object, _extract_text_content
+from ..transcript import primary_user_turn_content, split_turn_content
+from ..usefulness import graph_priority_adjustment, profile_priority_adjustment
+from ..workstream_recap import annotate_workstream_recap_row, row_workstream_id, workstream_bank_mismatch_reason
+
+RRF_K = 60
+ROUTE_FACT = "fact"
+ROUTE_TEMPORAL = "temporal"
+ROUTE_AGGREGATE = "aggregate"
+ROUTE_STYLE_CONTRACT = "style_contract"
+TEMPORAL_CONTINUITY_CAP = 3
+TEMPORAL_RECENT_CAP = 3
+TEMPORAL_TRANSCRIPT_CAP = 3
+TEMPORAL_GRAPH_CAP = 3
+AGGREGATE_CONTINUITY_CAP = 6
+AGGREGATE_TRANSCRIPT_CAP = 6
+AGGREGATE_GRAPH_CAP = 2
+FUSION_CHANNEL_WEIGHTS = {
+    "keyword": 1.0,
+    "operating": 1.05,
+    "semantic": 1.12,
+    "graph": 1.08,
+    "associative": 0.74,
+    "temporal": 1.04,
+}
+FUSION_SHELF_WEIGHTS = {
+    "profile": 1.12,
+    "operating": 1.08,
+    "graph": 1.05,
+    "continuity_match": 1.0,
+    "continuity_recent": 0.96,
+    "transcript": 1.0,
+    "corpus": 0.94,
+}
+AUTHORITY_FLOOR_SCORE = 80
+OPERATING_AUTHORITY_FLOOR_TYPES = {
+    OPERATING_RECORD_ACTIVE_WORK,
+    OPERATING_RECORD_CANONICAL_POLICY,
+    OPERATING_RECORD_CURRENT_COMMITMENT,
+    OPERATING_RECORD_LIVE_SYSTEM_STATE,
+    OPERATING_RECORD_RUNTIME_APPROVAL_POLICY,
+}
+
+logger = logging.getLogger(__name__)
+
+
+def _is_native_profile_mirror_receipt(row: Dict[str, Any]) -> bool:
+    return str(row.get("category") or "").strip() == "native_profile_mirror"
+
+@dataclass
+class RetrievalChannelStatus:
+    name: str
+    status: str
+    reason: str = ""
+    candidate_count: int = 0
+
+
+@dataclass
+class EvidenceCandidate:
+    key: str
+    shelf: str
+    row: Dict[str, Any]
+    rrf_score: float = 0.0
+    channel_ranks: Dict[str, int] = field(default_factory=dict)
+
+    def seen_in(self, name: str, rank: int) -> None:
+        current = self.channel_ranks.get(name)
+        if current is None or rank < current:
+            self.channel_ranks[name] = rank
+
+
+@dataclass
+class RetrievalRoute:
+    requested_mode: str = ROUTE_FACT
+    applied_mode: str = ROUTE_FACT
+    source: str = "default"
+    reason: str = ""
+    fallback_used: bool = False
+    resolution_status: str = "not_attempted"
+    resolution_error: str = ""
+    resolution_error_class: str = ""
+    bounds: Dict[str, Any] = field(default_factory=dict)
+
+
+def _normalize_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().split())
+
+
+def _classify_route_resolution_error(exc: Exception) -> str:
+    text = _normalize_text(exc).casefold()
+    status_code = getattr(exc, "status_code", None)
+    if status_code == 402 or any(term in text for term in ("payment required", "credits", "can only afford", "billing")):
+        return "economic_drift"
+    if any(term in text for term in ("auth", "unauthorized", "refresh token", "re-authenticate", "access token")):
+        return "auth_drift"
+    return "resolver_failure"
+
+
+def _build_cross_session_search_queries(query: str) -> List[str]:
+    normalized = _normalize_text(query)
+    return [normalized] if normalized else []
+
+
+def _selected_fallback_sources(selected: Mapping[str, Any], *, include_graph: bool = True) -> List[str]:
+    sources: List[str] = []
+    if list(selected.get("matched") or []):
+        sources.append("continuity_match")
+    if list(selected.get("recent") or []):
+        sources.append("continuity_recent")
+    if list(selected.get("transcript_rows") or []):
+        sources.append("transcript")
+    if include_graph and list(selected.get("graph_rows") or []):
+        sources.append("graph")
+    return sources
+
+
+def _build_lookup_semantics(
+    *,
+    query: str,
+    task_lookup: Mapping[str, Any] | None,
+    task_rows: List[Dict[str, Any]],
+    operating_lookup: Mapping[str, Any] | None,
+    operating_rows: List[Dict[str, Any]],
+    selected: Mapping[str, Any],
+) -> Dict[str, Any] | None:
+    recent_work_rows = [
+        row
+        for row in operating_rows
+        if str(row.get("record_type") or "").strip() in RECENT_WORK_RECAP_RECORD_TYPES
+    ]
+    if isinstance(operating_lookup, Mapping):
+        authoritative_rows = [
+            row
+            for row in operating_rows
+            if not bool(row.get("_brainstack_supporting_evidence_only"))
+            and not bool(row.get("_brainstack_runtime_state_only"))
+        ]
+        supporting_rows = [
+            row
+            for row in operating_rows
+            if bool(row.get("_brainstack_supporting_evidence_only")) or bool(row.get("_brainstack_runtime_state_only"))
+        ]
+        return {
+            "active": True,
+            "domain": "operating_truth",
+            "structured_owner_status": "brainstack.operating_truth",
+            "structured_lookup_performed": True,
+            "structured_record_count": len(operating_rows),
+            "authoritative_record_count": len(authoritative_rows),
+            "supporting_record_count": len(supporting_rows),
+            "record_types": [
+                str(value or "").strip()
+                for value in (operating_lookup.get("record_types") or ())
+                if str(value or "").strip() in OPERATING_RECORD_TYPES
+            ],
+            "fallback_sources": _selected_fallback_sources(selected),
+            "result_status": "committed_records" if authoritative_rows else "supporting_records_only"
+            if supporting_rows
+            else "structured_miss",
+        }
+    if recent_work_rows:
+        return {
+            "active": True,
+            "domain": "recent_work_recap",
+            "structured_owner_status": "brainstack.operating_truth",
+            "structured_lookup_performed": True,
+            "structured_record_count": len(recent_work_rows),
+            "record_types": [
+                str(row.get("record_type") or "").strip()
+                for row in recent_work_rows
+                if str(row.get("record_type") or "").strip()
+            ],
+            "fallback_sources": _selected_fallback_sources(selected, include_graph=False),
+            "result_status": "committed_records",
+        }
+    if not isinstance(task_lookup, Mapping):
+        return None
+
+    fallback_sources = _selected_fallback_sources(selected)
+
+    if task_rows:
+        result_status = "committed_records"
+    elif fallback_sources:
+        result_status = "structured_miss_with_fallback"
+    else:
+        result_status = "structured_miss"
+
+    return {
+        "active": True,
+        "domain": "task_like",
+        "structured_owner_status": "brainstack.task_memory",
+        "structured_lookup_performed": True,
+        "structured_record_count": len(task_rows),
+        "item_type": str(task_lookup.get("item_type") or "").strip(),
+        "due_date": str(task_lookup.get("due_date") or "").strip(),
+        "date_scope": str(task_lookup.get("date_scope") or "").strip(),
+        "followup_only": bool(task_lookup.get("followup_only")),
+        "fallback_sources": fallback_sources,
+        "result_status": result_status,
+    }
+
+
+def _looks_user_led(text: str) -> bool:
+    return bool(_normalize_text(split_turn_content(text).get("user")))
+
+
+def _has_meaningful_transcript_signal(rows: Iterable[Dict[str, Any]]) -> bool:
+    for row in rows:
+        if float(row.get("keyword_score") or 0.0) > 0.0:
+            return True
+        if str(row.get("match_mode") or "").strip() == "semantic" and float(row.get("semantic_score") or 0.0) > 0.0:
+            return True
+        if (
+            str(row.get("match_mode") or "").strip() == "support"
+            and str(row.get("retrieval_source") or "").strip() == "transcript.session_support"
+            and bool(row.get("same_principal"))
+        ):
+            return True
+    return False
+
+
+def _candidate_text(candidate: EvidenceCandidate) -> str:
+    row = candidate.row
+    if candidate.shelf == "graph":
+        return _graph_match_text(row)
+    if candidate.shelf == "profile":
+        return _normalize_text(row.get("content"))
+    if candidate.shelf == "transcript":
+        return _normalize_text(primary_user_turn_content(row.get("content")))
+    return _normalize_text(row.get("content"))
+
+
+def _candidate_priority_bonus(candidate: EvidenceCandidate) -> float:
+    row = candidate.row
+    text = _candidate_text(candidate)
+    bonus = 0.0
+    query_has_digits = bool(row.get("_brainstack_query_has_digits"))
+
+    if candidate.shelf == "transcript":
+        bonus += 0.05
+        if "keyword" in candidate.channel_ranks:
+            bonus += 0.03
+        if _looks_user_led(text):
+            bonus += 0.04
+    elif candidate.shelf == "operating":
+        bonus += 0.07 + _operating_record_type_bonus(row)
+    elif candidate.shelf == "continuity_match":
+        bonus += 0.02
+    elif candidate.shelf == "continuity_recent":
+        bonus += 0.01
+
+    if query_has_digits and any(char.isdigit() for char in text):
+        bonus += 0.08
+    if '"' in text or "'" in text:
+        bonus += 0.02
+
+    keyword_score = float(row.get("keyword_score") or 0.0)
+    if keyword_score > 0.0:
+        bonus += min(0.06, keyword_score * 0.06)
+
+    semantic_score = float(row.get("semantic_score") or 0.0)
+    if semantic_score > 0.0:
+        bonus += min(0.08, semantic_score * 0.08)
+
+    query_token_overlap = int(row.get("_brainstack_query_token_overlap") or 0)
+    if query_token_overlap > 0:
+        bonus += min(0.09, query_token_overlap * 0.03)
+
+    if bool(row.get("same_session")):
+        bonus += 0.03
+
+    if bool(row.get("_brainstack_recap_surface")):
+        bonus += 0.12
+    if bool(row.get("_brainstack_supporting_evidence_only")):
+        bonus -= 0.08
+
+    if candidate.shelf == "graph":
+        fact_class = _graph_fact_class(row)
+        if fact_class == "explicit_state_current":
+            bonus += 0.08
+        elif fact_class == "explicit_state_prior":
+            bonus -= 0.02
+        elif fact_class == "conflict":
+            bonus += 0.1
+
+    return bonus
+
+
+def _operating_record_type_bonus(row: Mapping[str, Any]) -> float:
+    record_type = str(row.get("record_type") or "").strip()
+    if is_background_operating_record(dict(row)):
+        return -0.12
+    if record_type == "recent_work_summary":
+        authority_rank = recent_work_authority_rank(dict(row))
+        if authority_rank <= 20:
+            return -0.08
+        if authority_rank >= 300:
+            return 0.18
+        return 0.16
+    if record_type in RECENT_WORK_RECAP_RECORD_TYPES:
+        return 0.12
+    if record_type == "live_system_state":
+        return -0.02
+    return 0.05
+
+
+def _weak_cross_session_keyword_residue_reason(candidate: EvidenceCandidate) -> str:
+    """Explain why weak transcript-like keyword residue is not fact-packet evidence."""
+    if candidate.shelf not in {"transcript", "continuity_match", "continuity_recent"}:
+        return ""
+    if bool(candidate.row.get("same_session")):
+        return ""
+    if "temporal" in candidate.channel_ranks:
+        return ""
+    if "semantic" in candidate.channel_ranks and float(candidate.row.get("semantic_score") or 0.0) > 0.0:
+        return ""
+    query_token_count = int(candidate.row.get("_brainstack_query_token_count") or 0)
+    if query_token_count < 4:
+        return ""
+    overlap = int(candidate.row.get("_brainstack_query_token_overlap") or 0)
+    if overlap >= 2:
+        return ""
+    return (
+        "weak_cross_session_keyword_residue: broad query matched fewer than "
+        "two informative tokens on a transcript-like shelf"
+    )
+
+
+_CURRENT_ASSIGNMENT_MARKERS = {
+    "active",
+    "aktualis",
+    "current",
+    "jelenlegi",
+    "most",
+    "now",
+}
+
+_ASSIGNMENT_DOMAIN_MARKERS = {
+    "assigned",
+    "assignment",
+    "feladat",
+    "feladatod",
+    "munka",
+    "task",
+    "work",
+    "workstream",
+}
+
+
+def _current_assignment_lookup_requested(query: str) -> bool:
+    """Return true when the query asks for current assigned work authority.
+
+    This is a narrow authority gate, not a semantic router: current assignment
+    truth must come from task/operating owner records, never assistant-authored
+    transcript residue or Tier-2 background graph guesses.
+    """
+    normalized = _normalize_text(query).casefold()
+    tokens = {
+        token
+        for token in re.findall(r"[^\W_]+", normalized, flags=re.UNICODE)
+        if len(token) >= 3
+    }
+    has_current_marker = bool(tokens & _CURRENT_ASSIGNMENT_MARKERS)
+    has_assignment_marker = bool(tokens & _ASSIGNMENT_DOMAIN_MARKERS)
+    return has_current_marker and has_assignment_marker
+
+
+def _assistant_assignment_residue_reason(candidate: EvidenceCandidate, *, query: str) -> str:
+    if not _current_assignment_lookup_requested(query):
+        return ""
+    if candidate.shelf not in {"transcript", "continuity_match", "continuity_recent"}:
+        return ""
+    row = candidate.row
+    if str(row.get("owner_role") or "").strip() == "agent_assignment":
+        return ""
+    text = _normalize_text(
+        row.get("content")
+        or row.get("excerpt")
+        or row.get("content_excerpt")
+        or row.get("summary")
+        or ""
+    ).casefold()
+    if "assistant:" not in text and "| assistant:" not in text:
+        return ""
+    return (
+        "assistant_authored_current_assignment_residue: transcript/continuity "
+        "assistant text is supporting history, not current assignment authority"
+    )
+
+
+def _tier2_graph_assignment_residue_reason(candidate: EvidenceCandidate, *, query: str) -> str:
+    if not _current_assignment_lookup_requested(query):
+        return ""
+    if candidate.shelf != "graph":
+        return ""
+    row = candidate.row
+    if str(row.get("owner_role") or "").strip() == "agent_assignment":
+        return ""
+    source = str(row.get("source") or "").strip()
+    if not source.startswith("tier2:"):
+        return ""
+    return (
+        "tier2_graph_current_assignment_residue: Tier-2 graph state is "
+        "supporting evidence, not current assignment authority"
+    )
+
+
+def _agreement_bonus(candidate: EvidenceCandidate) -> float:
+    channel_count = len(candidate.channel_ranks)
+    if channel_count <= 1:
+        return 0.0
+    return min(0.15, 0.05 * (channel_count - 1))
+
+
+def _candidate_authority_floor(candidate: EvidenceCandidate) -> int:
+    row = candidate.row
+    raw_metadata = row.get("metadata")
+    metadata: Mapping[str, Any] = raw_metadata if isinstance(raw_metadata, Mapping) else {}
+    if candidate.shelf == "profile":
+        return 100
+    if candidate.shelf == "operating":
+        record_type = str(row.get("record_type") or "").strip()
+        authority_level = str(metadata.get("authority_level") or "").strip()
+        if record_type in OPERATING_AUTHORITY_FLOOR_TYPES or authority_level == RECENT_WORK_AUTHORITY_CANONICAL:
+            return 90
+    if candidate.shelf == "graph":
+        fact_class = str(row.get("fact_class") or "").strip()
+        if fact_class in {"explicit_state_current", "conflict"}:
+            return 85
+    return 0
+
+
+def _candidate_has_authority_floor(candidate: EvidenceCandidate) -> bool:
+    return _candidate_authority_floor(candidate) >= AUTHORITY_FLOOR_SCORE
+
+
+def _fusion_rank_contribution(*, channel_name: str, shelf: str, rank: int) -> float:
+    channel_weight = float(FUSION_CHANNEL_WEIGHTS.get(channel_name, 1.0))
+    shelf_weight = float(FUSION_SHELF_WEIGHTS.get(shelf, 1.0))
+    return (channel_weight * shelf_weight) / (RRF_K + rank)
+
+
+def _llm_route_resolver(query: str) -> Dict[str, Any]:
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You classify Brainstack memory retrieval questions into one of four modes.\n"
+                "Return JSON only with the schema {\"mode\": \"fact|temporal|aggregate|style_contract\", \"reason\": \"...\"}.\n"
+                "Use temporal when the user needs ordering, before/after comparison, date difference, or change over time.\n"
+                "Use aggregate when the user needs totals, counts across multiple events, or exhaustive collection.\n"
+                "Use style_contract when the user is explicitly asking about their detailed rule pack, named style pack, rule list, or the full style contract itself.\n"
+                "Use fact for ordinary fact lookup or if uncertain."
+            ),
+        },
+        {
+            "role": "user",
+            "content": query,
+        },
+    ]
+    response = _default_llm_caller(
+        task="memory_prefetch_routing_hint",
+        messages=messages,
+        timeout=6.0,
+        max_tokens=120,
+    )
+    payload = _extract_json_object(_extract_text_content(response))
+    return {
+        "mode": _normalize_text(payload.get("mode")),
+        "reason": _normalize_text(payload.get("reason")),
+    }
+
+
+def _missing_style_contract_row(*, principal_scope_key: str = "") -> Dict[str, Any]:
+    scope_key = str(principal_scope_key or "").strip()
+    return {
+        "id": 0,
+        "stable_key": "behavior_contract:missing",
+        "storage_key": f"behavior_contract::missing::{scope_key or '_global'}",
+        "principal_scope_key": scope_key,
+        "category": "system",
+        "content": (
+            "No committed full behavior contract is stored for this principal scope. "
+            "Do not reconstruct a full rule list from derived policy summaries, profile slots, or transcript fragments."
+        ),
+        "source": "brainstack.behavior_contract",
+        "confidence": 1.0,
+        "metadata": {
+            "memory_class": "behavior_contract_status",
+            "status_reason": "no_committed_behavior_contract",
+            "principal_scope_key": scope_key,
+        },
+        "updated_at": "",
+        "active": True,
+        "keyword_score": 2.0,
+        "retrieval_source": "behavior_contract.missing",
+        "match_mode": "authority",
+        "_direct_slot_match": True,
+    }
+
+
+def _default_route_resolver(query: str) -> Dict[str, Any]:
+    return {
+        "mode": ROUTE_FACT,
+        "reason": "fact route default",
+        "source": "fact_default",
+    }
+
+
+def _resolve_route(
+    query: str,
+    *,
+    route_resolver: Callable[[str], Dict[str, Any] | str] | None,
+) -> RetrievalRoute:
+    normalized = _normalize_text(query)
+    route = RetrievalRoute(reason="fact route default")
+    if not normalized:
+        return route
+
+    deterministic = _default_route_resolver(normalized)
+    resolver = route_resolver
+    source = "injected"
+    if resolver is None:
+        route.source = str(deterministic.get("source") or "fact_default")
+        route.reason = str(deterministic.get("reason") or route.reason)
+        route.resolution_status = "skipped"
+        return route
+
+    try:
+        payload = resolver(normalized)
+    except Exception as exc:
+        logger.warning("Brainstack route resolution failed: %s", exc)
+        route.source = "route_resolution_failed"
+        route.reason = "route resolver failed; staying on fact route"
+        route.resolution_status = "failed"
+        route.resolution_error = str(exc)
+        route.resolution_error_class = _classify_route_resolution_error(exc)
+        return route
+
+    if isinstance(payload, str):
+        mode = _normalize_text(payload).lower()
+        reason = ""
+    elif isinstance(payload, dict):
+        mode = _normalize_text(payload.get("mode")).lower()
+        reason = _normalize_text(payload.get("reason"))
+        source = _normalize_text(payload.get("source")) or source
+    else:
+        route.source = "route_resolution_failed"
+        route.reason = "route resolver returned unsupported payload; staying on fact route"
+        route.resolution_status = "failed"
+        route.resolution_error = f"unsupported payload type: {type(payload).__name__}"
+        route.resolution_error_class = "unsupported_payload"
+        return route
+
+    if mode not in {ROUTE_FACT, ROUTE_TEMPORAL, ROUTE_AGGREGATE, ROUTE_STYLE_CONTRACT}:
+        route.source = "route_resolution_failed"
+        route.reason = "route resolver returned unsupported mode; staying on fact route"
+        route.resolution_status = "failed"
+        route.resolution_error = f"unsupported mode: {mode or '<empty>'}"
+        route.resolution_error_class = "unsupported_mode"
+        return route
+    route.requested_mode = mode
+    route.applied_mode = mode
+    route.source = source
+    route.reason = reason
+    route.resolution_status = "resolved"
+    return route
+
+
+def _round_robin(*groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    output: List[Dict[str, Any]] = []
+    max_len = max((len(group) for group in groups), default=0)
+    for index in range(max_len):
+        for group in groups:
+            if index < len(group):
+                output.append(group[index])
+    return output
+
+
+def _row_unique_key(row: Dict[str, Any]) -> str:
+    if "row_type" in row:
+        return f"graph:{row.get('row_type')}:{int(row.get('row_id') or 0)}"
+    if "document_id" in row:
+        return f"corpus:{int(row.get('document_id') or 0)}:{int(row.get('section_index') or 0)}"
+    return f"{str(row.get('session_id') or '')}:{int(row.get('id') or 0)}"
+
+
+def _dedupe_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    output: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        key = _row_unique_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(dict(row))
+    return output
+
+
+def _same_principal_session_support_rows(
+    store: BrainstackStore,
+    anchor_rows: Iterable[Dict[str, Any]],
+    *,
+    current_session_id: str,
+    per_session_limit: int = 2,
+) -> List[Dict[str, Any]]:
+    support_rows: List[Dict[str, Any]] = []
+    seen_support_keys: set[str] = set()
+    seen_anchor_sessions: set[str] = set()
+    for anchor in _dedupe_rows(anchor_rows):
+        if str(anchor.get("kind") or "") != "session_summary":
+            continue
+        if not bool(anchor.get("same_principal")):
+            continue
+        session_id = str(anchor.get("session_id") or "").strip()
+        if not session_id or session_id == current_session_id or session_id in seen_anchor_sessions:
+            continue
+        seen_anchor_sessions.add(session_id)
+        session_rows = store.recent_transcript(
+            session_id=session_id,
+            limit=max(per_session_limit * 3, 6),
+        )
+        ranked_session_rows = sorted(
+            [
+                dict(row)
+                for row in session_rows
+                if str(row.get("kind") or "") != "session_summary"
+            ],
+            key=lambda row: (
+                int(row.get("turn_number") or 0),
+                int(row.get("id") or 0),
+            ),
+            reverse=True,
+        )
+        added = 0
+        for row in ranked_session_rows:
+            row.setdefault("same_principal", True)
+            row.setdefault("same_session", False)
+            row.setdefault("keyword_score", 0.0)
+            row.setdefault("retrieval_source", "transcript.session_support")
+            row.setdefault("match_mode", "support")
+            key = _row_unique_key(row)
+            if key in seen_support_keys:
+                continue
+            seen_support_keys.add(key)
+            support_rows.append(row)
+            added += 1
+            if added >= per_session_limit:
+                break
+    return support_rows
+
+
+def _row_time_value(row: Dict[str, Any]) -> str:
+    metadata = row.get("metadata")
+    temporal_payload = metadata.get("temporal") if isinstance(metadata, dict) else None
+    temporal = temporal_payload if isinstance(temporal_payload, dict) else {}
+    return (
+        str(temporal.get("observed_at") or "").strip()
+        or str(row.get("created_at") or "").strip()
+        or str(row.get("happened_at") or "").strip()
+    )
+
+
+def _parse_time_value(raw: str) -> datetime | None:
+    value = str(raw or "").strip()
+    if not value:
+        return None
+
+    def _normalize_parsed(dt: datetime) -> datetime:
+        if dt.tzinfo is not None:
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+
+    try:
+        return _normalize_parsed(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    except ValueError:
+        pass
+    candidate = value.split("T", 1)[0] if "T" in value else value[:10]
+    try:
+        return _normalize_parsed(datetime.fromisoformat(candidate))
+    except ValueError:
+        pass
+    for fmt in ("%Y/%m/%d (%a) %H:%M", "%Y/%m/%d %H:%M", "%Y/%m/%d"):
+        try:
+            return _normalize_parsed(datetime.strptime(value, fmt))
+        except ValueError:
+            continue
+    return None
+
+
+def _row_time_fields(row: Dict[str, Any]) -> tuple[str, datetime | None]:
+    raw = _row_time_value(row)
+    return raw, _parse_time_value(raw)
+
+
+def _temporal_anchor_key(row: Dict[str, Any]) -> str:
+    raw, parsed = _row_time_fields(row)
+    return parsed.isoformat() if parsed is not None else raw
+
+
+def _sort_rows_chronologically(rows: Iterable[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+    deduped = _chronologically_sorted_rows(rows)
+    return deduped[:limit]
+
+
+def _chronologically_sorted_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    decorated = []
+    for row in _dedupe_rows(rows):
+        raw_time, parsed_time = _row_time_fields(row)
+        decorated.append(
+            (
+                0 if parsed_time is not None else 1,
+                parsed_time or datetime.max,
+                raw_time,
+                int(row.get("turn_number") or 0),
+                int(row.get("id") or row.get("row_id") or 0),
+                row,
+            )
+        )
+    decorated.sort()
+    return [row for *_, row in decorated]
+
+
+def _temporal_diversity_key(row: Dict[str, Any]) -> str:
+    _, parsed = _row_time_fields(row)
+    session_id = str(row.get("session_id") or "").strip()
+    if parsed is not None:
+        bucket = parsed.date().isoformat()
+        return f"{session_id}:{bucket}" if session_id else bucket
+    return ""
+
+
+def _temporal_diverse_rows(
+    rows: Iterable[Dict[str, Any]],
+    *,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    ranked = _chronologically_sorted_rows(rows)
+    if limit <= 0 or not ranked:
+        return []
+
+    bucket_representatives: Dict[str, Dict[str, Any]] = {}
+    for row in ranked:
+        bucket = _temporal_diversity_key(row)
+        if bucket:
+            # Keep the latest row within the same temporal bucket so a concrete
+            # realized event can displace earlier planning/context rows.
+            bucket_representatives[bucket] = dict(row)
+
+    selected = _chronologically_sorted_rows(bucket_representatives.values())
+    seen = {_row_unique_key(row) for row in selected}
+    for row in ranked:
+        key = _row_unique_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(dict(row))
+    return selected[:limit]
+
+
+def _select_temporal_priority_rows(
+    primary_rows: Iterable[Dict[str, Any]],
+    fallback_rows: Iterable[Dict[str, Any]],
+    *,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    selected = _temporal_diverse_rows(primary_rows, limit=limit)
+    if len(selected) >= limit:
+        return selected
+    seen = {_row_unique_key(row) for row in selected}
+    for row in _temporal_diverse_rows(fallback_rows, limit=max(limit * 4, limit)):
+        key = _row_unique_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(dict(row))
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _aggregate_row_priority(row: Dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        1 if bool(row.get("same_session")) else 0,
+        float(row.get("semantic_score") or 0.0),
+        float(row.get("keyword_score") or 0.0),
+        _row_time_value(row),
+        int(row.get("turn_number") or 0),
+        int(row.get("id") or 0),
+    )
+
+
+def _aggregate_diverse_rows(
+    rows: Iterable[Dict[str, Any]],
+    *,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    ranked = sorted(_dedupe_rows(rows), key=_aggregate_row_priority, reverse=True)
+    primary: List[Dict[str, Any]] = []
+    secondary: List[Dict[str, Any]] = []
+    seen_sessions: set[str] = set()
+    for row in ranked:
+        session_key = str(row.get("session_id") or "").strip()
+        if session_key and session_key not in seen_sessions:
+            primary.append(row)
+            seen_sessions.add(session_key)
+        else:
+            secondary.append(row)
+    return (primary + secondary)[:limit]
+
+
+def _native_aggregate_rows(
+    store: BrainstackStore,
+    *,
+    query: str,
+    session_id: str,
+) -> List[Dict[str, Any]]:
+    _ = (store, query, session_id)
+    # Disabled until native aggregate plans come from structured understanding
+    # rather than phrase-matched query heuristics.
+    return []
+
+
+def _fact_transcript_row_priority(row: Dict[str, Any]) -> tuple[Any, ...]:
+    content = _normalize_text(row.get("content") or row.get("content_excerpt"))
+    keyword_score = float(row.get("keyword_score") or 0.0)
+    retrieval_source = str(row.get("retrieval_source") or "")
+    match_mode = str(row.get("match_mode") or "")
+    return (
+        1 if keyword_score > 0.0 else 0,
+        keyword_score,
+        1 if match_mode == "keyword" or "keyword" in retrieval_source else 0,
+        1 if _looks_user_led(content) else 0,
+        1 if bool(row.get("same_session")) else 0,
+        float(row.get("semantic_score") or 0.0),
+        -len(content),
+        str(row.get("created_at") or ""),
+        int(row.get("turn_number") or 0),
+        int(row.get("id") or 0),
+    )
+
+
+def _transcript_join_key(row: Dict[str, Any]) -> str:
+    session_id = str(row.get("session_id") or "").strip()
+    turn_number = int(row.get("turn_number") or 0)
+    if session_id and turn_number > 0:
+        return f"{session_id}:{turn_number}"
+    row_id = int(row.get("id") or row.get("row_id") or 0)
+    if session_id and row_id > 0:
+        return f"{session_id}:id:{row_id}"
+    if row_id > 0:
+        return f"id:{row_id}"
+    return ""
+
+
+def _fact_transcript_rows(
+    *,
+    store: BrainstackStore,
+    current_session_id: str,
+    fused_transcript_rows: List[Dict[str, Any]],
+    keyword_transcript_rows: List[Dict[str, Any]],
+    semantic_conversation_rows: List[Dict[str, Any]],
+    matched_rows: List[Dict[str, Any]],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    if limit <= 0:
+        return []
+    effective_limit = limit
+    if fused_transcript_rows:
+        effective_limit = max(limit, 3)
+    elif keyword_transcript_rows and semantic_conversation_rows:
+        effective_limit = max(limit, 2)
+    rows = _dedupe_rows(
+        list(fused_transcript_rows)
+        + _round_robin(keyword_transcript_rows, semantic_conversation_rows)
+    )
+    support_rows = _same_principal_session_support_rows(
+        store,
+        matched_rows,
+        current_session_id=current_session_id,
+    )
+    ranked_rows = sorted(rows, key=_fact_transcript_row_priority, reverse=True)
+    top_ranked_keys = {
+        _transcript_join_key(row)
+        for row in ranked_rows[: max(effective_limit * 2, effective_limit + 1)]
+        if _transcript_join_key(row)
+    }
+    matched_keys: List[str] = []
+    seen_matched_keys: set[str] = set()
+    for row in matched_rows:
+        join_key = _transcript_join_key(row)
+        if not join_key or join_key not in top_ranked_keys or join_key in seen_matched_keys:
+            continue
+        seen_matched_keys.add(join_key)
+        matched_keys.append(join_key)
+    transcript_by_key: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        join_key = _transcript_join_key(row)
+        if join_key:
+            transcript_by_key.setdefault(join_key, row)
+    preferred_rows: List[Dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for join_key in matched_keys:
+        preferred = transcript_by_key.get(join_key)
+        if preferred is None or join_key in seen_keys:
+            continue
+        seen_keys.add(join_key)
+        preferred_rows.append(preferred)
+
+    remaining_rows = [
+        row
+        for row in ranked_rows
+        if _transcript_join_key(row) not in seen_keys
+    ]
+    support_preferred: List[Dict[str, Any]] = []
+    for row in support_rows:
+        join_key = _transcript_join_key(row)
+        unique_key = _row_unique_key(row)
+        if unique_key in seen_keys or (join_key and join_key in seen_keys):
+            continue
+        if join_key:
+            seen_keys.add(join_key)
+        seen_keys.add(unique_key)
+        support_preferred.append(row)
+    return (preferred_rows + support_preferred + remaining_rows)[:effective_limit]
+
+
+def _fact_sort_key(candidate: EvidenceCandidate) -> tuple[Any, ...]:
+    bonus = _candidate_priority_bonus(candidate)
+    agreement_bonus = _agreement_bonus(candidate)
+    return (
+        candidate.rrf_score + bonus + agreement_bonus,
+        agreement_bonus,
+        bonus,
+        len(candidate.channel_ranks),
+        1 if candidate.shelf == "operating" else 0,
+        1 if candidate.shelf == "transcript" else 0,
+        1 if candidate.shelf == "graph" else 0,
+        1 if candidate.shelf == "profile" else 0,
+    )
+
+
+def _route_limits(
+    *,
+    route: RetrievalRoute,
+    profile_limit: int,
+    continuity_match_limit: int,
+    continuity_recent_limit: int,
+    transcript_limit: int,
+    operating_limit: int,
+    graph_limit: int,
+    corpus_limit: int,
+) -> Dict[str, int]:
+    limits = {
+        "profile_limit": profile_limit,
+        "continuity_match_limit": continuity_match_limit,
+        "continuity_recent_limit": continuity_recent_limit,
+        "transcript_limit": transcript_limit,
+        "operating_limit": operating_limit,
+        "graph_limit": graph_limit,
+        "corpus_limit": corpus_limit,
+    }
+    if route.applied_mode == ROUTE_TEMPORAL:
+        limits["continuity_match_limit"] = max(limits["continuity_match_limit"], TEMPORAL_CONTINUITY_CAP)
+        limits["continuity_recent_limit"] = max(limits["continuity_recent_limit"], TEMPORAL_RECENT_CAP)
+        limits["transcript_limit"] = max(limits["transcript_limit"], TEMPORAL_TRANSCRIPT_CAP)
+        limits["graph_limit"] = max(limits["graph_limit"], TEMPORAL_GRAPH_CAP)
+        route.bounds = {
+            "kind": "row_cap",
+            "continuity": limits["continuity_match_limit"],
+            "recent": limits["continuity_recent_limit"],
+            "transcript": limits["transcript_limit"],
+            "graph": limits["graph_limit"],
+        }
+    elif route.applied_mode == ROUTE_AGGREGATE:
+        limits["continuity_match_limit"] = max(limits["continuity_match_limit"], AGGREGATE_CONTINUITY_CAP)
+        limits["transcript_limit"] = max(limits["transcript_limit"], AGGREGATE_TRANSCRIPT_CAP)
+        limits["graph_limit"] = max(limits["graph_limit"], AGGREGATE_GRAPH_CAP)
+        route.bounds = {
+            "kind": "row_cap",
+            "continuity": limits["continuity_match_limit"],
+            "transcript": limits["transcript_limit"],
+            "graph": limits["graph_limit"],
+        }
+    elif route.applied_mode == ROUTE_STYLE_CONTRACT:
+        limits["profile_limit"] = max(1, min(limits["profile_limit"], 4))
+        limits["continuity_match_limit"] = 0
+        limits["continuity_recent_limit"] = 0
+        limits["transcript_limit"] = 0
+        limits["operating_limit"] = 0
+        limits["graph_limit"] = 0
+        limits["corpus_limit"] = 0
+        route.bounds = {"kind": "slot_target", "profile": limits["profile_limit"]}
+    return limits
+
+
+def _route_has_support(route: RetrievalRoute, selected: Dict[str, List[Dict[str, Any]]]) -> bool:
+    if route.applied_mode == ROUTE_AGGREGATE:
+        if any(str(row.get("kind") or "") == "native_aggregate" for row in selected.get("matched", ())):
+            return True
+        total = sum(
+            len(selected.get(name, ()))
+            for name in ("matched", "transcript_rows", "graph_rows", "corpus_rows")
+        )
+        return total >= 2
+    if route.applied_mode == ROUTE_TEMPORAL:
+        anchors = {
+            _temporal_anchor_key(row)
+            for name in ("matched", "recent", "transcript_rows", "graph_rows")
+            for row in selected.get(name, ())
+            if _temporal_anchor_key(row)
+        }
+        return len(anchors) >= 2
+    if route.applied_mode == ROUTE_STYLE_CONTRACT:
+        return any(
+            str(row.get("stable_key") or "").strip() == STYLE_CONTRACT_SLOT or is_native_explicit_style_item(row)
+            for row in selected.get("profile_items", ())
+        )
+    return True
+
+
+def _keep_temporal_transcript_rows_with_anchor_support(selected: Dict[str, List[Dict[str, Any]]]) -> bool:
+    transcript_rows = list(selected.get("transcript_rows", ()))
+    if not transcript_rows:
+        return False
+    transcript_anchors = {
+        _temporal_anchor_key(row)
+        for row in transcript_rows
+        if _temporal_anchor_key(row)
+    }
+    if len(transcript_anchors) >= 2:
+        return True
+    overall_anchors = {
+        _temporal_anchor_key(row)
+        for name in ("matched", "recent", "transcript_rows", "graph_rows")
+        for row in selected.get(name, ())
+        if _temporal_anchor_key(row)
+    }
+    if len(overall_anchors) < 2:
+        return False
+    return any(
+        str(row.get("match_mode") or "").strip() == "support"
+        and str(row.get("retrieval_source") or "").strip() == "transcript.session_support"
+        and bool(row.get("same_principal"))
+        for row in transcript_rows
+    )
+
+
+def _select_temporal_rows(
+    *,
+    keyword_continuity_rows: List[Dict[str, Any]],
+    recent_rows: List[Dict[str, Any]],
+    temporal_continuity_rows: List[Dict[str, Any]],
+    temporal_transcript_rows: List[Dict[str, Any]],
+    graph_rows: List[Dict[str, Any]],
+    limits: Dict[str, int],
+) -> Dict[str, List[Dict[str, Any]]]:
+    prioritized_recent_rows = _select_temporal_priority_rows(
+        temporal_continuity_rows,
+        recent_rows,
+        limit=limits["continuity_recent_limit"],
+    )
+    recent_keys = {_row_unique_key(row) for row in prioritized_recent_rows}
+    prioritized_matched_rows = _select_temporal_priority_rows(
+        [
+            row
+            for row in temporal_continuity_rows
+            if _row_unique_key(row) not in recent_keys
+        ],
+        _dedupe_rows(_round_robin(keyword_continuity_rows, recent_rows)),
+        limit=limits["continuity_match_limit"],
+    )
+    return {
+        "profile_items": [],
+        "matched": prioritized_matched_rows,
+        "recent": prioritized_recent_rows,
+        "transcript_rows": _sort_rows_chronologically(
+            temporal_transcript_rows,
+            limit=limits["transcript_limit"],
+        ),
+        "graph_rows": _temporal_graph_rows(graph_rows, limit=limits["graph_limit"]),
+        "corpus_rows": [],
+    }
+
+
+def _select_aggregate_rows(
+    *,
+    native_aggregate_rows: List[Dict[str, Any]],
+    keyword_continuity_rows: List[Dict[str, Any]],
+    keyword_transcript_rows: List[Dict[str, Any]],
+    semantic_conversation_rows: List[Dict[str, Any]],
+    keyword_corpus_rows: List[Dict[str, Any]],
+    semantic_corpus_rows: List[Dict[str, Any]],
+    graph_rows: List[Dict[str, Any]],
+    limits: Dict[str, int],
+) -> Dict[str, List[Dict[str, Any]]]:
+    aggregate_matched = _aggregate_diverse_rows(
+        keyword_continuity_rows,
+        limit=limits["continuity_match_limit"],
+    )
+    if native_aggregate_rows:
+        aggregate_matched = _dedupe_rows([*native_aggregate_rows, *aggregate_matched])[
+            : limits["continuity_match_limit"]
+        ]
+    return {
+        "profile_items": [],
+        "matched": aggregate_matched,
+        "recent": [],
+        "transcript_rows": _aggregate_diverse_rows(
+            _round_robin(semantic_conversation_rows, keyword_transcript_rows),
+            limit=limits["transcript_limit"],
+        ),
+        "graph_rows": _graph_channel_rows(graph_rows, limit=limits["graph_limit"]),
+        "corpus_rows": _corpus_channel_rows(
+            _round_robin(semantic_corpus_rows, keyword_corpus_rows),
+            limit=limits["corpus_limit"],
+        ),
+    }
+
+
+def _collect_query_rows(
+    *,
+    shelf: str,
+    queries: List[str],
+    searcher: Callable[[str], List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    if not queries:
+        return []
+    groups: List[List[Dict[str, Any]]] = []
+    for query in queries:
+        rows = [dict(row) for row in searcher(query)]
+        for row in rows:
+            row.setdefault("_brainstack_query_variant", query)
+        groups.append(rows)
+
+    seen: set[str] = set()
+    merged: List[Dict[str, Any]] = []
+    for row in _round_robin(*groups):
+        key = _candidate_key(shelf, row)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(row)
+    return merged
+
+
+def _annotate_query_flags(rows: Iterable[Dict[str, Any]], *, query: str) -> List[Dict[str, Any]]:
+    query_has_digits = any(char.isdigit() for char in str(query or ""))
+    query_tokens = {
+        token
+        for token in re.findall(r"[^\W_]+", _normalize_text(query).casefold(), flags=re.UNICODE)
+        if len(token) >= 3
+    }
+    query_token_count = len(query_tokens)
+    annotated: List[Dict[str, Any]] = []
+    for row in rows:
+        payload = dict(row)
+        payload["_brainstack_query_has_digits"] = query_has_digits
+        content = _normalize_text(payload.get("content") or payload.get("content_excerpt"))
+        row_tokens = {
+            token
+            for token in re.findall(r"[^\W_]+", content.casefold(), flags=re.UNICODE)
+            if len(token) >= 3
+        }
+        literal_match = literal_slot_match(
+            query=query,
+            text=content,
+            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {},
+        )
+        payload["_brainstack_query_token_count"] = query_token_count
+        payload["_brainstack_query_token_overlap"] = max(
+            int(payload.get("_brainstack_query_token_overlap") or 0),
+            len(query_tokens & row_tokens),
+            2 if literal_match.get("matched") else 0,
+        )
+        if literal_match.get("matched"):
+            payload["_brainstack_literal_slot_match"] = literal_match
+        annotated.append(payload)
+    return annotated
+
+
+def _profile_keyword_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+    ranked = list(enumerate(rows))
+    ranked.sort(
+        key=lambda item: (
+            1 if bool(item[1].get("_direct_slot_match")) else 0,
+            float(item[1].get("keyword_score") or 0.0),
+            profile_priority_adjustment(item[1]),
+            float(item[1].get("confidence") or 0.0),
+            str(item[1].get("updated_at") or ""),
+            -0.05 * item[0],
+        ),
+        reverse=True,
+    )
+    return [row for _, row in ranked[:limit]]
+
+
+def _operating_channel_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+    deduped = _dedupe_rows(rows)
+    for row in deduped:
+        if is_background_operating_record(row):
+            row["_brainstack_suppression_reason"] = background_operating_suppression_reason(row)
+            row["_brainstack_supporting_evidence_only"] = True
+        if str(row.get("record_type") or "").strip() == OPERATING_RECORD_LIVE_SYSTEM_STATE:
+            row["_brainstack_supporting_evidence_only"] = True
+            row["_brainstack_runtime_state_only"] = True
+    has_authoritative_recent_work = any(
+        str(row.get("record_type") or "").strip() == "recent_work_summary"
+        and not is_background_recent_work(row)
+        for row in deduped
+    )
+    if has_authoritative_recent_work:
+        for row in deduped:
+            if is_background_recent_work(row):
+                row["_brainstack_suppression_reason"] = (
+                    "background_recent_work_summary: unscoped recent-work summary is "
+                    "background evidence when scoped operating truth is available"
+                )
+    ranked = list(enumerate(deduped))
+    ranked.sort(
+        key=lambda item: (
+            recent_work_authority_rank(item[1]),
+            float(item[1].get("keyword_score") or 0.0),
+            str(item[1].get("updated_at") or ""),
+            -0.05 * item[0],
+        ),
+        reverse=True,
+    )
+    return [row for _, row in ranked[:limit]]
+
+
+def _graph_match_text(row: Dict[str, Any]) -> str:
+    parts = [
+        str(row.get("subject") or "").strip(),
+        str(row.get("matched_alias") or "").strip(),
+        str(row.get("attribute") or "").strip(),
+        str(row.get("value") or "").strip(),
+        str(row.get("predicate") or "").strip(),
+        str(row.get("object_value") or "").strip(),
+        str(row.get("conflict_value") or "").strip(),
+    ]
+    return " ".join(part for part in parts if part)
+
+
+def _graph_fact_class(row: Dict[str, Any]) -> str:
+    row_type = str(row.get("row_type") or "").strip()
+    if row_type == "conflict":
+        return "conflict"
+    if row_type == "inferred_relation":
+        return "inferred_relation"
+    if row_type == "relation":
+        return "explicit_relation"
+    if row_type == "state":
+        temporal_status = record_temporal_status(row)
+        if row.get("is_current") and temporal_status == "current" and record_is_effective_at(row):
+            return "explicit_state_current"
+        if row.get("is_current") and temporal_status == "expired":
+            return "explicit_state_expired"
+        return "explicit_state_prior"
+    return row_type or "graph"
+
+
+def _graph_channel_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+    ranked = list(enumerate(rows))
+    ranked.sort(
+        key=lambda item: (
+            graph_priority_adjustment(item[1]),
+            float(item[1].get("keyword_score") or 0.0),
+            str(item[1].get("happened_at") or ""),
+            -0.05 * item[0],
+        ),
+        reverse=True,
+    )
+    return [row for _, row in ranked[:limit]]
+
+
+def _corpus_channel_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+    ranked = list(enumerate(_dedupe_rows(rows)))
+    ranked.sort(
+        key=lambda item: (
+            float(item[1].get("semantic_score") or 0.0),
+            float(item[1].get("keyword_score") or 0.0),
+            1 if "semantic" in str(item[1].get("retrieval_source") or "") else 0,
+            1 if bool(item[1].get("same_session")) else 0,
+            -0.05 * item[0],
+        ),
+        reverse=True,
+    )
+    return [row for _, row in ranked[:limit]]
+
+
+def _temporal_graph_rows(rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+    ranked = list(enumerate(rows))
+
+    def priority(item: tuple[int, Dict[str, Any]]) -> tuple[Any, ...]:
+        index, row = item
+        fact_class = _graph_fact_class(row)
+        return (
+            1 if fact_class == "explicit_state_current" else 0,
+            1 if fact_class == "conflict" else 0,
+            1 if fact_class == "explicit_state_prior" else 0,
+            1 if fact_class == "explicit_state_expired" else 0,
+            str(row.get("happened_at") or ""),
+            -0.05 * index,
+        )
+
+    ranked.sort(
+        key=priority,
+        reverse=True,
+    )
+    return [row for _, row in ranked[:limit]]
+
+
+def _candidate_key(shelf: str, row: Dict[str, Any]) -> str:
+    if shelf == "profile":
+        stable_key = str(row.get("stable_key") or "").strip()
+        return f"profile:{stable_key or row.get('id')}"
+    if shelf == "operating":
+        stable_key = str(row.get("stable_key") or "").strip()
+        return f"operating:{stable_key or row.get('id')}"
+    if shelf in {"continuity_match", "continuity_recent"}:
+        return f"continuity:{int(row.get('id') or 0)}"
+    if shelf == "transcript":
+        return f"transcript:{int(row.get('id') or 0)}"
+    if shelf == "graph":
+        return f"graph:{row.get('row_type')}:{int(row.get('row_id') or 0)}"
+    if shelf == "corpus":
+        return f"corpus:{int(row.get('document_id') or 0)}:{int(row.get('section_index') or 0)}"
+    return f"{shelf}:{row!r}"
+
+
+def _merge_shelf(existing: str, new: str) -> str:
+    priorities = {
+        "profile": 5,
+        "operating": 4,
+        "graph": 3,
+        "continuity_match": 2,
+        "continuity_recent": 1,
+        "transcript": 0,
+        "corpus": -1,
+    }
+    return existing if priorities.get(existing, 0) >= priorities.get(new, 0) else new
+
+
+def _merge_channel(
+    merged: Dict[str, EvidenceCandidate],
+    *,
+    channel_name: str,
+    rows: Iterable[Dict[str, Any]],
+    shelf: str,
+) -> None:
+    for rank, row in enumerate(rows, start=1):
+        row = annotate_workstream_recap_row(row, shelf=shelf)
+        key = _candidate_key(shelf, row)
+        candidate = merged.get(key)
+        if candidate is None:
+            candidate = EvidenceCandidate(key=key, shelf=shelf, row=row)
+            merged[key] = candidate
+        else:
+            candidate.shelf = _merge_shelf(candidate.shelf, shelf)
+        candidate.seen_in(channel_name, rank)
+        candidate.rrf_score += _fusion_rank_contribution(
+            channel_name=channel_name,
+            shelf=shelf,
+            rank=rank,
+        )
+
+
+def _channel_status(name: str, rows: List[Dict[str, Any]], *, reason: str = "", status: str = "active") -> Dict[str, Any]:
+    return asdict(
+        RetrievalChannelStatus(
+            name=name,
+            status=status,
+            reason=reason,
+            candidate_count=len(rows),
+        )
+    )
+
+
+def _select_rows(
+    candidates: List[EvidenceCandidate],
+    *,
+    profile_limit: int,
+    continuity_match_limit: int,
+    continuity_recent_limit: int,
+    transcript_limit: int,
+    operating_limit: int,
+    graph_limit: int,
+    corpus_limit: int,
+    evidence_item_budget: int,
+    query: str = "",
+) -> Dict[str, List[Dict[str, Any]]]:
+    profile_items: List[Dict[str, Any]] = []
+    matched: List[Dict[str, Any]] = []
+    recent: List[Dict[str, Any]] = []
+    transcript_rows: List[Dict[str, Any]] = []
+    operating_rows: List[Dict[str, Any]] = []
+    graph_rows: List[Dict[str, Any]] = []
+    corpus_rows: List[Dict[str, Any]] = []
+
+    seen_profile_keys: set[str] = set()
+    seen_continuity_ids: set[int] = set()
+    seen_transcript_ids: set[int] = set()
+    seen_operating_keys: set[str] = set()
+    seen_graph_keys: set[tuple[str, int]] = set()
+    seen_corpus_keys: set[tuple[int, int]] = set()
+    evidence_items_used = 0
+    shared_budget_enabled = evidence_item_budget > 0
+    has_scoped_recap_anchor = any(
+        candidate.shelf == "operating" and bool(candidate.row.get("_brainstack_recap_surface"))
+        for candidate in candidates
+    )
+    scoped_recap_anchor_workstream_ids = {
+        workstream_id
+        for candidate in candidates
+        if candidate.shelf == "operating" and bool(candidate.row.get("_brainstack_recap_surface"))
+        for workstream_id in (row_workstream_id(candidate.row),)
+        if workstream_id
+    }
+
+    def materialize(candidate: EvidenceCandidate) -> Dict[str, Any]:
+        row = dict(candidate.row)
+        row["_brainstack_rrf_score"] = candidate.rrf_score
+        row["_brainstack_channels"] = sorted(candidate.channel_ranks)
+        row["_brainstack_channel_ranks"] = dict(candidate.channel_ranks)
+        authority_floor = _candidate_authority_floor(candidate)
+        row["_brainstack_authority_floor"] = authority_floor
+        row["_brainstack_authority_floor_applied"] = authority_floor >= AUTHORITY_FLOOR_SCORE
+        return row
+
+    for candidate in candidates:
+        row = materialize(candidate)
+        suppression_reason = _weak_cross_session_keyword_residue_reason(candidate)
+        if suppression_reason:
+            candidate.row["_brainstack_suppression_reason"] = suppression_reason
+            continue
+        suppression_reason = _assistant_assignment_residue_reason(candidate, query=query)
+        if suppression_reason:
+            candidate.row["_brainstack_suppression_reason"] = suppression_reason
+            continue
+        suppression_reason = _tier2_graph_assignment_residue_reason(candidate, query=query)
+        if suppression_reason:
+            candidate.row["_brainstack_suppression_reason"] = suppression_reason
+            continue
+        if (
+            has_scoped_recap_anchor
+            and candidate.shelf in {"continuity_match", "continuity_recent"}
+            and bool(candidate.row.get("_brainstack_supporting_evidence_only"))
+        ):
+            candidate.row["_brainstack_suppression_reason"] = str(
+                candidate.row.get("_brainstack_workstream_recap_reason")
+                or "supporting_only_unscoped_workstream_recap_evidence"
+            )
+            continue
+        suppression_reason = workstream_bank_mismatch_reason(
+            anchor_workstream_ids=scoped_recap_anchor_workstream_ids,
+            shelf=candidate.shelf,
+            row=candidate.row,
+        )
+        if suppression_reason:
+            candidate.row["_brainstack_suppression_reason"] = suppression_reason
+            continue
+        if (
+            has_scoped_recap_anchor
+            and candidate.shelf == "operating"
+            and bool(candidate.row.get("_brainstack_runtime_state_only"))
+        ):
+            candidate.row["_brainstack_suppression_reason"] = (
+                "runtime_state_only: scheduler/live-state evidence is supporting context, "
+                "not assignment truth when scoped workstream authority is present"
+            )
+            continue
+        if str(candidate.row.get("_brainstack_suppression_reason") or ""):
+            continue
+        if candidate.shelf == "profile" and len(profile_items) < profile_limit:
+            stable_key = str(row.get("stable_key") or "").strip()
+            if stable_key and stable_key not in seen_profile_keys:
+                seen_profile_keys.add(stable_key)
+                profile_items.append(row)
+            continue
+
+        if shared_budget_enabled and evidence_items_used >= evidence_item_budget and not _candidate_has_authority_floor(candidate):
+            candidate.row["_brainstack_suppression_reason"] = "not_selected_by_global_evidence_budget"
+            continue
+
+        if candidate.shelf == "continuity_match" and len(matched) < continuity_match_limit:
+            row_id = int(row.get("id") or 0)
+            if row_id > 0 and row_id not in seen_continuity_ids:
+                seen_continuity_ids.add(row_id)
+                matched.append(row)
+                evidence_items_used += 1
+            continue
+
+        if candidate.shelf == "continuity_recent" and len(recent) < continuity_recent_limit:
+            row_id = int(row.get("id") or 0)
+            if row_id > 0 and row_id not in seen_continuity_ids:
+                seen_continuity_ids.add(row_id)
+                recent.append(row)
+                evidence_items_used += 1
+            continue
+
+        if candidate.shelf == "transcript" and len(transcript_rows) < transcript_limit:
+            row_id = int(row.get("id") or 0)
+            if row_id > 0 and row_id not in seen_transcript_ids:
+                seen_transcript_ids.add(row_id)
+                transcript_rows.append(row)
+                evidence_items_used += 1
+            continue
+
+        if candidate.shelf == "operating" and len(operating_rows) < operating_limit:
+            stable_key = str(row.get("stable_key") or "").strip()
+            if stable_key and stable_key not in seen_operating_keys:
+                seen_operating_keys.add(stable_key)
+                operating_rows.append(row)
+                evidence_items_used += 1
+            continue
+
+        if candidate.shelf == "graph" and len(graph_rows) < graph_limit:
+            row_key = (str(row.get("row_type") or ""), int(row.get("row_id") or 0))
+            if row_key[1] > 0 and row_key not in seen_graph_keys:
+                seen_graph_keys.add(row_key)
+                graph_rows.append(row)
+                evidence_items_used += 1
+            continue
+
+        if candidate.shelf == "corpus" and len(corpus_rows) < corpus_limit:
+            corpus_row_key = (int(row.get("document_id") or 0), int(row.get("section_index") or 0))
+            if corpus_row_key[0] > 0 and corpus_row_key not in seen_corpus_keys:
+                seen_corpus_keys.add(corpus_row_key)
+                corpus_rows.append(row)
+                evidence_items_used += 1
+            continue
+
+    return {
+        "profile_items": profile_items,
+        "matched": matched,
+        "recent": recent,
+        "transcript_rows": transcript_rows,
+        "operating_rows": operating_rows,
+        "graph_rows": graph_rows,
+        "corpus_rows": corpus_rows,
+    }
