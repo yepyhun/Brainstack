@@ -32,308 +32,417 @@ from .store_runtime import (
 
 class GraphStateSnapshotMixin(StoreRuntimeBase):
     def _sqlite_upsert_graph_state(
-            self,
-            *,
-            subject_name: str,
-            attribute: str,
-            value_text: str,
-            source: str,
-            supersede: bool = False,
-            metadata: Dict[str, Any] | None = None,
-        ) -> Dict[str, Any]:
-            now = utc_now_iso()
-            entity = self.get_or_create_entity(subject_name)
-            normalized_metadata = _normalize_graph_record_metadata(
-                metadata,
+        self,
+        *,
+        subject_name: str,
+        attribute: str,
+        value_text: str,
+        source: str,
+        supersede: bool = False,
+        metadata: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        now = utc_now_iso()
+        entity = self.get_or_create_entity(subject_name)
+        normalized_metadata, valid_from, valid_to = self._graph_state_metadata_for_upsert(
+            metadata=metadata,
+            source=source,
+            attribute=attribute,
+            value_text=value_text,
+            now=now,
+        )
+        current = self._sqlite_current_graph_state(
+            entity_id=int(entity["id"]),
+            attribute=attribute,
+            normalized_metadata=normalized_metadata,
+        )
+        normalized_new = " ".join(value_text.lower().split())
+
+        if current and " ".join(str(current["value_text"]).lower().split()) == normalized_new:
+            return self._sqlite_merge_unchanged_graph_state(
+                current=current,
+                normalized_metadata=normalized_metadata,
                 source=source,
-                graph_kind="state",
+                entity_id=int(entity["id"]),
             )
-            temporal = merge_temporal(
-                normalized_metadata.get("temporal"),
-                {"observed_at": normalized_metadata.get("temporal", {}).get("observed_at") or now},
-            )
-            if temporal:
-                normalized_metadata["temporal"] = temporal
-            inferred_valid_to = infer_relative_duration_valid_to(
-                value_text=value_text,
-                temporal=temporal,
-                metadata=normalized_metadata,
-                attribute=attribute,
-            )
-            if inferred_valid_to and not normalized_metadata.get("temporal", {}).get("valid_to"):
-                if is_background_relative_duration_source(
-                    {
-                        "source": source,
-                        "metadata": normalized_metadata,
-                        "attribute": attribute,
-                        "value_text": value_text,
-                    }
-                ):
-                    inferred_valid_to = str(temporal.get("valid_from") or temporal.get("observed_at") or now)
-                temporal = merge_temporal(temporal, {"valid_to": inferred_valid_to})
-                normalized_metadata["temporal"] = temporal
-                normalized_metadata["relative_duration_validity"] = {
-                    "schema": "brainstack.relative_duration_validity.v1",
-                    "derived_valid_to": inferred_valid_to,
-                    "grammar": "numeric_duration_remaining",
-                    "current_authority": "disabled_for_background_relative_duration"
-                    if is_background_relative_duration_source(
-                        {
-                            "source": source,
-                            "metadata": normalized_metadata,
-                            "attribute": attribute,
-                            "value_text": value_text,
-                        }
-                    )
-                    else "valid_until_derived_window",
-                }
-            if not normalized_metadata.get("temporal", {}).get("valid_to") and is_unbounded_background_volatile_state(
-                {
-                    "source": source,
-                    "metadata": normalized_metadata,
-                    "attribute": attribute,
-                    "value_text": value_text,
-                }
-            ):
-                disabled_valid_to = str(temporal.get("valid_from") or temporal.get("observed_at") or now)
-                temporal = merge_temporal(temporal, {"valid_to": disabled_valid_to})
-                normalized_metadata["temporal"] = temporal
-                normalized_metadata["background_current_authority"] = {
-                    "schema": "brainstack.background_current_authority.v1",
-                    "current_authority": "disabled_for_unbounded_volatile_background_state",
-                    "reason": "tier2_or_idle_window_source_without_explicit_valid_to",
-                }
-            valid_from = str(normalized_metadata.get("temporal", {}).get("valid_from") or now)
-            valid_to = str(normalized_metadata.get("temporal", {}).get("valid_to") or "")
-            current_candidates = self.conn.execute(
-                """
-                SELECT id, value_text, source, metadata_json, valid_from, valid_to
-                FROM graph_states
-                WHERE entity_id = ? AND attribute = ? AND is_current = 1
-                ORDER BY valid_from DESC, id DESC
-                """,
-                (entity["id"], attribute),
-            ).fetchall()
-            new_scope_key = _principal_scope_key_from_metadata(normalized_metadata)
-            current = None
-            for candidate in current_candidates:
-                candidate_scope_key = _principal_scope_key_from_metadata(_decode_json_object(candidate["metadata_json"]))
-                if new_scope_key:
-                    if candidate_scope_key == new_scope_key:
-                        current = candidate
-                        break
-                    continue
-                if not candidate_scope_key:
-                    current = candidate
-                    break
-            if current is None and not new_scope_key and current_candidates:
-                current = current_candidates[0]
-            normalized_new = " ".join(value_text.lower().split())
 
-            if current and " ".join(str(current["value_text"]).lower().split()) == normalized_new:
-                merged = _merge_graph_record_metadata(
-                    current["metadata_json"],
-                    normalized_metadata,
-                    source=source,
-                    graph_kind="state",
-                )
-                merged_valid_to = str((merged.get("temporal") or {}).get("valid_to") or current["valid_to"] or "")
-                self.conn.execute(
-                    "UPDATE graph_states SET metadata_json = ?, valid_to = ? WHERE id = ?",
-                    (
-                        json.dumps(merged, ensure_ascii=True, sort_keys=True),
-                        merged_valid_to or None,
-                        int(current["id"]),
-                    ),
-                )
-                self.conn.commit()
-                return {"status": "unchanged", "entity_id": entity["id"], "state_id": int(current["id"])}
-
-            if current and not supersede and _should_auto_supersede_exact_value(current["value_text"], value_text):
-                supersede = True
-                normalized_metadata = _merge_record_metadata(
-                    None,
-                    {
-                        **normalized_metadata,
-                        "exact_value_update": True,
-                        "status_reason": "numeric_exact_value_change",
-                    },
-                    source=source,
-                )
-
-            if current and not supersede:
-                conflict = self.conn.execute(
-                    """
-                    SELECT id, metadata_json FROM graph_conflicts
-                    WHERE entity_id = ? AND attribute = ? AND current_state_id = ?
-                      AND candidate_value_text = ? AND status = 'open'
-                    """,
-                    (entity["id"], attribute, int(current["id"]), value_text.strip()),
-                ).fetchone()
-                if conflict:
-                    merged = _merge_graph_record_metadata(
-                        conflict["metadata_json"],
-                        normalized_metadata,
-                        source=source,
-                        graph_kind="state_conflict",
-                    )
-                    self.conn.execute(
-                        """
-                        UPDATE graph_conflicts
-                        SET metadata_json = ?, candidate_source = ?, updated_at = ?
-                        WHERE id = ?
-                        """,
-                        (
-                            json.dumps(merged, ensure_ascii=True, sort_keys=True),
-                            source,
-                            now,
-                            int(conflict["id"]),
-                        ),
-                    )
-                    self.conn.commit()
-                    return {"status": "conflict", "entity_id": entity["id"], "conflict_id": int(conflict["id"])}
-                conflict_metadata = _merge_graph_record_metadata(
-                    None,
-                    normalized_metadata,
-                    source=source,
-                    graph_kind="state_conflict",
-                )
-                cur = self.conn.execute(
-                    """
-                    INSERT INTO graph_conflicts (
-                        entity_id, attribute, current_state_id, candidate_value_text,
-                        candidate_source, metadata_json, status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)
-                    """,
-                    (
-                        entity["id"],
-                        attribute,
-                        int(current["id"]),
-                        value_text.strip(),
-                        source,
-                        json.dumps(conflict_metadata, ensure_ascii=True, sort_keys=True),
-                        now,
-                        now,
-                    ),
-                )
-                self.conn.commit()
-                return {"status": "conflict", "entity_id": entity["id"], "conflict_id": _cursor_lastrowid(cur)}
-
-            if current and supersede:
-                prior_temporal = merge_temporal(
-                    _decode_json_object(current["metadata_json"]).get("temporal"),
-                    {"valid_to": valid_from},
-                )
-                prior_provenance = merge_provenance(
-                    _decode_json_object(current["metadata_json"]).get("provenance"),
-                    {"source_ids": [source]},
-                )
-                prior_metadata = _decode_json_object(current["metadata_json"])
-                prior_metadata.setdefault("source_kind", "explicit")
-                prior_metadata.setdefault("graph_kind", "state")
-                if prior_temporal:
-                    prior_metadata["temporal"] = prior_temporal
-                if prior_provenance:
-                    prior_metadata["provenance"] = prior_provenance
-                prior_metadata = attach_graph_source_lineage(
-                    prior_metadata,
-                    source=source,
-                    graph_kind="state",
-                )
-                self.conn.execute(
-                    """
-                    UPDATE graph_states
-                    SET is_current = 0, valid_to = ?, metadata_json = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        valid_from,
-                        json.dumps(prior_metadata, ensure_ascii=True, sort_keys=True),
-                        int(current["id"]),
-                    ),
-                )
-
-            state_metadata = _merge_graph_record_metadata(
+        if current and not supersede and _should_auto_supersede_exact_value(current["value_text"], value_text):
+            supersede = True
+            normalized_metadata = _merge_record_metadata(
                 None,
+                {
+                    **normalized_metadata,
+                    "exact_value_update": True,
+                    "status_reason": "numeric_exact_value_change",
+                },
+                source=source,
+            )
+
+        if current and not supersede:
+            return self._sqlite_record_graph_state_conflict(
+                entity_id=int(entity["id"]),
+                attribute=attribute,
+                current=current,
+                value_text=value_text,
+                source=source,
+                normalized_metadata=normalized_metadata,
+                now=now,
+            )
+
+        if current and supersede:
+            self._sqlite_mark_prior_graph_state(current=current, valid_from=valid_from, source=source)
+
+        state_metadata = _merge_graph_record_metadata(
+            None,
+            normalized_metadata,
+            source=source,
+            graph_kind="state",
+        )
+        new_state_id = self._sqlite_insert_graph_state(
+            entity_id=int(entity["id"]),
+            attribute=attribute,
+            value_text=value_text,
+            source=source,
+            state_metadata=state_metadata,
+            valid_from=valid_from,
+            valid_to=valid_to,
+        )
+
+        if current and supersede:
+            self._sqlite_link_graph_state_supersession(
+                current=current,
+                new_state_id=new_state_id,
+                state_metadata=state_metadata,
+                valid_from=valid_from,
+                source=source,
+            )
+            self.conn.commit()
+            return {
+                "status": "superseded",
+                "entity_id": entity["id"],
+                "state_id": new_state_id,
+                "prior_state_id": int(current["id"]),
+            }
+
+        self.conn.commit()
+        return {"status": "inserted", "entity_id": entity["id"], "state_id": new_state_id}
+
+    def _graph_state_source_payload(
+        self,
+        *,
+        source: str,
+        metadata: Dict[str, Any],
+        attribute: str,
+        value_text: str,
+    ) -> Dict[str, Any]:
+        return {
+            "source": source,
+            "metadata": metadata,
+            "attribute": attribute,
+            "value_text": value_text,
+        }
+
+    def _graph_state_metadata_for_upsert(
+        self,
+        *,
+        metadata: Dict[str, Any] | None,
+        source: str,
+        attribute: str,
+        value_text: str,
+        now: str,
+    ) -> tuple[Dict[str, Any], str, str]:
+        normalized_metadata = _normalize_graph_record_metadata(
+            metadata,
+            source=source,
+            graph_kind="state",
+        )
+        temporal = merge_temporal(
+            normalized_metadata.get("temporal"),
+            {"observed_at": normalized_metadata.get("temporal", {}).get("observed_at") or now},
+        )
+        if temporal:
+            normalized_metadata["temporal"] = temporal
+        inferred_valid_to = infer_relative_duration_valid_to(
+            value_text=value_text,
+            temporal=temporal,
+            metadata=normalized_metadata,
+            attribute=attribute,
+        )
+        source_payload = self._graph_state_source_payload(
+            source=source,
+            metadata=normalized_metadata,
+            attribute=attribute,
+            value_text=value_text,
+        )
+        if inferred_valid_to and not normalized_metadata.get("temporal", {}).get("valid_to"):
+            background_duration_source = is_background_relative_duration_source(source_payload)
+            if background_duration_source:
+                inferred_valid_to = str(temporal.get("valid_from") or temporal.get("observed_at") or now)
+            temporal = merge_temporal(temporal, {"valid_to": inferred_valid_to})
+            normalized_metadata["temporal"] = temporal
+            normalized_metadata["relative_duration_validity"] = {
+                "schema": "brainstack.relative_duration_validity.v1",
+                "derived_valid_to": inferred_valid_to,
+                "grammar": "numeric_duration_remaining",
+                "current_authority": "disabled_for_background_relative_duration"
+                if background_duration_source
+                else "valid_until_derived_window",
+            }
+        if not normalized_metadata.get("temporal", {}).get("valid_to") and is_unbounded_background_volatile_state(
+            source_payload
+        ):
+            disabled_valid_to = str(temporal.get("valid_from") or temporal.get("observed_at") or now)
+            temporal = merge_temporal(temporal, {"valid_to": disabled_valid_to})
+            normalized_metadata["temporal"] = temporal
+            normalized_metadata["background_current_authority"] = {
+                "schema": "brainstack.background_current_authority.v1",
+                "current_authority": "disabled_for_unbounded_volatile_background_state",
+                "reason": "tier2_or_idle_window_source_without_explicit_valid_to",
+            }
+        valid_from = str(normalized_metadata.get("temporal", {}).get("valid_from") or now)
+        valid_to = str(normalized_metadata.get("temporal", {}).get("valid_to") or "")
+        return normalized_metadata, valid_from, valid_to
+
+    def _sqlite_current_graph_state(
+        self,
+        *,
+        entity_id: int,
+        attribute: str,
+        normalized_metadata: Dict[str, Any],
+    ) -> Any:
+        current_candidates = self.conn.execute(
+            """
+            SELECT id, value_text, source, metadata_json, valid_from, valid_to
+            FROM graph_states
+            WHERE entity_id = ? AND attribute = ? AND is_current = 1
+            ORDER BY valid_from DESC, id DESC
+            """,
+            (entity_id, attribute),
+        ).fetchall()
+        new_scope_key = _principal_scope_key_from_metadata(normalized_metadata)
+        for candidate in current_candidates:
+            candidate_scope_key = _principal_scope_key_from_metadata(_decode_json_object(candidate["metadata_json"]))
+            if new_scope_key:
+                if candidate_scope_key == new_scope_key:
+                    return candidate
+                continue
+            if not candidate_scope_key:
+                return candidate
+        if not new_scope_key and current_candidates:
+            return current_candidates[0]
+        return None
+
+    def _sqlite_merge_unchanged_graph_state(
+        self,
+        *,
+        current: Any,
+        normalized_metadata: Dict[str, Any],
+        source: str,
+        entity_id: int,
+    ) -> Dict[str, Any]:
+        merged = _merge_graph_record_metadata(
+            current["metadata_json"],
+            normalized_metadata,
+            source=source,
+            graph_kind="state",
+        )
+        merged_valid_to = str((merged.get("temporal") or {}).get("valid_to") or current["valid_to"] or "")
+        self.conn.execute(
+            "UPDATE graph_states SET metadata_json = ?, valid_to = ? WHERE id = ?",
+            (
+                json.dumps(merged, ensure_ascii=True, sort_keys=True),
+                merged_valid_to or None,
+                int(current["id"]),
+            ),
+        )
+        self.conn.commit()
+        return {"status": "unchanged", "entity_id": entity_id, "state_id": int(current["id"])}
+
+    def _sqlite_record_graph_state_conflict(
+        self,
+        *,
+        entity_id: int,
+        attribute: str,
+        current: Any,
+        value_text: str,
+        source: str,
+        normalized_metadata: Dict[str, Any],
+        now: str,
+    ) -> Dict[str, Any]:
+        conflict = self.conn.execute(
+            """
+            SELECT id, metadata_json FROM graph_conflicts
+            WHERE entity_id = ? AND attribute = ? AND current_state_id = ?
+              AND candidate_value_text = ? AND status = 'open'
+            """,
+            (entity_id, attribute, int(current["id"]), value_text.strip()),
+        ).fetchone()
+        if conflict:
+            merged = _merge_graph_record_metadata(
+                conflict["metadata_json"],
                 normalized_metadata,
                 source=source,
-                graph_kind="state",
+                graph_kind="state_conflict",
             )
-            cur = self.conn.execute(
+            self.conn.execute(
                 """
-                INSERT INTO graph_states (
-                    entity_id, attribute, value_text, source, metadata_json, valid_from, valid_to, is_current
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                UPDATE graph_conflicts
+                SET metadata_json = ?, candidate_source = ?, updated_at = ?
+                WHERE id = ?
                 """,
                 (
-                    entity["id"],
-                    attribute,
-                    value_text.strip(),
+                    json.dumps(merged, ensure_ascii=True, sort_keys=True),
                     source,
-                    json.dumps(state_metadata, ensure_ascii=True, sort_keys=True),
-                    valid_from,
-                    valid_to or None,
+                    now,
+                    int(conflict["id"]),
                 ),
             )
-            new_state_id = _cursor_lastrowid(cur)
-
-            if current and supersede:
-                updated_prior_metadata = _decode_json_object(current["metadata_json"])
-                updated_prior_metadata.setdefault("source_kind", "explicit")
-                updated_prior_metadata.setdefault("graph_kind", "state")
-                updated_prior_metadata["temporal"] = merge_temporal(
-                    updated_prior_metadata.get("temporal"),
-                    {"valid_to": valid_from, "superseded_by": str(new_state_id)},
-                )
-                updated_prior_metadata["provenance"] = merge_provenance(
-                    updated_prior_metadata.get("provenance"),
-                    {"source_ids": [source], "replacement_record_id": str(new_state_id)},
-                )
-                updated_prior_metadata = attach_graph_source_lineage(
-                    updated_prior_metadata,
-                    source=source,
-                    graph_kind="state",
-                )
-                self.conn.execute(
-                    "UPDATE graph_states SET metadata_json = ? WHERE id = ?",
-                    (
-                        json.dumps(updated_prior_metadata, ensure_ascii=True, sort_keys=True),
-                        int(current["id"]),
-                    ),
-                )
-                new_state_metadata = _merge_graph_record_metadata(
-                    state_metadata,
-                    {
-                        "temporal": {"supersedes": str(current["id"]), "valid_from": valid_from},
-                        "provenance": {"replacement_record_id": str(current["id"])},
-                    },
-                    source=source,
-                    graph_kind="state",
-                )
-                self.conn.execute(
-                    "UPDATE graph_states SET metadata_json = ? WHERE id = ?",
-                    (
-                        json.dumps(new_state_metadata, ensure_ascii=True, sort_keys=True),
-                        new_state_id,
-                    ),
-                )
-                self.conn.execute(
-                    """
-                    INSERT INTO graph_supersessions (prior_state_id, new_state_id, reason, created_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (int(current["id"]), new_state_id, "superseded_by_new_current_state", valid_from),
-                )
-                self.conn.commit()
-                return {
-                    "status": "superseded",
-                    "entity_id": entity["id"],
-                    "state_id": new_state_id,
-                    "prior_state_id": int(current["id"]),
-                }
-
             self.conn.commit()
-            return {"status": "inserted", "entity_id": entity["id"], "state_id": new_state_id}
+            return {"status": "conflict", "entity_id": entity_id, "conflict_id": int(conflict["id"])}
+        conflict_metadata = _merge_graph_record_metadata(
+            None,
+            normalized_metadata,
+            source=source,
+            graph_kind="state_conflict",
+        )
+        cur = self.conn.execute(
+            """
+            INSERT INTO graph_conflicts (
+                entity_id, attribute, current_state_id, candidate_value_text,
+                candidate_source, metadata_json, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)
+            """,
+            (
+                entity_id,
+                attribute,
+                int(current["id"]),
+                value_text.strip(),
+                source,
+                json.dumps(conflict_metadata, ensure_ascii=True, sort_keys=True),
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+        return {"status": "conflict", "entity_id": entity_id, "conflict_id": _cursor_lastrowid(cur)}
+
+    def _sqlite_mark_prior_graph_state(self, *, current: Any, valid_from: str, source: str) -> None:
+        prior_temporal = merge_temporal(
+            _decode_json_object(current["metadata_json"]).get("temporal"),
+            {"valid_to": valid_from},
+        )
+        prior_provenance = merge_provenance(
+            _decode_json_object(current["metadata_json"]).get("provenance"),
+            {"source_ids": [source]},
+        )
+        prior_metadata = _decode_json_object(current["metadata_json"])
+        prior_metadata.setdefault("source_kind", "explicit")
+        prior_metadata.setdefault("graph_kind", "state")
+        if prior_temporal:
+            prior_metadata["temporal"] = prior_temporal
+        if prior_provenance:
+            prior_metadata["provenance"] = prior_provenance
+        prior_metadata = attach_graph_source_lineage(
+            prior_metadata,
+            source=source,
+            graph_kind="state",
+        )
+        self.conn.execute(
+            """
+            UPDATE graph_states
+            SET is_current = 0, valid_to = ?, metadata_json = ?
+            WHERE id = ?
+            """,
+            (
+                valid_from,
+                json.dumps(prior_metadata, ensure_ascii=True, sort_keys=True),
+                int(current["id"]),
+            ),
+        )
+
+    def _sqlite_insert_graph_state(
+        self,
+        *,
+        entity_id: int,
+        attribute: str,
+        value_text: str,
+        source: str,
+        state_metadata: Dict[str, Any],
+        valid_from: str,
+        valid_to: str,
+    ) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO graph_states (
+                entity_id, attribute, value_text, source, metadata_json, valid_from, valid_to, is_current
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                entity_id,
+                attribute,
+                value_text.strip(),
+                source,
+                json.dumps(state_metadata, ensure_ascii=True, sort_keys=True),
+                valid_from,
+                valid_to or None,
+            ),
+        )
+        return _cursor_lastrowid(cur)
+
+    def _sqlite_link_graph_state_supersession(
+        self,
+        *,
+        current: Any,
+        new_state_id: int,
+        state_metadata: Dict[str, Any],
+        valid_from: str,
+        source: str,
+    ) -> None:
+        updated_prior_metadata = _decode_json_object(current["metadata_json"])
+        updated_prior_metadata.setdefault("source_kind", "explicit")
+        updated_prior_metadata.setdefault("graph_kind", "state")
+        updated_prior_metadata["temporal"] = merge_temporal(
+            updated_prior_metadata.get("temporal"),
+            {"valid_to": valid_from, "superseded_by": str(new_state_id)},
+        )
+        updated_prior_metadata["provenance"] = merge_provenance(
+            updated_prior_metadata.get("provenance"),
+            {"source_ids": [source], "replacement_record_id": str(new_state_id)},
+        )
+        updated_prior_metadata = attach_graph_source_lineage(
+            updated_prior_metadata,
+            source=source,
+            graph_kind="state",
+        )
+        self.conn.execute(
+            "UPDATE graph_states SET metadata_json = ? WHERE id = ?",
+            (
+                json.dumps(updated_prior_metadata, ensure_ascii=True, sort_keys=True),
+                int(current["id"]),
+            ),
+        )
+        new_state_metadata = _merge_graph_record_metadata(
+            state_metadata,
+            {
+                "temporal": {"supersedes": str(current["id"]), "valid_from": valid_from},
+                "provenance": {"replacement_record_id": str(current["id"])},
+            },
+            source=source,
+            graph_kind="state",
+        )
+        self.conn.execute(
+            "UPDATE graph_states SET metadata_json = ? WHERE id = ?",
+            (
+                json.dumps(new_state_metadata, ensure_ascii=True, sort_keys=True),
+                new_state_id,
+            ),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO graph_supersessions (prior_state_id, new_state_id, reason, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (int(current["id"]), new_state_id, "superseded_by_new_current_state", valid_from),
+        )
 
     def _sqlite_list_graph_conflicts(self, *, limit: int) -> List[Dict[str, Any]]:
             rows = self.conn.execute(
