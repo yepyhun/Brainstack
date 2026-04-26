@@ -286,6 +286,197 @@ class SemanticIndexStoreMixin(StoreRuntimeBase):
         except Exception as exc:
             logger.warning("Brainstack semantic evidence refresh failed for shelf %s: %s", index_shelf, exc)
 
+    def _semantic_evidence_shelf_requested(self, shelf_filter: set[str], *shelf_names: str) -> bool:
+        return not shelf_filter or any(shelf_name in shelf_filter for shelf_name in shelf_names)
+
+    def _semantic_evidence_scope_included(self, *, scope_key: str, requested_scope_key: str) -> bool:
+        normalized = str(scope_key or "").strip()
+        return not requested_scope_key or normalized in {"", requested_scope_key}
+
+    def _delete_semantic_evidence_scope(self, *, requested_scope_key: str, shelf_filter: set[str]) -> None:
+        if not shelf_filter:
+            self.conn.execute("DELETE FROM semantic_evidence_index")
+            return
+        params: List[Any] = list(sorted(shelf_filter))
+        sql = f"DELETE FROM semantic_evidence_index WHERE shelf IN ({','.join('?' for _ in shelf_filter)})"
+        if requested_scope_key:
+            sql += " AND principal_scope_key IN ('', ?)"
+            params.append(requested_scope_key)
+        self.conn.execute(sql, tuple(params))
+
+    def _semantic_evidence_bump(self, counts: Dict[str, int], shelf: str) -> None:
+        counts[shelf] = counts.get(shelf, 0) + 1
+
+    def _rebuild_profile_semantic_evidence(self, *, requested_scope_key: str, counts: Dict[str, int]) -> None:
+        for row in self.conn.execute(
+            """
+            SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at, active
+            FROM profile_items
+            WHERE active = 1
+            """
+        ).fetchall():
+            item = _profile_row_to_dict(row)
+            if not self._semantic_evidence_scope_included(
+                scope_key=str(item.get("principal_scope_key") or ""),
+                requested_scope_key=requested_scope_key,
+            ):
+                continue
+            self._upsert_semantic_evidence_document(
+                evidence_key=f"profile:{item.get('stable_key') or item.get('id')}",
+                shelf="profile",
+                row_id=int(item.get("id") or 0),
+                stable_key=str(item.get("stable_key") or ""),
+                principal_scope_key=str(item.get("principal_scope_key") or ""),
+                source=str(item.get("source") or ""),
+                content=f"{item.get('category') or ''} {item.get('content') or ''}",
+                metadata=item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {},
+                source_updated_at=str(item.get("updated_at") or ""),
+            )
+            self._semantic_evidence_bump(counts, "profile")
+
+    def _rebuild_task_semantic_evidence(self, *, requested_scope_key: str, counts: Dict[str, int]) -> None:
+        for row in self.conn.execute(
+            """
+            SELECT id, stable_key, principal_scope_key, item_type, title, due_date, date_scope,
+                   optional, status, owner, source, source_session_id, source_turn_number,
+                   metadata_json, created_at, updated_at
+            FROM task_items
+            """
+        ).fetchall():
+            item = _task_row_to_dict(row)
+            if not self._semantic_evidence_scope_included(
+                scope_key=str(item.get("principal_scope_key") or ""),
+                requested_scope_key=requested_scope_key,
+            ):
+                continue
+            self._upsert_semantic_evidence_document(
+                evidence_key=f"task:{item.get('stable_key') or item.get('id')}",
+                shelf="task",
+                row_id=int(item.get("id") or 0),
+                stable_key=str(item.get("stable_key") or ""),
+                principal_scope_key=str(item.get("principal_scope_key") or ""),
+                source=str(item.get("source") or ""),
+                content=f"{item.get('item_type') or ''} {item.get('title') or ''} {item.get('due_date') or ''} {item.get('status') or ''}",
+                metadata=item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {},
+                source_updated_at=str(item.get("updated_at") or ""),
+            )
+            self._semantic_evidence_bump(counts, "task")
+
+    def _rebuild_operating_semantic_evidence(self, *, requested_scope_key: str, counts: Dict[str, int]) -> None:
+        for row in self.conn.execute(
+            """
+            SELECT id, stable_key, principal_scope_key, record_type, content, owner, source,
+                   source_session_id, source_turn_number, metadata_json, created_at, updated_at
+            FROM operating_records
+            """
+        ).fetchall():
+            item = _operating_row_to_dict(row)
+            if not self._semantic_evidence_scope_included(
+                scope_key=str(item.get("principal_scope_key") or ""),
+                requested_scope_key=requested_scope_key,
+            ):
+                continue
+            self._upsert_semantic_evidence_document(
+                evidence_key=f"operating:{item.get('stable_key') or item.get('id')}",
+                shelf="operating",
+                row_id=int(item.get("id") or 0),
+                stable_key=str(item.get("stable_key") or ""),
+                principal_scope_key=str(item.get("principal_scope_key") or ""),
+                source=str(item.get("source") or ""),
+                content=f"{item.get('record_type') or ''} {item.get('content') or ''}",
+                metadata=item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {},
+                source_updated_at=str(item.get("updated_at") or ""),
+            )
+            self._semantic_evidence_bump(counts, "operating")
+
+    def _rebuild_corpus_semantic_evidence(self, *, requested_scope_key: str, counts: Dict[str, int]) -> None:
+        for row in self.conn.execute(
+            """
+            SELECT cd.id AS document_id, cd.stable_key, cd.title, cd.doc_kind, cd.source,
+                   cd.metadata_json AS document_metadata_json, cd.updated_at,
+                   cs.id AS section_id, cs.section_index, cs.heading, cs.content,
+                   cs.metadata_json AS section_metadata_json, cs.created_at
+            FROM corpus_sections cs
+            JOIN corpus_documents cd ON cd.id = cs.document_id
+            WHERE cd.active = 1
+            """
+        ).fetchall():
+            document_metadata = _decode_json_object(row["document_metadata_json"])
+            section_metadata = _decode_json_object(row["section_metadata_json"])
+            metadata = {**document_metadata, **section_metadata}
+            scope_key = _principal_scope_key_from_metadata(metadata)
+            if not self._semantic_evidence_scope_included(scope_key=scope_key, requested_scope_key=requested_scope_key):
+                continue
+            self._upsert_semantic_evidence_document(
+                evidence_key=f"corpus:{int(row['document_id'] or 0)}:{int(row['section_index'] or 0)}",
+                shelf="corpus",
+                row_id=int(row["section_id"] or 0),
+                stable_key=str(row["stable_key"] or ""),
+                principal_scope_key=scope_key,
+                source=str(row["source"] or ""),
+                content=f"{row['title'] or ''} {row['heading'] or ''} {row['content'] or ''}",
+                metadata=metadata,
+                source_updated_at=str(row["updated_at"] or row["created_at"] or ""),
+            )
+            self._semantic_evidence_bump(counts, "corpus")
+
+    def _rebuild_graph_semantic_evidence(self, *, requested_scope_key: str, counts: Dict[str, int]) -> None:
+        for row in self.conn.execute(
+            """
+            SELECT gs.id, ge.canonical_name AS subject, gs.attribute, gs.value_text,
+                   gs.source, gs.metadata_json, gs.valid_from, gs.valid_to, gs.is_current
+            FROM graph_states gs
+            JOIN graph_entities ge ON ge.id = gs.entity_id
+            WHERE gs.is_current = 1
+            """
+        ).fetchall():
+            item = _row_to_dict(row)
+            raw_graph_metadata = item.get("metadata")
+            graph_metadata: Mapping[str, Any] = raw_graph_metadata if isinstance(raw_graph_metadata, Mapping) else {}
+            scope_key = _principal_scope_key_from_metadata(graph_metadata)
+            if not self._semantic_evidence_scope_included(scope_key=scope_key, requested_scope_key=requested_scope_key):
+                continue
+            self._upsert_semantic_evidence_document(
+                evidence_key=f"graph:state:{int(item.get('id') or 0)}",
+                shelf="graph",
+                row_id=int(item.get("id") or 0),
+                stable_key=f"{item.get('subject') or ''}:{item.get('attribute') or ''}",
+                principal_scope_key=scope_key,
+                source=str(item.get("source") or ""),
+                content=f"{item.get('subject') or ''} {item.get('attribute') or ''} {item.get('value_text') or ''}",
+                metadata=graph_metadata,
+                source_updated_at=str(item.get("valid_from") or ""),
+            )
+            self._semantic_evidence_bump(counts, "graph")
+
+    def _rebuild_continuity_semantic_evidence(self, *, requested_scope_key: str, counts: Dict[str, int]) -> None:
+        for row in self.conn.execute(
+            """
+            SELECT id, session_id, turn_number, kind, content, source, metadata_json, created_at, updated_at
+            FROM continuity_events
+            """
+        ).fetchall():
+            item = _row_to_dict(row)
+            raw_continuity_metadata = item.get("metadata")
+            continuity_metadata: Mapping[str, Any] = (
+                raw_continuity_metadata if isinstance(raw_continuity_metadata, Mapping) else {}
+            )
+            scope_key = _principal_scope_key_from_metadata(continuity_metadata)
+            if not self._semantic_evidence_scope_included(scope_key=scope_key, requested_scope_key=requested_scope_key):
+                continue
+            self._upsert_semantic_evidence_document(
+                evidence_key=f"continuity:{int(item.get('id') or 0)}",
+                shelf="continuity_match",
+                row_id=int(item.get("id") or 0),
+                stable_key="",
+                principal_scope_key=scope_key,
+                source=str(item.get("source") or ""),
+                content=f"{item.get('kind') or ''} {item.get('content') or ''}",
+                metadata=continuity_metadata,
+                source_updated_at=str(item.get("updated_at") or item.get("created_at") or ""),
+            )
+            self._semantic_evidence_bump(counts, "continuity_match")
+
     @_locked
     def rebuild_semantic_evidence_index(
         self,
@@ -295,185 +486,21 @@ class SemanticIndexStoreMixin(StoreRuntimeBase):
     ) -> Dict[str, Any]:
         requested_scope_key = str(principal_scope_key or "").strip()
         shelf_filter = {str(shelf or "").strip() for shelf in (shelves or ()) if str(shelf or "").strip()}
-        if shelf_filter:
-            params: List[Any] = list(sorted(shelf_filter))
-            sql = f"DELETE FROM semantic_evidence_index WHERE shelf IN ({','.join('?' for _ in shelf_filter)})"
-            if requested_scope_key:
-                sql += " AND principal_scope_key IN ('', ?)"
-                params.append(requested_scope_key)
-            self.conn.execute(sql, tuple(params))
-        else:
-            self.conn.execute("DELETE FROM semantic_evidence_index")
-
+        self._delete_semantic_evidence_scope(requested_scope_key=requested_scope_key, shelf_filter=shelf_filter)
         counts: Dict[str, int] = {}
 
-        def include_scope(scope_key: str) -> bool:
-            normalized = str(scope_key or "").strip()
-            return not requested_scope_key or normalized in {"", requested_scope_key}
-
-        def bump(shelf: str) -> None:
-            counts[shelf] = counts.get(shelf, 0) + 1
-
-        if not shelf_filter or "profile" in shelf_filter:
-            for row in self.conn.execute(
-                """
-                SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at, active
-                FROM profile_items
-                WHERE active = 1
-                """
-            ).fetchall():
-                item = _profile_row_to_dict(row)
-                if not include_scope(str(item.get("principal_scope_key") or "")):
-                    continue
-                self._upsert_semantic_evidence_document(
-                    evidence_key=f"profile:{item.get('stable_key') or item.get('id')}",
-                    shelf="profile",
-                    row_id=int(item.get("id") or 0),
-                    stable_key=str(item.get("stable_key") or ""),
-                    principal_scope_key=str(item.get("principal_scope_key") or ""),
-                    source=str(item.get("source") or ""),
-                    content=f"{item.get('category') or ''} {item.get('content') or ''}",
-                    metadata=item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {},
-                    source_updated_at=str(item.get("updated_at") or ""),
-                )
-                bump("profile")
-
-        if not shelf_filter or "task" in shelf_filter:
-            for row in self.conn.execute(
-                """
-                SELECT id, stable_key, principal_scope_key, item_type, title, due_date, date_scope,
-                       optional, status, owner, source, source_session_id, source_turn_number,
-                       metadata_json, created_at, updated_at
-                FROM task_items
-                """
-            ).fetchall():
-                item = _task_row_to_dict(row)
-                if not include_scope(str(item.get("principal_scope_key") or "")):
-                    continue
-                self._upsert_semantic_evidence_document(
-                    evidence_key=f"task:{item.get('stable_key') or item.get('id')}",
-                    shelf="task",
-                    row_id=int(item.get("id") or 0),
-                    stable_key=str(item.get("stable_key") or ""),
-                    principal_scope_key=str(item.get("principal_scope_key") or ""),
-                    source=str(item.get("source") or ""),
-                    content=f"{item.get('item_type') or ''} {item.get('title') or ''} {item.get('due_date') or ''} {item.get('status') or ''}",
-                    metadata=item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {},
-                    source_updated_at=str(item.get("updated_at") or ""),
-                )
-                bump("task")
-
-        if not shelf_filter or "operating" in shelf_filter:
-            for row in self.conn.execute(
-                """
-                SELECT id, stable_key, principal_scope_key, record_type, content, owner, source,
-                       source_session_id, source_turn_number, metadata_json, created_at, updated_at
-                FROM operating_records
-                """
-            ).fetchall():
-                item = _operating_row_to_dict(row)
-                if not include_scope(str(item.get("principal_scope_key") or "")):
-                    continue
-                self._upsert_semantic_evidence_document(
-                    evidence_key=f"operating:{item.get('stable_key') or item.get('id')}",
-                    shelf="operating",
-                    row_id=int(item.get("id") or 0),
-                    stable_key=str(item.get("stable_key") or ""),
-                    principal_scope_key=str(item.get("principal_scope_key") or ""),
-                    source=str(item.get("source") or ""),
-                    content=f"{item.get('record_type') or ''} {item.get('content') or ''}",
-                    metadata=item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {},
-                    source_updated_at=str(item.get("updated_at") or ""),
-                )
-                bump("operating")
-
-        if not shelf_filter or "corpus" in shelf_filter:
-            for row in self.conn.execute(
-                """
-                SELECT cd.id AS document_id, cd.stable_key, cd.title, cd.doc_kind, cd.source,
-                       cd.metadata_json AS document_metadata_json, cd.updated_at,
-                       cs.id AS section_id, cs.section_index, cs.heading, cs.content,
-                       cs.metadata_json AS section_metadata_json, cs.created_at
-                FROM corpus_sections cs
-                JOIN corpus_documents cd ON cd.id = cs.document_id
-                WHERE cd.active = 1
-                """
-            ).fetchall():
-                document_metadata = _decode_json_object(row["document_metadata_json"])
-                section_metadata = _decode_json_object(row["section_metadata_json"])
-                metadata = {**document_metadata, **section_metadata}
-                scope_key = _principal_scope_key_from_metadata(metadata)
-                if not include_scope(scope_key):
-                    continue
-                self._upsert_semantic_evidence_document(
-                    evidence_key=f"corpus:{int(row['document_id'] or 0)}:{int(row['section_index'] or 0)}",
-                    shelf="corpus",
-                    row_id=int(row["section_id"] or 0),
-                    stable_key=str(row["stable_key"] or ""),
-                    principal_scope_key=scope_key,
-                    source=str(row["source"] or ""),
-                    content=f"{row['title'] or ''} {row['heading'] or ''} {row['content'] or ''}",
-                    metadata=metadata,
-                    source_updated_at=str(row["updated_at"] or row["created_at"] or ""),
-                )
-                bump("corpus")
-
-        if not shelf_filter or "graph" in shelf_filter:
-            for row in self.conn.execute(
-                """
-                SELECT gs.id, ge.canonical_name AS subject, gs.attribute, gs.value_text,
-                       gs.source, gs.metadata_json, gs.valid_from, gs.valid_to, gs.is_current
-                FROM graph_states gs
-                JOIN graph_entities ge ON ge.id = gs.entity_id
-                WHERE gs.is_current = 1
-                """
-            ).fetchall():
-                item = _row_to_dict(row)
-                raw_graph_metadata = item.get("metadata")
-                graph_metadata: Mapping[str, Any] = raw_graph_metadata if isinstance(raw_graph_metadata, Mapping) else {}
-                scope_key = _principal_scope_key_from_metadata(graph_metadata)
-                if not include_scope(scope_key):
-                    continue
-                self._upsert_semantic_evidence_document(
-                    evidence_key=f"graph:state:{int(item.get('id') or 0)}",
-                    shelf="graph",
-                    row_id=int(item.get("id") or 0),
-                    stable_key=f"{item.get('subject') or ''}:{item.get('attribute') or ''}",
-                    principal_scope_key=scope_key,
-                    source=str(item.get("source") or ""),
-                    content=f"{item.get('subject') or ''} {item.get('attribute') or ''} {item.get('value_text') or ''}",
-                    metadata=graph_metadata,
-                    source_updated_at=str(item.get("valid_from") or ""),
-                )
-                bump("graph")
-
-        if not shelf_filter or "continuity" in shelf_filter or "continuity_match" in shelf_filter:
-            for row in self.conn.execute(
-                """
-                SELECT id, session_id, turn_number, kind, content, source, metadata_json, created_at, updated_at
-                FROM continuity_events
-                """
-            ).fetchall():
-                item = _row_to_dict(row)
-                raw_continuity_metadata = item.get("metadata")
-                continuity_metadata: Mapping[str, Any] = (
-                    raw_continuity_metadata if isinstance(raw_continuity_metadata, Mapping) else {}
-                )
-                scope_key = _principal_scope_key_from_metadata(continuity_metadata)
-                if not include_scope(scope_key):
-                    continue
-                self._upsert_semantic_evidence_document(
-                    evidence_key=f"continuity:{int(item.get('id') or 0)}",
-                    shelf="continuity_match",
-                    row_id=int(item.get("id") or 0),
-                    stable_key="",
-                    principal_scope_key=scope_key,
-                    source=str(item.get("source") or ""),
-                    content=f"{item.get('kind') or ''} {item.get('content') or ''}",
-                    metadata=continuity_metadata,
-                    source_updated_at=str(item.get("updated_at") or item.get("created_at") or ""),
-                )
-                bump("continuity_match")
+        if self._semantic_evidence_shelf_requested(shelf_filter, "profile"):
+            self._rebuild_profile_semantic_evidence(requested_scope_key=requested_scope_key, counts=counts)
+        if self._semantic_evidence_shelf_requested(shelf_filter, "task"):
+            self._rebuild_task_semantic_evidence(requested_scope_key=requested_scope_key, counts=counts)
+        if self._semantic_evidence_shelf_requested(shelf_filter, "operating"):
+            self._rebuild_operating_semantic_evidence(requested_scope_key=requested_scope_key, counts=counts)
+        if self._semantic_evidence_shelf_requested(shelf_filter, "corpus"):
+            self._rebuild_corpus_semantic_evidence(requested_scope_key=requested_scope_key, counts=counts)
+        if self._semantic_evidence_shelf_requested(shelf_filter, "graph"):
+            self._rebuild_graph_semantic_evidence(requested_scope_key=requested_scope_key, counts=counts)
+        if self._semantic_evidence_shelf_requested(shelf_filter, "continuity", "continuity_match"):
+            self._rebuild_continuity_semantic_evidence(requested_scope_key=requested_scope_key, counts=counts)
 
         self.conn.commit()
         return {
