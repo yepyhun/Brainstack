@@ -16,6 +16,17 @@ from .runtime import (
 )
 
 class Tier2WorkerMixin(ProviderRuntimeBase):
+    _config: Dict[str, Any]
+    _store: Any
+    _tier2_batch_history: List[Dict[str, Any]]
+    _tier2_followup_requested: bool
+    _tier2_lock: Any
+    _tier2_max_tokens: int
+    _tier2_running: bool
+    _tier2_thread: threading.Thread | None
+    _tier2_timeout_seconds: float
+    _tier2_transcript_limit: int
+
     def shutdown(self) -> None:
         worker_finished = self._wait_for_tier2_worker(timeout=self._tier2_timeout_seconds + 2.0)
         if not worker_finished:
@@ -90,9 +101,8 @@ class Tier2WorkerMixin(ProviderRuntimeBase):
                 self._tier2_running = False
                 self._tier2_thread = None
 
-    def _run_tier2_batch(self, *, session_id: str, turn_number: int, trigger_reason: str) -> Dict[str, Any]:
-        started_monotonic = time.monotonic()
-        result: Dict[str, Any] = {
+    def _tier2_base_result(self, *, session_id: str, turn_number: int, trigger_reason: str) -> Dict[str, Any]:
+        return {
             "run_id": hashlib.sha256(
                 f"{session_id}|{turn_number}|{trigger_reason}|{time.time_ns()}".encode("utf-8")
             ).hexdigest()[:24],
@@ -114,60 +124,52 @@ class Tier2WorkerMixin(ProviderRuntimeBase):
             "duration_ms": 0,
             "status": "not_run",
         }
-        if not self._store:
-            result["status"] = "skipped_no_store"
-            result["request_status"] = "skipped"
-            result["no_op_reasons"] = ["store_unavailable"]
-            result["duration_ms"] = int((time.monotonic() - started_monotonic) * 1000)
-            return result
-        transcript_rows = [
+
+    def _tier2_finish_result(
+        self,
+        result: Dict[str, Any],
+        *,
+        started_monotonic: float,
+        record: bool,
+    ) -> Dict[str, Any]:
+        result["duration_ms"] = int((time.monotonic() - started_monotonic) * 1000)
+        if record:
+            self._record_tier2_batch_result(result)
+        return result
+
+    def _tier2_transcript_rows(self, *, session_id: str) -> List[Dict[str, Any]]:
+        if self._store is None:
+            return []
+        return [
             row
             for row in reversed(self._store.recent_transcript(session_id=session_id, limit=self._tier2_transcript_limit))
             if str(row.get("kind", "")) == "turn"
         ]
-        result["transcript_turn_numbers"] = [int(row.get("turn_number") or 0) for row in transcript_rows]
-        result["transcript_ids"] = [int(row["id"]) for row in transcript_rows if row.get("id") is not None]
-        result["transcript_count"] = len(transcript_rows)
-        consolidation_source = build_consolidation_source(transcript_rows, source_kind="transcript")
-        result["consolidation_source"] = dict(consolidation_source)
-        if not transcript_rows:
-            result["status"] = "skipped_no_transcript"
-            result["request_status"] = "skipped"
-            result["no_op_reasons"] = ["no_eligible_transcript_turns"]
-            result["duration_ms"] = int((time.monotonic() - started_monotonic) * 1000)
-            self._record_tier2_batch_result(result)
-            return result
+
+    def _run_tier2_extractor(
+        self,
+        transcript_rows: List[Dict[str, Any]],
+        *,
+        session_id: str,
+        turn_number: int,
+        trigger_reason: str,
+    ) -> Dict[str, Any]:
         extractor = self._config.get("_tier2_extractor")
-        try:
-            if callable(extractor):
-                extracted = extractor(
-                    transcript_rows,
-                    session_id=session_id,
-                    turn_number=turn_number,
-                    trigger_reason=trigger_reason,
-                )
-            else:
-                extracted = extract_tier2_candidates(
-                    transcript_rows,
-                    transcript_limit=self._tier2_transcript_limit,
-                    timeout_seconds=self._tier2_timeout_seconds,
-                    max_tokens=self._tier2_max_tokens,
-                )
-        except Exception as exc:
-            result["status"] = "failed"
-            result["request_status"] = "failed"
-            result["error_reason"] = str(exc)
-            result["duration_ms"] = int((time.monotonic() - started_monotonic) * 1000)
-            self._record_tier2_batch_result(result)
-            return result
-        if not isinstance(extracted, dict):
-            result["status"] = "failed"
-            result["request_status"] = "failed"
-            result["json_parse_status"] = "invalid_payload"
-            result["error_reason"] = "Tier-2 extractor returned a non-dict payload."
-            result["duration_ms"] = int((time.monotonic() - started_monotonic) * 1000)
-            self._record_tier2_batch_result(result)
-            return result
+        if callable(extractor):
+            return extractor(
+                transcript_rows,
+                session_id=session_id,
+                turn_number=turn_number,
+                trigger_reason=trigger_reason,
+            )
+        return extract_tier2_candidates(
+            transcript_rows,
+            transcript_limit=self._tier2_transcript_limit,
+            timeout_seconds=self._tier2_timeout_seconds,
+            max_tokens=self._tier2_max_tokens,
+        )
+
+    def _annotate_tier2_payload(self, result: Dict[str, Any], extracted: Dict[str, Any]) -> Dict[str, int]:
         result["request_status"] = "ok"
         extracted_meta = extracted.get("_meta") if isinstance(extracted, dict) else {}
         result["json_parse_status"] = str((extracted_meta or {}).get("json_parse_status") or "unknown")
@@ -188,6 +190,11 @@ class Tier2WorkerMixin(ProviderRuntimeBase):
         result["extracted_counts"] = extracted_counts
         if not any(int(value or 0) for value in extracted_counts.values()):
             result["no_op_reasons"].append("extractor_returned_empty_payload")
+        result["temporal_event_samples"] = self._tier2_temporal_event_samples(extracted)
+        result["typed_entity_samples"] = self._tier2_typed_entity_samples(extracted)
+        return extracted_counts
+
+    def _tier2_temporal_event_samples(self, extracted: Dict[str, Any]) -> List[Dict[str, Any]]:
         temporal_event_samples: List[Dict[str, Any]] = []
         for event in list(extracted.get("temporal_events", []) or [])[:6]:
             if not isinstance(event, dict):
@@ -198,7 +205,9 @@ class Tier2WorkerMixin(ProviderRuntimeBase):
                     "content": str(event.get("content") or "").strip(),
                 }
             )
-        result["temporal_event_samples"] = temporal_event_samples
+        return temporal_event_samples
+
+    def _tier2_typed_entity_samples(self, extracted: Dict[str, Any]) -> List[Dict[str, Any]]:
         typed_entity_samples: List[Dict[str, Any]] = []
         for entity in list(extracted.get("typed_entities", []) or [])[:4]:
             if not isinstance(entity, dict):
@@ -211,7 +220,20 @@ class Tier2WorkerMixin(ProviderRuntimeBase):
                     "attributes": dict(entity.get("attributes") or {}),
                 }
             )
-        result["typed_entity_samples"] = typed_entity_samples
+        return typed_entity_samples
+
+    def _reconcile_tier2_payload(
+        self,
+        *,
+        session_id: str,
+        turn_number: int,
+        trigger_reason: str,
+        extracted: Dict[str, Any],
+        transcript_rows: List[Dict[str, Any]],
+        consolidation_source: Dict[str, Any],
+    ) -> tuple[Dict[str, int], int, Dict[str, Any]]:
+        if self._store is None:
+            return {}, 0, {}
         reconcile_report = reconcile_tier2_candidates(
             self._store,
             session_id=session_id,
@@ -253,6 +275,54 @@ class Tier2WorkerMixin(ProviderRuntimeBase):
                 },
             ),
         }
+        return action_counts, writes_performed, operating_promotions
+
+    def _run_tier2_batch(self, *, session_id: str, turn_number: int, trigger_reason: str) -> Dict[str, Any]:
+        started_monotonic = time.monotonic()
+        result = self._tier2_base_result(session_id=session_id, turn_number=turn_number, trigger_reason=trigger_reason)
+        if not self._store:
+            result["status"] = "skipped_no_store"
+            result["request_status"] = "skipped"
+            result["no_op_reasons"] = ["store_unavailable"]
+            return self._tier2_finish_result(result, started_monotonic=started_monotonic, record=False)
+        transcript_rows = self._tier2_transcript_rows(session_id=session_id)
+        result["transcript_turn_numbers"] = [int(row.get("turn_number") or 0) for row in transcript_rows]
+        result["transcript_ids"] = [int(row["id"]) for row in transcript_rows if row.get("id") is not None]
+        result["transcript_count"] = len(transcript_rows)
+        consolidation_source = build_consolidation_source(transcript_rows, source_kind="transcript")
+        result["consolidation_source"] = dict(consolidation_source)
+        if not transcript_rows:
+            result["status"] = "skipped_no_transcript"
+            result["request_status"] = "skipped"
+            result["no_op_reasons"] = ["no_eligible_transcript_turns"]
+            return self._tier2_finish_result(result, started_monotonic=started_monotonic, record=True)
+        try:
+            extracted = self._run_tier2_extractor(
+                transcript_rows,
+                session_id=session_id,
+                turn_number=turn_number,
+                trigger_reason=trigger_reason,
+                )
+        except Exception as exc:
+            result["status"] = "failed"
+            result["request_status"] = "failed"
+            result["error_reason"] = str(exc)
+            return self._tier2_finish_result(result, started_monotonic=started_monotonic, record=True)
+        if not isinstance(extracted, dict):
+            result["status"] = "failed"
+            result["request_status"] = "failed"
+            result["json_parse_status"] = "invalid_payload"
+            result["error_reason"] = "Tier-2 extractor returned a non-dict payload."
+            return self._tier2_finish_result(result, started_monotonic=started_monotonic, record=True)
+        self._annotate_tier2_payload(result, extracted)
+        action_counts, writes_performed, operating_promotions = self._reconcile_tier2_payload(
+            session_id=session_id,
+            turn_number=turn_number,
+            trigger_reason=trigger_reason,
+            extracted=extracted,
+            transcript_rows=transcript_rows,
+            consolidation_source=consolidation_source,
+        )
         result["action_counts"] = action_counts
         result["writes_performed"] = writes_performed
         result["operating_promotions"] = operating_promotions
@@ -261,6 +331,4 @@ class Tier2WorkerMixin(ProviderRuntimeBase):
         if action_counts and set(action_counts).issubset({"NONE", "REJECT_ASSISTANT_AUTHORED"}):
             result["no_op_reasons"].append("all_candidates_rejected_or_noop")
         result["status"] = "ok"
-        result["duration_ms"] = int((time.monotonic() - started_monotonic) * 1000)
-        self._record_tier2_batch_result(result)
-        return result
+        return self._tier2_finish_result(result, started_monotonic=started_monotonic, record=True)
