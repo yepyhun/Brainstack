@@ -467,6 +467,139 @@ def _append_block(lines: List[str], block: List[str], *, char_budget: int) -> bo
     return True
 
 
+def _single_value_block(title: str, value: str, *, limit: int) -> List[str]:
+    if not value:
+        return []
+    return ["", title, f"- {_trim(value, limit)}"]
+
+
+def _line_list_block(title: str, values: Iterable[str], *, limit: int) -> List[str]:
+    rows = list(values)
+    if not rows:
+        return []
+    block = ["", title]
+    for value in rows:
+        block.append(f"- {_trim(value, limit)}")
+    return block
+
+
+def _live_system_state_block(live_system_state: Iterable[str]) -> List[str]:
+    rows = list(live_system_state)
+    if not rows:
+        return []
+    block = ["", "Supporting live runtime state (not workstream truth):"]
+    for item in rows:
+        block.append(f"- {_trim(item, 180)}")
+    block.append("- This section is only authoritative for runtime mechanisms such as scheduler/pulse health.")
+    block.append("- Do not use this section to answer current user project status or the agent's assigned workstream.")
+    return block
+
+
+def _runtime_approval_policy_block(runtime_approval_policy: Mapping[str, Any]) -> List[str]:
+    if not bool(runtime_approval_policy.get("present")):
+        return []
+    policy_lines = ["", "Runtime approval policy:"]
+    content = _normalize_text(runtime_approval_policy.get("content"))
+    if content:
+        policy_lines.append(f"- {_trim(content, 180)}")
+    for entry in list(runtime_approval_policy.get("domains") or [])[:6]:
+        if not isinstance(entry, Mapping):
+            continue
+        name = _normalize_text(entry.get("name"))
+        if not name:
+            continue
+        action = _normalize_text(entry.get("default_action")) or (
+            "ask_user" if bool(entry.get("approval_required")) else "auto_approved"
+        )
+        risk_class = _normalize_text(entry.get("risk_class"))
+        detail = f"{name}: {action}"
+        if risk_class:
+            detail += f" ({risk_class})"
+        policy_lines.append(f"- {_trim(detail, 180)}")
+    return policy_lines
+
+
+def _canonical_policy_block(canonical_policy: Mapping[str, Any]) -> List[str]:
+    if not bool(canonical_policy.get("present")):
+        return []
+    canonical_lines = ["", "Canonical policy:"]
+    for rule in list(canonical_policy.get("rules") or [])[:4]:
+        if not isinstance(rule, Mapping):
+            continue
+        content = _normalize_text(rule.get("content"))
+        if not content:
+            continue
+        rule_class = _normalize_text(rule.get("rule_class"))
+        prefix = f"[{rule_class}] " if rule_class else ""
+        canonical_lines.append(f"- {prefix}{_trim(content, 180)}")
+    return canonical_lines
+
+
+def _runtime_handoff_tasks_block(runtime_handoff_tasks: Iterable[Any]) -> List[str]:
+    tasks = list(runtime_handoff_tasks)
+    if not tasks:
+        return []
+    handoff_lines = ["", "Runtime handoff tasks:"]
+    for task in tasks[:4]:
+        if not isinstance(task, Mapping):
+            continue
+        title = _normalize_text(task.get("title"))
+        if not title:
+            continue
+        suffix_bits = []
+        domain = _normalize_text(task.get("domain"))
+        action = _normalize_text(task.get("action"))
+        if domain:
+            suffix_bits.append(domain)
+        if action:
+            suffix_bits.append(action)
+        if bool(task.get("approval_required")):
+            suffix_bits.append("approval required")
+        suffix = f" [{' | '.join(suffix_bits)}]" if suffix_bits else ""
+        handoff_lines.append(f"- {_trim(title, 150)}{suffix}")
+    return handoff_lines
+
+
+def _stable_profile_entries_block(stable_profile_entries: Iterable[Any]) -> List[str]:
+    entries = list(stable_profile_entries)
+    if not entries:
+        return []
+    profile_lines = ["", "Stable project signals:"]
+    for entry in entries[:4]:
+        if not isinstance(entry, Mapping):
+            continue
+        label = str(entry.get("category") or "profile").replace("_", " ")
+        profile_lines.append(f"- [{label}] {_trim(entry.get('content'), 160)}")
+    return profile_lines
+
+
+def _external_owner_pointer_block(external_owner_pointers: Iterable[Any]) -> List[str]:
+    pointers = list(external_owner_pointers)
+    if not pointers:
+        return []
+    pointer_lines = ["", "External owner pointers:"]
+    for pointer in pointers[:4]:
+        if isinstance(pointer, Mapping):
+            pointer_lines.append(f"- {_trim(pointer.get('content'), 180)}")
+    return pointer_lines
+
+
+def _session_recovery_contract_block(session_recovery_contract: Mapping[str, Any]) -> List[str]:
+    if not session_recovery_contract:
+        return []
+    recovery_lines = ["", "Session recovery contract:"]
+    ordered = list(session_recovery_contract.get("ordered_checks") or [])
+    for item in ordered[:5]:
+        if not isinstance(item, Mapping):
+            continue
+        surface = _normalize_text(item.get("surface")).replace("_", " ")
+        purpose = _normalize_text(item.get("purpose"))
+        if not surface:
+            continue
+        recovery_lines.append(f"- {surface}: {_trim(purpose or 'startup check', 120)}")
+    return recovery_lines
+
+
 def render_operating_context_section(
     snapshot: Mapping[str, Any] | None,
     *,
@@ -504,162 +637,34 @@ def render_operating_context_section(
     external_owner_pointers = list(snapshot.get("external_owner_pointers") or [])
 
     content_added = False
-
-    if active_work_summary:
-        content_added = _append_block(
-            lines,
-            [
-                "",
-                "Current work:",
-                f"- {_trim(active_work_summary, 220)}",
-            ],
-            char_budget=char_budget,
-        ) or content_added
-
-    if recent_work_summary and recent_work_summary != active_work_summary:
-        content_added = _append_block(
-            lines,
-            [
-                "",
-                "Recent work checkpoint:",
-                f"- {_trim(recent_work_summary, 220)}",
-            ],
-            char_budget=char_budget,
-        ) or content_added
-
-    if open_decisions:
-        decision_lines = ["", "Open decisions:"]
-        for decision in open_decisions:
-            decision_lines.append(f"- {_trim(decision, 180)}")
-        content_added = _append_block(lines, decision_lines, char_budget=char_budget) or content_added
-
-    if current_commitments:
-        commitment_lines = ["", "Current commitments:"]
-        for commitment in current_commitments:
-            commitment_lines.append(f"- {_trim(commitment, 180)}")
-        content_added = _append_block(lines, commitment_lines, char_budget=char_budget) or content_added
-
-    if next_steps:
-        next_step_lines = ["", "Next steps:"]
-        for next_step in next_steps:
-            next_step_lines.append(f"- {_trim(next_step, 180)}")
-        content_added = _append_block(lines, next_step_lines, char_budget=char_budget) or content_added
-
-    if live_system_state:
-        live_state_lines = ["", "Supporting live runtime state (not workstream truth):"]
-        for item in live_system_state:
-            live_state_lines.append(f"- {_trim(item, 180)}")
-        live_state_lines.append(
-            "- This section is only authoritative for runtime mechanisms such as scheduler/pulse health."
-        )
-        live_state_lines.append(
-            "- Do not use this section to answer current user project status or the agent's assigned workstream."
-        )
-        content_added = _append_block(lines, live_state_lines, char_budget=char_budget) or content_added
-
-    if bool(runtime_approval_policy.get("present")):
-        policy_lines = ["", "Runtime approval policy:"]
-        content = _normalize_text(runtime_approval_policy.get("content"))
-        if content:
-            policy_lines.append(f"- {_trim(content, 180)}")
-        for entry in list(runtime_approval_policy.get("domains") or [])[:6]:
-            if not isinstance(entry, Mapping):
-                continue
-            name = _normalize_text(entry.get("name"))
-            if not name:
-                continue
-            action = _normalize_text(entry.get("default_action")) or (
-                "ask_user" if bool(entry.get("approval_required")) else "auto_approved"
-            )
-            risk_class = _normalize_text(entry.get("risk_class"))
-            detail = f"{name}: {action}"
-            if risk_class:
-                detail += f" ({risk_class})"
-            policy_lines.append(f"- {_trim(detail, 180)}")
-        content_added = _append_block(lines, policy_lines, char_budget=char_budget) or content_added
-
-    if bool(canonical_policy.get("present")):
-        canonical_lines = ["", "Canonical policy:"]
-        for rule in list(canonical_policy.get("rules") or [])[:4]:
-            if not isinstance(rule, Mapping):
-                continue
-            content = _normalize_text(rule.get("content"))
-            if not content:
-                continue
-            rule_class = _normalize_text(rule.get("rule_class"))
-            prefix = f"[{rule_class}] " if rule_class else ""
-            canonical_lines.append(f"- {prefix}{_trim(content, 180)}")
-        content_added = _append_block(lines, canonical_lines, char_budget=char_budget) or content_added
-
-    if runtime_handoff_tasks:
-        handoff_lines = ["", "Runtime handoff tasks:"]
-        for task in runtime_handoff_tasks[:4]:
-            if not isinstance(task, Mapping):
-                continue
-            title = _normalize_text(task.get("title"))
-            if not title:
-                continue
-            suffix_bits = []
-            domain = _normalize_text(task.get("domain"))
-            action = _normalize_text(task.get("action"))
-            if domain:
-                suffix_bits.append(domain)
-            if action:
-                suffix_bits.append(action)
-            if bool(task.get("approval_required")):
-                suffix_bits.append("approval required")
-            suffix = f" [{' | '.join(suffix_bits)}]" if suffix_bits else ""
-            handoff_lines.append(f"- {_trim(title, 150)}{suffix}")
-        content_added = _append_block(lines, handoff_lines, char_budget=char_budget) or content_added
-
-    if completed_outcomes:
-        outcome_lines = ["", "Completed outcomes:"]
-        for outcome in completed_outcomes:
-            outcome_lines.append(f"- {_trim(outcome, 180)}")
-        content_added = _append_block(lines, outcome_lines, char_budget=char_budget) or content_added
-
-    if discarded_work:
-        discarded_lines = ["", "Discarded or superseded work:"]
-        for item in discarded_work:
-            discarded_lines.append(f"- {_trim(item, 180)}")
-        content_added = _append_block(lines, discarded_lines, char_budget=char_budget) or content_added
-
-    if stable_profile_entries:
-        profile_lines = ["", "Stable project signals:"]
-        for entry in stable_profile_entries[:4]:
-            label = str(entry.get("category") or "profile").replace("_", " ")
-            profile_lines.append(f"- [{label}] {_trim(entry.get('content'), 160)}")
-        content_added = _append_block(lines, profile_lines, char_budget=char_budget) or content_added
-
-    if bool(session_state.get("active")) and proactive_guidance:
-        content_added = _append_block(
-            lines,
-            [
-                "",
-                "Proactive continuity rule:",
-                f"- {_trim(proactive_guidance, 220)}",
-            ],
-            char_budget=char_budget,
-        ) or content_added
-
-    if external_owner_pointers:
-        pointer_lines = ["", "External owner pointers:"]
-        for pointer in external_owner_pointers[:4]:
-            pointer_lines.append(f"- {_trim(pointer.get('content'), 180)}")
-        content_added = _append_block(lines, pointer_lines, char_budget=char_budget) or content_added
-
-    if session_recovery_contract:
-        recovery_lines = ["", "Session recovery contract:"]
-        ordered = list(session_recovery_contract.get("ordered_checks") or [])
-        for item in ordered[:5]:
-            if not isinstance(item, Mapping):
-                continue
-            surface = _normalize_text(item.get("surface")).replace("_", " ")
-            purpose = _normalize_text(item.get("purpose"))
-            if not surface:
-                continue
-            recovery_lines.append(f"- {surface}: {_trim(purpose or 'startup check', 120)}")
-        content_added = _append_block(lines, recovery_lines, char_budget=char_budget) or content_added
+    blocks = [
+        _single_value_block("Current work:", active_work_summary, limit=220),
+        _single_value_block(
+            "Recent work checkpoint:",
+            recent_work_summary if recent_work_summary != active_work_summary else "",
+            limit=220,
+        ),
+        _line_list_block("Open decisions:", open_decisions, limit=180),
+        _line_list_block("Current commitments:", current_commitments, limit=180),
+        _line_list_block("Next steps:", next_steps, limit=180),
+        _live_system_state_block(live_system_state),
+        _runtime_approval_policy_block(runtime_approval_policy),
+        _canonical_policy_block(canonical_policy),
+        _runtime_handoff_tasks_block(runtime_handoff_tasks),
+        _line_list_block("Completed outcomes:", completed_outcomes, limit=180),
+        _line_list_block("Discarded or superseded work:", discarded_work, limit=180),
+        _stable_profile_entries_block(stable_profile_entries),
+        _single_value_block(
+            "Proactive continuity rule:",
+            proactive_guidance if bool(session_state.get("active")) else "",
+            limit=220,
+        ),
+        _external_owner_pointer_block(external_owner_pointers),
+        _session_recovery_contract_block(session_recovery_contract),
+    ]
+    for block in blocks:
+        if block:
+            content_added = _append_block(lines, block, char_budget=char_budget) or content_added
 
     if content_added and owner_boundary:
         _append_block(
