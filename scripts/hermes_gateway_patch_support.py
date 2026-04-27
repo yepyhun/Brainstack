@@ -122,7 +122,11 @@ def _sha256(path: Path) -> str:
 
 
 def patch_files() -> list[Path]:
-    return sorted(PATCH_DIR.glob("*.patch"))
+    return [
+        path
+        for path in sorted(PATCH_DIR.glob("*.patch"))
+        if not path.name.startswith("002-hermes-heartbeat-wake-lane")
+    ]
 
 
 def patch_bundle_manifest() -> dict[str, Any]:

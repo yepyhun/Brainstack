@@ -22,6 +22,7 @@ from .storage.profile_read_store import ProfileReadStoreMixin
 from .storage.corpus_store import CorpusStoreMixin
 from .storage.semantic_index_store import SemanticIndexStoreMixin
 from .storage.graph_state_store import GraphStateStoreMixin
+from .storage.proactive_store import ProactiveStoreMixin
 from .storage.telemetry_store import TelemetryStoreMixin
 
 __all__ = ["BrainstackStore", "utc_now_iso"]
@@ -38,6 +39,7 @@ class BrainstackStore(
     CorpusStoreMixin,
     SemanticIndexStoreMixin,
     GraphStateStoreMixin,
+    ProactiveStoreMixin,
     TelemetryStoreMixin,
 ):
     def __init__(
@@ -77,6 +79,7 @@ class BrainstackStore(
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
+        self._init_proactive_schema_if_needed()
         self._backfill_legacy_principal_scoped_profiles_if_needed()
         self._run_compatibility_migrations_if_needed()
         try:

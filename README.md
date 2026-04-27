@@ -11,6 +11,8 @@ It is a composite `MemoryProvider` for persistent agents: profile memory, sessio
 
 The current installer also carries the optimized Hermes Gateway runtime path with it: fresh Hermes checkouts can receive the TurnContract, tool-profile, context-budget, provider-SLO, simple-renderer, stale-response, and heavy-tool metadata support Brainstack expects for fast stateful conversation.
 
+Optional bonus: this repo also includes a **Hermes Proactive Extension** under `extensions/hermes_proactive/`. It is not part of the Brainstack memory kernel. The wizard can install it only when explicitly requested, so operators can decide whether they want heartbeat/PulseProducer/Evolver-style proactivity on top of Brainstack. Brainstack provides the memory projection SDK; Hermes owns the runtime behavior. The extension itself uses stdlib plus Brainstack; it can read Evolver health signals, but it does not silently install Evolver or its dependencies.
+
 The promise is simple:
 
 - better long-horizon memory for always-on Hermes agents

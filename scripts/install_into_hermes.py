@@ -33,6 +33,7 @@ from hermes_gateway_patch_support import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PLUGIN = REPO_ROOT / "brainstack"
 SOURCE_HOST_PAYLOAD = REPO_ROOT / "host_payload"
+SOURCE_HERMES_PROACTIVE_EXTENSION = REPO_ROOT / "extensions" / "hermes_proactive"
 BACKEND_DEPENDENCIES = {
     "kuzu": "kuzu",
     "chromadb": "chromadb",
@@ -3210,6 +3211,11 @@ def main() -> int:
         help="Deprecated alias for --gateway-patch-mode skip.",
     )
     parser.add_argument(
+        "--install-hermes-proactive-extension",
+        action="store_true",
+        help="Install the optional Hermes proactive runtime extension in disabled/dry-run form.",
+    )
+    parser.add_argument(
         "--check-release-hygiene",
         action="store_true",
         help="Fail if tracked or staged files include private runtime paths or high-confidence secrets.",
@@ -3311,6 +3317,18 @@ def main() -> int:
     deps_result = _ensure_backend_dependencies(selected_python, dry_run=args.dry_run, skip_deps=args.skip_deps)
 
     host_helper_files: list[dict[str, str]] = []
+    hermes_proactive_extension: dict[str, Any] = {"status": "skipped", "reason": "not_requested"}
+    if args.install_hermes_proactive_extension:
+        extension_target = target / "extensions" / "hermes_proactive"
+        extension_files = _copy_tree(SOURCE_HERMES_PROACTIVE_EXTENSION, extension_target, args.dry_run)
+        hermes_proactive_extension = {
+            "status": "planned" if args.dry_run else "installed",
+            "source": str(SOURCE_HERMES_PROACTIVE_EXTENSION),
+            "target": str(extension_target),
+            "files": extension_files,
+            "mode": "dry_run",
+            "dependency_policy": "stdlib_plus_brainstack_sdk",
+        }
 
     gateway_patch_mode = "skip" if args.skip_hermes_gateway_patches else args.gateway_patch_mode
     try:
@@ -3371,6 +3389,7 @@ def main() -> int:
         "files": files,
         "helper_files": helper_files,
         "host_helper_files": host_helper_files,
+        "hermes_proactive_extension": hermes_proactive_extension,
         "host_patches": host_patches,
         "host_patch_inventory": _selected_host_patch_inventory(args.runtime, args.host_patch_mode),
         "hermes_gateway_patches": hermes_gateway_patches,
@@ -3388,6 +3407,7 @@ def main() -> int:
     action = "DRY-RUN" if args.dry_run else "INSTALLED"
     print(f"{action} Brainstack payload files: {len(files)}")
     print(f"{action} helper files: {len(helper_files)}")
+    print(f"{action} Hermes proactive extension: {hermes_proactive_extension.get('status')}")
     inventory = _selected_host_patch_inventory(args.runtime, args.host_patch_mode)
     selected_inventory = [item for item in inventory if item.get("selected")]
     skipped_inventory = [item for item in inventory if not item.get("selected")]

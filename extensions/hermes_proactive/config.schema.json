@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hermes Proactive Extension Config",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["disabled", "dry_run", "live"],
+      "default": "dry_run"
+    },
+    "heartbeat_interval_seconds": {
+      "type": "integer",
+      "minimum": 60,
+      "default": 600
+    },
+    "delivery_target": {
+      "type": "string",
+      "default": "proactive_runtime"
+    }
+  }
+}

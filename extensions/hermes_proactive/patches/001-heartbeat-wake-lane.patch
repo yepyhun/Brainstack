@@ -1,0 +1,294 @@
+diff --git a/gateway/heartbeat_wake.py b/gateway/heartbeat_wake.py
+new file mode 100644
+index 00000000..e34ad27e
+--- /dev/null
++++ b/gateway/heartbeat_wake.py
+@@ -0,0 +1,159 @@
++"""Hermes-owned heartbeat wake lane contracts.
++
++This module is intentionally runtime-local. It does not import Brainstack and it
++does not call providers, write chat transcripts, or deliver messages. It only
++classifies heartbeat wake requests so the host can decide whether a background
++producer may run.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass, field
++from datetime import UTC, datetime, timedelta
++from enum import Enum
++from typing import Mapping
++
++
++HEARTBEAT_WAKE_SCHEMA = "hermes.heartbeat_wake.v1"
++
++
++class HeartbeatWakeDecision(str, Enum):
++    """Decision for a heartbeat wake request."""
++
++    READY = "ready"
++    COALESCED = "coalesced"
++    RETRY_LATER = "retry_later"
++    STALE_CANCELLED = "stale_cancelled"
++    DISABLED = "disabled"
++
++
++class HeartbeatWakeReason(str, Enum):
++    """Stable reason codes for wake inspection."""
++
++    READY_TO_RUN = "READY_TO_RUN"
++    DUPLICATE_IN_FLIGHT = "DUPLICATE_IN_FLIGHT"
++    MAIN_LANE_BUSY = "MAIN_LANE_BUSY"
++    STALE_RUNNING_LOCK = "STALE_RUNNING_LOCK"
++    HEARTBEAT_DISABLED = "HEARTBEAT_DISABLED"
++
++
++@dataclass(frozen=True)
++class HeartbeatWakeRequest:
++    """Structured wake request from cron/platform/runtime."""
++
++    target: str
++    source: str = "heartbeat"
++    run_id: str | None = None
++    idempotency_key: str | None = None
++    requested_at: datetime | None = None
++    metadata: Mapping[str, str] = field(default_factory=dict)
++
++    def effective_idempotency_key(self) -> str:
++        if self.idempotency_key:
++            return self.idempotency_key
++        if self.run_id:
++            return f"{self.source}:{self.target}:{self.run_id}"
++        day_bucket = (self.requested_at or datetime.now(UTC)).strftime("%Y%m%d%H%M")
++        return f"{self.source}:{self.target}:{day_bucket}"
++
++
++@dataclass(frozen=True)
++class HeartbeatWakeState:
++    """Host-observed state used to classify the next wake."""
++
++    enabled: bool = True
++    main_lane_busy: bool = False
++    running_idempotency_key: str | None = None
++    running_since: datetime | None = None
++    last_completed_idempotency_key: str | None = None
++    stale_after_seconds: int = 900
++
++
++@dataclass(frozen=True)
++class HeartbeatWakeResult:
++    """Inspectable wake decision. Zero provider/chat side effects by design."""
++
++    schema: str
++    decision: HeartbeatWakeDecision
++    reason_code: HeartbeatWakeReason
++    idempotency_key: str
++    target: str
++    provider_calls: int = 0
++    transcript_writes: int = 0
++    delivery_requested: bool = False
++    retry_after_seconds: int | None = None
++    stale_lock_cancelled: bool = False
++
++    def to_dict(self) -> dict[str, object]:
++        return {
++            "schema": self.schema,
++            "decision": self.decision.value,
++            "reason_code": self.reason_code.value,
++            "idempotency_key": self.idempotency_key,
++            "target": self.target,
++            "provider_calls": self.provider_calls,
++            "transcript_writes": self.transcript_writes,
++            "delivery_requested": self.delivery_requested,
++            "retry_after_seconds": self.retry_after_seconds,
++            "stale_lock_cancelled": self.stale_lock_cancelled,
++        }
++
++
++def classify_heartbeat_wake(
++    request: HeartbeatWakeRequest,
++    state: HeartbeatWakeState,
++    *,
++    now: datetime | None = None,
++) -> HeartbeatWakeResult:
++    """Classify a heartbeat wake request without model/provider side effects."""
++
++    timestamp = now or datetime.now(UTC)
++    key = request.effective_idempotency_key()
++
++    if not state.enabled:
++        return HeartbeatWakeResult(
++            schema=HEARTBEAT_WAKE_SCHEMA,
++            decision=HeartbeatWakeDecision.DISABLED,
++            reason_code=HeartbeatWakeReason.HEARTBEAT_DISABLED,
++            idempotency_key=key,
++            target=request.target,
++        )
++
++    if state.running_idempotency_key == key:
++        return HeartbeatWakeResult(
++            schema=HEARTBEAT_WAKE_SCHEMA,
++            decision=HeartbeatWakeDecision.COALESCED,
++            reason_code=HeartbeatWakeReason.DUPLICATE_IN_FLIGHT,
++            idempotency_key=key,
++            target=request.target,
++        )
++
++    if state.running_idempotency_key and state.running_since:
++        stale_after = timedelta(seconds=max(state.stale_after_seconds, 1))
++        if timestamp - state.running_since > stale_after:
++            return HeartbeatWakeResult(
++                schema=HEARTBEAT_WAKE_SCHEMA,
++                decision=HeartbeatWakeDecision.STALE_CANCELLED,
++                reason_code=HeartbeatWakeReason.STALE_RUNNING_LOCK,
++                idempotency_key=key,
++                target=request.target,
++                stale_lock_cancelled=True,
++            )
++
++    if state.main_lane_busy:
++        return HeartbeatWakeResult(
++            schema=HEARTBEAT_WAKE_SCHEMA,
++            decision=HeartbeatWakeDecision.RETRY_LATER,
++            reason_code=HeartbeatWakeReason.MAIN_LANE_BUSY,
++            idempotency_key=key,
++            target=request.target,
++            retry_after_seconds=30,
++        )
++
++    return HeartbeatWakeResult(
++        schema=HEARTBEAT_WAKE_SCHEMA,
++        decision=HeartbeatWakeDecision.READY,
++        reason_code=HeartbeatWakeReason.READY_TO_RUN,
++        idempotency_key=key,
++        target=request.target,
++    )
+diff --git a/scripts/hermes_heartbeat_wake_probe.py b/scripts/hermes_heartbeat_wake_probe.py
+new file mode 100644
+index 00000000..60e17bfc
+--- /dev/null
++++ b/scripts/hermes_heartbeat_wake_probe.py
+@@ -0,0 +1,45 @@
++#!/usr/bin/env python3
++"""Print deterministic heartbeat wake proof for Gateway doctor/canary use."""
++
++from __future__ import annotations
++
++import json
++import sys
++from datetime import UTC, datetime, timedelta
++from pathlib import Path
++
++REPO_ROOT = Path(__file__).resolve().parents[1]
++if str(REPO_ROOT) not in sys.path:
++    sys.path.insert(0, str(REPO_ROOT))
++
++from gateway.heartbeat_wake import (
++    HeartbeatWakeRequest,
++    HeartbeatWakeState,
++    classify_heartbeat_wake,
++)
++
++
++def main() -> int:
++    now = datetime(2026, 1, 1, tzinfo=UTC)
++    request = HeartbeatWakeRequest(target="bestie", run_id="probe", requested_at=now)
++    scenarios = {
++        "ready": HeartbeatWakeState(),
++        "duplicate": HeartbeatWakeState(running_idempotency_key=request.effective_idempotency_key()),
++        "busy": HeartbeatWakeState(main_lane_busy=True),
++        "stale": HeartbeatWakeState(
++            running_idempotency_key="old",
++            running_since=now - timedelta(seconds=901),
++            stale_after_seconds=900,
++        ),
++        "disabled": HeartbeatWakeState(enabled=False),
++    }
++    result = {
++        name: classify_heartbeat_wake(request, state, now=now).to_dict()
++        for name, state in scenarios.items()
++    }
++    print(json.dumps(result, sort_keys=True, indent=2))
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tests/gateway/test_heartbeat_wake.py b/tests/gateway/test_heartbeat_wake.py
+new file mode 100644
+index 00000000..2c854561
+--- /dev/null
++++ b/tests/gateway/test_heartbeat_wake.py
+@@ -0,0 +1,72 @@
++from __future__ import annotations
++
++from datetime import UTC, datetime, timedelta
++
++from gateway.heartbeat_wake import (
++    HeartbeatWakeDecision,
++    HeartbeatWakeReason,
++    HeartbeatWakeRequest,
++    HeartbeatWakeState,
++    classify_heartbeat_wake,
++)
++
++
++def test_ready_wake_has_zero_model_chat_delivery_side_effects() -> None:
++    request = HeartbeatWakeRequest(target="bestie", run_id="r1")
++
++    result = classify_heartbeat_wake(request, HeartbeatWakeState())
++
++    assert result.decision is HeartbeatWakeDecision.READY
++    assert result.reason_code is HeartbeatWakeReason.READY_TO_RUN
++    assert result.provider_calls == 0
++    assert result.transcript_writes == 0
++    assert result.delivery_requested is False
++
++
++def test_duplicate_wake_coalesces() -> None:
++    request = HeartbeatWakeRequest(target="bestie", run_id="r1")
++    state = HeartbeatWakeState(running_idempotency_key=request.effective_idempotency_key())
++
++    result = classify_heartbeat_wake(request, state)
++
++    assert result.decision is HeartbeatWakeDecision.COALESCED
++    assert result.reason_code is HeartbeatWakeReason.DUPLICATE_IN_FLIGHT
++    assert result.provider_calls == 0
++    assert result.transcript_writes == 0
++
++
++def test_busy_main_lane_retries_without_parallel_agent() -> None:
++    request = HeartbeatWakeRequest(target="bestie", run_id="r1")
++
++    result = classify_heartbeat_wake(request, HeartbeatWakeState(main_lane_busy=True))
++
++    assert result.decision is HeartbeatWakeDecision.RETRY_LATER
++    assert result.reason_code is HeartbeatWakeReason.MAIN_LANE_BUSY
++    assert result.retry_after_seconds == 30
++
++
++def test_stale_running_lock_is_cancelled_explicitly() -> None:
++    now = datetime(2026, 1, 1, tzinfo=UTC)
++    request = HeartbeatWakeRequest(target="bestie", run_id="r2", requested_at=now)
++    state = HeartbeatWakeState(
++        running_idempotency_key="old",
++        running_since=now - timedelta(seconds=901),
++        stale_after_seconds=900,
++    )
++
++    result = classify_heartbeat_wake(request, state, now=now)
++
++    assert result.decision is HeartbeatWakeDecision.STALE_CANCELLED
++    assert result.reason_code is HeartbeatWakeReason.STALE_RUNNING_LOCK
++    assert result.stale_lock_cancelled is True
++
++
++def test_disabled_wake_fails_closed() -> None:
++    request = HeartbeatWakeRequest(target="bestie", run_id="r1")
++
++    result = classify_heartbeat_wake(request, HeartbeatWakeState(enabled=False))
++
++    assert result.decision is HeartbeatWakeDecision.DISABLED
++    assert result.reason_code is HeartbeatWakeReason.HEARTBEAT_DISABLED
++    assert result.provider_calls == 0
++    assert result.transcript_writes == 0
