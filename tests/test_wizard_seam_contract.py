@@ -5,6 +5,7 @@ from pathlib import Path
 
 from brainstack.db import BrainstackStore
 from brainstack.retrieval import build_system_prompt_projection, render_working_memory_block
+from scripts import hermes_gateway_patch_support
 from scripts import install_into_hermes
 
 
@@ -181,3 +182,33 @@ def test_brainstack_payload_refuses_private_runtime_sources() -> None:
         assert "hermes-config/agent-smoke/config.yaml" in str(exc)
     else:
         raise AssertionError("private runtime payload was accepted")
+
+
+def test_gateway_patch_bundle_contains_capability_preserving_toolloader_patch() -> None:
+    manifest = hermes_gateway_patch_support.patch_bundle_manifest()
+    patch_names = {entry["name"] for entry in manifest["patches"]}
+
+    assert "002-capability-preserving-deferred-tool-schema.patch" in patch_names
+
+    patch_text = (
+        Path(__file__).resolve().parents[1]
+        / "patches"
+        / "hermes_gateway"
+        / "002-capability-preserving-deferred-tool-schema.patch"
+    ).read_text(encoding="utf-8")
+    assert "hermes_deferred_tools.py" in patch_text
+    assert "deferred_tool_schema_mode" in patch_text
+    assert "DISCORD_DEFAULT_CAPABILITY_PRESERVED" in patch_text
+    assert "TOOL_NOT_LOADED_OR_NOT_CONFIGURED" in patch_text
+
+
+def test_gateway_patch_probes_enforce_boost_only_toolloader_contract() -> None:
+    probes = hermes_gateway_patch_support.REQUIRED_GATEWAY_PROBES
+
+    assert "hermes_deferred_tools.py" in probes
+    assert "build_load_tools_schema" in probes["hermes_deferred_tools.py"]
+    assert "tool_load_continuation.v1" in probes["hermes_deferred_tools.py"]
+    assert "deferred_tool_schema_mode" in probes["run_agent.py"]
+    assert "direct_render_preflight" in probes["agent/memory_manager.py"]
+    assert "capability_preserving_default" in probes["gateway/turn_profiles.py"]
+    assert "generic_no_evidence_forbidden" in probes["gateway/memory_answer_renderer.py"]

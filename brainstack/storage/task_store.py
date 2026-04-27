@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .durable_write_guard import guard_and_normalize_durable_truth_metadata
 from .store_protocol import StoreRuntimeBase
 from .store_runtime import (
     Any,
@@ -48,12 +49,20 @@ class TaskStoreMixin(StoreRuntimeBase):
             "SELECT id, metadata_json FROM task_items WHERE stable_key = ?",
             (str(stable_key or "").strip(),),
         ).fetchone()
+        merged_metadata = _merge_record_metadata(
+            existing["metadata_json"] if existing else None,
+            _enrich_record_metadata_with_literals(metadata, text=title),
+            source=source,
+        )
+        merged_metadata = guard_and_normalize_durable_truth_metadata(
+            shelf="task",
+            source=source,
+            metadata=merged_metadata,
+            record_type=str(item_type or "").strip(),
+            slot=str(stable_key or "").strip(),
+        )
         meta_json = json.dumps(
-            _merge_record_metadata(
-                existing["metadata_json"] if existing else None,
-                _enrich_record_metadata_with_literals(metadata, text=title),
-                source=source,
-            ),
+            merged_metadata,
             ensure_ascii=True,
             sort_keys=True,
         )

@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +73,9 @@ REQUIRED_GATEWAY_PROBES: dict[str, tuple[str, ...]] = {
         "conversation_direct",
         "conversation_tools",
         "heavy_work",
+        "capability_preserving_default",
+        "DISCORD_DEFAULT_CAPABILITY_PRESERVED",
+        "capability_shrunk",
     ),
     "gateway/tool_profile_snapshot.py": (
         "hermes.tool_profile_snapshot.v1",
@@ -98,10 +103,31 @@ REQUIRED_GATEWAY_PROBES: dict[str, tuple[str, ...]] = {
         "hermes.memory_answer_renderer.v1",
         "render_memory_answer",
         "current_assignment_absence",
+        "generic_no_evidence_forbidden",
     ),
     "gateway/run.py": (
         "resolve_turn_profile",
         "_last_turn_profile_resolution",
+        "HERMES_DEFERRED_TOOL_SCHEMA",
+        "deferred_tool_schema_mode",
+        "tool_loader_trace",
+    ),
+    "hermes_deferred_tools.py": (
+        "hermes.tool_loader.result.v1",
+        "LOAD_TOOLS_NAME",
+        "build_load_tools_schema",
+        "tool_load_continuation.v1",
+    ),
+    "run_agent.py": (
+        "deferred_tool_schema_mode",
+        "LOAD_TOOLS_NAME",
+        "_handle_deferred_tool_load",
+        "TOOL_NOT_LOADED_OR_NOT_CONFIGURED",
+    ),
+    "agent/memory_manager.py": (
+        "direct_render_preflight",
+        "memory_direct_render_preflight.v1",
+        "query_inspect",
     ),
 }
 
@@ -201,6 +227,17 @@ def _git_apply_check(target: Path, patch: Path) -> tuple[bool, str]:
     return proc.returncode == 0, detail
 
 
+def _git_apply_reverse_check(target: Path, patch: Path) -> tuple[bool, str]:
+    proc = subprocess.run(
+        ["git", "-C", str(target), "apply", "--reverse", "--check", str(patch)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    detail = (proc.stderr or proc.stdout or "").strip()
+    return proc.returncode == 0, detail
+
+
 def _git_apply(target: Path, patch: Path) -> None:
     proc = subprocess.run(
         ["git", "-C", str(target), "apply", str(patch)],
@@ -224,28 +261,66 @@ def apply_gateway_patch_bundle(target: Path, *, dry_run: bool) -> dict[str, Any]
             "before": before,
             "after": before,
             "applied_patches": [],
-            "rollback": "none_needed",
+                "rollback": "none_needed",
         }
-    if before["status"] == "gateway_patch_partial":
-        raise RuntimeError(
-            "Hermes Gateway patch state is partial; refusing silent patch. "
-            f"Missing files: {', '.join(before['missing_files'])}"
-        )
+    if dry_run:
+        with tempfile.TemporaryDirectory(prefix="brainstack-gateway-patch-dry-run-") as tmp:
+            probe_target = Path(tmp) / "target"
+            shutil.copytree(
+                target,
+                probe_target,
+                ignore=shutil.ignore_patterns(
+                    ".git",
+                    ".venv",
+                    "__pycache__",
+                    ".pytest_cache",
+                    "node_modules",
+                    "runtime",
+                    "sessions",
+                    "memories",
+                ),
+            )
+            subprocess.run(["git", "-C", str(probe_target), "init"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(probe_target), "add", "-A"], check=True, capture_output=True)
+            simulated = apply_gateway_patch_bundle(probe_target, dry_run=False)
+            simulated["dry_run"] = True
+            if simulated["status"] == "gateway_patch_applied":
+                simulated["status"] = "gateway_patch_planned"
+            simulated["before"] = before
+            simulated["rollback"] = "none_written_dry_run"
+            return simulated
 
     patches = patch_files()
     if not patches:
         raise RuntimeError(f"Hermes Gateway patch bundle is empty: {PATCH_DIR}")
 
     check_results: list[dict[str, Any]] = []
+    patches_to_apply: list[Path] = []
+    already_applied: list[str] = []
     for patch in patches:
         ok, detail = _git_apply_check(target, patch)
-        check_results.append({"patch": patch.name, "can_apply": ok, "detail": detail})
-        if not ok:
-            raise RuntimeError(f"Hermes Gateway patch check failed for {patch.name}: {detail}")
-
-    if not dry_run:
-        for patch in patches:
-            _git_apply(target, patch)
+        reverse_ok, reverse_detail = _git_apply_reverse_check(target, patch)
+        state = "can_apply" if ok else ("already_applied" if reverse_ok else "blocked")
+        check_results.append(
+            {
+                "patch": patch.name,
+                "state": state,
+                "can_apply": ok,
+                "already_applied": reverse_ok,
+                "detail": detail,
+                "reverse_detail": reverse_detail,
+            }
+        )
+        if ok:
+            patches_to_apply.append(patch)
+            if not dry_run:
+                _git_apply(target, patch)
+        elif reverse_ok:
+            already_applied.append(patch.name)
+        else:
+            raise RuntimeError(
+                f"Hermes Gateway patch check failed for {patch.name}: {detail or reverse_detail}"
+            )
 
     after = inspect_gateway_patch_support(target) if not dry_run else before
     if not dry_run and after["status"] != "upstream_gateway_supported":
@@ -258,6 +333,7 @@ def apply_gateway_patch_bundle(target: Path, *, dry_run: bool) -> dict[str, Any]
         "before": before,
         "after": after,
         "apply_checks": check_results,
-        "applied_patches": [patch.name for patch in patches],
+        "applied_patches": [patch.name for patch in patches_to_apply],
+        "already_applied_patches": already_applied,
         "rollback": "git checkout -- <patched files> or reset target checkout before reinstall",
     }

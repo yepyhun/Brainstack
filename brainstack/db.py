@@ -24,6 +24,7 @@ from .storage.semantic_index_store import SemanticIndexStoreMixin
 from .storage.graph_state_store import GraphStateStoreMixin
 from .storage.proactive_store import ProactiveStoreMixin
 from .storage.telemetry_store import TelemetryStoreMixin
+from .storage.admission_receipts import AdmissionReceiptStoreMixin
 
 __all__ = ["BrainstackStore", "utc_now_iso"]
 
@@ -41,6 +42,7 @@ class BrainstackStore(
     GraphStateStoreMixin,
     ProactiveStoreMixin,
     TelemetryStoreMixin,
+    AdmissionReceiptStoreMixin,
 ):
     def __init__(
         self,

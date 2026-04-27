@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Mapping
 
+from .admission_policy import admit_claim, graph_claim_proposal, profile_claim_proposal
+from .core.admission import AdmissionDecision
 from .db import BrainstackStore
 from .provenance import merge_provenance
+from .storage.projection_writer import ProjectionWriter
 from .style_contract import STYLE_CONTRACT_SLOT, normalize_style_contract_payload
 from .tier1_extractor import build_profile_stable_key
 
@@ -26,7 +29,13 @@ def _extract_identity_name(value: Any) -> str:
 
 
 def _current_user_name(store: BrainstackStore, *, principal_scope_key: str = "") -> str:
-    for stable_key in ("identity:name", "identity:user_name", "identity:user_identity"):
+    for stable_key in (
+        "identity:preferred_address_name",
+        "preference:addressing",
+        "identity:name",
+        "identity:user_name",
+        "identity:user_identity",
+    ):
         item = store.get_profile_item(stable_key=stable_key, principal_scope_key=principal_scope_key)
         if not item:
             continue
@@ -91,6 +100,19 @@ def _is_assistant_authored_candidate(candidate: Mapping[str, Any] | None) -> boo
     return False
 
 
+def _admission_action(kind: str, decision: AdmissionDecision, *, row_id: int = 0) -> Dict[str, Any]:
+    return {
+        "kind": kind,
+        "action": decision.decision.value,
+        "reason_code": decision.reason_code,
+        "stable_key": decision.stable_key,
+        "target_slot": decision.target_slot,
+        "truth_eligible": decision.truth_eligible,
+        "support_visibility": decision.support_visibility.value,
+        "row_id": int(row_id or 0),
+    }
+
+
 def _reconcile_profile_items(
     store: BrainstackStore,
     *,
@@ -99,38 +121,53 @@ def _reconcile_profile_items(
     metadata: Mapping[str, Any],
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
+    writer = ProjectionWriter(store)
     for candidate in candidates:
-        if _is_assistant_authored_candidate(candidate):
-            actions.append({"kind": "profile", "action": "REJECT_ASSISTANT_AUTHORED"})
-            continue
         category = _normalize_text(candidate.get("category")).lower()
         content = _normalize_text(candidate.get("content"))
         if not category or not content:
             continue
         stable_key = _profile_stable_key(candidate)
+        candidate_metadata = _candidate_metadata(
+            candidate,
+            base_metadata=metadata,
+            confidence=float(candidate.get("confidence", 0.75)),
+        )
+        proposal = profile_claim_proposal(
+            candidate,
+            source=source,
+            base_metadata=candidate_metadata,
+            stable_key=stable_key,
+            category=category,
+            content=content,
+        )
+        decision = admit_claim(proposal)
+        if not decision.accepted:
+            writer.record_decision(decision=decision, metadata=candidate_metadata)
+            actions.append(_admission_action("profile", decision))
+            continue
+        category = decision.target_slot.split(".", 1)[0] if "." in decision.target_slot else category
         principal_scope_key = str(metadata.get("principal_scope_key") or "").strip()
-        existing = store.get_profile_item(stable_key=stable_key, principal_scope_key=principal_scope_key)
+        existing = store.get_profile_item(stable_key=decision.stable_key, principal_scope_key=principal_scope_key)
         if existing and _normalize_text(existing.get("content")) == content:
-            actions.append({"kind": "profile", "action": "NONE", "stable_key": stable_key, "category": category})
+            writer.record_decision(decision=decision, metadata=candidate_metadata, durable_row_id=int(existing.get("id") or 0))
+            actions.append({"kind": "profile", "action": "NONE", "stable_key": decision.stable_key, "category": category})
             continue
         action = "UPDATE" if existing else "ADD"
-        row_id = store.upsert_profile_item(
-            stable_key=stable_key,
+        row_id = writer.write_profile(
+            decision=decision,
             category=category,
             content=content,
             source=source,
             confidence=float(candidate.get("confidence", 0.75)),
-            metadata=_candidate_metadata(
-                candidate,
-                base_metadata=metadata,
-                confidence=float(candidate.get("confidence", 0.75)),
-            ),
+            metadata=candidate_metadata,
         )
         actions.append(
             {
                 "kind": "profile",
                 "action": action,
-                "stable_key": stable_key,
+                "stable_key": decision.stable_key,
+                "target_slot": decision.target_slot,
                 "category": category,
                 "row_id": row_id,
             }
@@ -145,30 +182,43 @@ def _reconcile_style_contract(
     source: str,
     metadata: Mapping[str, Any],
 ) -> List[Dict[str, Any]]:
-    if _is_assistant_authored_candidate(candidate):
-        return [{"kind": "style_contract", "action": "REJECT_ASSISTANT_AUTHORED"}]
     normalized = normalize_style_contract_payload(candidate)
     if not normalized:
         return []
+    writer = ProjectionWriter(store)
     principal_scope_key = str(metadata.get("principal_scope_key") or "").strip()
+    candidate_metadata = _candidate_metadata(
+        normalized,
+        base_metadata=metadata,
+        confidence=float(normalized.get("confidence") or 0.9),
+    )
+    proposal = profile_claim_proposal(
+        normalized,
+        source=source,
+        base_metadata=candidate_metadata,
+        stable_key=STYLE_CONTRACT_SLOT,
+        category=str(normalized.get("category") or "preference"),
+        content=str(normalized.get("content") or "").strip(),
+    )
+    decision = admit_claim(proposal)
+    if not decision.accepted:
+        writer.record_decision(decision=decision, metadata=candidate_metadata)
+        return [_admission_action("style_contract", decision)]
     existing = store.get_profile_item(
         stable_key=STYLE_CONTRACT_SLOT,
         principal_scope_key=principal_scope_key,
     )
     content = str(normalized.get("content") or "").strip()
     if existing and str(existing.get("content") or "").strip() == content:
+        writer.record_decision(decision=decision, metadata=candidate_metadata, durable_row_id=int(existing.get("id") or 0))
         return [{"kind": "style_contract", "action": "NONE", "stable_key": STYLE_CONTRACT_SLOT}]
-    row_id = store.upsert_profile_item(
-        stable_key=STYLE_CONTRACT_SLOT,
+    row_id = writer.write_profile(
+        decision=decision,
         category=str(normalized.get("category") or "preference"),
         content=content,
         source=str(normalized.get("source") or source),
         confidence=float(normalized.get("confidence") or 0.9),
-        metadata=_candidate_metadata(
-            normalized,
-            base_metadata=metadata,
-            confidence=float(normalized.get("confidence") or 0.9),
-        ),
+        metadata=candidate_metadata,
     )
     return [
         {
@@ -189,22 +239,37 @@ def _reconcile_states(
     user_name: str,
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
+    writer = ProjectionWriter(store)
     for candidate in candidates:
-        if _is_assistant_authored_candidate(candidate):
-            actions.append({"kind": "state", "action": "REJECT_ASSISTANT_AUTHORED"})
-            continue
         subject_name = _canonicalize_person_subject(candidate.get("subject"), user_name=user_name)
-        outcome = store.upsert_graph_state(
-            subject_name=subject_name,
-            attribute=_normalize_text(candidate.get("attribute")).lower(),
-            value_text=_normalize_text(candidate.get("value")),
+        attribute = _normalize_text(candidate.get("attribute")).lower()
+        value_text = _normalize_text(candidate.get("value"))
+        candidate_metadata = _candidate_metadata(
+            candidate,
+            base_metadata=metadata,
+            confidence=float(candidate.get("confidence", 0.82)),
+        )
+        proposal = graph_claim_proposal(
+            candidate,
             source=source,
-            supersede=bool(candidate.get("supersede", False)),
-            metadata=_candidate_metadata(
-                candidate,
-                base_metadata=metadata,
-                confidence=float(candidate.get("confidence", 0.82)),
-            ),
+            base_metadata=candidate_metadata,
+            target_kind="state",
+            subject=subject_name,
+            predicate=attribute,
+            value=value_text,
+        )
+        decision = admit_claim(proposal)
+        if not decision.accepted:
+            writer.record_decision(decision=decision, metadata=candidate_metadata)
+            actions.append(_admission_action("state", decision))
+            continue
+        outcome = writer.write_graph_state(
+            decision=decision,
+            subject_name=subject_name,
+            attribute=attribute,
+            value_text=value_text,
+            source=source,
+            metadata=candidate_metadata,
         )
         status = str(outcome.get("status", "")).lower()
         if status == "unchanged":
@@ -228,22 +293,37 @@ def _reconcile_relations(
     user_name: str,
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
+    writer = ProjectionWriter(store)
     for candidate in candidates:
-        if _is_assistant_authored_candidate(candidate):
-            actions.append({"kind": "relation", "action": "REJECT_ASSISTANT_AUTHORED"})
-            continue
         subject_name = _canonicalize_person_subject(candidate.get("subject"), user_name=user_name)
         object_name = _canonicalize_person_subject(candidate.get("object"), user_name=user_name)
-        outcome = store.upsert_graph_relation(
+        predicate = _normalize_text(candidate.get("predicate")).lower()
+        candidate_metadata = _candidate_metadata(
+            candidate,
+            base_metadata=metadata,
+            confidence=float(candidate.get("confidence", 0.8)),
+        )
+        proposal = graph_claim_proposal(
+            candidate,
+            source=source,
+            base_metadata=candidate_metadata,
+            target_kind="relation",
+            subject=subject_name,
+            predicate=predicate,
+            value=object_name,
+        )
+        decision = admit_claim(proposal)
+        if not decision.accepted:
+            writer.record_decision(decision=decision, metadata=candidate_metadata)
+            actions.append(_admission_action("relation", decision))
+            continue
+        outcome = writer.write_graph_relation(
+            decision=decision,
             subject_name=subject_name,
-            predicate=_normalize_text(candidate.get("predicate")).lower(),
+            predicate=predicate,
             object_name=object_name,
             source=source,
-            metadata=_candidate_metadata(
-                candidate,
-                base_metadata=metadata,
-                confidence=float(candidate.get("confidence", 0.8)),
-            ),
+            metadata=candidate_metadata,
         )
         action = "NONE" if outcome["status"] == "unchanged" else "ADD"
         actions.append({"kind": "relation", "action": action, **candidate, **outcome})
@@ -259,22 +339,38 @@ def _reconcile_inferred_relations(
     user_name: str,
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
+    writer = ProjectionWriter(store)
     for candidate in candidates:
-        if _is_assistant_authored_candidate(candidate):
-            actions.append({"kind": "inferred_relation", "action": "REJECT_ASSISTANT_AUTHORED"})
-            continue
         subject_name = _canonicalize_person_subject(candidate.get("subject"), user_name=user_name)
         object_name = _canonicalize_person_subject(candidate.get("object"), user_name=user_name)
-        outcome = store.upsert_graph_inferred_relation(
+        predicate = _normalize_text(candidate.get("predicate")).lower()
+        candidate_metadata = _candidate_metadata(
+            candidate,
+            base_metadata=metadata,
+            confidence=float(candidate.get("confidence", 0.62)),
+        )
+        proposal = graph_claim_proposal(
+            candidate,
+            source=source,
+            base_metadata=candidate_metadata,
+            target_kind="inferred_relation",
+            subject=subject_name,
+            predicate=predicate,
+            value=object_name,
+        )
+        decision = admit_claim(proposal)
+        if not decision.accepted:
+            writer.record_decision(decision=decision, metadata=candidate_metadata)
+            actions.append(_admission_action("inferred_relation", decision))
+            continue
+        outcome = writer.write_graph_relation(
+            decision=decision,
             subject_name=subject_name,
-            predicate=_normalize_text(candidate.get("predicate")).lower(),
+            predicate=predicate,
             object_name=object_name,
             source=source,
-            metadata=_candidate_metadata(
-                candidate,
-                base_metadata=metadata,
-                confidence=float(candidate.get("confidence", 0.62)),
-            ),
+            metadata=candidate_metadata,
+            inferred=True,
         )
         status = str(outcome.get("status", "")).lower()
         if status in {"unchanged", "shadowed"}:
@@ -303,10 +399,8 @@ def _reconcile_typed_entities(
     user_name: str,
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
+    writer = ProjectionWriter(store)
     for candidate in candidates:
-        if _is_assistant_authored_candidate(candidate):
-            actions.append({"kind": "typed_entity", "action": "REJECT_ASSISTANT_AUTHORED"})
-            continue
         entity_name = _typed_entity_name(candidate)
         entity_type = _normalize_text(candidate.get("entity_type")).lower()
         if not entity_name or not entity_type:
@@ -319,17 +413,43 @@ def _reconcile_typed_entities(
         )
         raw_attributes_value = candidate.get("attributes")
         raw_attributes: Mapping[Any, Any] = raw_attributes_value if isinstance(raw_attributes_value, Mapping) else {}
-        actions.extend(
-            store.upsert_typed_entity(
-                entity_name=entity_name,
-                entity_type=entity_type,
-                subject_name=subject_name,
-                attributes=raw_attributes,
+        for attribute, value in {"entity_type": entity_type, "owner_subject": subject_name, **dict(raw_attributes)}.items():
+            normalized_attribute = _normalize_text(attribute).lower()
+            normalized_value = _normalize_text(value)
+            if not normalized_attribute or not normalized_value:
+                continue
+            proposal = graph_claim_proposal(
+                candidate,
+                source=source,
+                base_metadata=entity_metadata,
+                target_kind="typed_entity",
+                subject=entity_name,
+                predicate=normalized_attribute,
+                value=normalized_value,
+            )
+            decision = admit_claim(proposal)
+            if not decision.accepted:
+                writer.record_decision(decision=decision, metadata=entity_metadata)
+                actions.append(_admission_action("typed_entity", decision))
+                continue
+            outcome = writer.write_graph_state(
+                decision=decision,
+                subject_name=entity_name,
+                attribute=normalized_attribute,
+                value_text=normalized_value,
                 source=source,
                 metadata=entity_metadata,
-                confidence=float(candidate.get("confidence", 0.78)),
             )
-        )
+            actions.append(
+                {
+                    "kind": "typed_entity",
+                    "entity_name": entity_name,
+                    "entity_type": entity_type,
+                    "attribute": normalized_attribute,
+                    "action": "NONE" if str(outcome.get("status", "")).lower() in {"unchanged", "shadowed"} else "ADD",
+                    **outcome,
+                }
+            )
     return actions
 
 

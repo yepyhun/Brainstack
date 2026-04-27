@@ -124,6 +124,16 @@ def candidate_metadata_text(candidate: EvidenceCandidate, key: str) -> str:
     return str(metadata.get(key) or "") if isinstance(metadata, dict) else ""
 
 
+def candidate_admission_value(candidate: EvidenceCandidate, key: str) -> str:
+    metadata = candidate.row.get("metadata")
+    if not isinstance(metadata, dict):
+        return ""
+    admission = metadata.get("admission")
+    if isinstance(admission, dict):
+        return str(admission.get(key) or "")
+    return str(metadata.get(key) or "")
+
+
 def candidate_selection_reason(candidate: EvidenceCandidate, selected_candidate_keys: set[str]) -> str:
     if candidate.key in selected_candidate_keys:
         return "selected_by_fusion_and_budget"
@@ -169,6 +179,10 @@ def candidate_payload(candidate: EvidenceCandidate, *, selected_candidate_keys: 
         "recap_surface": row_bool(row, "_brainstack_recap_surface"),
         "supporting_evidence_only": row_bool(row, "_brainstack_supporting_evidence_only"),
         "runtime_state_only": row_bool(row, "_brainstack_runtime_state_only"),
+        "admission_truth_eligible": candidate_admission_value(candidate, "truth_eligible"),
+        "admission_support_visibility": candidate_admission_value(candidate, "support_visibility"),
+        "admission_decision": candidate_admission_value(candidate, "decision"),
+        "admission_reason_code": candidate_admission_value(candidate, "reason_code"),
         "workstream_recap_reason": row_text(row, "_brainstack_workstream_recap_reason"),
         "operating_authority_level": candidate_metadata_text(candidate, "authority_level"),
         "operating_owner_role": candidate_metadata_text(candidate, "owner_role"),

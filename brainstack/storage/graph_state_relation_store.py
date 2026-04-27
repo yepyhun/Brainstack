@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .durable_write_guard import guard_and_normalize_durable_truth_metadata
 from .store_protocol import StoreRuntimeBase
 from .store_runtime import (
     Any,
@@ -272,12 +273,18 @@ class GraphStateRelationMixin(StoreRuntimeBase):
             source: str,
             metadata: Dict[str, Any] | None = None,
         ) -> Dict[str, Any]:
+            checked_metadata = guard_and_normalize_durable_truth_metadata(
+                shelf="graph",
+                source=source,
+                metadata=metadata,
+                slot=str(predicate or "").strip(),
+            )
             outcome = self._sqlite_upsert_graph_relation(
                 subject_name=subject_name,
                 predicate=predicate,
                 object_name=object_name,
                 source=source,
-                metadata=metadata,
+                metadata=checked_metadata,
             )
             if self._graph_backend is not None:
                 subject = self.get_or_create_entity(subject_name)
@@ -295,12 +302,18 @@ class GraphStateRelationMixin(StoreRuntimeBase):
             source: str,
             metadata: Dict[str, Any] | None = None,
         ) -> Dict[str, Any]:
+            checked_metadata = guard_and_normalize_durable_truth_metadata(
+                shelf="graph",
+                source=source,
+                metadata=metadata,
+                slot=str(predicate or "").strip(),
+            )
             outcome = self._sqlite_upsert_graph_inferred_relation(
                 subject_name=subject_name,
                 predicate=predicate,
                 object_name=object_name,
                 source=source,
-                metadata=metadata,
+                metadata=checked_metadata,
             )
             if self._graph_backend is not None:
                 subject = self.get_or_create_entity(subject_name)

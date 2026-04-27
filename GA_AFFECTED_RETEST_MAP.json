@@ -1,0 +1,30 @@
+{
+  "schema": "brainstack.ga_affected_retest_map.v1",
+  "scripts/ga_dashboard.py": {
+    "minimal": [
+      "tests/test_ga_probe_harness.py",
+      "tests/test_ga_dashboard.py"
+    ],
+    "blast_radius": [
+      "tests/test_ga_release_contract.py"
+    ]
+  },
+  "scripts/ga_release_contract.py": {
+    "minimal": [
+      "tests/test_ga_release_contract.py"
+    ],
+    "blast_radius": [
+      "tests/test_ga_dashboard.py"
+    ]
+  },
+  "brainstack/product_contracts.py": {
+    "minimal": [
+      "tests/test_model_facing_packet_firewall.py",
+      "tests/test_adversarial_synthetic_gateway_e2e.py"
+    ],
+    "blast_radius": [
+      "tests/test_ga_dashboard.py",
+      "tests/test_phase185_rc_gate.py"
+    ]
+  }
+}

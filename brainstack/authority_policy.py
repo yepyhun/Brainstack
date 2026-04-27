@@ -22,6 +22,7 @@ REASON_HOST_PARITY_UNOBSERVABLE = "HOST_PARITY_UNOBSERVABLE"
 REASON_EXACT_LITERAL_AMBIGUOUS = "EXACT_LITERAL_AMBIGUOUS"
 REASON_SELECTED_MEMORY_EVIDENCE = "SELECTED_MEMORY_EVIDENCE"
 REASON_NO_TYPED_CURRENT_ASSIGNMENT_EVIDENCE = "NO_TYPED_CURRENT_ASSIGNMENT_EVIDENCE"
+REASON_ADMISSION_NOT_TRUTH_ELIGIBLE = "ADMISSION_NOT_TRUTH_ELIGIBLE"
 
 CLAIM_MEMORY_TRUTH = "memory_truth"
 CLAIM_BOUNDED_EVENT = "bounded_event"
@@ -70,6 +71,8 @@ def _profile_preference_requires_direct_match(item: Mapping[str, Any]) -> bool:
     category = _text(item.get("category")).casefold()
     if not stable_key.startswith("preference:") and category != "preference_policy":
         return False
+    if stable_key == "preference:diagnostics":
+        return False
     retrieval_source = _text(item.get("retrieval_source")).casefold()
     match_mode = _text(item.get("match_mode")).casefold()
     literal_slot_match = item.get("literal_slot_match")
@@ -78,6 +81,32 @@ def _profile_preference_requires_direct_match(item: Mapping[str, Any]) -> bool:
     if isinstance(literal_slot_match, Mapping) and bool(literal_slot_match.get("matched")):
         return False
     return True
+
+
+def _admission_payload(item: Mapping[str, Any]) -> Mapping[str, Any]:
+    direct = item.get("admission")
+    if isinstance(direct, Mapping):
+        return direct
+    metadata = item.get("metadata")
+    if isinstance(metadata, Mapping):
+        nested = metadata.get("admission")
+        if isinstance(nested, Mapping):
+            return nested
+        if "truth_eligible" in metadata or "support_visibility" in metadata:
+            return metadata
+    return {}
+
+
+def _admission_blocks_answer_truth(item: Mapping[str, Any]) -> tuple[bool, str]:
+    admission = _admission_payload(item)
+    if not admission:
+        return False, ""
+    if bool(admission.get("truth_eligible")):
+        return False, ""
+    visibility = _text(admission.get("support_visibility")).casefold()
+    if visibility in {"inspect_only", "contradiction_only", "history_only", "normal"}:
+        return True, visibility
+    return True, visibility or "support_only"
 
 
 def is_current_assignment_authority(item: Mapping[str, Any]) -> bool:
@@ -155,6 +184,20 @@ def classify_evidence_authority(
         "must_not_claim": [],
     }
     if not evidence_key:
+        return result
+    admission_blocked, admission_visibility = _admission_blocks_answer_truth(item)
+    if admission_blocked:
+        result.update(
+            {
+                "max_claim_strength": CLAIM_NONE
+                if admission_visibility in {"inspect_only", "contradiction_only"}
+                else CLAIM_SUPPORTING_CONTEXT,
+                "reason_code": REASON_ADMISSION_NOT_TRUTH_ELIGIBLE
+                if admission_visibility in {"inspect_only", "contradiction_only"}
+                else REASON_ONLY_SUPPORTING_CONTEXT,
+                "must_not_claim": ["memory_truth", "explicit_user_truth"],
+            }
+        )
         return result
     if conflict:
         result.update(

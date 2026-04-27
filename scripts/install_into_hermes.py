@@ -24,10 +24,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hermes_gateway_patch_support import (
-    apply_gateway_patch_bundle,
-    inspect_gateway_patch_support,
-)
+try:
+    from hermes_gateway_patch_support import (
+        apply_gateway_patch_bundle,
+        inspect_gateway_patch_support,
+    )
+except ModuleNotFoundError:
+    from scripts.hermes_gateway_patch_support import (
+        apply_gateway_patch_bundle,
+        inspect_gateway_patch_support,
+    )
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

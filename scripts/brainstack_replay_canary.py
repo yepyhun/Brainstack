@@ -29,6 +29,7 @@ if "agent.memory_provider" not in sys.modules:
     sys.modules.setdefault("agent.memory_provider", memory_provider_module)
 
 from brainstack import BrainstackMemoryProvider  # noqa: E402
+from brainstack.core.admission import TruthShelf, TruthWritePermit  # noqa: E402
 from brainstack.diagnostics import build_query_inspect  # noqa: E402
 from brainstack.operating_truth import (  # noqa: E402
     CURRENT_ASSIGNMENT_AUTHORITY_SCHEMA,
@@ -79,6 +80,17 @@ def _provider(db_path: Path) -> BrainstackMemoryProvider:
 
 def _metadata(extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
     return {"principal_scope_key": PRINCIPAL_SCOPE, **dict(extra or {})}
+
+
+def _canary_seed_metadata(*, shelf: TruthShelf, slot: str, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    permit = TruthWritePermit.canary_seed(
+        canary_run_id="brainstack_replay_canary",
+        shelf=shelf,
+        slot=slot,
+    )
+    payload = _metadata(extra)
+    payload.update(permit.metadata_payload())
+    return payload
 
 
 def _inspect(provider: BrainstackMemoryProvider, query: str) -> dict[str, Any]:
@@ -304,7 +316,11 @@ def _seed_background_profile(provider: BrainstackMemoryProvider) -> None:
         content="Brainstack development status and zero-human workstream are separate concepts.",
         source="tier2:idle_window",
         confidence=0.8,
-        metadata=provider._scoped_metadata({"source_kind": "tier2_idle_window"}),
+        metadata=_canary_seed_metadata(
+            shelf=TruthShelf.PROFILE,
+            slot="shared_work:brainstack-zero-human-definition",
+            extra={"source_kind": "tier2_idle_window"},
+        ),
     )
 
 
@@ -353,7 +369,7 @@ def _seed_tier2_graph_runtime_state(provider: BrainstackMemoryProvider) -> None:
         attribute="testing_status",
         value_text="active testing of brainstack",
         source="tier2:idle_window",
-        metadata=_metadata({"source_kind": "tier2"}),
+        metadata=_canary_seed_metadata(shelf=TruthShelf.GRAPH, slot="testing_status", extra={"source_kind": "tier2"}),
     )
 
 
@@ -694,7 +710,7 @@ def _seed_dirty_distractors(provider: BrainstackMemoryProvider) -> None:
         attribute="assignment",
         value_text="Brainstack development",
         source="tier2:idle_window",
-        metadata=_metadata({"source_kind": "tier2"}),
+        metadata=_canary_seed_metadata(shelf=TruthShelf.GRAPH, slot="assignment", extra={"source_kind": "tier2"}),
     )
     provider._store.ingest_corpus_source(
         _corpus_source_payload(

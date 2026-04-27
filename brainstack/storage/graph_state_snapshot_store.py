@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .durable_write_guard import guard_and_normalize_durable_truth_metadata
+from ..admission_policy import admit_claim, graph_claim_proposal, is_runtime_capability_slot
 from .store_protocol import StoreRuntimeBase
 from .store_runtime import (
     Any,
@@ -621,30 +623,72 @@ class GraphStateSnapshotMixin(StoreRuntimeBase):
             return parsed[:limit]
 
     def upsert_graph_state(
-            self,
-            *,
-            subject_name: str,
-            attribute: str,
-            value_text: str,
-            source: str,
-            supersede: bool = False,
-            metadata: Dict[str, Any] | None = None,
-        ) -> Dict[str, Any]:
-            outcome = self._sqlite_upsert_graph_state(
-                subject_name=subject_name,
-                attribute=attribute,
-                value_text=value_text,
-                source=source,
-                supersede=supersede,
-                metadata=metadata,
-            )
-            if self._graph_backend is not None and int(outcome.get("entity_id") or 0) > 0:
-                self._publish_entity_subgraph(int(outcome["entity_id"]))
-            self._refresh_semantic_evidence_shelf(
-                shelf="graph",
-                metadata=metadata,
-            )
-            return outcome
+        self,
+        *,
+        subject_name: str,
+        attribute: str,
+        value_text: str,
+        source: str,
+        supersede: bool = False,
+        metadata: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        metadata = self._graph_state_admission_metadata(
+            subject_name=subject_name,
+            attribute=attribute,
+            value_text=value_text,
+            source=source,
+            metadata=metadata,
+        )
+        checked_metadata = guard_and_normalize_durable_truth_metadata(
+            shelf="graph",
+            source=source,
+            metadata=metadata,
+            slot=str(attribute or "").strip(),
+        )
+        outcome = self._sqlite_upsert_graph_state(
+            subject_name=subject_name,
+            attribute=attribute,
+            value_text=value_text,
+            source=source,
+            supersede=supersede,
+            metadata=checked_metadata,
+        )
+        if self._graph_backend is not None and int(outcome.get("entity_id") or 0) > 0:
+            self._publish_entity_subgraph(int(outcome["entity_id"]))
+        self._refresh_semantic_evidence_shelf(
+            shelf="graph",
+            metadata=checked_metadata,
+        )
+        return outcome
+
+    def _graph_state_admission_metadata(
+        self,
+        *,
+        subject_name: str,
+        attribute: str,
+        value_text: str,
+        source: str,
+        metadata: Dict[str, Any] | None,
+    ) -> Dict[str, Any]:
+        merged = dict(metadata or {})
+        if "admission" in merged or "truth_write_permit" in merged:
+            return merged
+        if is_runtime_capability_slot(attribute) or str(merged.get("source_authority") or "").casefold() == "runtime_diagnostic":
+            return merged
+        if not str(source or "").casefold().startswith(("tier2:", "consolidation:", "session_recap:", "pulse:", "background:")):
+            return merged
+        proposal = graph_claim_proposal(
+            {},
+            source=source,
+            base_metadata=merged,
+            target_kind="state",
+            subject=subject_name,
+            predicate=attribute,
+            value=value_text,
+        )
+        decision = admit_claim(proposal)
+        merged.update(decision.metadata_payload())
+        return merged
 
     def upsert_typed_entity(
             self,

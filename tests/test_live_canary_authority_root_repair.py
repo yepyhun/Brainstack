@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from brainstack import BrainstackMemoryProvider
+from brainstack.core.admission import TruthShelf, TruthWritePermit
 from brainstack.db import BrainstackStore
 from brainstack.diagnostics import build_query_inspect
 from brainstack.operating_context import build_operating_context_snapshot, render_operating_context_section
@@ -17,6 +18,17 @@ from brainstack.operating_truth import (
 
 
 PRINCIPAL_SCOPE = "platform:test|user_id:user|agent_identity:agent-smoke|agent_workspace:workspace"
+
+
+def _canary_seed_metadata(*, shelf: TruthShelf, slot: str, metadata: dict[str, object]) -> dict[str, object]:
+    permit = TruthWritePermit.canary_seed(
+        canary_run_id="live-canary-authority-root-repair",
+        shelf=shelf,
+        slot=slot,
+    )
+    payload = dict(metadata)
+    payload.update(permit.metadata_payload())
+    return payload
 
 
 def _provider(tmp_path: Path) -> BrainstackMemoryProvider:
@@ -649,7 +661,11 @@ def test_assignment_lookup_suppresses_tier2_graph_runtime_state(tmp_path: Path) 
             attribute="testing_status",
             value_text="active testing of brainstack",
             source="tier2:idle_window",
-            metadata={"principal_scope_key": PRINCIPAL_SCOPE, "source_kind": "tier2"},
+            metadata=_canary_seed_metadata(
+                shelf=TruthShelf.GRAPH,
+                slot="testing_status",
+                metadata={"principal_scope_key": PRINCIPAL_SCOPE, "source_kind": "tier2"},
+            ),
         )
 
         report = build_query_inspect(
@@ -681,7 +697,11 @@ def test_recall_tool_marks_runtime_and_profile_as_non_assignment_authority(tmp_p
             content="Brainstack development status and zero-human workstream",
             source="tier2:idle_window",
             confidence=0.8,
-            metadata=provider._scoped_metadata({"source_kind": "tier2_idle_window"}),
+            metadata=_canary_seed_metadata(
+                shelf=TruthShelf.PROFILE,
+                slot="shared_work:brainstack-development-status",
+                metadata=provider._scoped_metadata({"source_kind": "tier2_idle_window"}),
+            ),
         )
         provider._store.upsert_operating_record(
             stable_key="runtime:scheduler:pulse",

@@ -1,0 +1,26 @@
+LIVE_GATE_EXECUTION_REQUIRED:
+  owner: docker_runtime_config
+  repairability: HUMAN_DECISION_REQUIRED
+  allowed_modules: []
+  forbidden_fixes:
+    - mark_live_pass_without_running
+    - downgrade_live_gate_to_known_limitation_without_scope_change
+    - claim_product_ready_from_synthetic_only
+  minimal_tests:
+    - scripts/run_ga_dashboard_sample.py
+  blast_radius_tests:
+    - tests/test_ga_dashboard.py
+
+PATH_PROOF_MISSING:
+  owner: source_of_truth_parity
+  repairability: REPAIRABLE_AUTOMATIC
+  allowed_modules:
+    - scripts/ga_dashboard.py
+    - tests/test_ga_probe_harness.py
+  forbidden_fixes:
+    - helper_only_greenwashing
+    - manual_only_proof
+  minimal_tests:
+    - tests/test_ga_probe_harness.py::test_path_proof_required_for_e2e_claims
+  blast_radius_tests:
+    - tests/test_ga_dashboard.py

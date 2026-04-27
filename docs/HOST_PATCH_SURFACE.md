@@ -18,6 +18,10 @@ Brainstack has three different install surfaces:
    - Explicit installer modifications to Hermes host files.
    - This is the risky surface that needs tracking across upstream Hermes versions.
 
+4. Gateway patch bundle
+   - `patches/hermes_gateway/*.patch` applied by the installer when upstream Hermes lacks the required Gateway/runtime contracts.
+   - This is source-of-truth for pending Hermes patches such as TurnContract, deterministic renderer, and capability-preserving deferred tool schema loading.
+
 ## Source of truth
 
 The canonical inventory lives in:
@@ -31,6 +35,10 @@ The installer now exposes a structured inventory and writes it into:
 under:
 
 - `host_patch_inventory`
+
+Gateway patch bundle status is written under:
+
+- `hermes_gateway_patches`
 
 ## How to inspect the patch surface
 
@@ -68,6 +76,7 @@ Current high-risk host-owned seams include:
 - credential-pool runtime auth safety for provider-backed cron execution
 - memory-provider/write-origin bridge wiring
 - gateway lifecycle hooks
+- Hermes capability preservation while deferring JSON tool schemas
 
 This is the minimum required to answer these questions quickly:
 
@@ -93,4 +102,5 @@ When a new Hermes version lands:
 - Do not treat copied plugin payload files as host patches.
 - Do not mix runtime config drift with source patch drift.
 - Do not add silent host mutations without adding them to the installer inventory.
+- Do not shrink configured Hermes capabilities to reduce tokens; defer schema loading instead.
 - Treat Hermes upgrades as unsafe until the inventory targets have been checked.

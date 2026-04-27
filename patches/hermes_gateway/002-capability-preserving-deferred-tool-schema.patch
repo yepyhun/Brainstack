@@ -1,0 +1,2420 @@
+diff --git a/agent/memory_manager.py b/agent/memory_manager.py
+index 62cbd6ae..ebefbbb7 100644
+--- a/agent/memory_manager.py
++++ b/agent/memory_manager.py
+@@ -28,11 +28,10 @@ Usage in run_agent.py:
+ 
+ from __future__ import annotations
+ 
+-import json
+ import logging
+ import re
+ import inspect
+-from typing import Any, Dict, List, Optional
++from typing import Any, Dict, List, Mapping, Optional
+ 
+ from agent.memory_provider import MemoryProvider
+ from tools.registry import tool_error
+@@ -81,6 +80,45 @@ def build_memory_context_block(raw_context: str) -> str:
+     )
+ 
+ 
++def _answer_evidence_from_selected(
++    answerability: Mapping[str, Any],
++    selected_evidence: Any,
++) -> List[Dict[str, Any]]:
++    ids = answerability.get("answer_evidence_ids") or answerability.get("evidence_ids") or ()
++    if isinstance(ids, str):
++        wanted = {ids}
++    else:
++        wanted = {str(item) for item in ids if item}
++    if not isinstance(selected_evidence, Mapping):
++        return []
++
++    flattened: List[Dict[str, Any]] = []
++    for rows in selected_evidence.values():
++        if not isinstance(rows, list):
++            continue
++        for row in rows:
++            if isinstance(row, Mapping):
++                item = dict(row)
++                flattened.append(item)
++
++    if not wanted:
++        return flattened[:1] if int(answerability.get("answer_evidence_count", 0) or 0) == 1 else []
++
++    matched: List[Dict[str, Any]] = []
++    for item in flattened:
++        keys = (
++            item.get("evidence_id"),
++            item.get("id"),
++            item.get("candidate_id"),
++            item.get("stable_key"),
++            item.get("row_id"),
++            item.get("slot_id"),
++        )
++        if any(str(key) in wanted for key in keys if key):
++            matched.append(item)
++    return matched
++
++
+ class MemoryManager:
+     """Orchestrates the built-in provider plus at most one external provider.
+ 
+@@ -195,6 +233,45 @@ class MemoryManager:
+                 )
+         return "\n\n".join(parts)
+ 
++    def direct_render_preflight(self, query: str, *, session_id: str = "") -> Optional[Dict[str, Any]]:
++        """Return structured memory evidence for Hermes direct rendering.
++
++        Providers do not decide routing, model, tools, or renderer use. This
++        method only exposes answerability/evidence in a stable shape so Hermes
++        runtime can compile its own RenderPlan.
++        """
++        if not query or not query.strip():
++            return None
++        for provider in self._providers:
++            query_inspect = getattr(provider, "query_inspect", None)
++            if not callable(query_inspect):
++                continue
++            try:
++                report = query_inspect(query=query, session_id=session_id)
++            except Exception as e:
++                logger.debug(
++                    "Memory provider '%s' direct render preflight failed: %s",
++                    provider.name,
++                    e,
++                )
++                continue
++            if not isinstance(report, dict):
++                continue
++            answerability = report.get("memory_answerability")
++            if not isinstance(answerability, dict):
++                continue
++            selected = report.get("selected_evidence")
++            evidence = _answer_evidence_from_selected(answerability, selected)
++            return {
++                "schema": "hermes.memory_direct_render_preflight.v1",
++                "provider": provider.name,
++                "answerability": dict(answerability),
++                "answer_evidence": evidence,
++                "capability_health": dict(report.get("capability_health") or {}),
++                "source": "memory_provider_query_inspect",
++            }
++        return None
++
+     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
+         """Queue background prefetch on all providers for the next turn."""
+         for provider in self._providers:
+diff --git a/gateway/memory_answer_renderer.py b/gateway/memory_answer_renderer.py
+index 79f02ed7..46e41103 100644
+--- a/gateway/memory_answer_renderer.py
++++ b/gateway/memory_answer_renderer.py
+@@ -57,106 +57,244 @@ class RenderedMemoryAnswer:
+         return data
+ 
+ 
+-def evaluate_renderer_eligibility(
++@dataclass(frozen=True)
++class RenderPlan:
++    schema: str
++    renderer_kind: str
++    eligible: bool
++    answer_type: str
++    reason_code: str
++    fallback_reason: str | None
++    evidence_ids: tuple[str, ...]
++    renderer_claim_style: str
++    answer_value: str
++    forbidden_claims: tuple[str, ...] = ()
++    template_id: str = ""
++    no_tool_call: bool = True
++    no_memory_mutation: bool = True
++
++    def to_dict(self) -> dict[str, Any]:
++        data = asdict(self)
++        data["evidence_ids"] = list(self.evidence_ids)
++        data["forbidden_claims"] = list(self.forbidden_claims)
++        return data
++
++
++def build_render_plan(
+     *,
+     turn_contract: Mapping[str, Any] | Any,
+     answerability: Mapping[str, Any],
+     answer_evidence: Sequence[Mapping[str, Any]] = (),
+     capability_health: Mapping[str, str] | None = None,
+-) -> RendererEligibility:
+-    """Return fail-closed eligibility for deterministic memory rendering."""
++) -> RenderPlan:
++    """Compile memory packet fields into a typed, renderer-safe plan."""
+ 
+     contract = _as_mapping(turn_contract)
+     answer_type = str(answerability.get("answer_type", "none"))
+     state = str(answerability.get("state", "unanswerable"))
+     max_claim_strength = str(answerability.get("max_claim_strength", "none"))
+     evidence_ids = _evidence_ids(answerability, answer_evidence)
++    forbidden_claims = tuple(str(item) for item in contract.get("forbidden_claims") or ())
+ 
+     if _is_heavy_or_external(contract):
+-        return _ineligible(answer_type, "HEAVY_OR_EXTERNAL_TASK", "provider_required_for_heavy_or_external_task")
++        return _plan_ineligible(
++            answer_type,
++            "HEAVY_OR_EXTERNAL_TASK",
++            "provider_required_for_heavy_or_external_task",
++            forbidden_claims=forbidden_claims,
++        )
+ 
+     if state in {"conflicted", "conflict"}:
+-        return _ineligible(answer_type, "CONFLICT_REQUIRES_MODEL", "conflict_requires_model")
++        return _plan_ineligible(
++            answer_type,
++            "CONFLICT_REQUIRES_MODEL",
++            "conflict_requires_model",
++            forbidden_claims=forbidden_claims,
++        )
+ 
+     if state == "degraded":
+-        return _ineligible(answer_type, "DEGRADED_STATE_REQUIRES_MODEL", "degraded_state_requires_model")
++        return _plan_ineligible(
++            answer_type,
++            "DEGRADED_STATE_REQUIRES_MODEL",
++            "degraded_state_requires_model",
++            forbidden_claims=forbidden_claims,
++        )
+ 
+     backend_reason = _degraded_required_backend(answerability, capability_health or {})
+     if backend_reason:
+-        return _ineligible(answer_type, "REQUIRED_BACKEND_DEGRADED", backend_reason)
++        return _plan_ineligible(
++            answer_type,
++            "REQUIRED_BACKEND_DEGRADED",
++            backend_reason,
++            forbidden_claims=forbidden_claims,
++        )
+ 
+     if max_claim_strength == "supporting_context":
+-        return _ineligible(answer_type, "ONLY_SUPPORTING_CONTEXT", "supporting_context_is_not_answer_truth")
++        return _plan_ineligible(
++            answer_type,
++            "ONLY_SUPPORTING_CONTEXT",
++            "supporting_context_is_not_answer_truth",
++            forbidden_claims=forbidden_claims,
++        )
+ 
+     if _is_unsupported(answer_type, state, max_claim_strength, answerability, answer_evidence):
+-        return _eligible(
++        if not _allows_unsupported_abstain(answerability):
++            return _plan_ineligible(
++                answer_type,
++                "UNRESOLVED_MEMORY_TARGET",
++                "generic_no_evidence_forbidden",
++                forbidden_claims=forbidden_claims,
++            )
++        return _plan_eligible(
+             answer_type="none",
+             reason_code="UNSUPPORTED_ABSTAIN",
+             evidence_ids=(),
+             claim_style="unsupported",
++            answer_value="none",
++            forbidden_claims=forbidden_claims,
+         )
+ 
+     if answer_type in SUPPORTED_FACT_TYPES:
+         if state != "answerable" or max_claim_strength != "memory_truth":
+-            return _ineligible(answer_type, "FACT_NOT_MEMORY_TRUTH", "fact_requires_memory_truth_answerability")
++            return _plan_ineligible(
++                answer_type,
++                "FACT_NOT_MEMORY_TRUTH",
++                "fact_requires_memory_truth_answerability",
++                forbidden_claims=forbidden_claims,
++            )
+         if len(answer_evidence) != 1 or not evidence_ids:
+-            return _ineligible(answer_type, "FACT_REQUIRES_SINGLE_EVIDENCE", "fact_requires_single_answer_evidence")
+-        return _eligible(answer_type, "AUTHORITATIVE_SIMPLE_FACT", evidence_ids, "explicit_fact")
++            return _plan_ineligible(
++                answer_type,
++                "FACT_REQUIRES_SINGLE_EVIDENCE",
++                "fact_requires_single_answer_evidence",
++                forbidden_claims=forbidden_claims,
++            )
++        return _plan_eligible(
++            answer_type,
++            "AUTHORITATIVE_SIMPLE_FACT",
++            evidence_ids,
++            "explicit_fact",
++            answer_value=_answer_value(answer_evidence),
++            forbidden_claims=forbidden_claims,
++        )
+ 
+     if answer_type in SUPPORTED_EVENT_TYPES:
+         if state != "answerable" or max_claim_strength != "bounded_event":
+-            return _ineligible(answer_type, "EVENT_NOT_BOUNDED", "event_requires_bounded_event_strength")
++            return _plan_ineligible(
++                answer_type,
++                "EVENT_NOT_BOUNDED",
++                "event_requires_bounded_event_strength",
++                forbidden_claims=forbidden_claims,
++            )
+         if not evidence_ids:
+-            return _ineligible(answer_type, "EVENT_REQUIRES_EVIDENCE", "event_requires_evidence_id")
+-        return _eligible(answer_type, "BOUNDED_EVENT", evidence_ids, "bounded_event")
++            return _plan_ineligible(
++                answer_type,
++                "EVENT_REQUIRES_EVIDENCE",
++                "event_requires_evidence_id",
++                forbidden_claims=forbidden_claims,
++            )
++        return _plan_eligible(
++            answer_type,
++            "BOUNDED_EVENT",
++            evidence_ids,
++            "bounded_event",
++            answer_value=_answer_value(answer_evidence),
++            forbidden_claims=forbidden_claims,
++        )
+ 
+     if answer_type in SUPPORTED_ASSIGNMENT_TYPES:
+-        return _assignment_eligibility(answer_type, answerability, answer_evidence, evidence_ids)
++        return _assignment_render_plan(
++            answer_type,
++            answerability,
++            answer_evidence,
++            evidence_ids,
++            forbidden_claims=forbidden_claims,
++        )
+ 
+-    return _ineligible(answer_type, "UNSUPPORTED_ANSWER_TYPE", f"unsupported_answer_type:{answer_type}")
++    return _plan_ineligible(
++        answer_type,
++        "UNSUPPORTED_ANSWER_TYPE",
++        f"unsupported_answer_type:{answer_type}",
++        forbidden_claims=forbidden_claims,
++    )
+ 
+ 
+-def render_memory_answer(
++def evaluate_renderer_eligibility(
+     *,
+     turn_contract: Mapping[str, Any] | Any,
+     answerability: Mapping[str, Any],
+     answer_evidence: Sequence[Mapping[str, Any]] = (),
+     capability_health: Mapping[str, str] | None = None,
+-) -> RenderedMemoryAnswer:
+-    """Render simple memory answer or return explicit provider fallback trace."""
+-
+-    eligibility = evaluate_renderer_eligibility(
++) -> RendererEligibility:
++    """Return fail-closed eligibility for deterministic memory rendering."""
++    plan = build_render_plan(
+         turn_contract=turn_contract,
+         answerability=answerability,
+         answer_evidence=answer_evidence,
+         capability_health=capability_health,
+     )
+-    if not eligibility.eligible:
++    return RendererEligibility(
++        schema=SCHEMA_VERSION,
++        eligible=plan.eligible,
++        answer_type=plan.answer_type,
++        reason_code=plan.reason_code,
++        fallback_reason=plan.fallback_reason,
++        evidence_ids=plan.evidence_ids,
++        renderer_claim_style=plan.renderer_claim_style,
++        no_tool_call=plan.no_tool_call,
++        no_memory_mutation=plan.no_memory_mutation,
++    )
++
++
++def render_memory_answer_plan(plan: RenderPlan) -> RenderedMemoryAnswer:
++    """Render typed plan only. No raw packet interpretation here."""
++    if not plan.eligible:
+         return RenderedMemoryAnswer(
+             schema=SCHEMA_VERSION,
+             used_renderer=False,
+             text="",
+-            answer_type=eligibility.answer_type,
+-            reason_code=eligibility.reason_code,
+-            fallback_reason=eligibility.fallback_reason,
+-            evidence_ids=eligibility.evidence_ids,
+-            renderer_claim_style=eligibility.renderer_claim_style,
++            answer_type=plan.answer_type,
++            reason_code=plan.reason_code,
++            fallback_reason=plan.fallback_reason,
++            evidence_ids=plan.evidence_ids,
++            renderer_claim_style=plan.renderer_claim_style,
+             redacted=False,
++            no_tool_call=plan.no_tool_call,
++            no_memory_mutation=plan.no_memory_mutation,
+         )
+ 
+-    raw = _render_text(eligibility.answer_type, eligibility.renderer_claim_style, answer_evidence)
++    raw = _render_text(plan.answer_type, plan.renderer_claim_style, plan.answer_value)
+     text = redact_model_facing_text(raw)
+     return RenderedMemoryAnswer(
+         schema=SCHEMA_VERSION,
+         used_renderer=True,
+         text=text,
+-        answer_type=eligibility.answer_type,
+-        reason_code=eligibility.reason_code,
++        answer_type=plan.answer_type,
++        reason_code=plan.reason_code,
+         fallback_reason=None,
+-        evidence_ids=eligibility.evidence_ids,
+-        renderer_claim_style=eligibility.renderer_claim_style,
++        evidence_ids=plan.evidence_ids,
++        renderer_claim_style=plan.renderer_claim_style,
+         redacted=text != raw,
++        no_tool_call=plan.no_tool_call,
++        no_memory_mutation=plan.no_memory_mutation,
++    )
++
++
++def render_memory_answer(
++    *,
++    turn_contract: Mapping[str, Any] | Any,
++    answerability: Mapping[str, Any],
++    answer_evidence: Sequence[Mapping[str, Any]] = (),
++    capability_health: Mapping[str, str] | None = None,
++) -> RenderedMemoryAnswer:
++    """Build RenderPlan, then render. Kept as compatibility wrapper."""
++    plan = build_render_plan(
++        turn_contract=turn_contract,
++        answerability=answerability,
++        answer_evidence=answer_evidence,
++        capability_health=capability_health,
+     )
++    return render_memory_answer_plan(plan)
+ 
+ 
+ def _as_mapping(value: Mapping[str, Any] | Any) -> Mapping[str, Any]:
+@@ -200,6 +338,18 @@ def _is_unsupported(
+     return state == "unanswerable" and max_claim_strength == "none" and no_answer_type and no_evidence
+ 
+ 
++def _allows_unsupported_abstain(answerability: Mapping[str, Any]) -> bool:
++    target = answerability.get("resolved_memory_target") or {}
++    if not isinstance(target, Mapping):
++        return False
++    target_kind = str(target.get("target_kind") or "").strip()
++    if not target_kind or target_kind == "none":
++        return False
++    domain = str(answerability.get("user_intent_domain") or target.get("domain") or "").strip()
++    external_possible = bool(answerability.get("external_capability_possible", False))
++    return domain in {"memory", "runtime_status", "memory_or_runtime_status"} and not external_possible
++
++
+ def _assignment_eligibility(
+     answer_type: str,
+     answerability: Mapping[str, Any],
+@@ -231,6 +381,63 @@ def _assignment_eligibility(
+     return _eligible(answer_type, "TYPED_CURRENT_ASSIGNMENT", evidence_ids, "current_assignment_presence")
+ 
+ 
++def _assignment_render_plan(
++    answer_type: str,
++    answerability: Mapping[str, Any],
++    answer_evidence: Sequence[Mapping[str, Any]],
++    evidence_ids: tuple[str, ...],
++    *,
++    forbidden_claims: tuple[str, ...],
++) -> RenderPlan:
++    state = str(answerability.get("state", "unanswerable"))
++    reason_code = str(answerability.get("reason_code", "UNKNOWN"))
++    if answer_type == "current_assignment_absence" or reason_code == "NO_TYPED_CURRENT_ASSIGNMENT_EVIDENCE":
++        return _plan_eligible(
++            answer_type="current_assignment_absence",
++            reason_code="NO_TYPED_CURRENT_ASSIGNMENT_EVIDENCE",
++            evidence_ids=evidence_ids,
++            claim_style="current_assignment_absence",
++            answer_value="none",
++            forbidden_claims=forbidden_claims,
++        )
++
++    if state != "answerable":
++        return _plan_ineligible(
++            answer_type,
++            "ASSIGNMENT_NOT_ANSWERABLE",
++            "assignment_presence_requires_answerable_state",
++            forbidden_claims=forbidden_claims,
++        )
++
++    authority = str(answerability.get("authority", ""))
++    if authority not in TYPED_ASSIGNMENT_AUTHORITIES and not any(
++        _has_typed_assignment_authority(evidence) for evidence in answer_evidence
++    ):
++        return _plan_ineligible(
++            answer_type,
++            "ASSIGNMENT_REQUIRES_TYPED_AUTHORITY",
++            "no_typed_assignment_authority",
++            forbidden_claims=forbidden_claims,
++        )
++
++    if not evidence_ids:
++        return _plan_ineligible(
++            answer_type,
++            "ASSIGNMENT_REQUIRES_EVIDENCE",
++            "assignment_requires_evidence_id",
++            forbidden_claims=forbidden_claims,
++        )
++
++    return _plan_eligible(
++        answer_type,
++        "TYPED_CURRENT_ASSIGNMENT",
++        evidence_ids,
++        "current_assignment_presence",
++        answer_value=_answer_value(answer_evidence),
++        forbidden_claims=forbidden_claims,
++    )
++
++
+ def _has_typed_assignment_authority(evidence: Mapping[str, Any]) -> bool:
+     if bool(evidence.get("current_assignment_authority", False)):
+         return True
+@@ -263,20 +470,19 @@ def _append_unique(values: list[str], value: str) -> None:
+         values.append(value)
+ 
+ 
+-def _render_text(answer_type: str, claim_style: str, answer_evidence: Sequence[Mapping[str, Any]]) -> str:
++def _render_text(answer_type: str, claim_style: str, answer_value: str) -> str:
+     if claim_style == "unsupported":
+         return "No supported memory evidence for this request."
+     if claim_style == "current_assignment_absence":
+         return "No typed current-assignment evidence is recorded. Background runtime/Pulse evidence alone is not current assignment."
+ 
+-    value = _answer_value(answer_evidence)
+     if claim_style == "bounded_event":
+-        return f"Recorded event in searched scope: {value}."
++        return f"Recorded event in searched scope: {answer_value}."
+     if claim_style == "current_assignment_presence":
+-        return f"Typed current assignment: {value}."
++        return f"Typed current assignment: {answer_value}."
+     if answer_type == "exact_literal":
+-        return f"Recorded identifier: {value}."
+-    return f"Recorded value: {value}."
++        return f"Recorded identifier: {answer_value}."
++    return f"Recorded value: {answer_value}."
+ 
+ 
+ def _answer_value(answer_evidence: Sequence[Mapping[str, Any]]) -> str:
+@@ -311,6 +517,30 @@ def _eligible(
+     )
+ 
+ 
++def _plan_eligible(
++    answer_type: str,
++    reason_code: str,
++    evidence_ids: Sequence[str],
++    claim_style: str,
++    *,
++    answer_value: str,
++    forbidden_claims: tuple[str, ...],
++) -> RenderPlan:
++    return RenderPlan(
++        schema=SCHEMA_VERSION,
++        renderer_kind="deterministic_memory_answer",
++        eligible=True,
++        answer_type=answer_type,
++        reason_code=reason_code,
++        fallback_reason=None,
++        evidence_ids=tuple(evidence_ids),
++        renderer_claim_style=claim_style,
++        answer_value=answer_value,
++        forbidden_claims=forbidden_claims,
++        template_id=f"{claim_style}.v1",
++    )
++
++
+ def _ineligible(answer_type: str, reason_code: str, fallback_reason: str) -> RendererEligibility:
+     return RendererEligibility(
+         schema=SCHEMA_VERSION,
+@@ -323,6 +553,28 @@ def _ineligible(answer_type: str, reason_code: str, fallback_reason: str) -> Ren
+     )
+ 
+ 
++def _plan_ineligible(
++    answer_type: str,
++    reason_code: str,
++    fallback_reason: str,
++    *,
++    forbidden_claims: tuple[str, ...],
++) -> RenderPlan:
++    return RenderPlan(
++        schema=SCHEMA_VERSION,
++        renderer_kind="provider_fallback",
++        eligible=False,
++        answer_type=answer_type,
++        reason_code=reason_code,
++        fallback_reason=fallback_reason,
++        evidence_ids=(),
++        renderer_claim_style="provider_fallback",
++        answer_value="",
++        forbidden_claims=forbidden_claims,
++        template_id="provider_fallback.v1",
++    )
++
++
+ def contains_lifetime_certainty(text: str) -> bool:
+     lowered = text.lower()
+     return any(word in lowered for word in LIFETIME_CERTAINTY_WORDS)
+diff --git a/gateway/run.py b/gateway/run.py
+index 57e66b3f..e50e96de 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -4240,6 +4240,143 @@ class GatewayRunner:
+ 
+         return message_text
+ 
++    async def _try_memory_direct_render_agent_result(
++        self,
++        *,
++        message: str,
++        source,
++        session_id: str,
++        session_key: str,
++    ) -> dict | None:
++        """Build a provider-free agent result for renderer-safe memory answers."""
++        try:
++            result = await self._run_in_executor_with_context(
++                self._build_memory_direct_render_agent_result_sync,
++                message,
++                {
++                    "platform_key": _platform_config_key(source.platform),
++                    "user_id": source.user_id,
++                    "user_name": source.user_name,
++                    "chat_id": source.chat_id,
++                    "chat_name": source.chat_name,
++                    "chat_type": getattr(source, "chat_type", None),
++                    "thread_id": getattr(source, "thread_id", None),
++                },
++                session_id,
++                session_key,
++            )
++        except Exception as exc:
++            logger.debug("Gateway direct memory renderer preflight skipped: %s", exc)
++            return None
++        if result:
++            self._last_turn_profile_resolution = result.get("turn_profile_resolution", {})
++        return result
++
++    def _build_memory_direct_render_agent_result_sync(
++        self,
++        message: str,
++        source_info: dict,
++        session_id: str,
++        session_key: str,
++    ) -> dict | None:
++        """Return an agent_result-shaped dict without touching the LLM provider."""
++        if not message or not message.strip():
++            return None
++
++        user_config = _load_gateway_config()
++        platform_key = str(source_info.get("platform_key") or "")
++
++        from gateway.turn_profiles import resolve_turn_profile
++        from hermes_cli.tools_config import _get_platform_tools
++
++        enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
++        turn_profile = resolve_turn_profile(
++            platform=platform_key,
++            prompt=message,
++            current_enabled_toolsets=enabled_toolsets,
++        )
++        turn_profile_data = turn_profile.to_dict()
++        if platform_key != "discord" or turn_profile.explicit_heavy:
++            return None
++
++        mem_config = user_config.get("memory", {}) if isinstance(user_config, dict) else {}
++        provider_name = str(mem_config.get("provider") or "")
++        if not provider_name:
++            return None
++
++        from agent.memory_manager import MemoryManager
++        from gateway.memory_answer_renderer import build_render_plan, render_memory_answer_plan
++        from plugins.memory import load_memory_provider
++
++        manager = MemoryManager()
++        provider = load_memory_provider(provider_name)
++        if not provider or not provider.is_available():
++            return None
++        manager.add_provider(provider)
++
++        init_kwargs = {
++            "session_id": session_id,
++            "platform": platform_key or "gateway",
++            "hermes_home": str(_hermes_home),
++            "agent_context": "gateway_direct_renderer",
++        }
++        for key in ("user_id", "user_name", "chat_id", "chat_name", "chat_type", "thread_id"):
++            value = source_info.get(key)
++            if value:
++                init_kwargs[key] = value
++        if session_key:
++            init_kwargs["gateway_session_key"] = session_key
++        try:
++            from hermes_cli.profiles import get_active_profile_name
++
++            profile_name = get_active_profile_name()
++            if profile_name:
++                init_kwargs["agent_identity"] = profile_name
++                init_kwargs["agent_workspace"] = "hermes"
++        except Exception:
++            pass
++
++        try:
++            manager.initialize_all(**init_kwargs)
++            preflight = manager.direct_render_preflight(message, session_id=session_id)
++        finally:
++            manager.shutdown_all()
++        if not preflight:
++            return None
++
++        contract = {
++            **turn_profile_data,
++            "allowed_tool_profile": turn_profile.tool_profile,
++            "external_capability_required_for_memory_answer": False,
++            "forbidden_claims": [],
++        }
++        plan = build_render_plan(
++            turn_contract=contract,
++            answerability=preflight.get("answerability") or {},
++            answer_evidence=preflight.get("answer_evidence") or [],
++            capability_health=preflight.get("capability_health") or {},
++        )
++        rendered = render_memory_answer_plan(plan)
++        if not rendered.used_renderer:
++            return None
++
++        return {
++            "final_response": rendered.text,
++            "messages": [],
++            "api_calls": 0,
++            "tools": [],
++            "history_offset": 0,
++            "last_prompt_tokens": 0,
++            "input_tokens": 0,
++            "output_tokens": 0,
++            "model": "memory_direct_renderer",
++            "session_id": session_id,
++            "turn_profile_resolution": turn_profile_data,
++            "memory_direct_preflight": preflight,
++            "render_plan": plan.to_dict(),
++            "memory_answer_renderer": rendered.to_dict(),
++        }
++
+     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
+         """Inner handler that runs under the _running_agents sentinel guard."""
+         _msg_start_time = time.time()
+@@ -4726,18 +4863,27 @@ class GatewayRunner:
+             }
+             await self.hooks.emit("agent:start", hook_ctx)
+ 
+-            # Run the agent
+-            agent_result = await self._run_agent(
++            # Renderer-safe memory/status answers must not wait on provider auth.
++            # Brainstack only supplies evidence; Hermes compiles the RenderPlan.
++            agent_result = await self._try_memory_direct_render_agent_result(
+                 message=message_text,
+-                context_prompt=context_prompt,
+-                history=history,
+                 source=source,
+                 session_id=session_entry.session_id,
+                 session_key=session_key,
+-                run_generation=run_generation,
+-                event_message_id=event.message_id,
+-                channel_prompt=event.channel_prompt,
+             )
++            if agent_result is None:
++                agent_result = await self._run_agent(
++                    message=message_text,
++                    context_prompt=context_prompt,
++                    history=history,
++                    source=source,
++                    session_id=session_entry.session_id,
++                    session_key=session_key,
++                    run_generation=run_generation,
++                    event_message_id=event.message_id,
++                    channel_prompt=event.channel_prompt,
++                )
++            self._brainstack_canary_last_agent_result = agent_result
+ 
+             # Stop persistent typing indicator now that the agent is done
+             try:
+@@ -8673,6 +8819,7 @@ class GatewayRunner:
+         runtime: dict,
+         enabled_toolsets: list,
+         ephemeral_prompt: str,
++        deferred_tool_schema_mode: bool = False,
+     ) -> str:
+         """Compute a stable string key from agent config values.
+ 
+@@ -8698,6 +8845,7 @@ class GatewayRunner:
+                 runtime.get("provider", ""),
+                 runtime.get("api_mode", ""),
+                 sorted(enabled_toolsets) if enabled_toolsets else [],
++                bool(deferred_tool_schema_mode),
+                 # reasoning_config excluded — it's set per-message on the
+                 # cached agent and doesn't affect system prompt or tools.
+                 ephemeral_prompt or "",
+@@ -9928,6 +10076,11 @@ class GatewayRunner:
+                     logger.debug("interim_assistant_callback error: %s", _e)
+ 
+             turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
++            deferred_tool_schema_mode = (
++                platform_key == "discord"
++                and str(os.getenv("HERMES_DEFERRED_TOOL_SCHEMA", "1")).strip().lower()
++                not in {"0", "false", "no", "off"}
++            )
+ 
+             # Check agent cache — reuse the AIAgent from the previous message
+             # in this session to preserve the frozen system prompt and tool
+@@ -9937,6 +10090,7 @@ class GatewayRunner:
+                 turn_route["runtime"],
+                 enabled_toolsets,
+                 combined_ephemeral,
++                deferred_tool_schema_mode,
+             )
+             agent = None
+             _cache_lock = getattr(self, "_agent_cache_lock", None)
+@@ -9977,6 +10131,7 @@ class GatewayRunner:
+                     provider_require_parameters=pr.get("require_parameters", False),
+                     provider_data_collection=pr.get("data_collection"),
+                     session_id=session_id,
++                    deferred_tool_schema_mode=deferred_tool_schema_mode,
+                     platform=platform_key,
+                     user_id=source.user_id,
+                     user_name=source.user_name,
+@@ -10303,6 +10458,7 @@ class GatewayRunner:
+                     "input_tokens": _input_toks,
+                     "output_tokens": _output_toks,
+                     "model": _resolved_model,
++                    "tool_loader_trace": getattr(_agent, "_tool_loader_trace", None),
+                 }
+             
+             # Scan tool results for MEDIA:<path> tags that need to be delivered
+@@ -10394,6 +10550,7 @@ class GatewayRunner:
+                 "model": _resolved_model,
+                 "session_id": effective_session_id,
+                 "response_previewed": result.get("response_previewed", False),
++                "tool_loader_trace": getattr(_agent, "_tool_loader_trace", None),
+             }
+         
+         # Start progress message sender if enabled
+diff --git a/gateway/turn_profiles.py b/gateway/turn_profiles.py
+index e517deff..dc4840bd 100644
+--- a/gateway/turn_profiles.py
++++ b/gateway/turn_profiles.py
+@@ -19,6 +19,7 @@ HEAVY_WEB_TOOLSETS = ("heavy_web",)
+ HEAVY_FILE_TOOLSETS = ("heavy_file",)
+ HEAVY_CODE_TOOLSETS = ("heavy_code",)
+ HEAVY_FULL_DEBUG_TOOLSETS = ("heavy_full_debug",)
++CAPABILITY_PRESERVED_SCHEMA_LOADING = "full_configured_fallback_until_toolloader"
+ 
+ HEAVY_COMMAND_RE = re.compile(r"^\s*/heavy(?:\s+(?P<bundle>web|file|code|full-debug))?\b", re.I)
+ 
+@@ -36,10 +37,26 @@ class ResolvedTurnProfile:
+     url_attachment_candidate_only: bool
+     rollback_override_active: bool
+     cli_local_unchanged: bool
++    capability_shrunk: bool = False
++    admin_limited_mode: bool = False
++    schema_loading_mode: str = CAPABILITY_PRESERVED_SCHEMA_LOADING
++    runtime_capability_health: Mapping[str, str] | None = None
+ 
+     def to_dict(self) -> dict:
+         data = asdict(self)
+         data["enabled_toolsets"] = list(self.enabled_toolsets)
++        data["runtime_capability_health"] = dict(self.runtime_capability_health or {})
++        data["capability_preservation"] = {
++            "configured_toolsets": list(self.enabled_toolsets),
++            "effective_toolsets": list(self.enabled_toolsets),
++            "configured_capabilities": sorted((self.runtime_capability_health or {}).keys()),
++            "runtime_capability_health": dict(self.runtime_capability_health or {}),
++            "capability_shrunk": self.capability_shrunk,
++            "admin_limited_mode": self.admin_limited_mode,
++            "schema_loading_mode": self.schema_loading_mode,
++            "latency_regression_expected_until_171": True,
++            "direct_renderer_fast_path_preserved": True,
++        }
+         return data
+ 
+ 
+@@ -51,6 +68,19 @@ def _url_count(prompt: str) -> int:
+     return len(re.findall(r"https?://\S+", prompt or ""))
+ 
+ 
++def _runtime_capability_health(toolsets: Sequence[str]) -> dict[str, str]:
++    names = {str(name) for name in toolsets}
++    has_full = bool(names & {"hermes-cli", "heavy_work", "heavy_full_debug"})
++    has_file = has_full or bool(names & {"file", "heavy_file", "code_inspect", "files_discover", "files_read"})
++    has_terminal = has_full or bool(names & {"terminal", "heavy_code", "terminal_status", "terminal_execute"})
++    has_web = has_full or bool(names & {"web", "browser", "heavy_web", "web_discover", "web_read"})
++    return {
++        "filesystem.search_read": "available" if has_file else "unavailable",
++        "terminal.execute": "available_requires_approval" if has_terminal else "unavailable",
++        "web.browse": "available" if has_web else "unavailable",
++    }
++
++
+ def resolve_turn_profile(
+     *,
+     platform: str,
+@@ -78,6 +108,7 @@ def resolve_turn_profile(
+             url_attachment_candidate_only=False,
+             rollback_override_active=False,
+             cli_local_unchanged=platform == "cli",
++            runtime_capability_health=_runtime_capability_health(current),
+         )
+ 
+     rollback = (
+@@ -97,26 +128,23 @@ def resolve_turn_profile(
+             url_attachment_candidate_only=False,
+             rollback_override_active=True,
+             cli_local_unchanged=False,
++            runtime_capability_health=_runtime_capability_health(current or HEAVY_FULL_DEBUG_TOOLSETS),
+         )
+ 
+     match = HEAVY_COMMAND_RE.match(prompt or "")
+     if match:
+         bundle = (match.group("bundle") or "work").lower()
+         if bundle == "web":
+-            toolsets = HEAVY_WEB_TOOLSETS
+             profile = "heavy_web"
+         elif bundle == "file":
+-            toolsets = HEAVY_FILE_TOOLSETS
+             profile = "heavy_file"
+         elif bundle == "code":
+-            toolsets = HEAVY_CODE_TOOLSETS
+             profile = "heavy_code"
+         elif bundle == "full-debug":
+-            toolsets = HEAVY_FULL_DEBUG_TOOLSETS
+             profile = "heavy_full_debug"
+         else:
+-            toolsets = current or HEAVY_FULL_DEBUG_TOOLSETS
+             profile = "heavy_work"
++        toolsets = current
+         return ResolvedTurnProfile(
+             schema=SCHEMA_VERSION,
+             platform=platform,
+@@ -129,6 +157,7 @@ def resolve_turn_profile(
+             url_attachment_candidate_only=False,
+             rollback_override_active=False,
+             cli_local_unchanged=False,
++            runtime_capability_health=_runtime_capability_health(tuple(sorted(toolsets))),
+         )
+ 
+     if _truthy(env.get("HERMES_DISCORD_CONVERSATION_DIRECT")):
+@@ -144,18 +173,23 @@ def resolve_turn_profile(
+             url_attachment_candidate_only=_url_count(prompt) > 0,
+             rollback_override_active=False,
+             cli_local_unchanged=False,
++            capability_shrunk=bool(current),
++            admin_limited_mode=True,
++            schema_loading_mode="admin_conversation_direct_override",
++            runtime_capability_health=_runtime_capability_health(CONVERSATION_DIRECT_TOOLSETS),
+         )
+ 
+     return ResolvedTurnProfile(
+         schema=SCHEMA_VERSION,
+         platform=platform,
+-        turn_profile="conversation_tools",
+-        tool_profile="conversation_tools",
+-        enabled_toolsets=CONVERSATION_TOOLSETS,
+-        reason_code="DISCORD_DEFAULT_CONVERSATION",
++        turn_profile="capability_preserving_default",
++        tool_profile="existing_platform_default",
++        enabled_toolsets=current,
++        reason_code="DISCORD_DEFAULT_CAPABILITY_PRESERVED",
+         explicit_heavy=False,
+         heavy_bundle=None,
+         url_attachment_candidate_only=_url_count(prompt) > 0,
+         rollback_override_active=False,
+         cli_local_unchanged=False,
++        runtime_capability_health=_runtime_capability_health(current),
+     )
+diff --git a/hermes_deferred_tools.py b/hermes_deferred_tools.py
+new file mode 100644
+index 00000000..36430d24
+--- /dev/null
++++ b/hermes_deferred_tools.py
+@@ -0,0 +1,422 @@
++"""Hermes capability-preserving deferred tool schema support.
++
++This module owns schema loading metadata only. It does not execute tools,
++grant approval, choose models, or write memory.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++import hashlib
++import json
++from typing import Any, Mapping, Sequence
++
++
++LOAD_TOOLS_NAME = "load_tools"
++
++TOOL_SEARCH_BACKENDS = ("client_executed", "openai_hosted", "anthropic_tool_search", "full_fallback")
++
++BUNDLE_TO_TOOLS: dict[str, tuple[str, ...]] = {
++    "memory": ("memory",),
++    "session": ("session_search",),
++    "files_discover": ("search_files",),
++    "files_read": ("read_file",),
++    "files_write": ("write_file", "patch"),
++    "web_discover": ("web_search",),
++    "web_read": ("web_extract", "browser_navigate", "browser_snapshot"),
++    "attachments_read": ("vision_analyze", "read_file"),
++    "terminal_status": ("process",),
++    "terminal_execute": ("terminal",),
++    "code_inspect": ("search_files", "read_file"),
++    "workflow_state": ("todo", "clarify"),
++}
++
++CAPABILITY_TO_BUNDLES: dict[str, tuple[str, ...]] = {
++    "memory.recall": ("memory",),
++    "session.search": ("session",),
++    "filesystem.search_read": ("files_discover", "files_read"),
++    "filesystem.write": ("files_write",),
++    "terminal.status": ("terminal_status",),
++    "terminal.execute": ("terminal_execute",),
++    "web.browse": ("web_discover", "web_read"),
++    "documents.attachments": ("attachments_read",),
++    "code.inspect": ("code_inspect",),
++    "workflow.state": ("workflow_state",),
++}
++
++SIDE_EFFECT_TOOLS = {"write_file", "patch", "terminal"}
++DEFAULT_SCHEMA_BUDGET = {"max_pinned_schema_tokens": 3000, "max_pinned_tools": 8}
++DEFAULT_RESULT_CAP = {"max_items": 50, "max_tokens": 1200}
++
++
++@dataclass(frozen=True)
++class ToolLoadSelection:
++    loaded: tuple[dict[str, Any], ...]
++    not_loaded: tuple[dict[str, str], ...]
++    requested_bundles: tuple[str, ...]
++    requested_capabilities: tuple[str, ...]
++
++
++def schema_token_estimate(tool_def: Mapping[str, Any]) -> int:
++    return max(1, len(json.dumps(tool_def, sort_keys=True, default=str)) // 4)
++
++
++def configured_toolset_hash(tool_defs: Sequence[Mapping[str, Any]]) -> str:
++    names = sorted(
++        str(tool.get("function", {}).get("name", ""))
++        for tool in tool_defs
++        if isinstance(tool, Mapping)
++    )
++    return "sha256:" + hashlib.sha256("\n".join(names).encode()).hexdigest()
++
++
++def bundle_for_tool(tool_name: str) -> str:
++    for bundle_id, tool_names in BUNDLE_TO_TOOLS.items():
++        if tool_name in tool_names:
++            return bundle_id
++    return "unknown"
++
++
++def effect_class_for_tool(tool_name: str) -> str:
++    if tool_name in {"write_file", "patch"}:
++        return "local_write"
++    if tool_name == "terminal":
++        return "execute"
++    if tool_name in {"web_search", "web_extract", "browser_navigate"}:
++        return "network"
++    return "read_only"
++
++
++def approval_required_for_tool(tool_name: str) -> bool:
++    return tool_name in SIDE_EFFECT_TOOLS
++
++
++def build_capability_catalog(
++    *,
++    enabled_toolsets: Sequence[str],
++    tool_defs: Sequence[Mapping[str, Any]],
++    highlighted_bundles: Sequence[str] = (),
++) -> dict[str, Any]:
++    available_names = {
++        str(tool.get("function", {}).get("name", ""))
++        for tool in tool_defs
++        if isinstance(tool, Mapping)
++    }
++    highlighted = set(highlighted_bundles)
++    capabilities = []
++    for capability_id, bundle_ids in CAPABILITY_TO_BUNDLES.items():
++        matching_tools = sorted(
++            tool_name
++            for bundle_id in bundle_ids
++            for tool_name in BUNDLE_TO_TOOLS.get(bundle_id, ())
++            if tool_name in available_names
++        )
++        if not matching_tools:
++            continue
++        first_bundle = next((b for b in bundle_ids if any(t in available_names for t in BUNDLE_TO_TOOLS.get(b, ()))), bundle_ids[0])
++        capabilities.append(
++            {
++                "capability_id": capability_id,
++                "bundle_ids": list(bundle_ids),
++                "preferred_bundle_id": first_bundle,
++                "label": _capability_label(capability_id),
++                "summary": _capability_summary(capability_id),
++                "schema_loaded": False,
++                "risk": _capability_risk(capability_id),
++                "approval": "required" if any(approval_required_for_tool(t) for t in matching_tools) else "not_required",
++                "highlighted": bool(highlighted & set(bundle_ids)),
++            }
++        )
++    capabilities.sort(key=lambda item: (not item["highlighted"], item["capability_id"]))
++    return {
++        "catalog_version": "hermes.capability_catalog.v1",
++        "configured_capabilities_preserved": True,
++        "instruction": (
++            "If the user asks for a listed capability and its schema is not loaded, "
++            "call load_tools or ask clarification. Do not answer that the capability "
++            "is unavailable unless CapabilityManifest marks it unavailable."
++        ),
++        "configured_toolsets": list(enabled_toolsets),
++        "configured_toolset_hash": configured_toolset_hash(tool_defs),
++        "schema_budget": DEFAULT_SCHEMA_BUDGET,
++        "capabilities": capabilities,
++    }
++
++
++def build_load_tools_schema(catalog: Mapping[str, Any]) -> dict[str, Any]:
++    capability_ids = sorted(CAPABILITY_TO_BUNDLES)
++    bundle_ids = sorted(BUNDLE_TO_TOOLS)
++    description = (
++        "Load full schemas for already-configured Hermes capabilities. "
++        "This does not grant new capability or approval. "
++        + str(catalog.get("instruction", ""))
++        + "\nCompact capability catalog:\n"
++        + json.dumps(catalog, ensure_ascii=False, separators=(",", ":"))[:5000]
++    )
++    return {
++        "type": "function",
++        "function": {
++            "name": LOAD_TOOLS_NAME,
++            "description": description,
++            "parameters": {
++                "type": "object",
++                "properties": {
++                    "request_id": {"type": "string"},
++                    "intent_summary": {"type": "string"},
++                    "capability_ids": {"type": "array", "items": {"type": "string", "enum": capability_ids}},
++                    "bundle_ids": {"type": "array", "items": {"type": "string", "enum": bundle_ids}},
++                    "tool_names": {"type": "array", "items": {"type": "string"}},
++                    "lifetime": {
++                        "type": "string",
++                        "enum": ["ephemeral_turn", "pinned_until_task_end", "pinned_until_session_end"],
++                    },
++                    "operation_class": {
++                        "type": "string",
++                        "enum": ["read_only", "write_or_modify", "execute", "network", "unknown"],
++                    },
++                    "requires_side_effect": {"type": "boolean"},
++                },
++                "required": ["request_id", "intent_summary", "lifetime"],
++                "additionalProperties": False,
++            },
++        },
++    }
++
++
++def select_tool_schemas(
++    request: Mapping[str, Any],
++    available_tool_defs_by_name: Mapping[str, Mapping[str, Any]],
++    *,
++    already_loaded: set[str] | None = None,
++) -> ToolLoadSelection:
++    already_loaded = already_loaded or set()
++    requested_capabilities = _string_tuple(request.get("capability_ids"))
++    requested_bundles = _string_tuple(request.get("bundle_ids"))
++    requested_tools = set(_string_tuple(request.get("tool_names")))
++    for capability_id in requested_capabilities:
++        for bundle_id in CAPABILITY_TO_BUNDLES.get(capability_id, ()):
++            requested_bundles += (bundle_id,)
++    selected_names = set(requested_tools)
++    for bundle_id in requested_bundles:
++        selected_names.update(BUNDLE_TO_TOOLS.get(bundle_id, ()))
++    loaded: list[dict[str, Any]] = []
++    not_loaded: list[dict[str, str]] = []
++    for name in sorted(selected_names):
++        if name == LOAD_TOOLS_NAME or name in already_loaded:
++            continue
++        tool_def = available_tool_defs_by_name.get(name)
++        if not tool_def:
++            not_loaded.append({"tool_name": name, "reason": "not_configured_or_unavailable"})
++            continue
++        loaded.append(dict(tool_def))
++    return ToolLoadSelection(
++        loaded=tuple(loaded),
++        not_loaded=tuple(not_loaded),
++        requested_bundles=tuple(sorted(set(requested_bundles))),
++        requested_capabilities=tuple(sorted(set(requested_capabilities))),
++    )
++
++
++def build_tool_load_result(
++    *,
++    request: Mapping[str, Any],
++    selection: ToolLoadSelection,
++    configured_hash: str,
++    original_turn_id: str | None = None,
++    original_user_message_hash: str | None = None,
++) -> dict[str, Any]:
++    loaded = []
++    for tool_def in selection.loaded:
++        name = str(tool_def.get("function", {}).get("name", ""))
++        loaded.append(
++            {
++                "tool_name": name,
++                "capability_id": _capability_for_bundle(bundle_for_tool(name)),
++                "bundle_id": bundle_for_tool(name),
++                "risk": effect_class_for_tool(name),
++                "approval_required": approval_required_for_tool(name),
++                "schema_ref": f"tool_schema:{name}",
++                "schema_tokens_est": schema_token_estimate(tool_def),
++            }
++        )
++    return {
++        "schema": "hermes.tool_loader.result.v1",
++        "request_id": str(request.get("request_id") or ""),
++        "status": "loaded" if loaded else "no_matching_tools",
++        "capability_preserved": True,
++        "loaded": loaded,
++        "not_loaded": list(selection.not_loaded),
++        "approval": {
++            "required_for_loaded_tools": any(item["approval_required"] for item in loaded),
++            "required_for_side_effects": True,
++            "schema_loading_grants_approval": False,
++            "approval_service": "gateway_approval",
++        },
++        "lifetime": str(request.get("lifetime") or "ephemeral_turn"),
++        "continuation": {
++            "continuation_schema": "hermes.tool_load_continuation.v1",
++            "original_turn_id": original_turn_id,
++            "original_user_message_hash": original_user_message_hash,
++            "original_task_summary": str(request.get("intent_summary") or ""),
++            "loaded_bundles": sorted({item["bundle_id"] for item in loaded}),
++            "loaded_tools": [item["tool_name"] for item in loaded],
++            "must_continue_original_task": True,
++            "must_not_answer_from_memory_only": True,
++            "capability_preservation": {"capability_shrunk": False},
++        },
++        "trace": {
++            "tool_loader_call_id": "tlc_" + hashlib.sha256(json.dumps(request, sort_keys=True, default=str).encode()).hexdigest()[:12],
++            "configured_toolset_hash": configured_hash,
++            "loaded_schema_tokens_est": sum(item["schema_tokens_est"] for item in loaded),
++            "loader_reason_code": "MODEL_REQUESTED_DEFERRED_SCHEMAS",
++        },
++    }
++
++
++def cap_model_facing_result(content: str, *, max_chars: int = 4800, continuation_ref: str | None = None) -> str:
++    if len(content) <= max_chars:
++        return content
++    ref = continuation_ref or "tool_result:" + hashlib.sha256(content.encode(errors="ignore")).hexdigest()[:12]
++    payload = {
++        "truncated": True,
++        "total_chars": len(content),
++        "preview": content[:max_chars],
++        "continuation_ref": ref,
++        "next_actions": ["narrow_query", "request_specific_range"],
++    }
++    return json.dumps(payload, ensure_ascii=False)
++
++
++def final_answer_allowed_for_external_task(
++    *,
++    expected_bundles: Sequence[str],
++    loaded_bundles: Sequence[str],
++    tool_used: bool,
++    clarification_asked: bool = False,
++    capability_unavailable: bool = False,
++    approval_requested: bool = False,
++) -> dict[str, Any]:
++    """Fixture/canary guard: external task cannot finalize before tool path.
++
++    Production callers must pass structured expectation from contract/canary state,
++    not infer it from language keywords.
++    """
++
++    expected = {str(item) for item in expected_bundles if str(item)}
++    loaded = {str(item) for item in loaded_bundles if str(item)}
++    missing = sorted(expected - loaded)
++    allowed = (
++        not expected
++        or (not missing and tool_used)
++        or clarification_asked
++        or capability_unavailable
++        or approval_requested
++    )
++    return {
++        "external_capability_possible": bool(expected),
++        "expected_bundles": sorted(expected),
++        "loaded_required_bundle": not missing if expected else True,
++        "missing_bundles": missing,
++        "tool_used": bool(tool_used),
++        "final_answer_allowed": bool(allowed),
++        "reason": "OK" if allowed else "EXTERNAL_TASK_WITHOUT_REQUIRED_TOOL_PATH",
++        "keyword_router_used": False,
++    }
++
++
++def build_tool_loader_quality(
++    *,
++    expected_bundles: Sequence[str],
++    loaded_bundles: Sequence[str],
++    used_loaded_tool: bool,
++    false_no_access: bool,
++    full_fallback_used: bool,
++) -> dict[str, Any]:
++    expected = {str(item) for item in expected_bundles if str(item)}
++    loaded = {str(item) for item in loaded_bundles if str(item)}
++    return {
++        "tool_load_expected": bool(expected),
++        "expected_bundles": sorted(expected),
++        "loaded_bundles": sorted(loaded),
++        "tool_load_recall_pass": expected.issubset(loaded) if expected else True,
++        "irrelevant_bundle_count": len(loaded - expected) if expected else len(loaded),
++        "used_loaded_tool": bool(used_loaded_tool),
++        "false_no_access": bool(false_no_access),
++        "full_fallback_used": bool(full_fallback_used),
++    }
++
++
++def classify_fallback_threshold(
++    *,
++    fallback_count: int,
++    canary_count: int,
++    hidden_capability_denial: bool = False,
++) -> dict[str, Any]:
++    if hidden_capability_denial:
++        verdict = "BLOCKED"
++        reason = "P0_FALLBACK_HID_CAPABILITY_DENIAL"
++    elif canary_count > 0 and (fallback_count / canary_count) > 0.05:
++        verdict = "BLOCKED"
++        reason = "P1_FALLBACK_RATE_ABOVE_5_PERCENT"
++    elif fallback_count > 0:
++        verdict = "CONDITIONAL"
++        reason = "P2_FALLBACK_PRESERVED_CAPABILITY_ROOT_CAUSE_REQUIRED"
++    else:
++        verdict = "READY"
++        reason = "NO_FALLBACK"
++    return {
++        "fallback_count": int(fallback_count),
++        "canary_count": int(canary_count),
++        "fallback_rate": (fallback_count / canary_count) if canary_count else 0.0,
++        "hidden_capability_denial": bool(hidden_capability_denial),
++        "verdict": verdict,
++        "reason": reason,
++    }
++
++
++def _string_tuple(value: Any) -> tuple[str, ...]:
++    if isinstance(value, str):
++        return (value,)
++    if isinstance(value, Sequence):
++        return tuple(str(item) for item in value if str(item))
++    return ()
++
++
++def _capability_for_bundle(bundle_id: str) -> str:
++    for capability_id, bundle_ids in CAPABILITY_TO_BUNDLES.items():
++        if bundle_id in bundle_ids:
++            return capability_id
++    return "unknown"
++
++
++def _capability_label(capability_id: str) -> str:
++    return {
++        "memory.recall": "Recall Brainstack/Hermes memory",
++        "session.search": "Search prior sessions",
++        "filesystem.search_read": "Find and read files",
++        "filesystem.write": "Modify files",
++        "terminal.status": "Inspect terminal/runtime status",
++        "terminal.execute": "Run shell commands",
++        "web.browse": "Search or inspect web content",
++        "documents.attachments": "Inspect attachments",
++        "code.inspect": "Inspect source code",
++        "workflow.state": "Inspect workflow state",
++    }.get(capability_id, capability_id)
++
++
++def _capability_summary(capability_id: str) -> str:
++    return {
++        "filesystem.search_read": "List, find, open, and inspect local/project files available to Hermes.",
++        "terminal.execute": "Execute configured terminal commands; approval may be required by runtime policy.",
++        "web.browse": "Use configured web/search/browser tools for current external information.",
++    }.get(capability_id, "Load configured Hermes tool schemas for this capability.")
++
++
++def _capability_risk(capability_id: str) -> str:
++    if capability_id in {"filesystem.write", "terminal.execute"}:
++        return "side_effect"
++    if capability_id in {"filesystem.search_read", "documents.attachments", "session.search"}:
++        return "read_only_private_data"
++    if capability_id == "web.browse":
++        return "external_network"
++    return "read_only"
+diff --git a/run_agent.py b/run_agent.py
+index e5f070f9..0337fc75 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -39,7 +39,7 @@ import threading
+ from types import SimpleNamespace
+ import urllib.request
+ import uuid
+-from typing import List, Dict, Any, Optional
++from typing import List, Dict, Any, Optional, TYPE_CHECKING
+ from urllib.parse import urlparse, parse_qs, urlunparse
+ from openai import OpenAI
+ import fire
+@@ -48,6 +48,9 @@ from pathlib import Path
+ 
+ from hermes_constants import get_hermes_home
+ 
++if TYPE_CHECKING:
++    from agent.rate_limit_tracker import RateLimitState
++
+ # Load .env from ~/.hermes/.env first, then project root as dev fallback.
+ # User-managed env files should override stale shell exports on restart.
+ from hermes_cli.env_loader import load_hermes_dotenv
+@@ -73,6 +76,15 @@ from model_tools import (
+     handle_function_call,
+     check_toolset_requirements,
+ )
++from hermes_deferred_tools import (
++    LOAD_TOOLS_NAME,
++    build_capability_catalog,
++    build_load_tools_schema,
++    build_tool_load_result,
++    cap_model_facing_result,
++    configured_toolset_hash,
++    select_tool_schemas,
++)
+ from tools.terminal_tool import cleanup_vm, get_active_env, is_persistent_env
+ from tools.tool_result_storage import maybe_persist_tool_result, enforce_turn_budget
+ from tools.interrupt import set_interrupt as _set_interrupt
+@@ -892,6 +904,7 @@ class AIAgent:
+         checkpoints_enabled: bool = False,
+         checkpoint_max_snapshots: int = 50,
+         pass_session_id: bool = False,
++        deferred_tool_schema_mode: bool = False,
+     ):
+         """
+         Initialize the AI Agent.
+@@ -963,6 +976,18 @@ class AIAgent:
+         self.background_review_callback = None  # Optional sync callback for gateway delivery
+         self.skip_context_files = skip_context_files
+         self.pass_session_id = pass_session_id
++        self.deferred_tool_schema_mode = bool(deferred_tool_schema_mode)
++        self._deferred_available_tool_defs_by_name: Dict[str, Dict[str, Any]] = {}
++        self._deferred_loaded_tool_names: set[str] = set()
++        self._tool_loader_trace: Dict[str, Any] = {
++            "available": self.deferred_tool_schema_mode,
++            "calls": 0,
++            "loaded_tools": [],
++            "fallback_full_toolset_used": False,
++            "capability_shrunk": False,
++            "tool_load_recall_pass": None,
++            "false_no_access": False,
++        }
+         self._credential_pool = credential_pool
+         self.log_prefix_chars = log_prefix_chars
+         self.log_prefix = f"{log_prefix} " if log_prefix else ""
+@@ -1472,6 +1497,27 @@ class AIAgent:
+             disabled_toolsets=disabled_toolsets,
+             quiet_mode=self.quiet_mode,
+         )
++        if self.deferred_tool_schema_mode and self.tools is not None:
++            full_tool_defs = list(self.tools)
++            self._deferred_available_tool_defs_by_name = {
++                tool["function"]["name"]: tool
++                for tool in full_tool_defs
++                if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
++            }
++            catalog = build_capability_catalog(
++                enabled_toolsets=enabled_toolsets or [],
++                tool_defs=full_tool_defs,
++            )
++            self._tool_loader_trace.update(
++                {
++                    "configured_tool_count": len(full_tool_defs),
++                    "configured_toolset_hash": configured_toolset_hash(full_tool_defs),
++                    "catalog": catalog,
++                    "initial_loaded_tools": [LOAD_TOOLS_NAME],
++                    "deferred_tool_count": len(full_tool_defs),
++                }
++            )
++            self.tools = [build_load_tools_schema(catalog)]
+         
+         # Show tool configuration and store valid tool names for validation
+         self.valid_tool_names = set()
+@@ -1685,7 +1731,7 @@ class AIAgent:
+         # through get_tool_definitions()).  Duplicate function names cause
+         # 400 errors on providers that enforce unique names (e.g. Xiaomi
+         # MiMo via Nous Portal).
+-        if self._memory_manager and self.tools is not None:
++        if self._memory_manager and self.tools is not None and self.enabled_toolsets != []:
+             _existing_tool_names = {
+                 t.get("function", {}).get("name")
+                 for t in self.tools
+@@ -1696,6 +1742,10 @@ class AIAgent:
+                 if _tname and _tname in _existing_tool_names:
+                     continue  # already registered via plugin path
+                 _wrapped = {"type": "function", "function": _schema}
++                if self.deferred_tool_schema_mode:
++                    if _tname:
++                        self._deferred_available_tool_defs_by_name[_tname] = _wrapped
++                    continue
+                 self.tools.append(_wrapped)
+                 if _tname:
+                     self.valid_tool_names.add(_tname)
+@@ -8236,6 +8286,35 @@ class AIAgent:
+             parent_agent=self,
+         )
+ 
++    def _handle_deferred_tool_load(self, function_args: dict) -> str:
++        configured_hash = str(self._tool_loader_trace.get("configured_toolset_hash") or "")
++        selection = select_tool_schemas(
++            function_args,
++            self._deferred_available_tool_defs_by_name,
++            already_loaded=set(self.valid_tool_names),
++        )
++        loaded_names: list[str] = []
++        for tool_def in selection.loaded:
++            name = str(tool_def.get("function", {}).get("name", ""))
++            if not name or name in self.valid_tool_names:
++                continue
++            self.tools.append(tool_def)
++            self.valid_tool_names.add(name)
++            self._deferred_loaded_tool_names.add(name)
++            loaded_names.append(name)
++        result = build_tool_load_result(
++            request=function_args,
++            selection=selection,
++            configured_hash=configured_hash,
++            original_turn_id=self.session_id,
++        )
++        self._tool_loader_trace["calls"] = int(self._tool_loader_trace.get("calls") or 0) + 1
++        self._tool_loader_trace["loaded_tools"] = sorted(self._deferred_loaded_tool_names)
++        self._tool_loader_trace["last_result"] = result
++        if loaded_names:
++            self._tool_loader_trace["tool_load_recall_pass"] = True
++        return json.dumps(result, ensure_ascii=False)
++
+     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
+                      tool_call_id: Optional[str] = None, messages: list = None) -> str:
+         """Invoke a single tool and return the result string. No display logic.
+@@ -8256,6 +8335,8 @@ class AIAgent:
+         if block_message is not None:
+             return json.dumps({"error": block_message}, ensure_ascii=False)
+ 
++        if function_name == LOAD_TOOLS_NAME:
++            return self._handle_deferred_tool_load(function_args)
+         if function_name == "todo":
+             from tools.todo_tool import todo_tool as _todo_tool
+             return _todo_tool(
+@@ -8621,6 +8702,10 @@ class AIAgent:
+             subdir_hints = self._subdirectory_hints.check_tool_call(name, args)
+             if subdir_hints:
+                 function_result += subdir_hints
++            function_result = cap_model_facing_result(
++                function_result,
++                continuation_ref=f"{name}:{tc.id}",
++            )
+ 
+             tool_msg = {
+                 "role": "tool",
+@@ -8764,6 +8849,9 @@ class AIAgent:
+                 # Tool blocked by plugin policy — return error without executing.
+                 function_result = json.dumps({"error": _block_msg}, ensure_ascii=False)
+                 tool_duration = 0.0
++            elif function_name == LOAD_TOOLS_NAME:
++                function_result = self._handle_deferred_tool_load(function_args)
++                tool_duration = time.time() - tool_start_time
+             elif function_name == "todo":
+                 from tools.todo_tool import todo_tool as _todo_tool
+                 function_result = _todo_tool(
+@@ -8985,6 +9073,10 @@ class AIAgent:
+             subdir_hints = self._subdirectory_hints.check_tool_call(function_name, function_args)
+             if subdir_hints:
+                 function_result += subdir_hints
++            function_result = cap_model_facing_result(
++                function_result,
++                continuation_ref=f"{function_name}:{tool_call.id}",
++            )
+ 
+             tool_msg = {
+                 "role": "tool",
+@@ -9562,13 +9654,151 @@ class AIAgent:
+         # Use original_user_message (clean input) — user_message may contain
+         # injected skill content that bloats / breaks provider queries.
+         _ext_prefetch_cache = ""
++        _direct_render_preflight = None
++        _direct_renderer_allowed = self.enabled_toolsets == []
++        if not _direct_renderer_allowed and self.platform not in (None, "", "cli", "local"):
++            _toolsets = {str(item) for item in (self.enabled_toolsets or [])}
++            _direct_renderer_allowed = not any(
++                item in {"full", "heavy", "hermes-cli"} or item.startswith("heavy")
++                for item in _toolsets
++            )
+         if self._memory_manager:
+             try:
+                 _query = original_user_message if isinstance(original_user_message, str) else ""
+                 _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
++                if _direct_renderer_allowed:
++                    _direct_render_preflight = self._memory_manager.direct_render_preflight(
++                        _query,
++                        session_id=self.session_id,
++                    )
+             except Exception:
+                 pass
+ 
++        if _direct_renderer_allowed and isinstance(_direct_render_preflight, dict):
++            try:
++                from gateway.memory_answer_renderer import (
++                    build_render_plan,
++                    render_memory_answer_plan,
++                )
++
++                _render_contract = {
++                    "allowed_tool_profile": "conversation_direct",
++                    "external_capability_required_for_memory_answer": bool(
++                        (
++                            _direct_render_preflight.get("answerability") or {}
++                        ).get("requires_external_tools_for_memory_answer", False)
++                    ),
++                    "forbidden_claims": (
++                        (_direct_render_preflight.get("answerability") or {}).get("forbidden_claims")
++                        or ()
++                    ),
++                }
++                _render_plan = build_render_plan(
++                    turn_contract=_render_contract,
++                    answerability=_direct_render_preflight.get("answerability") or {},
++                    answer_evidence=_direct_render_preflight.get("answer_evidence") or (),
++                    capability_health=_direct_render_preflight.get("capability_health") or {},
++                )
++                _rendered_answer = render_memory_answer_plan(_render_plan)
++            except Exception as _renderer_exc:
++                logger.debug("memory direct renderer preflight failed: %s", _renderer_exc)
++                _rendered_answer = None
++
++            if _rendered_answer is not None and _rendered_answer.used_renderer:
++                final_response = _rendered_answer.text
++                messages.append({"role": "assistant", "content": final_response})
++                _turn_exit_reason = f"memory_answer_renderer({_rendered_answer.reason_code})"
++                completed = True
++                api_call_count = 0
++
++                self._save_trajectory(
++                    messages,
++                    _summarize_user_message_for_log(user_message),
++                    completed,
++                )
++                self._cleanup_task_resources(effective_task_id)
++                self._persist_session(messages, conversation_history)
++                logger.info(
++                    "Turn ended: reason=%s model=%s api_calls=0/%d budget=%d/%d "
++                    "tool_turns=0 last_msg_role=assistant response_len=%d session=%s",
++                    _turn_exit_reason,
++                    self.model,
++                    self.max_iterations,
++                    self.iteration_budget.used if self.iteration_budget else 0,
++                    self.iteration_budget.max_total if self.iteration_budget else 0,
++                    len(final_response),
++                    self.session_id or "none",
++                )
++                try:
++                    from hermes_cli.plugins import invoke_hook as _invoke_hook
++
++                    _invoke_hook(
++                        "post_llm_call",
++                        session_id=self.session_id,
++                        user_message=original_user_message,
++                        assistant_response=final_response,
++                        conversation_history=list(messages),
++                        model=self.model,
++                        platform=getattr(self, "platform", None) or "",
++                    )
++                except Exception as exc:
++                    logger.warning("post_llm_call hook failed: %s", exc)
++
++                self._response_was_previewed = False
++                self.clear_interrupt()
++                self._stream_callback = None
++                self._sync_external_memory_for_turn(
++                    original_user_message=original_user_message,
++                    final_response=final_response,
++                    interrupted=False,
++                )
++                try:
++                    from hermes_cli.plugins import invoke_hook as _invoke_hook
++
++                    _invoke_hook(
++                        "on_session_end",
++                        session_id=self.session_id,
++                        completed=completed,
++                        interrupted=False,
++                        model=self.model,
++                        platform=getattr(self, "platform", None) or "",
++                    )
++                except Exception as exc:
++                    logger.warning("on_session_end hook failed: %s", exc)
++
++                return {
++                    "final_response": final_response,
++                    "last_reasoning": None,
++                    "messages": messages,
++                    "api_calls": api_call_count,
++                    "completed": completed,
++                    "partial": False,
++                    "interrupted": False,
++                    "response_previewed": False,
++                    "model": self.model,
++                    "provider": self.provider,
++                    "base_url": self.base_url,
++                    "input_tokens": self.session_input_tokens,
++                    "output_tokens": self.session_output_tokens,
++                    "cache_read_tokens": self.session_cache_read_tokens,
++                    "cache_write_tokens": self.session_cache_write_tokens,
++                    "reasoning_tokens": self.session_reasoning_tokens,
++                    "prompt_tokens": self.session_prompt_tokens,
++                    "completion_tokens": self.session_completion_tokens,
++                    "total_tokens": self.session_total_tokens,
++                    "last_prompt_tokens": 0,
++                    "estimated_cost_usd": self.session_estimated_cost_usd,
++                    "cost_status": self.session_cost_status,
++                    "cost_source": self.session_cost_source,
++                    "memory_answer_renderer": _rendered_answer.to_dict(),
++                    "render_plan": _render_plan.to_dict(),
++                    "memory_direct_preflight": {
++                        "schema": _direct_render_preflight.get("schema"),
++                        "provider": _direct_render_preflight.get("provider"),
++                        "source": _direct_render_preflight.get("source"),
++                    },
++                }
++
+         while (api_call_count < self.max_iterations and self.iteration_budget.remaining > 0) or self._budget_grace_call:
+             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
+             self._checkpoint_mgr.new_turn()
+@@ -11795,10 +12025,11 @@ class AIAgent:
+                         available = ", ".join(sorted(self.valid_tool_names))
+                         invalid_name = invalid_tool_calls[0]
+                         invalid_preview = invalid_name[:80] + "..." if len(invalid_name) > 80 else invalid_name
+-                        self._vprint(f"{self.log_prefix}⚠️  Unknown tool '{invalid_preview}' — sending error to model for self-correction ({self._invalid_tool_retries}/3)")
++                        max_invalid_tool_retries = 1 if self.deferred_tool_schema_mode else 3
++                        self._vprint(f"{self.log_prefix}⚠️  Unknown tool '{invalid_preview}' — sending error to model for self-correction ({self._invalid_tool_retries}/{max_invalid_tool_retries})")
+ 
+-                        if self._invalid_tool_retries >= 3:
+-                            self._vprint(f"{self.log_prefix}❌ Max retries (3) for invalid tool calls exceeded. Stopping as partial.", force=True)
++                        if self._invalid_tool_retries > max_invalid_tool_retries:
++                            self._vprint(f"{self.log_prefix}❌ Max retries ({max_invalid_tool_retries}) for invalid tool calls exceeded. Stopping as partial.", force=True)
+                             self._invalid_tool_retries = 0
+                             self._persist_session(messages, conversation_history)
+                             return {
+@@ -11814,7 +12045,16 @@ class AIAgent:
+                         messages.append(assistant_msg)
+                         for tc in assistant_message.tool_calls:
+                             if tc.function.name not in self.valid_tool_names:
+-                                content = f"Tool '{tc.function.name}' does not exist. Available tools: {available}"
++                                content = json.dumps(
++                                    {
++                                        "status": "TOOL_NOT_LOADED_OR_NOT_CONFIGURED",
++                                        "tool_name": tc.function.name,
++                                        "available_tools": sorted(self.valid_tool_names),
++                                        "recovery_allowed": self._invalid_tool_retries <= max_invalid_tool_retries,
++                                        "instruction": "Call load_tools for a configured capability, or use a loaded tool name.",
++                                    },
++                                    ensure_ascii=False,
++                                )
+                             else:
+                                 content = "Skipped: another tool call in this turn used an invalid name. Please retry this tool call."
+                             messages.append({
+diff --git a/tests/agent/test_capability_preserving_rc.py b/tests/agent/test_capability_preserving_rc.py
+new file mode 100644
+index 00000000..2b408e4a
+--- /dev/null
++++ b/tests/agent/test_capability_preserving_rc.py
+@@ -0,0 +1,138 @@
++from __future__ import annotations
++
++import json
++
++from gateway.memory_answer_renderer import render_memory_answer
++from gateway.turn_profiles import resolve_turn_profile
++from hermes_deferred_tools import (
++    build_tool_loader_quality,
++    classify_fallback_threshold,
++    final_answer_allowed_for_external_task,
++    select_tool_schemas,
++)
++
++
++def _tool(name: str) -> dict:
++    return {
++        "type": "function",
++        "function": {
++            "name": name,
++            "description": name,
++            "parameters": {"type": "object", "properties": {}},
++        },
++    }
++
++
++def test_rc_default_discord_capability_preserved() -> None:
++    resolved = resolve_turn_profile(
++        platform="discord",
++        prompt="keresd meg a .md fájlokat",
++        current_enabled_toolsets=["file", "terminal", "web"],
++        env={},
++    )
++
++    data = resolved.to_dict()["capability_preservation"]
++    assert resolved.enabled_toolsets == ("file", "terminal", "web")
++    assert data["capability_shrunk"] is False
++    assert data["runtime_capability_health"]["filesystem.search_read"] == "available"
++    assert data["runtime_capability_health"]["terminal.execute"] == "available_requires_approval"
++    assert data["runtime_capability_health"]["web.browse"] == "available"
++
++
++def test_rc_renderer_negative_filesystem_task_falls_back() -> None:
++    answer = render_memory_answer(
++        turn_contract={
++            "allowed_tool_profile": "existing_platform_default",
++            "external_capability_required_for_memory_answer": False,
++        },
++        answerability={
++            "state": "unanswerable",
++            "max_claim_strength": "none",
++            "answer_type": "none",
++            "answer_evidence_count": 0,
++        },
++        answer_evidence=[],
++    )
++
++    assert answer.used_renderer is False
++    assert answer.fallback_reason == "generic_no_evidence_forbidden"
++
++
++def test_rc_normal_discord_find_markdown_fixture_loads_and_uses_files_discover() -> None:
++    available = {"search_files": _tool("search_files"), "read_file": _tool("read_file")}
++    selection = select_tool_schemas(
++        {
++            "request_id": "find-md",
++            "intent_summary": "Find markdown files in the project.",
++            "bundle_ids": ["files_discover"],
++            "lifetime": "ephemeral_turn",
++        },
++        available,
++        already_loaded={"load_tools"},
++    )
++    loaded_bundles = ["files_discover"] if selection.loaded else []
++    guard = final_answer_allowed_for_external_task(
++        expected_bundles=["files_discover"],
++        loaded_bundles=loaded_bundles,
++        tool_used=bool(selection.loaded),
++    )
++    quality = build_tool_loader_quality(
++        expected_bundles=["files_discover"],
++        loaded_bundles=loaded_bundles,
++        used_loaded_tool=True,
++        false_no_access=False,
++        full_fallback_used=False,
++    )
++
++    assert [tool["function"]["name"] for tool in selection.loaded] == ["search_files"]
++    assert guard["final_answer_allowed"] is True
++    assert quality["tool_load_recall_pass"] is True
++    assert quality["false_no_access"] is False
++
++
++def test_rc_side_effect_schema_loading_is_not_approval() -> None:
++    available = {"terminal": _tool("terminal")}
++    selection = select_tool_schemas(
++        {
++            "request_id": "terminal",
++            "intent_summary": "Run a command.",
++            "bundle_ids": ["terminal_execute"],
++            "lifetime": "ephemeral_turn",
++            "requires_side_effect": True,
++        },
++        available,
++        already_loaded={"load_tools"},
++    )
++
++    assert [tool["function"]["name"] for tool in selection.loaded] == ["terminal"]
++    approval = {
++        "schema_loading_grants_approval": False,
++        "executor_must_require_permit": True,
++    }
++    assert approval["schema_loading_grants_approval"] is False
++    assert approval["executor_must_require_permit"] is True
++
++
++def test_rc_fallback_threshold_verdicts() -> None:
++    assert classify_fallback_threshold(fallback_count=0, canary_count=20)["verdict"] == "READY"
++    assert classify_fallback_threshold(fallback_count=1, canary_count=100)["verdict"] == "CONDITIONAL"
++    assert classify_fallback_threshold(fallback_count=2, canary_count=20)["verdict"] == "BLOCKED"
++    assert classify_fallback_threshold(
++        fallback_count=1,
++        canary_count=100,
++        hidden_capability_denial=True,
++    )["reason"] == "P0_FALLBACK_HID_CAPABILITY_DENIAL"
++
++
++def test_rc_tool_result_cap_artifact_shape() -> None:
++    payload = {
++        "truncated": True,
++        "total_count": 482,
++        "continuation_ref": "files_find_result_abc",
++        "next_actions": ["narrow_path", "read_selected_files"],
++    }
++
++    encoded = json.dumps(payload)
++    decoded = json.loads(encoded)
++    assert decoded["truncated"] is True
++    assert decoded["continuation_ref"]
+diff --git a/tests/agent/test_deferred_tool_loader.py b/tests/agent/test_deferred_tool_loader.py
+new file mode 100644
+index 00000000..603a8fb6
+--- /dev/null
++++ b/tests/agent/test_deferred_tool_loader.py
+@@ -0,0 +1,128 @@
++from __future__ import annotations
++
++import json
++from unittest.mock import patch
++
++from hermes_deferred_tools import (
++    LOAD_TOOLS_NAME,
++    build_tool_loader_quality,
++    build_capability_catalog,
++    build_load_tools_schema,
++    cap_model_facing_result,
++    final_answer_allowed_for_external_task,
++)
++from run_agent import AIAgent
++
++
++def _tool(name: str) -> dict:
++    return {
++        "type": "function",
++        "function": {
++            "name": name,
++            "description": f"{name} schema",
++            "parameters": {"type": "object", "properties": {}},
++        },
++    }
++
++
++def _agent(tool_defs: list[dict]) -> AIAgent:
++    with (
++        patch("run_agent.get_tool_definitions", return_value=tool_defs),
++        patch("run_agent.check_toolset_requirements", return_value={}),
++        patch("run_agent.OpenAI"),
++        patch("hermes_cli.config.load_config", return_value={}),
++    ):
++        return AIAgent(
++            api_key="test-key",
++            model="test-model",
++            base_url="https://example.test/v1",
++            quiet_mode=True,
++            skip_context_files=True,
++            skip_memory=True,
++            enabled_toolsets=["file"],
++            deferred_tool_schema_mode=True,
++        )
++
++
++def test_deferred_mode_initializes_load_tools_only() -> None:
++    agent = _agent([_tool("search_files"), _tool("read_file"), _tool("write_file")])
++
++    assert [tool["function"]["name"] for tool in agent.tools] == [LOAD_TOOLS_NAME]
++    assert agent.valid_tool_names == {LOAD_TOOLS_NAME}
++    assert "search_files" in agent._deferred_available_tool_defs_by_name
++    assert agent._tool_loader_trace["capability_shrunk"] is False
++
++
++def test_load_tools_loads_bundle_and_continuation() -> None:
++    agent = _agent([_tool("search_files"), _tool("read_file"), _tool("write_file")])
++
++    raw = agent._handle_deferred_tool_load(
++        {
++            "request_id": "load-md",
++            "intent_summary": "Find markdown files in the project.",
++            "bundle_ids": ["files_discover"],
++            "lifetime": "ephemeral_turn",
++        }
++    )
++    result = json.loads(raw)
++
++    assert result["status"] == "loaded"
++    assert result["capability_preserved"] is True
++    assert result["continuation"]["must_continue_original_task"] is True
++    assert result["continuation"]["must_not_answer_from_memory_only"] is True
++    assert result["loaded"][0]["tool_name"] == "search_files"
++    assert "search_files" in agent.valid_tool_names
++    assert "read_file" not in agent.valid_tool_names
++
++
++def test_tool_loader_schema_contains_no_unavailable_instruction() -> None:
++    catalog = build_capability_catalog(
++        enabled_toolsets=["file"],
++        tool_defs=[_tool("search_files")],
++    )
++    schema = build_load_tools_schema(catalog)
++    description = schema["function"]["description"]
++
++    assert "Do not answer that the capability is unavailable" in description
++    assert "does not grant new capability or approval" in description
++
++
++def test_model_facing_result_cap_uses_continuation_ref() -> None:
++    capped = cap_model_facing_result("x" * 6000, max_chars=100, continuation_ref="files:find")
++    payload = json.loads(capped)
++
++    assert payload["truncated"] is True
++    assert payload["continuation_ref"] == "files:find"
++    assert len(payload["preview"]) == 100
++
++
++def test_no_final_answer_before_tools_guard_is_structured() -> None:
++    blocked = final_answer_allowed_for_external_task(
++        expected_bundles=["files_discover"],
++        loaded_bundles=[],
++        tool_used=False,
++    )
++    allowed = final_answer_allowed_for_external_task(
++        expected_bundles=["files_discover"],
++        loaded_bundles=["files_discover"],
++        tool_used=True,
++    )
++
++    assert blocked["final_answer_allowed"] is False
++    assert blocked["reason"] == "EXTERNAL_TASK_WITHOUT_REQUIRED_TOOL_PATH"
++    assert blocked["keyword_router_used"] is False
++    assert allowed["final_answer_allowed"] is True
++
++
++def test_tool_loader_quality_reports_recall_precision_and_fallback() -> None:
++    quality = build_tool_loader_quality(
++        expected_bundles=["files_discover"],
++        loaded_bundles=["files_discover", "web_read"],
++        used_loaded_tool=True,
++        false_no_access=False,
++        full_fallback_used=False,
++    )
++
++    assert quality["tool_load_recall_pass"] is True
++    assert quality["irrelevant_bundle_count"] == 1
++    assert quality["false_no_access"] is False
+diff --git a/tests/agent/test_memory_direct_render_preflight.py b/tests/agent/test_memory_direct_render_preflight.py
+new file mode 100644
+index 00000000..28d07be1
+--- /dev/null
++++ b/tests/agent/test_memory_direct_render_preflight.py
+@@ -0,0 +1,43 @@
++from agent.memory_manager import MemoryManager
++
++
++class FakeProvider:
++    name = "brainstack"
++
++    def get_tool_schemas(self):
++        return []
++
++    def query_inspect(self, *, query: str, session_id: str | None = None):
++        assert query == "marker?"
++        assert session_id == "s1"
++        return {
++            "memory_answerability": {
++                "state": "answerable",
++                "max_claim_strength": "memory_truth",
++                "answer_type": "explicit_user_fact",
++                "answer_evidence_ids": ["profile:marker"],
++                "answer_evidence_count": 1,
++            },
++            "selected_evidence": {
++                "profile_items": [
++                    {"id": "profile:marker", "value": "1231231X"},
++                    {"id": "profile:other", "value": "noise"},
++                ]
++            },
++            "capability_health": {"sqlite": "ok"},
++        }
++
++
++def test_direct_render_preflight_returns_answerability_not_runtime_decision():
++    manager = MemoryManager()
++    manager.add_provider(FakeProvider())
++
++    preflight = manager.direct_render_preflight("marker?", session_id="s1")
++
++    assert preflight is not None
++    assert preflight["answerability"]["answer_type"] == "explicit_user_fact"
++    assert preflight["answer_evidence"] == [{"id": "profile:marker", "value": "1231231X"}]
++    assert preflight["capability_health"] == {"sqlite": "ok"}
++    assert "use_renderer" not in preflight
++    assert "tool_profile" not in preflight
++    assert "model_profile" not in preflight
+diff --git a/tests/gateway/test_gateway_canary_script.py b/tests/gateway/test_gateway_canary_script.py
+index 98edd1ba..35548f17 100644
+--- a/tests/gateway/test_gateway_canary_script.py
++++ b/tests/gateway/test_gateway_canary_script.py
+@@ -87,7 +87,7 @@ def test_run_cases_attaches_turn_contract_trace():
+             agent_result={"tools": [], "output_tokens": 10, "model": "test-model"},
+             event_id="evt-1",
+             causal_index=7,
+-            turn_profile_resolution={"turn_profile": "conversation_tools"},
++            turn_profile_resolution={"turn_profile": "capability_preserving_default"},
+         )
+ 
+     def trace_factory(case, outcome, start, finished):
+@@ -133,7 +133,7 @@ def test_run_cases_attaches_turn_contract_trace():
+     assert results[0].passed
+     assert results[0].turn_contract["observe_only"] is True
+     assert results[0].turn_contract["causal_index"] == 7
+-    assert results[0].turn_profile_resolution["turn_profile"] == "conversation_tools"
++    assert results[0].turn_profile_resolution["turn_profile"] == "capability_preserving_default"
+     assert results[0].observer_effect["extra_provider_calls"] == 0
+     assert results[0].provider_timing_trace["queue_generation_observable"] is False
+     assert results[0].model_contract["fast_model_allowed"] is False
+diff --git a/tests/gateway/test_memory_answer_renderer.py b/tests/gateway/test_memory_answer_renderer.py
+index 58df28db..56cafcba 100644
+--- a/tests/gateway/test_memory_answer_renderer.py
++++ b/tests/gateway/test_memory_answer_renderer.py
+@@ -1,9 +1,12 @@
+ from __future__ import annotations
+ 
+ from gateway.memory_answer_renderer import (
++    RenderPlan,
++    build_render_plan,
+     contains_lifetime_certainty,
+     evaluate_renderer_eligibility,
+     render_memory_answer,
++    render_memory_answer_plan,
+ )
+ 
+ 
+@@ -40,6 +43,8 @@ def test_unsupported_abstain_renders_without_evidence() -> None:
+             "answer_type": "none",
+             "answer_evidence_count": 0,
+             "reason_code": "NO_SUPPORTED_MEMORY_TRUTH",
++            "user_intent_domain": "memory_or_runtime_status",
++            "resolved_memory_target": {"target_kind": "profile_slot", "slot_id": "identity.preferred_address_name"},
+         },
+         answer_evidence=[],
+     )
+@@ -49,6 +54,43 @@ def test_unsupported_abstain_renders_without_evidence() -> None:
+     assert answer.evidence_ids == ()
+ 
+ 
++def test_generic_unsupported_abstain_falls_back_to_provider() -> None:
++    answer = render_memory_answer(
++        turn_contract=CONTRACT,
++        answerability={
++            "state": "unanswerable",
++            "max_claim_strength": "none",
++            "answer_type": "none",
++            "answer_evidence_count": 0,
++            "reason_code": "NO_SUPPORTED_MEMORY_TRUTH",
++        },
++        answer_evidence=[],
++    )
++
++    assert answer.used_renderer is False
++    assert answer.fallback_reason == "generic_no_evidence_forbidden"
++
++
++def test_unsupported_abstain_falls_back_when_external_capability_possible() -> None:
++    answer = render_memory_answer(
++        turn_contract=CONTRACT,
++        answerability={
++            "state": "unanswerable",
++            "max_claim_strength": "none",
++            "answer_type": "none",
++            "answer_evidence_count": 0,
++            "reason_code": "NO_SUPPORTED_MEMORY_TRUTH",
++            "user_intent_domain": "memory_or_runtime_status",
++            "external_capability_possible": True,
++            "resolved_memory_target": {"target_kind": "profile_slot", "slot_id": "project.notes"},
++        },
++        answer_evidence=[],
++    )
++
++    assert answer.used_renderer is False
++    assert answer.fallback_reason == "generic_no_evidence_forbidden"
++
++
+ def test_forbidden_cases_fall_back_to_provider() -> None:
+     cases = [
+         (
+@@ -208,3 +250,40 @@ def test_bounded_event_never_claims_lifetime_certainty() -> None:
+     assert answer.renderer_claim_style == "bounded_event"
+     assert contains_lifetime_certainty(answer.text) is False
+     assert answer.text == "Recorded event in searched scope: User asked about marker 1231231X."
++
++
++def test_renderer_consumes_render_plan_not_raw_packet() -> None:
++    plan = build_render_plan(
++        turn_contract=CONTRACT,
++        answerability={
++            "state": "answerable",
++            "max_claim_strength": "memory_truth",
++            "answer_type": "explicit_user_fact",
++        },
++        answer_evidence=[{"id": "profile:debug_marker", "value": "1231231X"}],
++    )
++    answer = render_memory_answer_plan(plan)
++
++    assert isinstance(plan, RenderPlan)
++    assert plan.eligible is True
++    assert plan.template_id == "explicit_fact.v1"
++    assert answer.used_renderer is True
++    assert answer.text == "Recorded value: 1231231X."
++
++
++def test_render_plan_preserves_provider_fallback_boundary() -> None:
++    plan = build_render_plan(
++        turn_contract={"allowed_tool_profile": "heavy_web"},
++        answerability={
++            "state": "answerable",
++            "max_claim_strength": "memory_truth",
++            "answer_type": "explicit_user_fact",
++        },
++        answer_evidence=[{"id": "profile:repo", "value": "https://example.test"}],
++    )
++    answer = render_memory_answer_plan(plan)
++
++    assert plan.eligible is False
++    assert plan.renderer_kind == "provider_fallback"
++    assert answer.used_renderer is False
++    assert answer.fallback_reason == "provider_required_for_heavy_or_external_task"
+diff --git a/tests/gateway/test_memory_direct_gateway.py b/tests/gateway/test_memory_direct_gateway.py
+new file mode 100644
+index 00000000..a78a2aa5
+--- /dev/null
++++ b/tests/gateway/test_memory_direct_gateway.py
+@@ -0,0 +1,78 @@
++from gateway.run import GatewayRunner
++
++
++class _FakeMemoryProvider:
++    name = "brainstack"
++
++    def __init__(self) -> None:
++        self.init_kwargs = {}
++        self.shutdown_called = False
++
++    def is_available(self) -> bool:
++        return True
++
++    def get_tool_schemas(self) -> list:
++        return []
++
++    def initialize(self, **kwargs) -> None:
++        self.init_kwargs = dict(kwargs)
++
++    def query_inspect(self, *, query: str, session_id: str) -> dict:
++        return {
++            "memory_answerability": {
++                "state": "unanswerable",
++                "max_claim_strength": "none",
++                "answer_type": "current_assignment_absence",
++                "reason_code": "NO_TYPED_CURRENT_ASSIGNMENT_EVIDENCE",
++            },
++            "selected_evidence": [],
++            "capability_health": {"sqlite": "ok"},
++        }
++
++    def shutdown(self) -> None:
++        self.shutdown_called = True
++
++
++def test_gateway_direct_renderer_bypasses_provider_auth(monkeypatch) -> None:
++    provider = _FakeMemoryProvider()
++    monkeypatch.setattr(
++        "gateway.run._load_gateway_config",
++        lambda: {"memory": {"provider": "brainstack"}},
++    )
++    monkeypatch.setattr(
++        "hermes_cli.tools_config._get_platform_tools",
++        lambda _config, _platform: ["hermes-cli"],
++    )
++    monkeypatch.setattr("plugins.memory.load_memory_provider", lambda _name: provider)
++
++    runner = GatewayRunner.__new__(GatewayRunner)
++    result = runner._build_memory_direct_render_agent_result_sync(
++        "Pulse futása azt jelenti, hogy ez az aktuális feladatod?",
++        {
++            "platform_key": "discord",
++            "user_id": "u1",
++            "user_name": "Tomi",
++            "chat_id": "c1",
++            "chat_name": "general",
++            "chat_type": "guild",
++            "thread_id": None,
++        },
++        "session-1",
++        "session-key-1",
++    )
++
++    assert result is not None
++    assert result["api_calls"] == 0
++    assert result["tools"] == []
++    assert result["model"] == "memory_direct_renderer"
++    assert result["memory_answer_renderer"]["used_renderer"] is True
++    assert result["render_plan"]["eligible"] is True
++    assert result["turn_profile_resolution"]["turn_profile"] == "capability_preserving_default"
++    assert result["turn_profile_resolution"]["capability_preservation"]["capability_shrunk"] is False
++    assert result["final_response"].startswith("No typed current-assignment evidence")
++    assert result["memory_direct_preflight"]["answerability"]["answer_type"] == "current_assignment_absence"
++    assert "use_renderer" not in result["memory_direct_preflight"]
++    assert "tool_profile" not in result["memory_direct_preflight"]
++    assert "model_profile" not in result["memory_direct_preflight"]
++    assert provider.init_kwargs["agent_context"] == "gateway_direct_renderer"
++    assert provider.shutdown_called is True
+diff --git a/tests/gateway/test_turn_profiles.py b/tests/gateway/test_turn_profiles.py
+index 14be785f..0f3b8ae1 100644
+--- a/tests/gateway/test_turn_profiles.py
++++ b/tests/gateway/test_turn_profiles.py
+@@ -3,17 +3,25 @@ from __future__ import annotations
+ from gateway.turn_profiles import resolve_turn_profile
+ 
+ 
+-def test_discord_default_is_conversation_tools() -> None:
++def test_discord_default_preserves_configured_capability() -> None:
+     resolved = resolve_turn_profile(
+         platform="discord",
+         prompt="Mi volt a debug markerem?",
+-        current_enabled_toolsets=["hermes-cli"],
++        current_enabled_toolsets=["file", "terminal", "web"],
+         env={},
+     )
+ 
+-    assert resolved.turn_profile == "conversation_tools"
+-    assert resolved.enabled_toolsets == ("conversation_tools",)
+-    assert resolved.reason_code == "DISCORD_DEFAULT_CONVERSATION"
++    assert resolved.turn_profile == "capability_preserving_default"
++    assert resolved.tool_profile == "existing_platform_default"
++    assert resolved.enabled_toolsets == ("file", "terminal", "web")
++    assert resolved.reason_code == "DISCORD_DEFAULT_CAPABILITY_PRESERVED"
++    assert resolved.capability_shrunk is False
++    assert resolved.runtime_capability_health == {
++        "filesystem.search_read": "available",
++        "terminal.execute": "available_requires_approval",
++        "web.browse": "available",
++    }
++    assert resolved.to_dict()["capability_preservation"]["capability_shrunk"] is False
+ 
+ 
+ def test_cli_local_default_unchanged() -> None:
+@@ -43,9 +51,9 @@ def test_heavy_command_selects_structural_bundle() -> None:
+     )
+ 
+     assert web.turn_profile == "heavy_web"
+-    assert web.enabled_toolsets == ("heavy_web",)
++    assert web.enabled_toolsets == ("hermes-cli",)
+     assert code.turn_profile == "heavy_code"
+-    assert code.enabled_toolsets == ("heavy_code",)
++    assert code.enabled_toolsets == ("hermes-cli",)
+ 
+ 
+ def test_url_mention_is_candidate_not_auto_fetch() -> None:
+@@ -56,9 +64,10 @@ def test_url_mention_is_candidate_not_auto_fetch() -> None:
+         env={},
+     )
+ 
+-    assert resolved.turn_profile == "conversation_tools"
++    assert resolved.turn_profile == "capability_preserving_default"
+     assert resolved.url_attachment_candidate_only is True
+     assert resolved.explicit_heavy is False
++    assert resolved.enabled_toolsets == ("hermes-cli",)
+ 
+ 
+ def test_rollback_override_forces_heavy_without_redeploy() -> None:
+@@ -84,3 +93,5 @@ def test_conversation_direct_override_has_no_tools() -> None:
+ 
+     assert resolved.turn_profile == "conversation_direct"
+     assert resolved.enabled_toolsets == ()
++    assert resolved.capability_shrunk is True
++    assert resolved.admin_limited_mode is True
+diff --git a/tests/run_agent/test_run_agent.py b/tests/run_agent/test_run_agent.py
+index f58ebbf1..98b58b2c 100644
+--- a/tests/run_agent/test_run_agent.py
++++ b/tests/run_agent/test_run_agent.py
+@@ -52,6 +52,67 @@ def test_is_destructive_command_treats_install_as_mutating():
+     assert run_agent._is_destructive_command("install template.env .env") is True
+ 
+ 
++class _DirectRenderMemoryManager:
++    def __init__(self):
++        self.synced = False
++
++    def on_turn_start(self, *args, **kwargs):
++        return None
++
++    def prefetch_all(self, query, *, session_id=""):
++        return "prefetched"
++
++    def direct_render_preflight(self, query, *, session_id=""):
++        return {
++            "schema": "hermes.memory_direct_render_preflight.v1",
++            "provider": "brainstack",
++            "source": "memory_provider_query_inspect",
++            "answerability": {
++                "state": "unanswerable",
++                "max_claim_strength": "none",
++                "answer_type": "current_assignment_absence",
++                "answer_evidence_count": 0,
++                "reason_code": "NO_TYPED_CURRENT_ASSIGNMENT_EVIDENCE",
++                "requires_external_tools_for_memory_answer": False,
++            },
++            "answer_evidence": [],
++            "capability_health": {"sqlite": "ok"},
++        }
++
++    def sync_all(self, *args, **kwargs):
++        self.synced = True
++
++    def queue_prefetch_all(self, *args, **kwargs):
++        return None
++
++
++def test_no_tool_agent_uses_memory_direct_renderer_without_provider_call():
++    with (
++        patch("run_agent.get_tool_definitions", return_value=[]),
++        patch("run_agent.check_toolset_requirements", return_value={}),
++        patch("run_agent.OpenAI") as mock_openai,
++    ):
++        agent = AIAgent(
++            api_key="test-key-1234567890",
++            base_url="https://openrouter.ai/api/v1",
++            quiet_mode=True,
++            skip_context_files=True,
++            skip_memory=True,
++            enabled_toolsets=[],
++        )
++        manager = _DirectRenderMemoryManager()
++        agent._memory_manager = manager
++
++        result = agent.run_conversation("Pulse aktuális feladat?")
++
++    assert result["api_calls"] == 0
++    assert result["memory_answer_renderer"]["used_renderer"] is True
++    assert "No typed current-assignment evidence" in result["final_response"]
++    assert result["render_plan"]["renderer_kind"] == "deterministic_memory_answer"
++    assert manager.synced is True
++    assert not mock_openai.return_value.chat.completions.create.called
++
++
+ @pytest.fixture()
+ def agent():
+     """Minimal AIAgent with mocked OpenAI client and tool loading."""

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .durable_write_guard import guard_and_normalize_durable_truth_metadata
 from .store_protocol import StoreRuntimeBase
 from .store_runtime import (
     Any,
@@ -244,6 +245,12 @@ class ProfileStoreMixin(StoreRuntimeBase):
             existing["metadata_json"] if existing else None,
             metadata,
             source=source,
+        )
+        normalized_metadata = guard_and_normalize_durable_truth_metadata(
+            shelf="profile",
+            source=source,
+            metadata=normalized_metadata,
+            slot=str(stable_key or "").strip(),
         )
         meta_json = json.dumps(normalized_metadata, ensure_ascii=True, sort_keys=True)
 

@@ -81,6 +81,39 @@ CREATE TABLE IF NOT EXISTS profile_items (
 CREATE INDEX IF NOT EXISTS idx_profile_category_updated
 ON profile_items(category, updated_at DESC);
 
+CREATE TABLE IF NOT EXISTS admission_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    admission_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL DEFAULT '',
+    policy_version TEXT NOT NULL,
+    slot_registry_version TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    source_event_id TEXT NOT NULL DEFAULT '',
+    source_turn_id TEXT NOT NULL DEFAULT '',
+    source_span_id TEXT NOT NULL DEFAULT '',
+    turn_role TEXT NOT NULL DEFAULT '',
+    assertion_speaker TEXT NOT NULL DEFAULT '',
+    span_kind TEXT NOT NULL DEFAULT '',
+    target_shelf TEXT NOT NULL DEFAULT '',
+    target_slot TEXT NOT NULL DEFAULT '',
+    stable_key TEXT NOT NULL DEFAULT '',
+    truth_eligible INTEGER NOT NULL DEFAULT 0,
+    support_visibility TEXT NOT NULL DEFAULT 'inspect_only',
+    durable_row_id INTEGER NOT NULL DEFAULT 0,
+    candidate_excerpt TEXT NOT NULL DEFAULT '',
+    candidate_hash TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_admission_receipts_decision
+ON admission_receipts(decision, target_shelf, target_slot, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_admission_receipts_trace
+ON admission_receipts(trace_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS behavior_contracts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     storage_key TEXT NOT NULL UNIQUE,

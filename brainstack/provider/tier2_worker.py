@@ -250,6 +250,8 @@ class Tier2WorkerMixin(ProviderRuntimeBase):
         writes_performed = 0
         for action in reconcile_report.get("actions", []):
             action_name = str(action.get("action") or "UNKNOWN")
+            if str(action.get("reason_code") or "") == "ASSISTANT_CLAIM_NOT_USER_TRUTH":
+                action_name = "REJECT_ASSISTANT_AUTHORED"
             action_counts[action_name] = action_counts.get(action_name, 0) + 1
             if action_name != "NONE" and not action_name.startswith("REJECT_"):
                 writes_performed += 1

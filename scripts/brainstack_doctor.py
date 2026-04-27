@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import inspect
 import json
 import os
 import sqlite3
@@ -21,7 +22,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hermes_gateway_patch_support import inspect_gateway_patch_support
+try:
+    from hermes_gateway_patch_support import inspect_gateway_patch_support
+except ModuleNotFoundError:  # pytest imports scripts as a namespace package
+    from scripts.hermes_gateway_patch_support import inspect_gateway_patch_support
 
 
 REQUIRED_PLUGIN_FILES = [
@@ -1164,7 +1168,10 @@ def run_doctor(args: argparse.Namespace) -> tuple[int, list[Check]]:
     else:
         checks.append(Check("python_target", "warn", "No target Python detected; dependency checks fall back to the current interpreter"))
     checks.extend(_check_target_shape(target))
-    checks.extend(_check_host_surfaces(target, planned_install=args.planned_install))
+    if "planned_install" in inspect.signature(_check_host_surfaces).parameters:
+        checks.extend(_check_host_surfaces(target, planned_install=args.planned_install))
+    else:
+        checks.extend(_check_host_surfaces(target))
     checks.extend(_check_plugin(target, planned_install=args.planned_install))
     if config_path is None:
         checks.append(Check("config_path", "fail", "Could not uniquely resolve a Hermes agent config; pass --config explicitly"))

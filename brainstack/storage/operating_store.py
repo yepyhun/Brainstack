@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .durable_write_guard import guard_and_normalize_durable_truth_metadata
 from .store_protocol import StoreRuntimeBase
 from .store_runtime import (
     Any,
@@ -56,6 +57,13 @@ class OperatingStoreMixin(StoreRuntimeBase):
                 _enrich_record_metadata_with_literals(metadata, text=content),
                 source=source,
             ),
+        )
+        merged_metadata = guard_and_normalize_durable_truth_metadata(
+            shelf="operating",
+            source=source,
+            metadata=merged_metadata,
+            record_type=str(record_type or "").strip(),
+            slot=str(stable_key or "").strip(),
         )
         meta_json = json.dumps(
             merged_metadata,
