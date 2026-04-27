@@ -336,6 +336,14 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "why": "Prevents /opt/data/brainstack runtime storage from shadowing the installed Brainstack plugin package.",
     },
     {
+        "patcher": "_patch_compose_discord_bot_mentions",
+        "target": "docker-compose*.yml",
+        "scope": "docker-runtime-seam",
+        "runtime_modes": ("docker",),
+        "purpose": "Allow trusted canary bot messages only when they mention the Hermes Discord bot.",
+        "why": "Live Discord smoke uses a separate bot sender; without this env the adapter ignores bot-origin messages by default.",
+    },
+    {
         "patcher": "_patch_dockerignore",
         "target": ".dockerignore",
         "scope": "docker-build-seam",
@@ -2836,6 +2844,7 @@ services:
       PYTHONPATH: /opt/hermes/plugins/memory
       HERMES_UID: "${{HERMES_UID:-1000}}"
       HERMES_GID: "${{HERMES_GID:-1000}}"
+      DISCORD_ALLOW_BOTS: "mentions"
 {tei_environment}
     volumes:
       - ./{runtime_ref}:/opt/data
@@ -2901,6 +2910,26 @@ def _patch_compose_plugin_pythonpath(path: Path, dry_run: bool) -> list[str]:
                 path.write_text(text, encoding="utf-8")
             return ["compose:plugin_pythonpath"]
     raise RuntimeError(f"Installer patch anchor missing for compose plugin PYTHONPATH in {path}")
+
+
+def _patch_compose_discord_bot_mentions(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    if "DISCORD_ALLOW_BOTS:" in text:
+        return []
+    anchors = [
+        "      PYTHONPATH: /opt/hermes/plugins/memory\n",
+        '      HERMES_ENABLE_PROJECT_PLUGINS: "true"\n',
+        "      HERMES_ENABLE_PROJECT_PLUGINS: 'true'\n",
+    ]
+    for anchor in anchors:
+        if anchor in text:
+            text = text.replace(anchor, anchor + '      DISCORD_ALLOW_BOTS: "mentions"\n', 1)
+            if not dry_run:
+                path.write_text(text, encoding="utf-8")
+            return ["compose:discord_allow_bot_mentions"]
+    raise RuntimeError(f"Installer patch anchor missing for compose Discord bot mention allowance in {path}")
 
 
 def _patch_dockerignore(path: Path, dry_run: bool) -> list[str]:
