@@ -125,12 +125,12 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "removal_condition": "Hermes Docker runtime explicitly sets terminal working directory to mounted workspace.",
     },
     "_patch_deferred_tool_loader_contract": {
-        "category": "required_seam",
+        "category": "compat_hotfix",
         "owner": "hermes-tool-loader-seam",
         "removal_condition": "Hermes ToolLoader natively treats bundle/capability ids as schema aliases and returns continuation guidance.",
     },
     "_patch_run_agent_deferred_tool_continuation": {
-        "category": "required_seam",
+        "category": "compat_hotfix",
         "owner": "hermes-tool-loader-seam",
         "removal_condition": "Hermes provider loop natively prevents final answers after schema loading until the loaded tool is used.",
     },
@@ -145,12 +145,12 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "removal_condition": "Hermes run loop natively validates memory acknowledgements before final response persistence and delivery.",
     },
     "_patch_run_agent_terminal_final_guard_seam": {
-        "category": "required_seam",
+        "category": "compat_hotfix",
         "owner": "hermes-tool-safety-seam",
         "removal_condition": "Hermes provider loop natively prevents terminal execution success claims without terminal tool results.",
     },
     "_patch_memory_answer_renderer_language": {
-        "category": "required_seam",
+        "category": "compat_hotfix",
         "owner": "hermes-presentation-seam",
         "removal_condition": "Hermes deterministic memory renderer natively localizes fixed templates from runtime language preference.",
     },
@@ -2476,14 +2476,11 @@ def _patch_run_agent_memory_output_validation_seam(path: Path, dry_run: bool) ->
         "                self._replace_last_assistant_response_content(messages, conversation_history, final_response)\n"
     )
     if "original_user_message=original_user_message,\n                    final_response=final_response,\n                    interrupted=False,\n                )\n                self._replace_last_assistant_response_content(messages, conversation_history, final_response)" not in text:
-        text = _replace_once(
-            text,
-            direct_anchor,
-            direct_replacement,
-            label="run_agent direct renderer memory output validation",
-            path=path,
-        )
-        applied.append("run_agent:direct_renderer_memory_output_validation")
+        if direct_anchor in text:
+            text = text.replace(direct_anchor, direct_replacement, 1)
+            applied.append("run_agent:direct_renderer_memory_output_validation")
+        else:
+            applied.append("run_agent:direct_renderer_memory_output_validation_absent")
 
     normal_anchor = (
         "        # Persist session to both JSON log and SQLite\n"
