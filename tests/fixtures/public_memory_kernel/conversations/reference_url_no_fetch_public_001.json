@@ -1,0 +1,35 @@
+{
+  "scenario_id": "reference_url_no_fetch_public_001",
+  "turn_id": "turn-public-005",
+  "source_event_id": "event-public-005",
+  "source_role": "user",
+  "principal_scope_key": "principal:public-alex",
+  "workspace_scope_key": "workspace:public-memory",
+  "session_id": "session:public-005",
+  "query_summary": "Save a repository URL as reference without fetching web content.",
+  "receipt_mode": "complete",
+  "capture_items": [
+    {
+      "proposal_id": "cap_reference_url",
+      "target_slot": "reference.repository_url",
+      "stable_key": "reference.repository_url:orion-lib",
+      "normalized_value": "https://example.com/orion-lib",
+      "source_span_id": "span-reference-url",
+      "surface_value": "Save this repo URL as a reference, do not open it: https://example.com/orion-lib",
+      "capture_intent": "reference_save",
+      "language": "en",
+      "confidence": 0.96
+    }
+  ],
+  "expected": {
+    "receipt_coverage": "complete",
+    "ack_mode": "full",
+    "full_ack_allowed": true,
+    "selected_slots": ["reference.repository_url"],
+    "reset_recall": {
+      "reference.repository_url:orion-lib": "https://example.com/orion-lib"
+    },
+    "required_trace_reason_codes": ["selected_receipt_backed_fact"],
+    "must_not_fetch_url": true
+  }
+}

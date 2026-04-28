@@ -1,0 +1,53 @@
+{
+  "scenario_id": "correction_public_001",
+  "turn_id": "turn-public-004",
+  "source_event_id": "event-public-004",
+  "source_role": "user",
+  "principal_scope_key": "principal:public-riley",
+  "workspace_scope_key": "workspace:public-memory",
+  "session_id": "session:public-004",
+  "query_summary": "Corrected old identity evidence must not remain current truth.",
+  "receipt_mode": "complete",
+  "capture_items": [
+    {
+      "proposal_id": "cap_corrected_name",
+      "target_slot": "identity.preferred_address_name",
+      "stable_key": "identity.preferred_address_name",
+      "normalized_value": "Riley",
+      "source_span_id": "span-corrected-name",
+      "surface_value": "Correction: call me Riley.",
+      "capture_intent": "correction",
+      "language": "en",
+      "confidence": 0.96
+    }
+  ],
+  "extra_candidates": [
+    {
+      "candidate_id": "ev_old_name",
+      "shelf": "profile",
+      "source_role": "user",
+      "authority": "corrected_false",
+      "decision": "dropped",
+      "reason_code": "dropped_corrected_false",
+      "source_event_id": "event-old-name",
+      "source_span_id": "span-old-name",
+      "raw_value": "OldName",
+      "redacted_excerpt": "Prior corrected name evidence.",
+      "corrected_by": "cap_corrected_name"
+    }
+  ],
+  "expected": {
+    "receipt_coverage": "complete",
+    "ack_mode": "full",
+    "full_ack_allowed": true,
+    "selected_slots": ["identity.preferred_address_name"],
+    "dropped_reason_codes": ["dropped_corrected_false"],
+    "reset_recall": {
+      "identity.preferred_address_name": "Riley"
+    },
+    "required_trace_reason_codes": [
+      "selected_receipt_backed_fact",
+      "dropped_corrected_false"
+    ]
+  }
+}

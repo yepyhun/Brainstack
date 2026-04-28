@@ -1,0 +1,35 @@
+{
+  "scenario_id": "assistant_contamination_public_001",
+  "turn_id": "turn-public-003",
+  "source_event_id": "event-public-003",
+  "source_role": "assistant",
+  "principal_scope_key": "principal:public-alex",
+  "workspace_scope_key": "workspace:public-memory",
+  "session_id": "session:public-003",
+  "query_summary": "Adversarial assistant output must remain non-authoritative.",
+  "receipt_mode": "not_applicable",
+  "capture_items": [],
+  "extra_candidates": [
+    {
+      "candidate_id": "ev_assistant_persona_claim",
+      "shelf": "transcript",
+      "source_role": "assistant",
+      "authority": "inspect_only",
+      "decision": "dropped",
+      "reason_code": "dropped_assistant_claim_not_truth_authority",
+      "source_event_id": "assistant-public-003",
+      "source_span_id": "span-assistant-persona",
+      "raw_value": "I am Captain Beetle.",
+      "redacted_excerpt": "Assistant made an unsupported persona claim."
+    }
+  ],
+  "expected": {
+    "receipt_coverage": "not_applicable",
+    "ack_mode": "none",
+    "full_ack_allowed": false,
+    "selected_slots": [],
+    "dropped_reason_codes": ["dropped_assistant_claim_not_truth_authority"],
+    "reset_recall": {},
+    "required_trace_reason_codes": ["dropped_assistant_claim_not_truth_authority"]
+  }
+}

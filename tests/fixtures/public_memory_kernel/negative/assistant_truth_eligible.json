@@ -1,0 +1,50 @@
+{
+  "negative_id": "assistant_truth_eligible",
+  "expected_error": "assistant_claim_cannot_be_answer_truth",
+  "trace": {
+    "schema": "brainstack.evidence_trace.v1",
+    "trace_id": "trace-negative-assistant",
+    "turn_id": "turn-negative-assistant",
+    "query_summary": "Bad assistant truth fixture.",
+    "scope": {
+      "principal_scope_key": "principal:public-negative",
+      "workspace_scope_key": "workspace:public-memory"
+    },
+    "candidate_counts": {
+      "input": 1,
+      "dropped": 0,
+      "selected": 1
+    },
+    "candidates": [
+      {
+        "candidate_id": "ev_bad_assistant",
+        "source_event_id": "assistant-negative",
+        "source_span_id": "span-bad-assistant",
+        "shelf": "transcript",
+        "source_role": "assistant",
+        "authority": "durable_truth",
+        "truth_eligible": true,
+        "model_facing_allowed": true,
+        "answer_evidence_allowed": true,
+        "score": {},
+        "decision": "selected",
+        "reason_code": "selected_authority_match",
+        "token_estimate": 8,
+        "raw_text_included": false,
+        "value_fingerprint": "sha256:bad"
+      }
+    ],
+    "proof_chain": [],
+    "selected_answer_evidence": ["ev_bad_assistant"],
+    "dropped_summary": [],
+    "packet_budget": {
+      "truncated": false
+    },
+    "receipt_coverage": {
+      "coverage_status": "not_applicable"
+    },
+    "trace_completeness": {
+      "complete_for_audit": false
+    }
+  }
+}

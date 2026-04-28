@@ -1,0 +1,14 @@
+{
+  "users": [
+    {
+      "principal_scope_key": "principal:public-alex",
+      "platform_handle": "ExampleHandle42",
+      "preferred_address_name": "Alex"
+    },
+    {
+      "principal_scope_key": "principal:public-riley",
+      "platform_handle": "ExampleHandle77",
+      "preferred_address_name": "Riley"
+    }
+  ]
+}

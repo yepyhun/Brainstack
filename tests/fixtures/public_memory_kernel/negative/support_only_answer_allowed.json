@@ -1,0 +1,50 @@
+{
+  "negative_id": "support_only_answer_allowed",
+  "expected_error": "support_only_cannot_be_answer_evidence",
+  "trace": {
+    "schema": "brainstack.evidence_trace.v1",
+    "trace_id": "trace-negative-support",
+    "turn_id": "turn-negative-support",
+    "query_summary": "Bad support-only answer fixture.",
+    "scope": {
+      "principal_scope_key": "principal:public-negative",
+      "workspace_scope_key": "workspace:public-memory"
+    },
+    "candidate_counts": {
+      "input": 1,
+      "dropped": 0,
+      "selected": 1
+    },
+    "candidates": [
+      {
+        "candidate_id": "ev_bad_support",
+        "source_event_id": "event-support",
+        "source_span_id": "span-support",
+        "shelf": "transcript",
+        "source_role": "user",
+        "authority": "support_only",
+        "truth_eligible": false,
+        "model_facing_allowed": true,
+        "answer_evidence_allowed": true,
+        "score": {},
+        "decision": "selected",
+        "reason_code": "selected_authority_match",
+        "token_estimate": 6,
+        "raw_text_included": false,
+        "value_fingerprint": "sha256:bad"
+      }
+    ],
+    "proof_chain": [],
+    "selected_answer_evidence": ["ev_bad_support"],
+    "dropped_summary": [],
+    "packet_budget": {
+      "truncated": false
+    },
+    "receipt_coverage": {
+      "coverage_status": "not_applicable"
+    },
+    "trace_completeness": {
+      "complete_for_audit": false
+    }
+  }
+}

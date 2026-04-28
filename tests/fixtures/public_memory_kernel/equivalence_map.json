@@ -1,0 +1,42 @@
+[
+  {
+    "public_scenario_id": "explicit_capture_complete_public_001",
+    "represents_private_failure_class": "receipt_backed_explicit_capture_reset_recall",
+    "does_not_contain_private_data": true,
+    "invariant": "full memory acknowledgement requires complete receipt coverage",
+    "forbidden_regression": "full_ack_without_complete_receipt_coverage",
+    "required_trace_reason_code": "selected_receipt_backed_fact"
+  },
+  {
+    "public_scenario_id": "partial_capture_public_001",
+    "represents_private_failure_class": "partial_receipt_full_ack",
+    "does_not_contain_private_data": true,
+    "invariant": "partial receipt coverage cannot produce full acknowledgement",
+    "forbidden_regression": "partial_coverage_allows_full_ack",
+    "required_trace_reason_code": "full_ack_requires_complete_receipt_coverage"
+  },
+  {
+    "public_scenario_id": "assistant_contamination_public_001",
+    "represents_private_failure_class": "assistant_self_claim_refeed",
+    "does_not_contain_private_data": true,
+    "invariant": "assistant output cannot become answer truth",
+    "forbidden_regression": "assistant_self_claim_model_facing_after_reset",
+    "required_trace_reason_code": "dropped_assistant_claim_not_truth_authority"
+  },
+  {
+    "public_scenario_id": "correction_public_001",
+    "represents_private_failure_class": "corrected_false_selected_as_current_truth",
+    "does_not_contain_private_data": true,
+    "invariant": "corrected-false evidence cannot be selected as current truth",
+    "forbidden_regression": "corrected_false_answer_evidence",
+    "required_trace_reason_code": "dropped_corrected_false"
+  },
+  {
+    "public_scenario_id": "reference_url_no_fetch_public_001",
+    "represents_private_failure_class": "reference_url_save_without_fetch",
+    "does_not_contain_private_data": true,
+    "invariant": "reference URL save preserves literal without web fetch success claim",
+    "forbidden_regression": "url_content_invented_or_fetch_claimed",
+    "required_trace_reason_code": "selected_receipt_backed_fact"
+  }
+]

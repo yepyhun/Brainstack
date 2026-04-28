@@ -1,0 +1,11 @@
+{
+  "projects": [
+    {
+      "project_id": "project-orion",
+      "name": "Project Orion",
+      "creator": "Alex",
+      "graph_inspiration": "ExampleGraph",
+      "reference_repo_url": "https://example.com/orion-lib"
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "scenario_id": "explicit_capture_complete_public_001",
+  "turn_id": "turn-public-001",
+  "source_event_id": "event-public-001",
+  "source_role": "user",
+  "principal_scope_key": "principal:public-alex",
+  "workspace_scope_key": "workspace:public-memory",
+  "session_id": "session:public-001",
+  "query_summary": "User explicitly asks to remember profile and reference facts.",
+  "receipt_mode": "complete",
+  "capture_items": [
+    {
+      "proposal_id": "cap_public_name",
+      "target_slot": "identity.preferred_address_name",
+      "stable_key": "identity.preferred_address_name",
+      "normalized_value": "Alex",
+      "source_span_id": "span-public-name",
+      "surface_value": "Call me Alex.",
+      "language": "en",
+      "confidence": 0.95
+    },
+    {
+      "proposal_id": "cap_public_age",
+      "target_slot": "identity.age",
+      "stable_key": "identity.age",
+      "normalized_value": "27",
+      "source_span_id": "span-public-age",
+      "surface_value": "I am 27.",
+      "language": "en",
+      "confidence": 0.95
+    },
+    {
+      "proposal_id": "cap_public_repo",
+      "target_slot": "reference.repository_url",
+      "stable_key": "reference.repository_url:example-lib",
+      "normalized_value": "https://example.com/orion-lib",
+      "source_span_id": "span-public-url",
+      "surface_value": "Save this repo URL as a reference, do not open it: https://example.com/orion-lib",
+      "capture_intent": "reference_save",
+      "language": "en",
+      "confidence": 0.96
+    }
+  ],
+  "expected": {
+    "receipt_coverage": "complete",
+    "ack_mode": "full",
+    "full_ack_allowed": true,
+    "selected_slots": [
+      "identity.preferred_address_name",
+      "identity.age",
+      "reference.repository_url"
+    ],
+    "reset_recall": {
+      "identity.preferred_address_name": "Alex",
+      "identity.age": "27",
+      "reference.repository_url:example-lib": "https://example.com/orion-lib"
+    },
+    "required_trace_reason_codes": [
+      "selected_receipt_backed_fact"
+    ]
+  }
+}

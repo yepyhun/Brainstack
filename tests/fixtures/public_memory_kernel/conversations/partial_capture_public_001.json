@@ -1,0 +1,48 @@
+{
+  "scenario_id": "partial_capture_public_001",
+  "turn_id": "turn-public-002",
+  "source_event_id": "event-public-002",
+  "source_role": "user",
+  "principal_scope_key": "principal:public-alex",
+  "workspace_scope_key": "workspace:public-memory",
+  "session_id": "session:public-002",
+  "query_summary": "Only one accepted proposal receives a durable write receipt.",
+  "receipt_mode": "partial",
+  "receipt_proposal_ids": ["cap_partial_name"],
+  "capture_items": [
+    {
+      "proposal_id": "cap_partial_name",
+      "target_slot": "identity.preferred_address_name",
+      "stable_key": "identity.preferred_address_name",
+      "normalized_value": "Alex",
+      "source_span_id": "span-partial-name",
+      "surface_value": "Call me Alex.",
+      "language": "en",
+      "confidence": 0.95
+    },
+    {
+      "proposal_id": "cap_partial_age",
+      "target_slot": "identity.age",
+      "stable_key": "identity.age",
+      "normalized_value": "27",
+      "source_span_id": "span-partial-age",
+      "surface_value": "I am 27.",
+      "language": "en",
+      "confidence": 0.95
+    }
+  ],
+  "expected": {
+    "receipt_coverage": "partial",
+    "ack_mode": "partial",
+    "full_ack_allowed": false,
+    "selected_slots": ["identity.preferred_address_name"],
+    "dropped_reason_codes": ["full_ack_requires_complete_receipt_coverage"],
+    "reset_recall": {
+      "identity.preferred_address_name": "Alex"
+    },
+    "required_trace_reason_codes": [
+      "selected_receipt_backed_fact",
+      "full_ack_requires_complete_receipt_coverage"
+    ]
+  }
+}

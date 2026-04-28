@@ -1,0 +1,56 @@
+{
+  "negative_id": "raw_text_included",
+  "expected_error": "raw_text_included",
+  "trace": {
+    "schema": "brainstack.evidence_trace.v1",
+    "trace_id": "trace-negative-raw",
+    "turn_id": "turn-negative-raw",
+    "query_summary": "Bad raw text fixture.",
+    "scope": {
+      "principal_scope_key": "principal:public-negative",
+      "workspace_scope_key": "workspace:public-memory"
+    },
+    "candidate_counts": {
+      "input": 1,
+      "dropped": 1,
+      "selected": 0
+    },
+    "candidates": [
+      {
+        "candidate_id": "ev_bad_raw",
+        "source_event_id": "event-raw",
+        "source_span_id": "span-raw",
+        "shelf": "transcript",
+        "source_role": "user",
+        "authority": "inspect_only",
+        "truth_eligible": false,
+        "model_facing_allowed": false,
+        "answer_evidence_allowed": false,
+        "score": {},
+        "decision": "dropped",
+        "reason_code": "dropped_inspect_only",
+        "token_estimate": 3,
+        "raw_text_included": true,
+        "raw_text": "Private text must not be here.",
+        "value_fingerprint": "sha256:bad"
+      }
+    ],
+    "proof_chain": [],
+    "selected_answer_evidence": [],
+    "dropped_summary": [
+      {
+        "reason_code": "dropped_inspect_only",
+        "count": 1
+      }
+    ],
+    "packet_budget": {
+      "truncated": false
+    },
+    "receipt_coverage": {
+      "coverage_status": "not_applicable"
+    },
+    "trace_completeness": {
+      "complete_for_audit": false
+    }
+  }
+}
