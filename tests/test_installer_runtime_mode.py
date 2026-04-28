@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 from argparse import Namespace
+from pathlib import Path
 
 from scripts import brainstack_doctor
 from scripts import install_into_hermes
+
+
+def test_installer_main_invokes_capability_preserving_patches() -> None:
+    source = Path(install_into_hermes.__file__).read_text(encoding="utf-8")
+
+    assert '_run_host_patch("_patch_gateway_turn_profiles_capability_preserving_default"' in source
+    assert '_run_host_patch("_patch_compose_discord_capability_preserving_tool_profile"' in source
 
 
 def test_generated_docker_compose_includes_local_tei_jina_runtime(tmp_path):
@@ -32,6 +40,8 @@ def test_generated_docker_compose_includes_local_tei_jina_runtime(tmp_path):
     assert "PYTHONPATH: /opt/hermes/plugins/memory" in text
     assert 'DISCORD_ALLOW_BOTS: "mentions"' in text
     assert "TERMINAL_CWD: /workspace" in text
+    assert "HERMES_DISCORD_TURN_PROFILE: heavy" in text
+    assert "HERMES_DISCORD_TOOL_PROFILE: heavy" in text
 
 
 def test_generated_docker_compose_allows_external_embedding_runtime(tmp_path):
@@ -55,6 +65,8 @@ def test_generated_docker_compose_allows_external_embedding_runtime(tmp_path):
     assert "PYTHONPATH: /opt/hermes/plugins/memory" in text
     assert 'DISCORD_ALLOW_BOTS: "mentions"' in text
     assert "TERMINAL_CWD: /workspace" in text
+    assert "HERMES_DISCORD_TURN_PROFILE: heavy" in text
+    assert "HERMES_DISCORD_TOOL_PROFILE: heavy" in text
 
 
 def test_compose_plugin_pythonpath_patch_prevents_runtime_state_shadowing(tmp_path):
@@ -121,6 +133,64 @@ services:
     assert applied == ["compose:terminal_cwd_workspace"]
     assert "TERMINAL_CWD: /workspace" in text
     assert text.index("DISCORD_ALLOW_BOTS") < text.index("TERMINAL_CWD")
+
+
+def test_compose_discord_capability_profile_patch_preserves_native_tools(tmp_path):
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        """
+services:
+  hermes-bestie:
+    environment:
+      HERMES_HOME: /opt/data
+      HERMES_ENABLE_PROJECT_PLUGINS: "true"
+      PYTHONPATH: /opt/hermes/plugins/memory
+      DISCORD_ALLOW_BOTS: "mentions"
+      TERMINAL_CWD: /workspace
+""",
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_compose_discord_capability_preserving_tool_profile(compose, dry_run=False)
+
+    text = compose.read_text(encoding="utf-8")
+    assert applied == ["compose:discord_capability_preserving_tool_profile"]
+    assert "HERMES_DISCORD_TURN_PROFILE: heavy" in text
+    assert "HERMES_DISCORD_TOOL_PROFILE: heavy" in text
+    assert text.index("TERMINAL_CWD") < text.index("HERMES_DISCORD_TURN_PROFILE")
+
+
+def test_gateway_turn_profile_patch_preserves_current_platform_toolsets(tmp_path):
+    module = tmp_path / "turn_profiles.py"
+    module.write_text(
+        '''
+def resolve_turn_profile(*, platform, prompt, current_enabled_toolsets, env=None):
+    current = tuple(sorted(str(name) for name in current_enabled_toolsets))
+    return ResolvedTurnProfile(
+        schema=SCHEMA_VERSION,
+        platform=platform,
+        turn_profile="conversation_tools",
+        tool_profile="conversation_tools",
+        enabled_toolsets=CONVERSATION_TOOLSETS,
+        reason_code="DISCORD_DEFAULT_CONVERSATION",
+        explicit_heavy=False,
+        heavy_bundle=None,
+        url_attachment_candidate_only=_url_count(prompt) > 0,
+        rollback_override_active=False,
+        cli_local_unchanged=False,
+    )
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_gateway_turn_profiles_capability_preserving_default(module, dry_run=False)
+
+    text = module.read_text(encoding="utf-8")
+    assert applied == ["gateway_turn_profiles:capability_preserving_default"]
+    assert 'turn_profile="capability_preserving_default"' in text
+    assert 'tool_profile="existing_platform_default"' in text
+    assert "enabled_toolsets=current" in text
+    assert 'reason_code="DISCORD_DEFAULT_CAPABILITY_PRESERVED"' in text
 
 
 def test_deferred_tool_loader_contract_patch_preserves_alias_capability(tmp_path):

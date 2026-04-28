@@ -124,6 +124,16 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "owner": "docker-runtime-seam",
         "removal_condition": "Hermes Docker runtime explicitly sets terminal working directory to mounted workspace.",
     },
+    "_patch_compose_discord_capability_preserving_tool_profile": {
+        "category": "required_seam",
+        "owner": "docker-runtime-seam",
+        "removal_condition": "Hermes Discord default profile preserves native platform capability without compose-level fallback.",
+    },
+    "_patch_gateway_turn_profiles_capability_preserving_default": {
+        "category": "required_seam",
+        "owner": "gateway-runtime-seam",
+        "removal_condition": "Hermes Discord turn profiles preserve native platform toolsets by default while deferred ToolLoader support is incomplete.",
+    },
     "_patch_deferred_tool_loader_contract": {
         "category": "compat_hotfix",
         "owner": "hermes-tool-loader-seam",
@@ -349,6 +359,14 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "why": "Avoids a parallel runtime while keeping Brainstack synchronized with the single Hermes gateway.",
     },
     {
+        "patcher": "_patch_gateway_turn_profiles_capability_preserving_default",
+        "target": "gateway/turn_profiles.py",
+        "scope": "gateway-capability-preservation-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Prevent Discord conversation mode from replacing Hermes' native platform toolset with an empty compact profile.",
+        "why": "Brainstack integration must not make native file, terminal, web, or workflow tools disappear behind hidden mode selection.",
+    },
+    {
         "patcher": "_patch_config",
         "target": "hermes-config/<agent>/config.yaml",
         "scope": "runtime-config-seam",
@@ -395,6 +413,14 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_modes": ("docker",),
         "purpose": "Make terminal commands execute from the mounted workspace by default.",
         "why": "Docker file/terminal canaries need an explicit workspace contract instead of inherited image cwd.",
+    },
+    {
+        "patcher": "_patch_compose_discord_capability_preserving_tool_profile",
+        "target": "docker-compose*.yml",
+        "scope": "docker-runtime-seam",
+        "runtime_modes": ("docker",),
+        "purpose": "Force a capability-preserving Discord profile when Gateway deferred ToolLoader support is incomplete.",
+        "why": "The installed bot must never lose native Hermes file, terminal, web, or workflow capability behind hidden mode selection.",
     },
     {
         "patcher": "_patch_deferred_tool_loader_contract",
@@ -3597,6 +3623,56 @@ def _patch_gateway_run(path: Path, dry_run: bool) -> list[str]:
     return applied
 
 
+def _patch_gateway_turn_profiles_capability_preserving_default(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    if "DISCORD_DEFAULT_CAPABILITY_PRESERVED" in text and "capability_preserving_default" in text:
+        return []
+
+    old = """    return ResolvedTurnProfile(
+        schema=SCHEMA_VERSION,
+        platform=platform,
+        turn_profile="conversation_tools",
+        tool_profile="conversation_tools",
+        enabled_toolsets=CONVERSATION_TOOLSETS,
+        reason_code="DISCORD_DEFAULT_CONVERSATION",
+        explicit_heavy=False,
+        heavy_bundle=None,
+        url_attachment_candidate_only=_url_count(prompt) > 0,
+        rollback_override_active=False,
+        cli_local_unchanged=False,
+    )
+"""
+    new = """    # capability_shrunk=false by construction: default Discord turns preserve
+    # the configured Hermes platform toolsets. Compact/deferred schemas may
+    # optimize prompt cost, but they must not hide native tools behind a mode.
+    return ResolvedTurnProfile(
+        schema=SCHEMA_VERSION,
+        platform=platform,
+        turn_profile="capability_preserving_default",
+        tool_profile="existing_platform_default",
+        enabled_toolsets=current,
+        reason_code="DISCORD_DEFAULT_CAPABILITY_PRESERVED",
+        explicit_heavy=False,
+        heavy_bundle=None,
+        url_attachment_candidate_only=_url_count(prompt) > 0,
+        rollback_override_active=False,
+        cli_local_unchanged=False,
+    )
+"""
+    text = _replace_once(
+        text,
+        old,
+        new,
+        label="gateway turn profile capability-preserving Discord default",
+        path=path,
+    )
+    if not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return ["gateway_turn_profiles:capability_preserving_default"]
+
+
 def _patch_auxiliary_client(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
@@ -4069,6 +4145,8 @@ services:
       HERMES_GID: "${{HERMES_GID:-1000}}"
       DISCORD_ALLOW_BOTS: "mentions"
       TERMINAL_CWD: /workspace
+      HERMES_DISCORD_TURN_PROFILE: heavy
+      HERMES_DISCORD_TOOL_PROFILE: heavy
 {tei_environment}
     volumes:
       - ./{runtime_ref}:/opt/data
@@ -4175,6 +4253,37 @@ def _patch_compose_terminal_workspace_cwd(path: Path, dry_run: bool) -> list[str
                 path.write_text(text, encoding="utf-8")
             return ["compose:terminal_cwd_workspace"]
     raise RuntimeError(f"Installer patch anchor missing for compose terminal workspace cwd in {path}")
+
+
+def _patch_compose_discord_capability_preserving_tool_profile(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    required = {
+        "HERMES_DISCORD_TURN_PROFILE:": '      HERMES_DISCORD_TURN_PROFILE: heavy\n',
+        "HERMES_DISCORD_TOOL_PROFILE:": '      HERMES_DISCORD_TOOL_PROFILE: heavy\n',
+    }
+    if all(marker in text for marker in required):
+        return []
+
+    anchors = [
+        "      TERMINAL_CWD: /workspace\n",
+        '      DISCORD_ALLOW_BOTS: "mentions"\n',
+        "      PYTHONPATH: /opt/hermes/plugins/memory\n",
+        '      HERMES_ENABLE_PROJECT_PLUGINS: "true"\n',
+        "      HERMES_ENABLE_PROJECT_PLUGINS: 'true'\n",
+    ]
+    for anchor in anchors:
+        if anchor not in text:
+            continue
+        additions = "".join(line for marker, line in required.items() if marker not in text)
+        if not additions:
+            return []
+        text = text.replace(anchor, anchor + additions, 1)
+        if not dry_run:
+            path.write_text(text, encoding="utf-8")
+        return ["compose:discord_capability_preserving_tool_profile"]
+    raise RuntimeError(f"Installer patch anchor missing for compose Discord capability-preserving tool profile in {path}")
 
 
 def _patch_dockerignore(path: Path, dry_run: bool) -> list[str]:
@@ -4643,6 +4752,7 @@ def main() -> int:
     host_patches.extend(_run_host_patch("_patch_memory_manager_output_validation_seam", target / "agent" / "memory_manager.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_memory_manager", target / "agent" / "memory_manager.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_gateway_run", target / "gateway" / "run.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_gateway_turn_profiles_capability_preserving_default", target / "gateway" / "turn_profiles.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     if args.runtime == "docker":
         assert compose_path is not None
         host_patches.extend(_run_host_patch("_patch_compose_healthcheck", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
@@ -4650,6 +4760,7 @@ def main() -> int:
         host_patches.extend(_run_host_patch("_patch_compose_plugin_pythonpath", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_compose_discord_bot_mentions", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_compose_terminal_workspace_cwd", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
+        host_patches.extend(_run_host_patch("_patch_compose_discord_capability_preserving_tool_profile", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_dockerignore", target / ".dockerignore", args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_dockerfile_backend_dependencies", target / "Dockerfile", args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_docker_entrypoint", target / "docker" / "entrypoint.sh", args.dry_run, host_patch_mode=args.host_patch_mode))
