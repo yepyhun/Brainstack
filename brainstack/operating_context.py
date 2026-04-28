@@ -76,6 +76,17 @@ def _profile_item_supports_stable_signal(item: Mapping[str, Any]) -> bool:
     }
 
 
+def _stable_profile_display_label(item: Mapping[str, Any]) -> str:
+    metadata = item.get("metadata")
+    payload = metadata if isinstance(metadata, Mapping) else {}
+    if payload.get("target_slot") or (
+        isinstance(payload.get("admission"), Mapping)
+        and payload["admission"].get("target_slot")
+    ) or item.get("slot") or item.get("storage_key"):
+        return profile_item_display_label(item)
+    return str(item.get("category") or "profile").strip() or "profile"
+
+
 def _build_stable_profile_entries(profile_items: Iterable[Mapping[str, Any]], *, limit: int) -> List[Dict[str, str]]:
     entries: List[Dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -93,14 +104,15 @@ def _build_stable_profile_entries(profile_items: Iterable[Mapping[str, Any]], *,
         if entry_key in seen:
             continue
         seen.add(entry_key)
-        entries.append(
-            {
-                "category": category,
-                "stable_key": stable_key,
-                "label": profile_item_display_label(item),
-                "content": content,
-            }
-        )
+        entry = {
+            "category": category,
+            "stable_key": stable_key,
+            "content": content,
+        }
+        display_label = _stable_profile_display_label(item)
+        if display_label != category:
+            entry["label"] = display_label
+        entries.append(entry)
         if len(entries) >= limit:
             break
     return entries

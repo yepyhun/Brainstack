@@ -9,7 +9,15 @@ Brainstack gives Hermes a memory model instead of a memory blob.
 
 It is a composite `MemoryProvider` for persistent agents: profile memory, session continuity, temporal graph truth, and corpus retrieval under one memory owner inside Hermes.
 
-The current installer also carries the optimized Hermes Gateway runtime path with it: fresh Hermes checkouts can receive the TurnContract, tool-profile, context-budget, provider-SLO, simple-renderer, stale-response, and heavy-tool metadata support Brainstack expects for fast stateful conversation.
+It is built from three proven memory lines, then adapted into a Hermes-native kernel:
+
+- **Hindsight** gives bounded continuity and after-turn learning.
+- **Graphiti** gives temporal graph truth, relations, and conflict handling.
+- **MemPalace** gives large-corpus retrieval and packed evidence recall.
+
+Brainstack's job is not to copy those projects loosely. Its job is to keep their useful invariants, put them behind one Hermes memory owner, and make every important memory decision inspectable.
+
+The installer also carries the Hermes integration path Brainstack needs for stateful conversation. It keeps runtime ownership in Hermes while installing the memory seam, doctor checks, and optional compatibility support required by the kernel.
 
 Optional bonus: this repo also includes a **Hermes Proactive Extension** under `extensions/hermes_proactive/`. It is not part of the Brainstack memory kernel. The wizard can install it only when explicitly requested, so operators can decide whether they want heartbeat/PulseProducer/Evolver-style proactivity on top of Brainstack. Brainstack provides the memory projection SDK; Hermes owns the runtime behavior. The extension itself uses stdlib plus Brainstack; it can read Evolver health signals, but it does not silently install Evolver or its dependencies.
 
@@ -24,7 +32,7 @@ This repo is for people building serious Hermes-based second-brain systems. It i
 
 ## Core foundation
 
-Brainstack is built from three donor lines, then reshaped into one Hermes-native memory system:
+Brainstack's foundation stays donor-grounded:
 
 | Layer | Base | What Brainstack takes from it |
 | :--- | :--- | :--- |
@@ -32,7 +40,7 @@ Brainstack is built from three donor lines, then reshaped into one Hermes-native
 | **L2** | **[Graphiti](https://github.com/getzep/graphiti)** | entity/relation memory, temporal truth, conflict-aware graph state |
 | **L3** | **[MemPalace](https://github.com/MemPalace/mempalace)** | large-corpus retrieval, source/chunk identity, packed cited evidence recall |
 
-Additional patterns also shape the current code:
+Additional patterns also shape current code:
 
 - **Hermes-LCM** for bounded transcript evidence fallback
 
@@ -84,7 +92,7 @@ Brainstack takes the opposite approach:
 - bounded evidence instead of transcript abuse
 - temporal truth handled explicitly, not as an afterthought
 
-Transcript is evidence. Graph is truth. Corpus is corpus. Profile is profile. That sounds obvious. In practice, it usually is not.
+Transcript is evidence. Graph is truth. Corpus is corpus. Profile is profile. That sounds obvious, but most agent memory systems blur those lines. Brainstack keeps them separate so Hermes can answer with less noise and less accidental false confidence.
 
 ## What Brainstack is trying to do
 
@@ -101,11 +109,10 @@ Transcript is evidence. Graph is truth. Corpus is corpus. Profile is profile. Th
 - uses `SQLite` for shell, session, profile, transcript, and lexical fallback state
 - supports embedded `Kuzu` for L2 graph truth and reports explicitly if it is unavailable
 - supports embedded `Chroma` for L3 semantic corpus retrieval and reports explicitly if it is unavailable
-- is actively audited against the donor-first native-seam model
-- explicit user/addressing truth remains Hermes-host owned
-- transport-handle precedence and explicit-truth atomicity on live chat surfaces remain Hermes host seams, not Brainstack plugin seams
-- explicit multi-rule pack fidelity and ordinary-turn compliance are proven on the Hermes host path, not by reintroducing Brainstack-owned behavior governance
-- runtime handoff is read-only from Brainstack's side; scheduling, execution, and approval remain Hermes/runtime responsibilities
+- proves explicit capture with receipt-backed writes instead of trusting an assistant saying "saved"
+- ships a public-safe regression corpus for memory correctness without private Discord or canary data
+- emits evidence traces showing what entered the packet, what was dropped, and why
+- keeps runtime handoff read-only from Brainstack's side; scheduling, execution, approval, and provider behavior remain Hermes/runtime responsibilities
 
 ## Quickstart
 
@@ -129,39 +136,29 @@ python install_into_hermes.py /path/to/hermes-agent --enable --doctor --runtime 
 
 After install, run the doctor and confirm that Brainstack is the active memory provider.
 
-## What Brainstack is built from
+## Donor boundaries
 
-Brainstack is built from three donor lines, then re-composed into a single Hermes-native memory system:
+The donor base is important, but the product value is the integration boundary: Hermes sees one memory kernel, while Brainstack keeps the underlying jobs separate.
 
-1. **[Hindsight](https://github.com/vectorize-io/hindsight)** - For temporal state preservation, bounded history, and preserving old states rather than destructively overwriting past knowledge.
-2. **[Graphiti](https://github.com/getzep/graphiti)** - For explicitly surfacing graph conflicts, tracking entity relationships, and managing temporal truths natively.
-3. **[MemPalace](https://github.com/MemPalace/mempalace)** - For modular, high-performance retrieval and FTS/Semantic FUSION handling of large corpuses without massive token overhead.
+That boundary matters:
 
-That donor base is not the whole point. Brainstack's value is that it gives Hermes one memory owner for these jobs instead of leaving them as separate memory-shaped subsystems.
-
-This shows up as a strict internal separation of concerns:
-
-| Layer | Inspiration | Core Responsibility |
-| :--- | :--- | :--- |
-| **L1** | **Hindsight** | recency, session continuity, after-turn learning |
-| **L2** | **Graphiti** | entity-relation-temporal graph, current/previous truth |
-| **L3** | **MemPalace** | big corpus, FUSION context packing |
-
-Additional patterns also influence the current code:
-
-- **Hermes-LCM transcript pattern** for bounded raw transcript retention and temporal evidence fallback
+- donors provide proven memory semantics
+- Brainstack adapts them into Hermes-native shelves and contracts
+- Hermes remains the runtime owner for scheduling, tools, approval, and provider behavior
+- transcript fallback stays bounded raw evidence, not a second memory engine
 
 ## What Brainstack adds on top
 
 Using the donors directly would still leave a lot of hard integration work in the host.
 
-Brainstack adds the parts that make the system usable as one memory kernel instead of a donor bundle:
+Brainstack adds the parts that make the system usable in a real Hermes agent instead of only looking good in a diagram:
 
 - one live memory owner inside Hermes
 - explicit shelf separation instead of a flat memory blob
 - current truth, historical truth, and conflict state kept distinct
 - bounded packing discipline so recall helps the turn instead of flooding it
 - host-aware install, doctor, and boundary tooling so the memory layer can actually survive real runtime drift
+- public proof fixtures and evidence traces so regressions can be checked without private data
 
 ## Current runtime architecture
 
@@ -214,6 +211,9 @@ What is currently true:
 - local markdown/wiki files can enter the corpus shelf through explicit allowlisted source adapters instead of raw prompt stuffing
 - shelf-aware export and dry-run import reports make memory moves inspectable, redacted, and mutation-free by default
 - the installer recognizes Hermes' native interrupted-turn external-memory guard, so Brainstack follows the upstream host seam instead of forcing a stale local patch
+- public-safe memory fixtures reproduce the critical failure classes without leaking live Discord data
+- evidence traces expose proof chains from source span to packet selection
+- token-cost baseline reports measure selected and dropped public evidence cost without enabling a new optimizer
 
 Release posture:
 
