@@ -1,0 +1,66 @@
+{
+  "negative_id": "budget_protected_dropped",
+  "expected_error": "budget_dropped_authority_critical_evidence",
+  "trace": {
+    "schema": "brainstack.evidence_trace.v1",
+    "trace_id": "trace-negative-budget-protected",
+    "turn_id": "turn-negative-budget-protected",
+    "query_summary": "Bad budget fixture dropped receipt-backed answer evidence.",
+    "scope": {
+      "principal_scope_key": "principal:public-negative",
+      "workspace_scope_key": "workspace:public-memory"
+    },
+    "candidate_counts": {
+      "input": 1,
+      "dropped": 1,
+      "selected": 0
+    },
+    "candidates": [
+      {
+        "candidate_id": "ev_bad_budget_receipt",
+        "source_event_id": "event-bad-budget",
+        "source_span_id": "span-bad-budget",
+        "capture_plan_id": "cp_bad_budget",
+        "proposal_id": "cap_bad_budget",
+        "admission_id": "adm_cap_bad_budget",
+        "receipt_id": "mwr_bad_budget",
+        "shelf": "profile",
+        "target_slot": "identity.preferred_address_name",
+        "source_role": "user",
+        "authority": "receipt_backed",
+        "truth_eligible": true,
+        "model_facing_allowed": false,
+        "answer_evidence_allowed": true,
+        "score": {},
+        "decision": "dropped",
+        "reason_code": "dropped_budget_overflow",
+        "token_estimate": 8,
+        "raw_text_included": false,
+        "value_fingerprint": "sha256:bad"
+      }
+    ],
+    "proof_chain": [],
+    "selected_answer_evidence": [],
+    "dropped_summary": [
+      {
+        "reason_code": "dropped_budget_overflow",
+        "count": 1
+      }
+    ],
+    "packet_budget": {
+      "max_tokens": 4,
+      "truncated": true,
+      "answer_evidence_preserved": true,
+      "receipt_coverage_preserved": true,
+      "authority_fields_preserved": true,
+      "scope_fields_preserved": true,
+      "correction_fields_preserved": true
+    },
+    "receipt_coverage": {
+      "coverage_status": "complete"
+    },
+    "trace_completeness": {
+      "complete_for_audit": false
+    }
+  }
+}

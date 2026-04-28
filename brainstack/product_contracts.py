@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from .core.packet_budget import PacketBudgetPolicy, apply_packet_budget
 
 PRODUCT_PROBE_SCHEMA = "brainstack.product_probe.v1"
 FAILURE_BUNDLE_SCHEMA = "brainstack.failure_bundle.v1"
@@ -341,6 +342,8 @@ def model_facing_packet_firewall(
     candidates: Sequence[Mapping[str, Any]],
     *,
     query_mode: str = "normal",
+    packet_budget_mode: str = "off",
+    packet_budget_max_candidate_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Filter final memory packet candidates before prompt assembly."""
 
@@ -415,13 +418,51 @@ def model_facing_packet_firewall(
             )
             continue
 
+        if "token_estimate" not in item:
+            item["token_estimate"] = _model_packet_token_estimate(item)
+        item.setdefault("candidate_id", evidence_id)
+        if "authority" not in item and evidence_class:
+            item["authority"] = evidence_class
+        item.setdefault("answer_evidence_allowed", bool(item.get("answer_evidence", False)))
         kept.append(item)
         if bool(item.get("answer_evidence", False)):
             answer_evidence.append(item)
 
+    packet_budget = {
+        "mode": packet_budget_mode,
+        "enabled": packet_budget_mode in {"shadow", "active"},
+        "max_candidate_tokens": packet_budget_max_candidate_tokens,
+        "applied_to_output": False,
+    }
+    if packet_budget_mode in {"shadow", "active"} and packet_budget_max_candidate_tokens is not None:
+        budget_result = apply_packet_budget(
+            kept,
+            PacketBudgetPolicy(max_candidate_tokens=packet_budget_max_candidate_tokens),
+        )
+        packet_budget.update(budget_result.to_trace_packet_budget())
+        if packet_budget_mode == "active":
+            kept = [item for item in budget_result.candidates if item.get("decision") == "selected"]
+            budget_dropped = [
+                item for item in budget_result.candidates if item.get("decision") == "dropped"
+            ]
+            dropped.extend(
+                {
+                    "evidence_id": str(item.get("evidence_id") or item.get("candidate_id") or ""),
+                    "drop_reason": str(item.get("reason_code") or ""),
+                }
+                for item in budget_dropped
+            )
+            answer_evidence = [
+                item
+                for item in kept
+                if bool(item.get("answer_evidence", False)) or bool(item.get("answer_evidence_allowed", False))
+            ]
+            packet_budget["applied_to_output"] = True
+
     return {
         "schema": "brainstack.model_facing_packet_firewall.v1",
         "query_mode": query_mode,
+        "packet_budget": packet_budget,
         "input_candidate_count": len(candidates),
         "kept_count": len(kept),
         "dropped_count": len(dropped),
@@ -430,6 +471,15 @@ def model_facing_packet_firewall(
         "dropped": dropped,
         "policy_version": "model_packet_firewall.v1",
     }
+
+
+def _model_packet_token_estimate(item: Mapping[str, Any]) -> int:
+    payload = {
+        "slot": item.get("slot") or item.get("target_slot") or "",
+        "value": item.get("value") or item.get("redacted_excerpt") or item.get("content") or "",
+    }
+    text = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return max(1, (len(text) + 3) // 4)
 
 
 def build_phrase_provenance_report(

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from brainstack.db import BrainstackStore
 from brainstack.diagnostics import build_query_inspect
-from brainstack.literal_index import classify_literal, detect_literal_tokens, literal_slot_match
+from brainstack.literal_index import classify_literal, detect_literal_tokens, detect_url_literals, literal_slot_match
 
 PRINCIPAL_SCOPE = "principal:literal-event"
 
@@ -196,3 +196,16 @@ def test_literal_slot_match_uses_anchor_plus_shape_not_shape_alone() -> None:
     assert literal_slot_match(query="X suffix unknown thing", text="", metadata=metadata)["matched"] is False
     matched = literal_slot_match(query="X suffix debug thing", text="", metadata=metadata)
     assert matched["matched"] is True
+
+
+def test_url_literals_are_exact_model_facing_literals() -> None:
+    text = "Jegyezd meg repo URL-ként: https://github.com/NevaMind-AI/memU"
+    tokens = detect_literal_tokens(text)
+
+    assert detect_url_literals(text) == ["https://github.com/NevaMind-AI/memU"]
+    assert any(
+        token["class"] == "url"
+        and token["value"] == "https://github.com/NevaMind-AI/memU"
+        and token["model_facing"] is True
+        for token in tokens
+    )

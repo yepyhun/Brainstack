@@ -10,6 +10,7 @@ from brainstack.db import BrainstackStore
 from brainstack.explicit_capture import EXPLICIT_CAPTURE_SCHEMA_VERSION
 from brainstack.graph import ingest_graph_evidence_with_receipt
 from brainstack.graph_evidence import GraphEvidenceItem
+from brainstack.operating_truth import OPERATING_RECORD_TYPES
 from brainstack.write_contract import WRITE_CONTRACT_TRACE_SCHEMA_VERSION
 
 
@@ -71,6 +72,46 @@ def test_explicit_profile_remember_writes_multilingual_user_truth_and_recall(tmp
             provider.handle_tool_call("brainstack_recall", {"query": "root cause engineering preference"})
         )
         assert recall["selected_evidence"]["profile"]
+    finally:
+        provider.shutdown()
+
+
+def test_explicit_assistant_address_name_is_profile_preference_not_operating(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        assert provider._store is not None
+        receipt = json.loads(
+            provider.handle_tool_call(
+                "brainstack_remember",
+                {
+                    "shelf": "profile",
+                    "stable_key": "preference:assistant_address_name",
+                    "category": "preference",
+                    "content": "Helper",
+                    "source_role": "user",
+                    "authority_class": "profile",
+                    "confidence": 0.98,
+                    "metadata": {
+                        "target_slot": "preference.assistant_address_name",
+                        "source_span_id": "span-assistant-address",
+                    },
+                },
+            )
+        )
+
+        assert receipt["status"] == "committed"
+        assert receipt["write_contract_trace"]["lane"] == "profile"
+        row = provider._store.get_profile_item(
+            stable_key="preference:assistant_address_name",
+            principal_scope_key=provider._principal_scope_key,
+        )
+        assert row is not None
+        assert row["content"] == "Helper"
+        assert provider._store.search_operating_records(
+            query="Helper",
+            principal_scope_key=provider._principal_scope_key,
+            limit=5,
+        ) == []
     finally:
         provider.shutdown()
 
@@ -204,6 +245,12 @@ def test_trusted_operator_explicit_capture_is_host_injected_not_model_schema(tmp
         schemas = {schema["name"]: schema for schema in provider.get_tool_schemas()}
         assert schemas["brainstack_remember"]["parameters"]["properties"]["source_role"]["enum"] == ["user"]
         assert schemas["brainstack_supersede"]["parameters"]["properties"]["source_role"]["enum"] == ["user"]
+        assert schemas["brainstack_remember"]["parameters"]["properties"]["record_type"]["enum"] == list(
+            OPERATING_RECORD_TYPES
+        )
+        assert "preference:assistant_address_name" in schemas["brainstack_remember"]["parameters"]["properties"][
+            "stable_key"
+        ]["description"]
 
         receipt = json.loads(
             provider.handle_tool_call(

@@ -114,6 +114,36 @@ def test_assistant_creator_claim_is_not_durable_graph_truth_but_user_correction_
         store.close()
 
 
+def test_project_metadata_state_uses_canonical_admission_slot_for_permit(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        result = reconcile_tier2_candidates(
+            store,
+            session_id="s1",
+            turn_number=7,
+            source="tier2:test",
+            metadata={"assertion_speaker": "user", "span_kind": "assertion"},
+            extracted={
+                "states": [
+                    {
+                        "subject": "Brainstack",
+                        "attribute": "created_by",
+                        "value": "Tomi",
+                        "confidence": 0.95,
+                    }
+                ]
+            },
+        )
+
+        rows = store.list_current_graph_states(limit=10)
+        assert any(row["subject"] == "Brainstack" and row["predicate"] == "created_by" for row in rows)
+        assert any(action["action"] == "ADD" for action in result["actions"])
+        receipts = store.list_admission_receipts(limit=10)
+        assert any(row["target_slot"] == "project.created_by" for row in receipts)
+    finally:
+        store.close()
+
+
 def test_runtime_capability_claim_is_quarantined_from_graph_truth(tmp_path: Path) -> None:
     store = _open_store(tmp_path)
     try:

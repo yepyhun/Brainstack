@@ -35,6 +35,17 @@ class ReasonCode(StrEnum):
     DROPPED_SUPPORT_ONLY_FOR_ANSWER_TRUTH = "dropped_support_only_for_answer_truth"
     DROPPED_SCOPE_MISMATCH = "dropped_scope_mismatch"
     DROPPED_BUDGET_OVERFLOW = "dropped_budget_overflow"
+    DROPPED_BUDGET_LOW_AUTHORITY = "dropped_budget_low_authority"
+    DROPPED_BUDGET_SUPPORT_ONLY = "dropped_budget_support_only"
+    DROPPED_BUDGET_DUPLICATE_LOWER_AUTHORITY = (
+        "dropped_budget_duplicate_lower_authority"
+    )
+    DROPPED_BUDGET_STALE_TRANSCRIPT = "dropped_budget_stale_transcript"
+    SELECTED_BUDGET_PROTECTED_AUTHORITY = "selected_budget_protected_authority"
+    SELECTED_BUDGET_WITHIN_LIMIT = "selected_budget_within_limit"
+    BUDGET_INSUFFICIENT_FOR_AUTHORITY_MINIMUM = (
+        "budget_insufficient_for_authority_minimum"
+    )
     DEMOTED_LOW_AUTHORITY = "demoted_low_authority"
     DEFERRED_EXTERNAL_RUNTIME_OWNER = "deferred_external_runtime_owner"
     NO_CANDIDATE_FOR_RESOLVED_MEMORY_TARGET = "no_candidate_for_resolved_memory_target"

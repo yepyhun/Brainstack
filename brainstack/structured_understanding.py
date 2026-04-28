@@ -465,6 +465,7 @@ def _infer_capture_payload_success_cached(content: str, timezone_name: str, refe
                 "Rules:\n"
                 "- emit task_capture only when the user text itself explicitly provides durable tasks or commitments to remember\n"
                 "- emit operating_capture only when the user text itself explicitly provides structured operating truth to remember\n"
+                "- do not emit operating_capture for style preferences, naming preferences, assistant/bot address names, or ordinary conversation; those belong to profile/preference capture paths\n"
                 "- use null when the text is ordinary conversation or not explicit enough\n"
                 "- keep item titles and contents short, factual, and directly grounded in the provided user text only\n"
                 "- do not translate, soften, or invent structured memory that is not explicit in the user text\n"

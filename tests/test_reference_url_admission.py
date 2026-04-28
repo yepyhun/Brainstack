@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from brainstack.product_contracts import admit_reference_url, recall_reference_url
+from brainstack.transcript import build_turn_summary, trim_text_boundary
 
 
 def test_explicit_repo_url_admitted_as_reference_repository_url() -> None:
@@ -25,6 +26,29 @@ def test_reference_repo_url_exact_recall_after_reset() -> None:
     )
 
     assert recall_reference_url([record], label="resource-x") == "https://example.com/org/resource-x"
+
+
+def test_transcript_trim_preserves_exact_url_literals() -> None:
+    text = (
+        "Jegyezd meg ezt repo URL-ként, de ne nyisd meg, mert később pontosan "
+        "vissza kell idézni a hivatkozást és a körülötte lévő hosszú magyarázat "
+        "szándékosan túlviszi a preview limitet: https://example.com/org/resource-x"
+    )
+
+    trimmed = trim_text_boundary(text, max_len=80)
+
+    assert trimmed.endswith("https://example.com/org/resource-x")
+    assert "URLs:" in trimmed
+
+
+def test_turn_summary_preserves_user_url_when_assistant_ack_is_short() -> None:
+    summary = build_turn_summary(
+        "Jegyezd meg ezt repo URL-ként, de ne nyisd meg: https://example.com/org/resource-x",
+        "MEGJEGYEZTEM.",
+        max_len=48,
+    )
+
+    assert "https://example.com/org/resource-x" in summary
 
 
 def test_remember_url_does_not_fetch() -> None:

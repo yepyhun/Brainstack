@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from .operating_truth import OPERATING_RECORD_TYPES
+
 
 TASK_STATUS_VALUES = ["pending", "in_progress", "blocked", "completed", "failed", "stale", "cancelled"]
 
@@ -139,12 +141,23 @@ def workstream_recap_tool_schema(
 def explicit_capture_tool_schema(*, name: str, operation: str, capture_schema_version: str) -> Dict[str, Any]:
     properties: Dict[str, Any] = {
         "shelf": {"type": "string", "enum": ["profile", "operating", "task"]},
-        "stable_key": {"type": "string"},
+        "stable_key": {
+            "type": "string",
+            "description": (
+                "Typed stable key. Use profile keys such as preference:assistant_address_name "
+                "for how the user wants to address the assistant; do not put style or naming preferences "
+                "on the operating shelf."
+            ),
+        },
         "source_role": {"type": "string", "enum": ["user"]},
         "authority_class": {"type": "string"},
         "content": {"type": "string"},
         "category": {"type": "string"},
-        "record_type": {"type": "string"},
+        "record_type": {
+            "type": "string",
+            "enum": list(OPERATING_RECORD_TYPES),
+            "description": "Required only when shelf is operating. Must be one of Brainstack's typed operating record kinds.",
+        },
         "title": {"type": "string"},
         "due_date": {"type": "string"},
         "date_scope": {"type": "string"},

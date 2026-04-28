@@ -1,0 +1,93 @@
+{
+  "scenario_id": "budget_support_noise_public_001",
+  "turn_id": "turn-public-budget-001",
+  "source_event_id": "event-public-budget-001",
+  "source_role": "user",
+  "principal_scope_key": "principal:public-alex",
+  "workspace_scope_key": "workspace:public-memory",
+  "session_id": "session:public-budget-001",
+  "query_summary": "Budget keeps receipt-backed facts and drops transcript noise first.",
+  "receipt_mode": "complete",
+  "packet_budget_max_candidate_tokens": 18,
+  "capture_items": [
+    {
+      "proposal_id": "cap_budget_name",
+      "target_slot": "identity.preferred_address_name",
+      "stable_key": "identity.preferred_address_name",
+      "normalized_value": "Alex",
+      "source_span_id": "span-budget-name",
+      "surface_value": "Call me Alex.",
+      "language": "en",
+      "confidence": 0.96
+    },
+    {
+      "proposal_id": "cap_budget_project_creator",
+      "target_slot": "project.created_by",
+      "stable_key": "project.created_by:orion",
+      "normalized_value": "Alex",
+      "source_span_id": "span-budget-project-creator",
+      "surface_value": "I created Project Orion.",
+      "language": "en",
+      "confidence": 0.96
+    }
+  ],
+  "extra_candidates": [
+    {
+      "candidate_id": "ev_budget_stale_transcript",
+      "shelf": "transcript",
+      "source_role": "user",
+      "authority": "support_only",
+      "decision": "selected",
+      "source_event_id": "event-public-old-budget",
+      "source_span_id": "span-budget-old",
+      "raw_value": "Older chat summary about a related project.",
+      "redacted_excerpt": "Older support-only transcript summary.",
+      "token_estimate": 12,
+      "stale": true
+    },
+    {
+      "candidate_id": "ev_budget_support_note",
+      "shelf": "transcript",
+      "source_role": "user",
+      "authority": "support_only",
+      "decision": "selected",
+      "source_event_id": "event-public-support-budget",
+      "source_span_id": "span-budget-support",
+      "raw_value": "Support-only note that must not displace durable facts.",
+      "redacted_excerpt": "Support-only note.",
+      "token_estimate": 7
+    }
+  ],
+  "expected": {
+    "receipt_coverage": "complete",
+    "ack_mode": "full",
+    "full_ack_allowed": true,
+    "selected_slots": [
+      "identity.preferred_address_name",
+      "project.created_by"
+    ],
+    "selected_candidate_ids": [
+      "ev_cap_budget_name",
+      "ev_cap_budget_project_creator"
+    ],
+    "dropped_candidate_ids": [
+      "ev_budget_stale_transcript",
+      "ev_budget_support_note"
+    ],
+    "dropped_reason_codes": [
+      "dropped_budget_stale_transcript",
+      "dropped_budget_support_only"
+    ],
+    "packet_budget_status": "applied",
+    "packet_budget_fail_closed": false,
+    "reset_recall": {
+      "identity.preferred_address_name": "Alex",
+      "project.created_by:orion": "Alex"
+    },
+    "required_trace_reason_codes": [
+      "selected_budget_protected_authority",
+      "dropped_budget_stale_transcript",
+      "dropped_budget_support_only"
+    ]
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "scenario_id": "budget_duplicate_public_001",
+  "turn_id": "turn-public-budget-002",
+  "source_event_id": "event-public-budget-002",
+  "source_role": "user",
+  "principal_scope_key": "principal:public-alex",
+  "workspace_scope_key": "workspace:public-memory",
+  "session_id": "session:public-budget-002",
+  "query_summary": "Budget drops lower-authority duplicate evidence before unique durable facts.",
+  "receipt_mode": "complete",
+  "packet_budget_max_candidate_tokens": 20,
+  "capture_items": [
+    {
+      "proposal_id": "cap_budget_reference_url",
+      "target_slot": "reference.repository_url",
+      "stable_key": "reference.repository_url:orion-lib",
+      "normalized_value": "https://example.com/orion-lib",
+      "source_span_id": "span-budget-reference-url",
+      "surface_value": "Save this reference URL: https://example.com/orion-lib",
+      "capture_intent": "reference_save",
+      "language": "en",
+      "confidence": 0.96
+    }
+  ],
+  "extra_candidates": [
+    {
+      "candidate_id": "ev_budget_duplicate_url_summary",
+      "shelf": "transcript",
+      "target_slot": "reference.repository_url",
+      "source_role": "assistant",
+      "authority": "support_only",
+      "decision": "selected",
+      "source_event_id": "assistant-public-budget-002",
+      "source_span_id": "span-budget-duplicate-url-summary",
+      "raw_value": "https://example.com/orion-lib",
+      "redacted_excerpt": "Assistant repeated the same URL as a support-only summary.",
+      "token_estimate": 9
+    }
+  ],
+  "expected": {
+    "receipt_coverage": "complete",
+    "ack_mode": "full",
+    "full_ack_allowed": true,
+    "selected_slots": [
+      "reference.repository_url"
+    ],
+    "selected_candidate_ids": [
+      "ev_cap_budget_reference_url"
+    ],
+    "dropped_candidate_ids": [
+      "ev_budget_duplicate_url_summary"
+    ],
+    "dropped_reason_codes": [
+      "dropped_budget_duplicate_lower_authority"
+    ],
+    "packet_budget_status": "applied",
+    "packet_budget_fail_closed": false,
+    "reset_recall": {
+      "reference.repository_url:orion-lib": "https://example.com/orion-lib"
+    },
+    "required_trace_reason_codes": [
+      "selected_budget_protected_authority",
+      "dropped_budget_duplicate_lower_authority"
+    ]
+  }
+}

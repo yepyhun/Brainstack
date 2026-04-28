@@ -1,0 +1,77 @@
+{
+  "scenario_id": "budget_authority_minimum_public_001",
+  "turn_id": "turn-public-budget-003",
+  "source_event_id": "event-public-budget-003",
+  "source_role": "user",
+  "principal_scope_key": "principal:public-alex",
+  "workspace_scope_key": "workspace:public-memory",
+  "session_id": "session:public-budget-003",
+  "query_summary": "Budget fails closed when authority-critical evidence alone exceeds the cap.",
+  "receipt_mode": "complete",
+  "packet_budget_max_candidate_tokens": 10,
+  "capture_items": [
+    {
+      "proposal_id": "cap_budget_identity",
+      "target_slot": "identity.preferred_address_name",
+      "stable_key": "identity.preferred_address_name",
+      "normalized_value": "Alex",
+      "source_span_id": "span-budget-identity",
+      "surface_value": "Call me Alex.",
+      "language": "en",
+      "confidence": 0.96
+    },
+    {
+      "proposal_id": "cap_budget_age",
+      "target_slot": "identity.age",
+      "stable_key": "identity.age",
+      "normalized_value": "27",
+      "source_span_id": "span-budget-age",
+      "surface_value": "I am 27.",
+      "language": "en",
+      "confidence": 0.96
+    }
+  ],
+  "extra_candidates": [
+    {
+      "candidate_id": "ev_budget_low_value_noise",
+      "shelf": "transcript",
+      "source_role": "user",
+      "authority": "support_only",
+      "decision": "selected",
+      "source_event_id": "event-public-budget-noise",
+      "source_span_id": "span-budget-noise",
+      "raw_value": "Low-value transcript note.",
+      "redacted_excerpt": "Low-value transcript note.",
+      "token_estimate": 4
+    }
+  ],
+  "expected": {
+    "receipt_coverage": "complete",
+    "ack_mode": "full",
+    "full_ack_allowed": true,
+    "selected_slots": [
+      "identity.preferred_address_name",
+      "identity.age"
+    ],
+    "selected_candidate_ids": [
+      "ev_cap_budget_identity",
+      "ev_cap_budget_age"
+    ],
+    "dropped_candidate_ids": [
+      "ev_budget_low_value_noise"
+    ],
+    "dropped_reason_codes": [
+      "budget_insufficient_for_authority_minimum"
+    ],
+    "packet_budget_status": "insufficient_for_authority_minimum",
+    "packet_budget_fail_closed": true,
+    "reset_recall": {
+      "identity.preferred_address_name": "Alex",
+      "identity.age": "27"
+    },
+    "required_trace_reason_codes": [
+      "selected_budget_protected_authority",
+      "budget_insufficient_for_authority_minimum"
+    ]
+  }
+}

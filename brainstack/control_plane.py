@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import json
 from typing import Any, Callable, Dict, Mapping
 
+from .core.packet_budget import PacketBudgetPolicy, apply_packet_budget
 from .db import BrainstackStore
 from .executive_retrieval import retrieve_executive_context
 from .local_typed_understanding import analyze_local_query
@@ -429,6 +431,171 @@ def _record_working_memory_retrievals(
         store.record_corpus_retrievals(rows=corpus_rows)
 
 
+def _packet_budget_token_estimate(row: Mapping[str, Any]) -> int:
+    payload = {
+        "stable_key": row.get("stable_key") or row.get("storage_key") or "",
+        "content": row.get("content") or row.get("object_value") or row.get("summary") or "",
+        "source": row.get("source") or "",
+    }
+    text = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return max(1, (len(text) + 3) // 4)
+
+
+def _packet_budget_candidate(
+    *,
+    channel: str,
+    index: int,
+    row: Mapping[str, Any],
+    protected: bool,
+    authority: str,
+) -> dict[str, Any]:
+    candidate_id = f"{channel}:{row.get('id') or row.get('row_id') or row.get('stable_key') or index}"
+    return {
+        "candidate_id": candidate_id,
+        "evidence_id": candidate_id,
+        "channel": channel,
+        "authority": authority,
+        "decision": "selected",
+        "source_role": row.get("source_role") or row.get("source") or "memory",
+        "truth_eligible": protected,
+        "answer_evidence_allowed": protected,
+        "answer_evidence": protected,
+        "protected": protected,
+        "token_estimate": _packet_budget_token_estimate(row),
+    }
+
+
+def _working_memory_budget_candidates(
+    *,
+    profile_items: list[dict[str, Any]],
+    task_rows: list[dict[str, Any]],
+    operating_rows: list[dict[str, Any]],
+    matched: list[dict[str, Any]],
+    recent: list[dict[str, Any]],
+    transcript_rows: list[dict[str, Any]],
+    graph_rows: list[dict[str, Any]],
+    corpus_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    groups = [
+        ("profile_items", profile_items, True, "durable_truth"),
+        ("task_rows", task_rows, True, "durable_truth"),
+        ("operating_rows", operating_rows, True, "durable_truth"),
+        ("graph_rows", graph_rows, True, "durable_truth"),
+        ("corpus_rows", corpus_rows, True, "cited_corpus"),
+        ("matched", matched, False, "support_only"),
+        ("recent", recent, False, "support_only"),
+        ("transcript_rows", transcript_rows, False, "support_only"),
+    ]
+    for channel, rows, protected, authority in groups:
+        for index, row in enumerate(rows):
+            candidates.append(
+                _packet_budget_candidate(
+                    channel=channel,
+                    index=index,
+                    row=row,
+                    protected=protected,
+                    authority=authority,
+                )
+            )
+    return candidates
+
+
+def _apply_working_memory_packet_budget(
+    *,
+    mode: str,
+    max_candidate_tokens: int | None,
+    profile_items: list[dict[str, Any]],
+    task_rows: list[dict[str, Any]],
+    operating_rows: list[dict[str, Any]],
+    matched: list[dict[str, Any]],
+    recent: list[dict[str, Any]],
+    transcript_rows: list[dict[str, Any]],
+    graph_rows: list[dict[str, Any]],
+    corpus_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    normalized_mode = str(mode or "off").strip().casefold()
+    if normalized_mode not in {"off", "shadow", "active"}:
+        normalized_mode = "off"
+    telemetry: dict[str, Any] = {
+        "mode": normalized_mode,
+        "enabled": normalized_mode in {"shadow", "active"},
+        "applied_to_output": False,
+        "max_candidate_tokens": max_candidate_tokens,
+    }
+    if normalized_mode == "off" or max_candidate_tokens is None:
+        return {
+            "telemetry": telemetry,
+            "profile_items": profile_items,
+            "task_rows": task_rows,
+            "operating_rows": operating_rows,
+            "matched": matched,
+            "recent": recent,
+            "transcript_rows": transcript_rows,
+            "graph_rows": graph_rows,
+            "corpus_rows": corpus_rows,
+        }
+    candidates = _working_memory_budget_candidates(
+        profile_items=profile_items,
+        task_rows=task_rows,
+        operating_rows=operating_rows,
+        matched=matched,
+        recent=recent,
+        transcript_rows=transcript_rows,
+        graph_rows=graph_rows,
+        corpus_rows=corpus_rows,
+    )
+    result = apply_packet_budget(
+        candidates,
+        PacketBudgetPolicy(max_candidate_tokens=max_candidate_tokens),
+    )
+    telemetry.update(result.to_trace_packet_budget())
+    if normalized_mode == "shadow":
+        return {
+            "telemetry": telemetry,
+            "profile_items": profile_items,
+            "task_rows": task_rows,
+            "operating_rows": operating_rows,
+            "matched": matched,
+            "recent": recent,
+            "transcript_rows": transcript_rows,
+            "graph_rows": graph_rows,
+            "corpus_rows": corpus_rows,
+        }
+    kept_ids = {
+        str(item.get("candidate_id") or "")
+        for item in result.candidates
+        if str(item.get("decision") or "") == "selected"
+    }
+
+    def kept(channel: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        output: list[dict[str, Any]] = []
+        for index, row in enumerate(rows):
+            candidate = _packet_budget_candidate(
+                channel=channel,
+                index=index,
+                row=row,
+                protected=channel in {"profile_items", "task_rows", "operating_rows", "graph_rows", "corpus_rows"},
+                authority="support_only",
+            )
+            if candidate["candidate_id"] in kept_ids:
+                output.append(row)
+        return output
+
+    telemetry["applied_to_output"] = True
+    return {
+        "telemetry": telemetry,
+        "profile_items": kept("profile_items", profile_items),
+        "task_rows": kept("task_rows", task_rows),
+        "operating_rows": kept("operating_rows", operating_rows),
+        "matched": kept("matched", matched),
+        "recent": kept("recent", recent),
+        "transcript_rows": kept("transcript_rows", transcript_rows),
+        "graph_rows": kept("graph_rows", graph_rows),
+        "corpus_rows": kept("corpus_rows", corpus_rows),
+    }
+
+
 def build_working_memory_packet(
     store: BrainstackStore,
     *,
@@ -450,6 +617,8 @@ def build_working_memory_packet(
     system_substrate: Dict[str, Any] | None = None,
     render_ordinary_contract: bool = False,
     record_retrievals: bool = True,
+    packet_budget_mode: str = "off",
+    packet_budget_max_candidate_tokens: int | None = None,
 ) -> Dict[str, Any]:
     analysis = analyze_query(
         store,
@@ -565,6 +734,28 @@ def build_working_memory_packet(
         compiled_behavior_policy=compiled_behavior_policy,
         retrieval=retrieval,
     )
+    budgeted = _apply_working_memory_packet_budget(
+        mode=packet_budget_mode,
+        max_candidate_tokens=packet_budget_max_candidate_tokens,
+        profile_items=profile_items,
+        task_rows=task_rows,
+        operating_rows=operating_rows,
+        matched=matched,
+        recent=recent,
+        transcript_rows=transcript_rows,
+        graph_rows=graph_rows,
+        corpus_rows=corpus_rows,
+    )
+    profile_items = budgeted["profile_items"]
+    task_rows = budgeted["task_rows"]
+    operating_rows = budgeted["operating_rows"]
+    matched = budgeted["matched"]
+    recent = budgeted["recent"]
+    transcript_rows = budgeted["transcript_rows"]
+    graph_rows = budgeted["graph_rows"]
+    corpus_rows = budgeted["corpus_rows"]
+    packet_budget = dict(budgeted["telemetry"])
+    policy_payload["packet_budget"] = packet_budget
 
     block = render_working_memory_block(
         policy=policy_payload,
@@ -606,5 +797,6 @@ def build_working_memory_packet(
         "associative_expansion": retrieval.get("associative_expansion", {}),
         "routing": routing,
         "system_substrate": dict(system_substrate or {}),
+        "packet_budget": packet_budget,
         "block": block,
     }

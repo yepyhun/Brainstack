@@ -38,5 +38,29 @@
     "invariant": "reference URL save preserves literal without web fetch success claim",
     "forbidden_regression": "url_content_invented_or_fetch_claimed",
     "required_trace_reason_code": "selected_receipt_backed_fact"
+  },
+  {
+    "public_scenario_id": "budget_support_noise_public_001",
+    "represents_private_failure_class": "low_authority_packet_noise_displaces_truth",
+    "does_not_contain_private_data": true,
+    "invariant": "budget pressure drops support-only transcript noise before receipt-backed facts",
+    "forbidden_regression": "support_context_displaces_authority_critical_evidence",
+    "required_trace_reason_code": "dropped_budget_support_only"
+  },
+  {
+    "public_scenario_id": "budget_duplicate_public_001",
+    "represents_private_failure_class": "duplicate_lower_authority_packet_waste",
+    "does_not_contain_private_data": true,
+    "invariant": "lower-authority duplicate evidence is dropped before unique receipt-backed evidence",
+    "forbidden_regression": "duplicate_support_summary_kept_over_receipt_backed_fact",
+    "required_trace_reason_code": "dropped_budget_duplicate_lower_authority"
+  },
+  {
+    "public_scenario_id": "budget_authority_minimum_public_001",
+    "represents_private_failure_class": "authority_minimum_exceeds_budget",
+    "does_not_contain_private_data": true,
+    "invariant": "budget insufficiency fails closed instead of silently dropping authority-critical evidence",
+    "forbidden_regression": "receipt_backed_fact_dropped_to_meet_budget",
+    "required_trace_reason_code": "budget_insufficient_for_authority_minimum"
   }
 ]

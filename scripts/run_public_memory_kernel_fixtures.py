@@ -14,6 +14,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from brainstack.capture_pipeline import admit_structured_capture_items  # noqa: E402
+from brainstack.core.packet_budget import (  # noqa: E402
+    PacketBudgetPolicy,
+    apply_packet_budget,
+    validate_packet_budget_trace,
+)
 from brainstack.core.reason_codes import ReasonCode  # noqa: E402
 from brainstack.core.trace import (  # noqa: E402
     AUTHORITY_CORRECTED_FALSE,
@@ -164,7 +169,7 @@ def _extra_candidate(item: Mapping[str, Any]) -> dict[str, Any]:
     if authority in {AUTHORITY_SUPPORT_ONLY, AUTHORITY_INSPECT_ONLY, AUTHORITY_CORRECTED_FALSE}:
         answer_allowed = False
         truth_eligible = False
-    return make_evidence_candidate(
+    candidate = make_evidence_candidate(
         candidate_id=str(item.get("candidate_id") or ""),
         shelf=str(item.get("shelf") or "transcript"),
         target_slot=str(item.get("target_slot") or ""),
@@ -182,6 +187,10 @@ def _extra_candidate(item: Mapping[str, Any]) -> dict[str, Any]:
         corrected_by=item.get("corrected_by"),
         token_estimate=int(item.get("token_estimate") or 4),
     )
+    for key in ("stable_key", "protected", "required_for_answer", "stale"):
+        if key in item:
+            candidate[key] = item[key]
+    return candidate
 
 
 def _reset_recall(plan: CapturePlan, coverage: Mapping[str, Any]) -> dict[str, str]:
@@ -240,6 +249,14 @@ def run_scenario(scenario: Mapping[str, Any]) -> dict[str, Any]:
         }
         candidates = []
     candidates.extend(_extra_candidate(item) for item in scenario.get("extra_candidates") or [])
+    budget_result = None
+    budget_max = scenario.get("packet_budget_max_candidate_tokens")
+    if budget_max is not None:
+        budget_result = apply_packet_budget(
+            candidates,
+            PacketBudgetPolicy(max_candidate_tokens=int(budget_max)),
+        )
+        candidates = budget_result.candidates
     trace = build_evidence_trace(
         trace_id=f"trace_{scenario.get('scenario_id')}",
         turn_id=str(scenario.get("turn_id") or ""),
@@ -248,8 +265,12 @@ def run_scenario(scenario: Mapping[str, Any]) -> dict[str, Any]:
         workspace_scope_key=str(scenario.get("workspace_scope_key") or ""),
         candidates=candidates,
         receipt_coverage=coverage,
+        max_tokens=int(budget_max) if budget_max is not None else None,
+        truncated=bool(budget_result.truncated) if budget_result is not None else False,
     )
-    errors = validate_evidence_trace(trace)
+    if budget_result is not None:
+        trace["packet_budget"].update(budget_result.to_trace_packet_budget())
+    errors = validate_evidence_trace(trace) + validate_packet_budget_trace(trace)
     expected = scenario.get("expected") or {}
     observed_recall = _reset_recall(plan, coverage)
     contract_errors = []
@@ -278,6 +299,29 @@ def run_scenario(scenario: Mapping[str, Any]) -> dict[str, Any]:
         ]
         if code not in dropped_codes:
             contract_errors.append(f"missing_dropped_reason_code:{code}")
+    if expected.get("packet_budget_status"):
+        if trace["packet_budget"].get("status") != expected["packet_budget_status"]:
+            contract_errors.append("packet_budget_status_mismatch")
+    if "packet_budget_fail_closed" in expected:
+        if bool(trace["packet_budget"].get("fail_closed")) != bool(expected["packet_budget_fail_closed"]):
+            contract_errors.append("packet_budget_fail_closed_mismatch")
+    if expected.get("selected_candidate_ids"):
+        selected_ids = [
+            item.get("candidate_id")
+            for item in candidates
+            if item.get("decision") == DECISION_SELECTED
+        ]
+        if selected_ids != expected["selected_candidate_ids"]:
+            contract_errors.append("selected_candidate_ids_mismatch")
+    if expected.get("dropped_candidate_ids"):
+        dropped_ids = [
+            item.get("candidate_id")
+            for item in candidates
+            if item.get("decision") == DECISION_DROPPED
+        ]
+        for candidate_id in expected["dropped_candidate_ids"]:
+            if candidate_id not in dropped_ids:
+                contract_errors.append(f"missing_dropped_candidate_id:{candidate_id}")
     if expected.get("reset_recall") is not None and observed_recall != expected["reset_recall"]:
         contract_errors.append("reset_recall_mismatch")
     status = "pass" if not errors and not contract_errors else "fail"
@@ -313,7 +357,9 @@ def run_negative_fixtures(fixture_dir: Path) -> dict[str, Any]:
     results = []
     for path in sorted((fixture_dir / "negative").glob("*.json")):
         payload = _load_json(path)
-        errors = validate_evidence_trace(payload["trace"])
+        errors = validate_evidence_trace(payload["trace"]) + validate_packet_budget_trace(
+            payload["trace"]
+        )
         expected = str(payload.get("expected_error") or "")
         results.append(
             {

@@ -31,6 +31,7 @@ def test_generated_docker_compose_includes_local_tei_jina_runtime(tmp_path):
     assert "tei-model-cache:" in text
     assert "PYTHONPATH: /opt/hermes/plugins/memory" in text
     assert 'DISCORD_ALLOW_BOTS: "mentions"' in text
+    assert "TERMINAL_CWD: /workspace" in text
 
 
 def test_generated_docker_compose_allows_external_embedding_runtime(tmp_path):
@@ -53,6 +54,7 @@ def test_generated_docker_compose_allows_external_embedding_runtime(tmp_path):
     assert "BRAINSTACK_EMBEDDINGS_URL" not in text
     assert "PYTHONPATH: /opt/hermes/plugins/memory" in text
     assert 'DISCORD_ALLOW_BOTS: "mentions"' in text
+    assert "TERMINAL_CWD: /workspace" in text
 
 
 def test_compose_plugin_pythonpath_patch_prevents_runtime_state_shadowing(tmp_path):
@@ -96,6 +98,351 @@ services:
     assert applied == ["compose:discord_allow_bot_mentions"]
     assert 'DISCORD_ALLOW_BOTS: "mentions"' in text
     assert text.index("PYTHONPATH") < text.index("DISCORD_ALLOW_BOTS")
+
+
+def test_compose_terminal_workspace_cwd_patch_sets_workspace_contract(tmp_path):
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        """
+services:
+  hermes-bestie:
+    environment:
+      HERMES_HOME: /opt/data
+      HERMES_ENABLE_PROJECT_PLUGINS: "true"
+      PYTHONPATH: /opt/hermes/plugins/memory
+      DISCORD_ALLOW_BOTS: "mentions"
+""",
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_compose_terminal_workspace_cwd(compose, dry_run=False)
+
+    text = compose.read_text(encoding="utf-8")
+    assert applied == ["compose:terminal_cwd_workspace"]
+    assert "TERMINAL_CWD: /workspace" in text
+    assert text.index("DISCORD_ALLOW_BOTS") < text.index("TERMINAL_CWD")
+
+
+def test_deferred_tool_loader_contract_patch_preserves_alias_capability(tmp_path):
+    module = tmp_path / "hermes_deferred_tools.py"
+    module.write_text(
+        '''
+BUNDLE_TO_TOOLS = {
+    "memory": ("memory",),
+}
+
+CAPABILITY_TO_BUNDLES = {
+    "memory.recall": ("memory",),
+}
+
+def build_capability_catalog():
+    return {
+        "instruction": (
+            "If the user asks for a listed capability and its schema is not loaded, "
+            "call load_tools or ask clarification. Do not answer that the capability "
+            "is unavailable unless CapabilityManifest marks it unavailable."
+        ),
+    }
+
+def _capability_label(capability_id: str) -> str:
+    return {
+        "memory.recall": "Recall Brainstack/Hermes memory",
+    }.get(capability_id, capability_id)
+
+def _capability_summary(capability_id: str) -> str:
+    return {
+        "filesystem.search_read": "List, find, open, and inspect local/project files available to Hermes.",
+    }.get(capability_id, "Load configured Hermes tool schemas for this capability.")
+
+def select_tool_schemas(request, available_tool_defs_by_name, *, already_loaded=None):
+    already_loaded = already_loaded or set()
+    requested_capabilities = _string_tuple(request.get("capability_ids"))
+    requested_bundles = _string_tuple(request.get("bundle_ids"))
+    requested_tools = set(_string_tuple(request.get("tool_names")))
+    for capability_id in requested_capabilities:
+        for bundle_id in CAPABILITY_TO_BUNDLES.get(capability_id, ()):
+            requested_bundles += (bundle_id,)
+    selected_names = set(requested_tools)
+    for bundle_id in requested_bundles:
+        selected_names.update(BUNDLE_TO_TOOLS.get(bundle_id, ()))
+    loaded = []
+    not_loaded = []
+    for name in sorted(selected_names):
+        pass
+
+def build_tool_load_result():
+    return {
+        "continuation": {
+            "must_not_answer_from_memory_only": True,
+            "capability_preservation": {"capability_shrunk": False},
+        },
+    }
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_deferred_tool_loader_contract(module, dry_run=False)
+
+    text = module.read_text(encoding="utf-8")
+    assert applied == [
+        "deferred_tools:memory_bundle_explicit_brainstack_tools",
+        "deferred_tools:memory_write_capability",
+        "deferred_tools:memory_write_instruction",
+        "deferred_tools:memory_write_label",
+        "deferred_tools:memory_write_summary",
+        "deferred_tools:alias_tool_names",
+        "deferred_tools:continuation_instruction",
+    ]
+    assert "brainstack_remember" in text
+    assert '"memory.write": ("memory",)' in text
+    assert "load memory.write before saying it was remembered" in text
+    assert '"memory.write": "Write explicit Brainstack/Hermes memory"' in text
+    assert "Treat those as schema aliases, not missing tools." in text
+    assert '"next_step_instruction":' in text
+
+
+def test_run_agent_deferred_tool_continuation_patch_blocks_final_before_tool(tmp_path):
+    module = tmp_path / "run_agent.py"
+    module.write_text(
+        '''
+from hermes_deferred_tools import (
+    LOAD_TOOLS_NAME,
+)
+
+class AIAgent:
+    def __init__(self):
+        self._deferred_loaded_tool_names: set[str] = set()
+        self._tool_loader_trace: Dict[str, Any] = {
+        }
+
+    def _repair_tool_call(self, normalized, tool_name, lowered):
+        if matches:
+            return matches[0]
+
+        return None
+
+    def _handle_deferred_tool_load(self, function_args):
+        if loaded_names:
+            self._tool_loader_trace["tool_load_recall_pass"] = True
+        return json.dumps(result, ensure_ascii=False)
+
+    def _invoke_tool(self, function_name, function_args, effective_task_id):
+        if function_name == LOAD_TOOLS_NAME:
+            return self._handle_deferred_tool_load(function_args)
+        if function_name == "todo":
+            return "todo"
+
+    def _loop(self, assistant_message, finish_reason, messages):
+                    final_response = assistant_message.content or ""
+
+                    # Fix: unmute output when entering the no-tool-call branch
+                    self._mute_post_response = False
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_run_agent_deferred_tool_continuation(module, dry_run=False)
+
+    text = module.read_text(encoding="utf-8")
+    assert "run_agent:deferred_final_answer_guard" in applied
+    assert "BUNDLE_TO_TOOLS" in text
+    assert "self._deferred_tool_continuation" in text
+    assert "valid_alias_targets" in text
+    assert "def _deferred_tool_final_guard_nudge" in text
+    assert "DECLARED_EXTERNAL_CAPABILITY_NOT_USED" in text
+
+
+def test_memory_manager_output_validation_patch_adds_provider_receipt_seam(tmp_path):
+    module = tmp_path / "memory_manager.py"
+    module.write_text(
+        '''
+from typing import Any, Dict, List, Mapping
+
+class Provider:
+    name = "brainstack"
+
+class MemoryManager:
+    def __init__(self):
+        self._providers = []
+
+    def sync_all(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+        """Sync a completed turn to all providers."""
+        for provider in self._providers:
+            try:
+                provider.sync_turn(user_content, assistant_content, session_id=session_id)
+            except Exception as e:
+                logger.warning(
+                    "Memory provider '%s' sync_turn failed: %s",
+                    provider.name, e,
+                )
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_memory_manager_output_validation_seam(module, dry_run=False)
+
+    text = module.read_text(encoding="utf-8")
+    assert applied == [
+        "memory_manager:output_validation_seam",
+        "memory_manager:memory_commitment_blocked_renderer",
+    ]
+    assert "def validate_assistant_output_all(" in text
+    assert "validate_assistant_output" in text
+    assert "record_output_validation_delivery_all" in text
+    assert "durable memory write receipt" in text
+
+
+def test_run_agent_memory_output_validation_patch_runs_before_persist(tmp_path):
+    module = tmp_path / "run_agent.py"
+    module.write_text(
+        '''
+class AIAgent:
+    def _sync_external_memory_for_turn(
+        self,
+        *,
+        original_user_message: Any,
+        final_response: Any,
+        interrupted: bool,
+    ) -> None:
+        pass
+
+    def run(self):
+                final_response = _rendered_answer.text
+                messages.append({"role": "assistant", "content": final_response})
+
+        # Persist session to both JSON log and SQLite
+        self._persist_session(messages, conversation_history)
+
+        if final_response and not interrupted:
+            try:
+                from hermes_cli.plugins import invoke_hook as _invoke_hook
+                pass
+            except Exception as exc:
+                logger.warning("post_llm_call hook failed: %s", exc)
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_run_agent_memory_output_validation_seam(module, dry_run=False)
+
+    text = module.read_text(encoding="utf-8")
+    assert "run_agent:memory_output_validation_helpers" in applied
+    assert "run_agent:normal_memory_output_validation" in applied
+    assert "run_agent:memory_output_validation_delivery_record" in applied
+    assert "def _validate_external_memory_final_response" in text
+    assert text.index("_validate_external_memory_final_response(") < text.index("_persist_session")
+    assert "self._record_external_memory_validation_delivery(final_response)" in text
+
+
+def test_run_agent_terminal_final_guard_patch_blocks_terminal_false_success(tmp_path):
+    module = tmp_path / "run_agent.py"
+    module.write_text(
+        '''
+class AIAgent:
+    def _validate_external_memory_final_response(
+        self,
+        *,
+        original_user_message: Any,
+        final_response: Any,
+        interrupted: bool,
+    ) -> Any:
+        return final_response
+
+    def _replace_last_assistant_response_content(
+        self,
+        messages: Any,
+        conversation_history: Any,
+        final_response: Any,
+    ) -> None:
+        pass
+
+    def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str, tool_call_id: Any = None, messages: list = None) -> str:
+        block_message = None
+        if block_message is not None:
+            return json.dumps({"error": block_message}, ensure_ascii=False)
+        return "{}"
+
+    def _execute_tool_calls_sequential(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
+        for tool_call in assistant_message.tool_calls:
+            function_name = "terminal"
+            function_args = {}
+            _block_msg = None
+            if _block_msg is not None:
+                # Tool blocked by plugin policy — skip counter resets.
+                # Execution is handled below in the tool dispatch chain.
+                pass
+            else:
+                pass
+
+    def _loop(self, assistant_message, finish_reason, messages):
+                    final_response = assistant_message.content or ""
+
+                    # Fix: unmute output when entering the no-tool-call branch
+                    # so the user can see empty-response warnings and recovery
+                    self._mute_post_response = False
+
+    def run(self):
+        if final_response and not interrupted:
+            final_response = self._validate_external_memory_final_response(
+                original_user_message=original_user_message,
+                final_response=final_response,
+                interrupted=interrupted,
+            )
+            self._replace_last_assistant_response_content(messages, conversation_history, final_response)
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_run_agent_terminal_final_guard_seam(module, dry_run=False)
+
+    text = module.read_text(encoding="utf-8")
+    assert applied == [
+        "run_agent:terminal_final_guard_helpers",
+        "run_agent:terminal_url_fetch_guard_concurrent",
+        "run_agent:terminal_url_fetch_guard_sequential",
+        "run_agent:terminal_final_guard_nudge",
+        "run_agent:terminal_final_response_validation",
+    ]
+    assert "def _terminal_tool_final_guard_nudge(" in text
+    assert "def _terminal_url_fetch_block_message(" in text
+    assert "Implicit terminal URL fetch blocked" in text
+    assert "block_message = self._terminal_url_fetch_block_message(function_name, function_args, messages)" in text
+    assert "_block_msg = self._terminal_url_fetch_block_message(function_name, function_args, messages)" in text
+    assert "def _validate_terminal_final_response(" in text
+    assert "_terminal_tool_guard_nudge = self._terminal_tool_final_guard_nudge(" in text
+    assert "final_response = self._validate_terminal_final_response(" in text
+
+
+def test_memory_answer_renderer_language_patch_localizes_current_assignment(tmp_path):
+    module = tmp_path / "memory_answer_renderer.py"
+    module.write_text(
+        '''"""renderer"""
+from dataclasses import asdict, dataclass
+from typing import Any
+
+
+def _render_text(answer_type: str, claim_style: str, answer_value: str) -> str:
+    if claim_style == "unsupported":
+        return "No supported memory evidence for this request."
+    if claim_style == "current_assignment_absence":
+        return "No typed current-assignment evidence is recorded. Background runtime/Pulse evidence alone is not current assignment."
+
+    if claim_style == "bounded_event":
+        return f"Recorded event in the requested scope: {answer_value}."
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_memory_answer_renderer_language(module, dry_run=False)
+
+    text = module.read_text(encoding="utf-8")
+    assert applied == [
+        "memory_renderer:language_import",
+        "memory_renderer:response_language_helper",
+        "memory_renderer:localized_templates",
+    ]
+    assert "def _response_language()" in text
+    assert "Nincs rögzített aktuális feladat explicit assignment evidence alapján." in text
 
 
 def test_doctor_accepts_fenced_private_recall_wrapper():

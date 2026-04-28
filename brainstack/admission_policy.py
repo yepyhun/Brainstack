@@ -79,6 +79,13 @@ SLOT_REGISTRY: dict[str, SlotSpec] = {
         storage_key="preference:addressing",
         allowed_authorities=TRUSTED_AUTHORITIES,
     ),
+    "preference.assistant_address_name": SlotSpec(
+        slot_id="preference.assistant_address_name",
+        shelf="profile",
+        storage_key="preference:assistant_address_name",
+        exclusive_current=True,
+        allowed_authorities=TRUSTED_AUTHORITIES,
+    ),
     "preference.communication_style": SlotSpec(
         slot_id="preference.communication_style",
         shelf="profile",
@@ -193,6 +200,9 @@ PROFILE_SLOT_ALIASES = {
     "identity:age": "identity.age",
     "reference:repository_url": "reference.repository_url",
     "preference:addressing": "preference.addressing",
+    "preference:assistant_address_name": "preference.assistant_address_name",
+    "preference:assistant_name": "preference.assistant_address_name",
+    "preference:bot_address_name": "preference.assistant_address_name",
     "preference:communication_style": "preference.communication_style",
     "preference:formatting": "preference.formatting",
     "preference:verbosity": "preference.verbosity",

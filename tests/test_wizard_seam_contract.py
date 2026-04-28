@@ -149,6 +149,80 @@ def test_brainstack_projection_carries_private_memory_and_scheduler_contract(
         store.close()
 
 
+def test_profile_projection_uses_typed_slot_labels(tmp_path: Path) -> None:
+    store = BrainstackStore(str(tmp_path / "brainstack.sqlite3"))
+    store.open()
+    try:
+        store.upsert_profile_item(
+            stable_key="identity:age",
+            category="identity",
+            content="19",
+            source="test",
+            confidence=0.95,
+            metadata={"principal_scope_key": "principal:test", "target_slot": "identity.age"},
+        )
+        projection = build_system_prompt_projection(
+            store,
+            profile_limit=4,
+            principal_scope_key="principal:test",
+            session_id="session:test",
+        )
+
+        assert "[identity.age] 19" in str(projection["block"])
+    finally:
+        store.close()
+
+
+def test_system_projection_includes_truth_eligible_project_metadata(tmp_path: Path) -> None:
+    store = BrainstackStore(str(tmp_path / "brainstack.sqlite3"), graph_backend="sqlite", corpus_backend="sqlite")
+    store.open()
+    try:
+        scope = "principal:project-metadata"
+        store.upsert_graph_state(
+            subject_name="Brainstack",
+            attribute="created_by",
+            value_text="Canary Tomi",
+            source="test",
+            metadata={
+                "principal_scope_key": scope,
+                "truth_eligible": True,
+                "support_visibility": "answer_evidence",
+                "admission": {
+                    "target_slot": "project.created_by",
+                    "truth_eligible": True,
+                    "support_visibility": "answer_evidence",
+                },
+            },
+        )
+        store.upsert_graph_state(
+            subject_name="Brainstack graph layer",
+            attribute="component_inspired_by",
+            value_text="Graphiti",
+            source="test",
+            metadata={
+                "principal_scope_key": scope,
+                "truth_eligible": True,
+                "support_visibility": "answer_evidence",
+                "admission": {
+                    "target_slot": "project.component_inspired_by",
+                    "truth_eligible": True,
+                    "support_visibility": "answer_evidence",
+                },
+            },
+        )
+        projection = build_system_prompt_projection(
+            store,
+            profile_limit=4,
+            principal_scope_key=scope,
+            session_id="session:test",
+        )
+
+        assert "[project.created.by] Brainstack: Canary Tomi" in str(projection["block"])
+        assert "[project.component.inspired.by] Brainstack graph layer: Graphiti" in str(projection["block"])
+    finally:
+        store.close()
+
+
 def test_private_runtime_paths_are_release_hygiene_failures(tmp_path: Path) -> None:
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     private_file = tmp_path / "hermes-config" / "agent-smoke" / "auth.json"
@@ -209,6 +283,8 @@ def test_gateway_patch_probes_enforce_boost_only_toolloader_contract() -> None:
     assert "build_load_tools_schema" in probes["hermes_deferred_tools.py"]
     assert "tool_load_continuation.v1" in probes["hermes_deferred_tools.py"]
     assert "deferred_tool_schema_mode" in probes["run_agent.py"]
+    assert "_terminal_tool_final_guard_nudge" in probes["run_agent.py"]
+    assert "_validate_terminal_final_response" in probes["run_agent.py"]
     assert "direct_render_preflight" in probes["agent/memory_manager.py"]
     assert "capability_preserving_default" in probes["gateway/turn_profiles.py"]
     assert "generic_no_evidence_forbidden" in probes["gateway/memory_answer_renderer.py"]
