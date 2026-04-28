@@ -11,7 +11,8 @@ def test_installer_main_invokes_capability_preserving_patches() -> None:
     source = Path(install_into_hermes.__file__).read_text(encoding="utf-8")
 
     assert '_run_host_patch("_patch_gateway_turn_profiles_capability_preserving_default"' in source
-    assert '_run_host_patch("_patch_compose_discord_capability_preserving_tool_profile"' in source
+    assert '_run_host_patch("_patch_compose_discord_capability_preserving_tool_profile"' not in source
+    assert '_run_host_patch("_patch_compose_remove_discord_forced_heavy_profile"' in source
 
 
 def test_generated_docker_compose_includes_local_tei_jina_runtime(tmp_path):
@@ -40,8 +41,8 @@ def test_generated_docker_compose_includes_local_tei_jina_runtime(tmp_path):
     assert "PYTHONPATH: /opt/hermes/plugins/memory" in text
     assert 'DISCORD_ALLOW_BOTS: "mentions"' in text
     assert "TERMINAL_CWD: /workspace" in text
-    assert "HERMES_DISCORD_TURN_PROFILE: heavy" in text
-    assert "HERMES_DISCORD_TOOL_PROFILE: heavy" in text
+    assert "HERMES_DISCORD_TURN_PROFILE" not in text
+    assert "HERMES_DISCORD_TOOL_PROFILE" not in text
 
 
 def test_generated_docker_compose_allows_external_embedding_runtime(tmp_path):
@@ -65,8 +66,8 @@ def test_generated_docker_compose_allows_external_embedding_runtime(tmp_path):
     assert "PYTHONPATH: /opt/hermes/plugins/memory" in text
     assert 'DISCORD_ALLOW_BOTS: "mentions"' in text
     assert "TERMINAL_CWD: /workspace" in text
-    assert "HERMES_DISCORD_TURN_PROFILE: heavy" in text
-    assert "HERMES_DISCORD_TOOL_PROFILE: heavy" in text
+    assert "HERMES_DISCORD_TURN_PROFILE" not in text
+    assert "HERMES_DISCORD_TOOL_PROFILE" not in text
 
 
 def test_compose_plugin_pythonpath_patch_prevents_runtime_state_shadowing(tmp_path):
@@ -135,7 +136,7 @@ services:
     assert text.index("DISCORD_ALLOW_BOTS") < text.index("TERMINAL_CWD")
 
 
-def test_compose_discord_capability_profile_patch_preserves_native_tools(tmp_path):
+def test_compose_cleanup_removes_obsolete_forced_heavy_profile(tmp_path):
     compose = tmp_path / "docker-compose.yml"
     compose.write_text(
         """
@@ -147,17 +148,19 @@ services:
       PYTHONPATH: /opt/hermes/plugins/memory
       DISCORD_ALLOW_BOTS: "mentions"
       TERMINAL_CWD: /workspace
+      HERMES_DISCORD_TURN_PROFILE: heavy
+      HERMES_DISCORD_TOOL_PROFILE: heavy
 """,
         encoding="utf-8",
     )
 
-    applied = install_into_hermes._patch_compose_discord_capability_preserving_tool_profile(compose, dry_run=False)
+    applied = install_into_hermes._patch_compose_remove_discord_forced_heavy_profile(compose, dry_run=False)
 
     text = compose.read_text(encoding="utf-8")
-    assert applied == ["compose:discord_capability_preserving_tool_profile"]
-    assert "HERMES_DISCORD_TURN_PROFILE: heavy" in text
-    assert "HERMES_DISCORD_TOOL_PROFILE: heavy" in text
-    assert text.index("TERMINAL_CWD") < text.index("HERMES_DISCORD_TURN_PROFILE")
+    assert applied == ["compose:remove_discord_forced_heavy_profile"]
+    assert "HERMES_DISCORD_TURN_PROFILE" not in text
+    assert "HERMES_DISCORD_TOOL_PROFILE" not in text
+    assert "TERMINAL_CWD: /workspace" in text
 
 
 def test_gateway_turn_profile_patch_preserves_current_platform_toolsets(tmp_path):

@@ -124,10 +124,10 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "owner": "docker-runtime-seam",
         "removal_condition": "Hermes Docker runtime explicitly sets terminal working directory to mounted workspace.",
     },
-    "_patch_compose_discord_capability_preserving_tool_profile": {
+    "_patch_compose_remove_discord_forced_heavy_profile": {
         "category": "required_seam",
         "owner": "docker-runtime-seam",
-        "removal_condition": "Hermes Discord default profile preserves native platform capability without compose-level fallback.",
+        "removal_condition": "All supported installs are already free of the old forced-heavy Discord fallback.",
     },
     "_patch_gateway_turn_profiles_capability_preserving_default": {
         "category": "required_seam",
@@ -415,12 +415,12 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "why": "Docker file/terminal canaries need an explicit workspace contract instead of inherited image cwd.",
     },
     {
-        "patcher": "_patch_compose_discord_capability_preserving_tool_profile",
+        "patcher": "_patch_compose_remove_discord_forced_heavy_profile",
         "target": "docker-compose*.yml",
         "scope": "docker-runtime-seam",
         "runtime_modes": ("docker",),
-        "purpose": "Force a capability-preserving Discord profile when Gateway deferred ToolLoader support is incomplete.",
-        "why": "The installed bot must never lose native Hermes file, terminal, web, or workflow capability behind hidden mode selection.",
+        "purpose": "Remove the obsolete forced-heavy Discord profile fallback from existing Docker installs.",
+        "why": "Capability preservation now belongs to the turn profile seam, not a permanent heavy-mode runtime override.",
     },
     {
         "patcher": "_patch_deferred_tool_loader_contract",
@@ -4145,8 +4145,6 @@ services:
       HERMES_GID: "${{HERMES_GID:-1000}}"
       DISCORD_ALLOW_BOTS: "mentions"
       TERMINAL_CWD: /workspace
-      HERMES_DISCORD_TURN_PROFILE: heavy
-      HERMES_DISCORD_TOOL_PROFILE: heavy
 {tei_environment}
     volumes:
       - ./{runtime_ref}:/opt/data
@@ -4255,35 +4253,21 @@ def _patch_compose_terminal_workspace_cwd(path: Path, dry_run: bool) -> list[str
     raise RuntimeError(f"Installer patch anchor missing for compose terminal workspace cwd in {path}")
 
 
-def _patch_compose_discord_capability_preserving_tool_profile(path: Path, dry_run: bool) -> list[str]:
+def _patch_compose_remove_discord_forced_heavy_profile(path: Path, dry_run: bool) -> list[str]:
     if not path.exists():
         return []
     text = path.read_text(encoding="utf-8")
-    required = {
-        "HERMES_DISCORD_TURN_PROFILE:": '      HERMES_DISCORD_TURN_PROFILE: heavy\n',
-        "HERMES_DISCORD_TOOL_PROFILE:": '      HERMES_DISCORD_TOOL_PROFILE: heavy\n',
-    }
-    if all(marker in text for marker in required):
+    old_text = text
+    for line in (
+        "      HERMES_DISCORD_TURN_PROFILE: heavy\n",
+        "      HERMES_DISCORD_TOOL_PROFILE: heavy\n",
+    ):
+        text = text.replace(line, "")
+    if text == old_text:
         return []
-
-    anchors = [
-        "      TERMINAL_CWD: /workspace\n",
-        '      DISCORD_ALLOW_BOTS: "mentions"\n',
-        "      PYTHONPATH: /opt/hermes/plugins/memory\n",
-        '      HERMES_ENABLE_PROJECT_PLUGINS: "true"\n',
-        "      HERMES_ENABLE_PROJECT_PLUGINS: 'true'\n",
-    ]
-    for anchor in anchors:
-        if anchor not in text:
-            continue
-        additions = "".join(line for marker, line in required.items() if marker not in text)
-        if not additions:
-            return []
-        text = text.replace(anchor, anchor + additions, 1)
-        if not dry_run:
-            path.write_text(text, encoding="utf-8")
-        return ["compose:discord_capability_preserving_tool_profile"]
-    raise RuntimeError(f"Installer patch anchor missing for compose Discord capability-preserving tool profile in {path}")
+    if not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return ["compose:remove_discord_forced_heavy_profile"]
 
 
 def _patch_dockerignore(path: Path, dry_run: bool) -> list[str]:
@@ -4760,7 +4744,7 @@ def main() -> int:
         host_patches.extend(_run_host_patch("_patch_compose_plugin_pythonpath", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_compose_discord_bot_mentions", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_compose_terminal_workspace_cwd", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
-        host_patches.extend(_run_host_patch("_patch_compose_discord_capability_preserving_tool_profile", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
+        host_patches.extend(_run_host_patch("_patch_compose_remove_discord_forced_heavy_profile", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_dockerignore", target / ".dockerignore", args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_dockerfile_backend_dependencies", target / "Dockerfile", args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_docker_entrypoint", target / "docker" / "entrypoint.sh", args.dry_run, host_patch_mode=args.host_patch_mode))
