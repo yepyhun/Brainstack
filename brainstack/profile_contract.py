@@ -20,6 +20,33 @@ def normalize_profile_slot(value: Any) -> str:
     return normalized
 
 
+def logical_profile_slot_from_row(row: Mapping[str, Any]) -> str:
+    metadata = row.get("metadata")
+    payload = metadata if isinstance(metadata, Mapping) else {}
+    for candidate in (
+        payload.get("target_slot"),
+        (payload.get("admission") or {}).get("target_slot") if isinstance(payload.get("admission"), Mapping) else "",
+        row.get("slot"),
+        row.get("stable_key"),
+        row.get("storage_key"),
+    ):
+        value = str(candidate or "").strip()
+        if not value:
+            continue
+        value = value.split("::principal_scope::", 1)[0]
+        if value:
+            return value
+    return ""
+
+
+def profile_item_display_label(row: Mapping[str, Any]) -> str:
+    slot = logical_profile_slot_from_row(row)
+    if slot:
+        return slot.replace(":", ".", 1)
+    category = str(row.get("category") or "profile").strip() or "profile"
+    return category.replace("_", " ")
+
+
 def _style_contract_payload_has_rules(style_contract: Mapping[str, Any] | None) -> bool:
     if not isinstance(style_contract, Mapping):
         return False

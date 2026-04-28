@@ -104,6 +104,7 @@ REQUIRED_GATEWAY_PROBES: dict[str, tuple[str, ...]] = {
         "render_memory_answer",
         "current_assignment_absence",
         "generic_no_evidence_forbidden",
+        "_response_language",
     ),
     "gateway/run.py": (
         "resolve_turn_profile",
@@ -117,12 +118,17 @@ REQUIRED_GATEWAY_PROBES: dict[str, tuple[str, ...]] = {
         "LOAD_TOOLS_NAME",
         "build_load_tools_schema",
         "tool_load_continuation.v1",
+        "brainstack_remember",
+        "next_step_instruction",
     ),
     "run_agent.py": (
         "deferred_tool_schema_mode",
         "LOAD_TOOLS_NAME",
         "_handle_deferred_tool_load",
         "TOOL_NOT_LOADED_OR_NOT_CONFIGURED",
+        "_deferred_tool_final_guard_nudge",
+        "_terminal_tool_final_guard_nudge",
+        "_validate_terminal_final_response",
     ),
     "agent/memory_manager.py": (
         "direct_render_preflight",

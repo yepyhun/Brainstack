@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+from ..memory_write_receipts import (
+    build_ack_plan,
+    build_memory_write_receipt,
+    build_single_proposal_capture_plan,
+    commitment_guard_trace,
+    compute_receipt_coverage,
+)
 from .provider_protocol import ProviderRuntimeBase
 from .runtime import (
     ACTIVE_TASK_STATUSES,
@@ -324,6 +331,19 @@ class ProviderToolsMixin(ProviderRuntimeBase):
         stable_key = str(capture.get("stable_key") or "")
         source = f"{tool_name}:{shelf}"
         content = str(capture.get("content") or capture.get("title") or "")
+        turn_id = f"{self._session_id}:{int(self._turn_counter)}"
+        source_event_id = str(metadata.get("source_event_id") or metadata.get("event_id") or turn_id)
+        source_span_id = str(metadata.get("source_span_id") or metadata.get("span_id") or "")
+        target_slot = str(metadata.get("target_slot") or stable_key)
+        capture_plan = build_single_proposal_capture_plan(
+            turn_id=turn_id,
+            source_event_id=source_event_id,
+            target_slot=target_slot,
+            stable_key=stable_key,
+            source_span_id=source_span_id,
+            normalized_value=content,
+            proposal_id=str(metadata.get("proposal_id") or ""),
+        )
 
         def _commit() -> None:
             if shelf == "profile":
@@ -396,6 +416,38 @@ class ProviderToolsMixin(ProviderRuntimeBase):
                 "brainstack_temporal_status": str(metadata.get("brainstack_temporal_status") or ""),
             },
         )
+        proposal = capture_plan.proposals[0]
+        memory_write_receipt = build_memory_write_receipt(
+            capture_plan=capture_plan,
+            proposal=proposal,
+            receipt_id=f"mwr_{receipt.get('receipt_id')}",
+            transaction_id=str(receipt.get("receipt_id") or ""),
+            source_event_id=source_event_id,
+            source_span_ids=[source_span_id] if source_span_id else [],
+            principal_scope_key=self._principal_scope_key,
+            workspace_scope_key=str(getattr(self, "_agent_workspace", "") or ""),
+            session_id=self._session_id,
+            shelf=shelf,
+            entity_id=self._principal_scope_key,
+            value_fingerprint=str(capture.get("content_hash") or receipt.get("content_hash") or ""),
+        )
+        receipt_coverage = compute_receipt_coverage(
+            capture_plan,
+            [memory_write_receipt],
+            principal_scope_key=self._principal_scope_key,
+            workspace_scope_key=str(getattr(self, "_agent_workspace", "") or ""),
+            session_id=self._session_id,
+        )
+        ack_plan = build_ack_plan(capture_plan, receipt_coverage)
+        receipt["capture_plan"] = capture_plan.to_dict()
+        receipt["memory_write_receipt"] = memory_write_receipt
+        receipt["receipt_coverage"] = receipt_coverage
+        receipt["ack_plan"] = ack_plan
+        receipt["memory_commitment_guard"] = commitment_guard_trace(
+            capture_plan=capture_plan,
+            coverage=receipt_coverage,
+            commitment_claim_present=True,
+        )["memory_commitment_guard"]
         receipt["read_only"] = False
         return receipt
 

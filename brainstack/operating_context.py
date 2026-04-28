@@ -19,6 +19,7 @@ from .operating_truth import (
     is_background_recent_work,
 )
 from .local_typed_understanding import build_session_recovery_contract
+from .profile_contract import profile_item_display_label
 
 
 OPERATING_CONTEXT_SNAPSHOT_VERSION = 1
@@ -96,6 +97,7 @@ def _build_stable_profile_entries(profile_items: Iterable[Mapping[str, Any]], *,
             {
                 "category": category,
                 "stable_key": stable_key,
+                "label": profile_item_display_label(item),
                 "content": content,
             }
         )
@@ -564,11 +566,11 @@ def _stable_profile_entries_block(stable_profile_entries: Iterable[Any]) -> List
     entries = list(stable_profile_entries)
     if not entries:
         return []
-    profile_lines = ["", "Stable project signals:"]
+    profile_lines = ["", "Stable profile signals:"]
     for entry in entries[:4]:
         if not isinstance(entry, Mapping):
             continue
-        label = str(entry.get("category") or "profile").replace("_", " ")
+        label = str(entry.get("label") or entry.get("category") or "profile")
         profile_lines.append(f"- [{label}] {_trim(entry.get('content'), 160)}")
     return profile_lines
 

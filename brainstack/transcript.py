@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 
 ROLE_PREFIX_RE = re.compile(r"^\s*(user|assistant|system|tool)\s*:\s*", re.IGNORECASE)
 INLINE_ROLE_PREFIX_RE = re.compile(r"(^|\s+\|\s*)(user|assistant|system|tool)\s*:\s*", re.IGNORECASE)
+URL_LITERAL_RE = re.compile(r"https?://[^\s<>\")\]]+")
 
 
 def normalize_multiline_text(value: Any) -> str:
@@ -20,6 +21,7 @@ def trim_text_boundary(text: Any, *, max_len: int = 220, soft_overshoot: int = 2
     normalized = " ".join(str(text or "").split())
     if len(normalized) <= max_len:
         return normalized
+    preserved_urls = [match.group(0).rstrip(".,;:!?") for match in URL_LITERAL_RE.finditer(normalized)]
 
     upper_bound = min(len(normalized), max_len + max(0, soft_overshoot))
     forward_window = normalized[max_len:upper_bound]
@@ -27,12 +29,12 @@ def trim_text_boundary(text: Any, *, max_len: int = 220, soft_overshoot: int = 2
     for index, char in enumerate(forward_window, start=max_len):
         if char in ".!?;:)]":
             snippet = normalized[: index + 1].rstrip()
-            return snippet if len(snippet) >= len(normalized) else f"{snippet}..."
+            return _append_preserved_urls(snippet, normalized, preserved_urls)
 
     for index, char in enumerate(forward_window, start=max_len):
         if char.isspace():
             snippet = normalized[:index].rstrip()
-            return snippet if len(snippet) >= len(normalized) else f"{snippet}..."
+            return _append_preserved_urls(snippet, normalized, preserved_urls)
 
     backward_window = normalized[:max_len]
     boundary = max(
@@ -45,10 +47,19 @@ def trim_text_boundary(text: Any, *, max_len: int = 220, soft_overshoot: int = 2
     )
     if boundary >= int(max_len * 0.6):
         snippet = backward_window[:boundary].rstrip()
-        return snippet if len(snippet) >= len(normalized) else f"{snippet}..."
+        return _append_preserved_urls(snippet, normalized, preserved_urls)
 
     fallback = normalized[: max(0, max_len - 3)].rstrip()
-    return fallback if len(fallback) >= len(normalized) else f"{fallback}..."
+    return _append_preserved_urls(fallback, normalized, preserved_urls)
+
+
+def _append_preserved_urls(snippet: str, full_text: str, urls: List[str]) -> str:
+    if len(snippet) >= len(full_text):
+        return snippet
+    suffix_urls = [url for url in urls if url and url not in snippet]
+    if not suffix_urls:
+        return f"{snippet}..."
+    return f"{snippet}... URLs: {' '.join(suffix_urls)}"
 
 
 def split_turn_content(content: Any) -> Dict[str, str]:

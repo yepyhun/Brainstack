@@ -66,6 +66,13 @@ SLOT_REGISTRY: dict[str, SlotSpec] = {
         exclusive_current=True,
         allowed_authorities=TRUSTED_AUTHORITIES,
     ),
+    "identity.age": SlotSpec(
+        slot_id="identity.age",
+        shelf="profile",
+        storage_key="identity:age",
+        exclusive_current=True,
+        allowed_authorities=TRUSTED_AUTHORITIES,
+    ),
     "preference.addressing": SlotSpec(
         slot_id="preference.addressing",
         shelf="profile",
@@ -100,6 +107,12 @@ SLOT_REGISTRY: dict[str, SlotSpec] = {
         slot_id="preference.diagnostics",
         shelf="profile",
         storage_key="preference:diagnostics",
+        allowed_authorities=TRUSTED_AUTHORITIES,
+    ),
+    "reference.repository_url": SlotSpec(
+        slot_id="reference.repository_url",
+        shelf="profile",
+        storage_key="reference:repository_url",
         allowed_authorities=TRUSTED_AUTHORITIES,
     ),
     "project.created_by": SlotSpec(
@@ -177,6 +190,8 @@ PROFILE_SLOT_ALIASES = {
     "identity:preferred_name": "identity.preferred_address_name",
     "identity:user_name": "identity.preferred_address_name",
     "identity:legal_name": "identity.legal_name",
+    "identity:age": "identity.age",
+    "reference:repository_url": "reference.repository_url",
     "preference:addressing": "preference.addressing",
     "preference:communication_style": "preference.communication_style",
     "preference:formatting": "preference.formatting",

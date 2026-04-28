@@ -10,6 +10,7 @@ from .operating_context import render_operating_context_section
 from .profile_contract import (
     is_native_explicit_style_item,
     normalize_profile_slot,
+    profile_item_display_label,
 )
 from .provenance import summarize_provenance
 from .style_contract import STYLE_CONTRACT_SLOT
@@ -230,6 +231,11 @@ def build_system_prompt_projection(
         for entry in list(operating_context_snapshot.get("stable_profile_entries") or [])
         if isinstance(entry, Mapping) and str(entry.get("stable_key") or "").strip()
     }
+    project_rows = store.list_current_graph_states(
+        limit=8,
+        attributes=("created_by", "inspired_by", "component_inspired_by"),
+        principal_scope_key=principal_scope_key,
+    )
     rendered_profile_keys: List[str] = []
     profile_lines: List[str] = []
     for item in filtered_items[:profile_limit]:
@@ -238,14 +244,25 @@ def build_system_prompt_projection(
             continue
         if stable_key:
             rendered_profile_keys.append(stable_key)
-        label = item["category"].replace("_", " ")
+        label = profile_item_display_label(item)
         profile_lines.append(f"[{label}] {_trim(item['content'], 140)}")
+    project_lines: List[str] = []
+    for row in project_rows:
+        line = _render_project_signal(row)
+        if line:
+            project_lines.append(line)
 
     sections: List[str] = []
     if operating_context_section:
         sections.append(operating_context_section)
     if operating_context_section or profile_lines:
         sections.append(truthful_memory_operations_section)
+    if project_lines:
+        sections.append(
+            "# Brainstack Project Memory\n"
+            "Stable project metadata admitted from explicit user evidence.\n"
+            f"{_render_items(project_lines)}"
+        )
     if profile_lines:
         sections.append(
             "# Brainstack Profile\n"
@@ -262,11 +279,24 @@ def build_system_prompt_projection(
             operating_context_section or profile_lines
         ),
         "rendered_profile_keys": tuple(rendered_profile_keys),
+        "rendered_project_rows": tuple(
+            f"{row.get('subject')}:{row.get('predicate')}" for row in project_rows
+        ),
         "hidden_profile_keys": tuple(sorted(hidden_profile_keys)),
         "canonical_style_present": canonical_style_present,
         "native_explicit_style_present": native_explicit_style_present,
         "active_lane_source_revision": 0,
     }
+
+
+def _render_project_signal(row: Mapping[str, Any]) -> str:
+    subject = str(row.get("subject") or "").strip()
+    predicate = str(row.get("predicate") or "").strip()
+    value = str(row.get("object_value") or "").strip()
+    if not subject or not predicate or not value:
+        return ""
+    label = predicate.replace("_", ".")
+    return f"[project.{label}] {subject}: {_trim(value, 140)}"
 
 
 def _render_lookup_semantics_section(payload: Mapping[str, Any] | None) -> str:
@@ -922,7 +952,7 @@ def _render_profile_match_section(
         )
         lines.append(
             _with_provenance(
-                f"[{item['category'].replace('_', ' ')}] {rendered_content}",
+                f"[{profile_item_display_label(item)}] {rendered_content}",
                 source=str(item.get("source", "")),
                 provenance_mode=provenance_mode,
                 metadata=item.get("metadata"),

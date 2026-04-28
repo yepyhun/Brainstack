@@ -26,5 +26,24 @@
       "tests/test_ga_dashboard.py",
       "tests/test_phase185_rc_gate.py"
     ]
+  },
+  "brainstack/memory_write_receipts.py": {
+    "minimal": [
+      "tests/test_memory_write_receipt_contract.py"
+    ],
+    "blast_radius": [
+      "tests/test_explicit_capture_contract.py",
+      "tests/test_live_discord_e2e_runner.py"
+    ]
+  },
+  "brainstack/provider/tools.py": {
+    "minimal": [
+      "tests/test_memory_write_receipt_contract.py",
+      "tests/test_explicit_capture_contract.py"
+    ],
+    "blast_radius": [
+      "tests/test_agent_tool_surface.py",
+      "tests/test_multilingual_multimodal_gate.py"
+    ]
   }
 }

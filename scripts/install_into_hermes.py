@@ -114,6 +114,51 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "owner": "docker-runtime-seam",
         "removal_condition": "Hermes Docker runtime adds project plugin roots before mutable runtime state paths.",
     },
+    "_patch_compose_discord_bot_mentions": {
+        "category": "required_seam",
+        "owner": "docker-runtime-seam",
+        "removal_condition": "Hermes Discord adapter provides first-class trusted bot canary sender support.",
+    },
+    "_patch_compose_terminal_workspace_cwd": {
+        "category": "required_seam",
+        "owner": "docker-runtime-seam",
+        "removal_condition": "Hermes Docker runtime explicitly sets terminal working directory to mounted workspace.",
+    },
+    "_patch_deferred_tool_loader_contract": {
+        "category": "required_seam",
+        "owner": "hermes-tool-loader-seam",
+        "removal_condition": "Hermes ToolLoader natively treats bundle/capability ids as schema aliases and returns continuation guidance.",
+    },
+    "_patch_run_agent_deferred_tool_continuation": {
+        "category": "required_seam",
+        "owner": "hermes-tool-loader-seam",
+        "removal_condition": "Hermes provider loop natively prevents final answers after schema loading until the loaded tool is used.",
+    },
+    "_patch_memory_manager_output_validation_seam": {
+        "category": "required_seam",
+        "owner": "hermes-memory-commitment-seam",
+        "removal_condition": "Hermes MemoryManager natively exposes final-output validation and delivery receipt hooks for external memory providers.",
+    },
+    "_patch_run_agent_memory_output_validation_seam": {
+        "category": "required_seam",
+        "owner": "hermes-memory-commitment-seam",
+        "removal_condition": "Hermes run loop natively validates memory acknowledgements before final response persistence and delivery.",
+    },
+    "_patch_run_agent_terminal_final_guard_seam": {
+        "category": "required_seam",
+        "owner": "hermes-tool-safety-seam",
+        "removal_condition": "Hermes provider loop natively prevents terminal execution success claims without terminal tool results.",
+    },
+    "_patch_memory_answer_renderer_language": {
+        "category": "required_seam",
+        "owner": "hermes-presentation-seam",
+        "removal_condition": "Hermes deterministic memory renderer natively localizes fixed templates from runtime language preference.",
+    },
+    "_patch_terminal_tool_result_hygiene": {
+        "category": "required_seam",
+        "owner": "hermes-tool-safety-seam",
+        "removal_condition": "Hermes terminal tool natively mirrors blocked/approval status into model-facing output, not only error fields.",
+    },
     "_patch_prompt_builder": {
         "category": "legacy_host_patch",
         "owner": "host-prompt-legacy",
@@ -342,6 +387,70 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_modes": ("docker",),
         "purpose": "Allow trusted canary bot messages only when they mention the Hermes Discord bot.",
         "why": "Live Discord smoke uses a separate bot sender; without this env the adapter ignores bot-origin messages by default.",
+    },
+    {
+        "patcher": "_patch_compose_terminal_workspace_cwd",
+        "target": "docker-compose*.yml",
+        "scope": "docker-runtime-seam",
+        "runtime_modes": ("docker",),
+        "purpose": "Make terminal commands execute from the mounted workspace by default.",
+        "why": "Docker file/terminal canaries need an explicit workspace contract instead of inherited image cwd.",
+    },
+    {
+        "patcher": "_patch_deferred_tool_loader_contract",
+        "target": "hermes_deferred_tools.py",
+        "scope": "tool-loader-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Keep deferred tool loading capability-preserving when the model asks for bundle/capability aliases.",
+        "why": "A schema alias such as terminal_execute must load the concrete configured tool instead of becoming a false no-access path.",
+    },
+    {
+        "patcher": "_patch_run_agent_deferred_tool_continuation",
+        "target": "run_agent.py",
+        "scope": "provider-loop-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Prevent a final answer after tool schema loading until the loaded concrete tool is used.",
+        "why": "Deferred schema loading is only product-safe if the provider loop cannot answer from memory after declaring a tool need.",
+    },
+    {
+        "patcher": "_patch_memory_manager_output_validation_seam",
+        "target": "agent/memory_manager.py",
+        "scope": "memory-commitment-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Expose final-output validation and delivery hooks from Hermes MemoryManager to external memory providers.",
+        "why": "A model's remembered/saved wording is not proof; Brainstack receipts must be checked before Hermes ships the final response.",
+    },
+    {
+        "patcher": "_patch_run_agent_memory_output_validation_seam",
+        "target": "run_agent.py",
+        "scope": "memory-commitment-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Validate final memory acknowledgements before session persistence, plugin hooks, external sync, and user delivery.",
+        "why": "Prevents false durable-memory acknowledgement when the provider failed to produce complete receipt coverage.",
+    },
+    {
+        "patcher": "_patch_run_agent_terminal_final_guard_seam",
+        "target": "run_agent.py",
+        "scope": "tool-safety-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Prevent terminal command results from being claimed without a terminal tool result in the same turn.",
+        "why": "Cheap or unstable providers can answer from memory; Hermes must enforce no-final-before-terminal-result at the runtime boundary.",
+    },
+    {
+        "patcher": "_patch_memory_answer_renderer_language",
+        "target": "gateway/memory_answer_renderer.py",
+        "scope": "presentation-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Localize deterministic memory renderer templates from runtime language preference.",
+        "why": "Direct renderer speed must not bypass user-visible language/style contract on typed memory answers.",
+    },
+    {
+        "patcher": "_patch_terminal_tool_result_hygiene",
+        "target": "tools/terminal_tool.py",
+        "scope": "tool-safety-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Make blocked terminal results impossible to summarize as successful blank-output commands.",
+        "why": "A blocked/approval-required side-effect tool result must carry its denial in model-facing output to avoid unsafe success hallucinations.",
     },
     {
         "patcher": "_patch_dockerignore",
@@ -732,6 +841,148 @@ def _patch_memory_manager_required_seam(path: Path, dry_run: bool) -> list[str]:
             path=path,
         )
         applied.append("memory_manager:memory_write_metadata_bridge")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_memory_manager_output_validation_seam(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    if "def validate_assistant_output_all(" not in text:
+        old_block = (
+            "    def sync_all(self, user_content: str, assistant_content: str, *, session_id: str = \"\") -> None:\n"
+            "        \"\"\"Sync a completed turn to all providers.\"\"\"\n"
+            "        for provider in self._providers:\n"
+            "            try:\n"
+            "                provider.sync_turn(user_content, assistant_content, session_id=session_id)\n"
+            "            except Exception as e:\n"
+            "                logger.warning(\n"
+            "                    \"Memory provider '%s' sync_turn failed: %s\",\n"
+            "                    provider.name, e,\n"
+            "                )\n"
+        )
+        new_block = old_block + (
+            "\n"
+            "    def validate_assistant_output_all(\n"
+            "        self,\n"
+            "        content: str,\n"
+            "        *,\n"
+            "        user_content: str = \"\",\n"
+            "        session_id: str = \"\",\n"
+            "    ) -> Dict[str, Any] | None:\n"
+            "        \"\"\"Validate a final assistant response through external memory providers.\n"
+            "\n"
+            "        Providers only return validation/receipt state. Hermes owns whether to\n"
+            "        ship, retry, or render an honest failure message.\n"
+            "        \"\"\"\n"
+            "        current_content = str(content or \"\")\n"
+            "        provider_results: List[Dict[str, Any]] = []\n"
+            "        changed = False\n"
+            "        blocked = False\n"
+            "        for provider in self._providers:\n"
+            "            validator = getattr(provider, \"validate_assistant_output\", None)\n"
+            "            if not callable(validator):\n"
+            "                continue\n"
+            "            try:\n"
+            "                try:\n"
+            "                    result = validator(current_content, user_content=user_content, session_id=session_id)\n"
+            "                except TypeError:\n"
+            "                    result = validator(current_content)\n"
+            "            except Exception as e:\n"
+            "                logger.warning(\"Memory provider '%s' validate_assistant_output failed: %s\", provider.name, e)\n"
+            "                continue\n"
+            "            if not isinstance(result, Mapping):\n"
+            "                continue\n"
+            "            payload = dict(result)\n"
+            "            payload[\"provider\"] = provider.name\n"
+            "            provider_results.append(payload)\n"
+            "            next_content = payload.get(\"content\")\n"
+            "            if isinstance(next_content, str) and next_content and next_content != current_content:\n"
+            "                current_content = next_content\n"
+            "                changed = True\n"
+            "            if payload.get(\"blocked\") or payload.get(\"can_ship\") is False:\n"
+            "                blocked = True\n"
+            "        if not provider_results:\n"
+            "            return None\n"
+            "        if blocked:\n"
+            "            current_content = _render_memory_commitment_blocked(provider_results)\n"
+            "            changed = True\n"
+            "        return {\n"
+            "            \"schema\": \"hermes.memory_output_validation.v1\",\n"
+            "            \"content\": current_content,\n"
+            "            \"changed\": changed,\n"
+            "            \"blocked\": blocked,\n"
+            "            \"provider_results\": provider_results,\n"
+            "        }\n"
+            "\n"
+            "    def record_output_validation_delivery_all(\n"
+            "        self,\n"
+            "        validation_result: Mapping[str, Any] | None,\n"
+            "        *,\n"
+            "        delivered_content: str,\n"
+            "    ) -> None:\n"
+            "        if not isinstance(validation_result, Mapping):\n"
+            "            return\n"
+            "        results = validation_result.get(\"provider_results\")\n"
+            "        if not isinstance(results, list):\n"
+            "            return\n"
+            "        by_name = {str(item.get(\"provider\") or \"\"): item for item in results if isinstance(item, Mapping)}\n"
+            "        for provider in self._providers:\n"
+            "            recorder = getattr(provider, \"record_output_validation_delivery\", None)\n"
+            "            if not callable(recorder):\n"
+            "                continue\n"
+            "            try:\n"
+            "                recorder(by_name.get(provider.name), delivered_content=delivered_content)\n"
+            "            except Exception as e:\n"
+            "                logger.debug(\"Memory provider '%s' output validation delivery record failed: %s\", provider.name, e)\n"
+        )
+        text = _replace_once(
+            text,
+            old_block,
+            new_block,
+            label="memory_manager output validation seam",
+            path=path,
+        )
+        applied.append("memory_manager:output_validation_seam")
+
+    if "def _render_memory_commitment_blocked(" not in text:
+        helper_anchor = "\n\nclass MemoryManager:\n"
+        helper_block = (
+            "\n\n"
+            "def _render_memory_commitment_blocked(provider_results: List[Mapping[str, Any]]) -> str:\n"
+            "    missing: List[str] = []\n"
+            "    covered: List[str] = []\n"
+            "    for result in provider_results:\n"
+            "        validation = result.get(\"memory_commitment_validation\") if isinstance(result, Mapping) else None\n"
+            "        if not isinstance(validation, Mapping):\n"
+            "            continue\n"
+            "        ack = validation.get(\"ack_plan\")\n"
+            "        if not isinstance(ack, Mapping):\n"
+            "            continue\n"
+            "        covered.extend(str(slot) for slot in ack.get(\"covered_slots\") or [] if slot)\n"
+            "        missing.extend(str(slot) for slot in ack.get(\"missing_slots\") or [] if slot)\n"
+            "    if covered or missing:\n"
+            "        covered_text = \", \".join(covered) if covered else \"nincs igazolt mező\"\n"
+            "        missing_text = \", \".join(missing) if missing else \"nincs hiányzó mező\"\n"
+            "        return (\n"
+            "            \"Nem állíthatom, hogy mindent elmentettem, mert nincs teljes write receipt coverage. \"\n"
+            "            f\"Igazolt: {covered_text}. Hiányzik: {missing_text}.\"\n"
+            "        )\n"
+            "    return \"Nem állíthatom, hogy elmentettem ezt, mert nincs sikeres durable memory write receipt.\"\n"
+            "\n\n"
+            "class MemoryManager:\n"
+        )
+        text = _replace_once(
+            text,
+            helper_anchor,
+            helper_block,
+            label="memory_manager memory commitment blocked renderer",
+            path=path,
+        )
+        applied.append("memory_manager:memory_commitment_blocked_renderer")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -1844,6 +2095,981 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
     return applied
 
 
+def _patch_deferred_tool_loader_contract(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    if '"brainstack_remember"' not in text:
+        text = _replace_once(
+            text,
+            '    "memory": ("memory",),\n',
+            '    "memory": ("memory", "brainstack_recall", "brainstack_inspect", "brainstack_remember", "brainstack_supersede"),\n',
+            label="deferred memory bundle explicit Brainstack tools",
+            path=path,
+        )
+        applied.append("deferred_tools:memory_bundle_explicit_brainstack_tools")
+
+    if '"memory.write": ("memory",),' not in text:
+        text = _replace_once(
+            text,
+            '    "memory.recall": ("memory",),\n',
+            '    "memory.recall": ("memory",),\n'
+            '    "memory.write": ("memory",),\n',
+            label="deferred memory write capability catalog",
+            path=path,
+        )
+        applied.append("deferred_tools:memory_write_capability")
+
+    if "load memory.write before saying it was remembered" not in text:
+        text = _replace_once(
+            text,
+            "            \"is unavailable unless CapabilityManifest marks it unavailable.\"\n"
+            "        ),\n",
+            "            \"is unavailable unless CapabilityManifest marks it unavailable. \"\n"
+            "            \"For any user request to remember, save, store, or update memory in any language, \"\n"
+            "            \"load memory.write before saying it was remembered.\"\n"
+            "        ),\n",
+            label="deferred catalog memory-write instruction",
+            path=path,
+        )
+        applied.append("deferred_tools:memory_write_instruction")
+
+    if '"memory.write": "Write explicit Brainstack/Hermes memory",' not in text:
+        text = _replace_once(
+            text,
+            '        "memory.recall": "Recall Brainstack/Hermes memory",\n',
+            '        "memory.recall": "Recall Brainstack/Hermes memory",\n'
+            '        "memory.write": "Write explicit Brainstack/Hermes memory",\n',
+            label="deferred catalog memory-write label",
+            path=path,
+        )
+        applied.append("deferred_tools:memory_write_label")
+
+    if "Commit explicit user-provided facts, preferences, references, or corrections" not in text:
+        text = _replace_once(
+            text,
+            "    return {\n"
+            '        "filesystem.search_read": "List, find, open, and inspect local/project files available to Hermes.",\n',
+            "    return {\n"
+            '        "memory.write": "Commit explicit user-provided facts, preferences, references, or corrections through the configured memory write contract.",\n'
+            '        "filesystem.search_read": "List, find, open, and inspect local/project files available to Hermes.",\n',
+            label="deferred catalog memory-write summary",
+            path=path,
+        )
+        applied.append("deferred_tools:memory_write_summary")
+
+    old_selection = (
+        "    selected_names = set(requested_tools)\n"
+        "    for bundle_id in requested_bundles:\n"
+        "        selected_names.update(BUNDLE_TO_TOOLS.get(bundle_id, ()))\n"
+    )
+    new_selection = (
+        "    selected_names: set[str] = set()\n"
+        "    for requested_tool in requested_tools:\n"
+        "        # Models sometimes put bundle/capability ids in tool_names after reading\n"
+        "        # the compact catalog. Treat those as schema aliases, not missing tools.\n"
+        "        if requested_tool in BUNDLE_TO_TOOLS:\n"
+        "            selected_names.update(BUNDLE_TO_TOOLS.get(requested_tool, ()))\n"
+        "            requested_bundles += (requested_tool,)\n"
+        "            continue\n"
+        "        if requested_tool in CAPABILITY_TO_BUNDLES:\n"
+        "            bundles = CAPABILITY_TO_BUNDLES.get(requested_tool, ())\n"
+        "            requested_bundles += tuple(bundles)\n"
+        "            for bundle_id in bundles:\n"
+        "                selected_names.update(BUNDLE_TO_TOOLS.get(bundle_id, ()))\n"
+        "            continue\n"
+        "        selected_names.add(requested_tool)\n"
+        "    for bundle_id in requested_bundles:\n"
+        "        selected_names.update(BUNDLE_TO_TOOLS.get(bundle_id, ()))\n"
+    )
+    if "Treat those as schema aliases, not missing tools." not in text:
+        text = _replace_once(
+            text,
+            old_selection,
+            new_selection,
+            label="deferred tool bundle/capability alias expansion",
+            path=path,
+        )
+        applied.append("deferred_tools:alias_tool_names")
+
+    continuation_anchor = (
+        '            "must_not_answer_from_memory_only": True,\n'
+        '            "capability_preservation": {"capability_shrunk": False},\n'
+    )
+    continuation_replacement = (
+        '            "must_not_answer_from_memory_only": True,\n'
+        '            "next_step_instruction": (\n'
+        '                "Continue the original task using one of loaded_tools exactly. "\n'
+        '                "Do not answer that a requested bundle/capability alias is unavailable "\n'
+        '                "when a concrete loaded tool is present."\n'
+        "            ),\n"
+        '            "capability_preservation": {"capability_shrunk": False},\n'
+    )
+    if '"next_step_instruction":' not in text:
+        text = _replace_once(
+            text,
+            continuation_anchor,
+            continuation_replacement,
+            label="deferred tool continuation instruction",
+            path=path,
+        )
+        applied.append("deferred_tools:continuation_instruction")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_run_agent_deferred_tool_continuation(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    if "    BUNDLE_TO_TOOLS,\n" not in text:
+        text = _replace_once(
+            text,
+            "from hermes_deferred_tools import (\n    LOAD_TOOLS_NAME,\n",
+            "from hermes_deferred_tools import (\n    BUNDLE_TO_TOOLS,\n    LOAD_TOOLS_NAME,\n",
+            label="run_agent deferred tool alias import",
+            path=path,
+        )
+        applied.append("run_agent:deferred_tool_alias_import")
+
+    if "self._deferred_tool_continuation" not in text:
+        text = _replace_once(
+            text,
+            "        self._deferred_loaded_tool_names: set[str] = set()\n"
+            "        self._tool_loader_trace: Dict[str, Any] = {\n",
+            "        self._deferred_loaded_tool_names: set[str] = set()\n"
+            "        self._deferred_tool_continuation: Optional[Dict[str, Any]] = None\n"
+            "        self._deferred_tool_continuation_retry_count = 0\n"
+            "        self._tool_loader_trace: Dict[str, Any] = {\n",
+            label="run_agent deferred tool continuation state",
+            path=path,
+        )
+        applied.append("run_agent:deferred_tool_continuation_state")
+
+    if "valid_alias_targets = [name for name in alias_tools if name in self.valid_tool_names]" not in text:
+        text = _replace_once(
+            text,
+            "        if matches:\n"
+            "            return matches[0]\n"
+            "\n"
+            "        return None\n",
+            "        if matches:\n"
+            "            return matches[0]\n"
+            "\n"
+            "        if self.deferred_tool_schema_mode:\n"
+            "            alias_tools = BUNDLE_TO_TOOLS.get(normalized) or BUNDLE_TO_TOOLS.get(tool_name)\n"
+            "            if alias_tools:\n"
+            "                valid_alias_targets = [name for name in alias_tools if name in self.valid_tool_names]\n"
+            "                if len(valid_alias_targets) == 1:\n"
+            "                    return valid_alias_targets[0]\n"
+            "\n"
+            "        return None\n",
+            label="run_agent deferred tool alias repair",
+            path=path,
+        )
+        applied.append("run_agent:deferred_tool_alias_repair")
+
+    if 'self._deferred_tool_continuation = dict(result.get("continuation") or {})' not in text:
+        text = _replace_once(
+            text,
+            '        if loaded_names:\n'
+            '            self._tool_loader_trace["tool_load_recall_pass"] = True\n'
+            "        return json.dumps(result, ensure_ascii=False)\n",
+            '        if loaded_names:\n'
+            '            self._tool_loader_trace["tool_load_recall_pass"] = True\n'
+            '            self._deferred_tool_continuation = dict(result.get("continuation") or {})\n'
+            "            self._deferred_tool_continuation_retry_count = 0\n"
+            "        return json.dumps(result, ensure_ascii=False)\n",
+            label="run_agent deferred tool continuation capture",
+            path=path,
+        )
+        applied.append("run_agent:deferred_tool_continuation_capture")
+
+    helper_block = (
+        "    def _mark_deferred_loaded_tool_used(self, function_name: str) -> None:\n"
+        "        if function_name and function_name in self._deferred_loaded_tool_names:\n"
+        "            self._deferred_tool_continuation = None\n"
+        "            self._deferred_tool_continuation_retry_count = 0\n"
+        "\n"
+        "    def _deferred_tool_final_guard_nudge(self, final_response: str) -> str | None:\n"
+        "        if not self.deferred_tool_schema_mode or not self._deferred_tool_continuation:\n"
+        "            return None\n"
+        "        if not self._has_content_after_think_block(final_response):\n"
+        "            return None\n"
+        "        loaded_tools = [\n"
+        "            str(name)\n"
+        "            for name in (self._deferred_tool_continuation.get(\"loaded_tools\") or ())\n"
+        "            if str(name)\n"
+        "        ]\n"
+        "        if not loaded_tools:\n"
+        "            return None\n"
+        "        if self._deferred_tool_continuation_retry_count >= 2:\n"
+        "            return None\n"
+        "        task = str(self._deferred_tool_continuation.get(\"original_task_summary\") or \"the original task\")\n"
+        "        return (\n"
+        "            \"Runtime guard: you loaded tool schemas for this task but attempted a final answer \"\n"
+        "            \"before using the loaded tool. Continue the original task now. \"\n"
+        "            f\"Original task: {task}. \"\n"
+        "            f\"Loaded tool names available now: {', '.join(sorted(loaded_tools))}. \"\n"
+        "            \"Call one of those tool names exactly. If the tool requires approval, call it so the \"\n"
+        "            \"runtime approval service can request approval. Do not claim the capability is \"\n"
+        "            \"unavailable merely because a bundle/capability alias was not itself a tool name.\"\n"
+        "        )\n"
+        "\n"
+    )
+    if "def _mark_deferred_loaded_tool_used" not in text:
+        text = _replace_once(
+            text,
+            "        return json.dumps(result, ensure_ascii=False)\n"
+            "\n"
+            "    def _invoke_tool(",
+            "        return json.dumps(result, ensure_ascii=False)\n"
+            "\n"
+            + helper_block
+            + "    def _invoke_tool(",
+            label="run_agent deferred tool final guard helpers",
+            path=path,
+        )
+        applied.append("run_agent:deferred_tool_final_guard_helpers")
+
+    if "self._mark_deferred_loaded_tool_used(function_name)\n        if function_name == \"todo\":" not in text:
+        text = _replace_once(
+            text,
+            "        if function_name == LOAD_TOOLS_NAME:\n"
+            "            return self._handle_deferred_tool_load(function_args)\n"
+            "        if function_name == \"todo\":\n",
+            "        if function_name == LOAD_TOOLS_NAME:\n"
+            "            return self._handle_deferred_tool_load(function_args)\n"
+            "        self._mark_deferred_loaded_tool_used(function_name)\n"
+            "        if function_name == \"todo\":\n",
+            label="run_agent deferred loaded tool used marker",
+            path=path,
+        )
+        applied.append("run_agent:deferred_loaded_tool_used_marker")
+
+    if "_deferred_tool_guard_nudge = self._deferred_tool_final_guard_nudge(final_response)" not in text:
+        text = _replace_once(
+            text,
+            "                    final_response = assistant_message.content or \"\"\n"
+            "\n"
+            "                    # Fix: unmute output when entering the no-tool-call branch\n",
+            "                    final_response = assistant_message.content or \"\"\n"
+            "\n"
+            "                    _deferred_tool_guard_nudge = self._deferred_tool_final_guard_nudge(final_response)\n"
+            "                    if _deferred_tool_guard_nudge:\n"
+            "                        self._deferred_tool_continuation_retry_count += 1\n"
+            "                        guard_msg = self._build_assistant_message(assistant_message, finish_reason)\n"
+            "                        messages.append(guard_msg)\n"
+            "                        messages.append({\"role\": \"user\", \"content\": _deferred_tool_guard_nudge})\n"
+            "                        self._tool_loader_trace[\"final_answer_blocked_before_tool\"] = True\n"
+            "                        self._tool_loader_trace[\n"
+            "                            \"final_answer_block_reason\"\n"
+            "                        ] = \"DECLARED_EXTERNAL_CAPABILITY_NOT_USED\"\n"
+            "                        continue\n"
+            "\n"
+            "                    # Fix: unmute output when entering the no-tool-call branch\n",
+            label="run_agent deferred final answer guard",
+            path=path,
+        )
+        applied.append("run_agent:deferred_final_answer_guard")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_run_agent_memory_output_validation_seam(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    if "def _validate_external_memory_final_response(" not in text:
+        old_block = (
+            "    def _sync_external_memory_for_turn(\n"
+            "        self,\n"
+            "        *,\n"
+            "        original_user_message: Any,\n"
+            "        final_response: Any,\n"
+            "        interrupted: bool,\n"
+            "    ) -> None:\n"
+        )
+        helper_block = (
+            "    def _validate_external_memory_final_response(\n"
+            "        self,\n"
+            "        *,\n"
+            "        original_user_message: Any,\n"
+            "        final_response: Any,\n"
+            "        interrupted: bool,\n"
+            "    ) -> Any:\n"
+            "        if interrupted or not (self._memory_manager and final_response and original_user_message):\n"
+            "            return final_response\n"
+            "        try:\n"
+            "            validator = getattr(self._memory_manager, \"validate_assistant_output_all\", None)\n"
+            "            if not callable(validator):\n"
+            "                return final_response\n"
+            "            result = validator(\n"
+            "                final_response,\n"
+            "                user_content=original_user_message,\n"
+            "                session_id=self.session_id or \"\",\n"
+            "            )\n"
+            "            self._last_memory_output_validation = result if isinstance(result, dict) else None\n"
+            "            if isinstance(result, dict) and isinstance(result.get(\"content\"), str):\n"
+            "                return result[\"content\"]\n"
+            "        except Exception:\n"
+            "            logger.warning(\"external memory final output validation failed\", exc_info=True)\n"
+            "        return final_response\n"
+            "\n"
+            "    def _replace_last_assistant_response_content(\n"
+            "        self,\n"
+            "        messages: Any,\n"
+            "        conversation_history: Any,\n"
+            "        final_response: Any,\n"
+            "    ) -> None:\n"
+            "        for collection in (messages, conversation_history):\n"
+            "            if not isinstance(collection, list):\n"
+            "                continue\n"
+            "            for msg in reversed(collection):\n"
+            "                if isinstance(msg, dict) and msg.get(\"role\") == \"assistant\" and \"content\" in msg:\n"
+            "                    msg[\"content\"] = final_response\n"
+            "                    break\n"
+            "\n"
+            "    def _record_external_memory_validation_delivery(self, delivered_content: Any) -> None:\n"
+            "        result = getattr(self, \"_last_memory_output_validation\", None)\n"
+            "        if not isinstance(result, dict) or not self._memory_manager:\n"
+            "            return\n"
+            "        try:\n"
+            "            recorder = getattr(self._memory_manager, \"record_output_validation_delivery_all\", None)\n"
+            "            if callable(recorder):\n"
+            "                recorder(result, delivered_content=str(delivered_content or \"\"))\n"
+            "        except Exception:\n"
+            "            logger.debug(\"external memory validation delivery record failed\", exc_info=True)\n"
+            "\n"
+        )
+        text = _replace_once(
+            text,
+            old_block,
+            helper_block + old_block,
+            label="run_agent memory output validation helpers",
+            path=path,
+        )
+        applied.append("run_agent:memory_output_validation_helpers")
+
+    direct_anchor = (
+        "                final_response = _rendered_answer.text\n"
+        "                messages.append({\"role\": \"assistant\", \"content\": final_response})\n"
+    )
+    direct_replacement = (
+        "                final_response = _rendered_answer.text\n"
+        "                messages.append({\"role\": \"assistant\", \"content\": final_response})\n"
+        "                final_response = self._validate_external_memory_final_response(\n"
+        "                    original_user_message=original_user_message,\n"
+        "                    final_response=final_response,\n"
+        "                    interrupted=False,\n"
+        "                )\n"
+        "                self._replace_last_assistant_response_content(messages, conversation_history, final_response)\n"
+    )
+    if "original_user_message=original_user_message,\n                    final_response=final_response,\n                    interrupted=False,\n                )\n                self._replace_last_assistant_response_content(messages, conversation_history, final_response)" not in text:
+        text = _replace_once(
+            text,
+            direct_anchor,
+            direct_replacement,
+            label="run_agent direct renderer memory output validation",
+            path=path,
+        )
+        applied.append("run_agent:direct_renderer_memory_output_validation")
+
+    normal_anchor = (
+        "        # Persist session to both JSON log and SQLite\n"
+        "        self._persist_session(messages, conversation_history)\n"
+    )
+    normal_replacement = (
+        "        if final_response and not interrupted:\n"
+        "            final_response = self._validate_external_memory_final_response(\n"
+        "                original_user_message=original_user_message,\n"
+        "                final_response=final_response,\n"
+        "                interrupted=interrupted,\n"
+        "            )\n"
+        "            self._replace_last_assistant_response_content(messages, conversation_history, final_response)\n"
+        "\n"
+        "        # Persist session to both JSON log and SQLite\n"
+        "        self._persist_session(messages, conversation_history)\n"
+    )
+    if "        if final_response and not interrupted:\n            final_response = self._validate_external_memory_final_response(\n                original_user_message=original_user_message,\n                final_response=final_response,\n                interrupted=interrupted,\n            )" not in text:
+        text = _replace_once(
+            text,
+            normal_anchor,
+            normal_replacement,
+            label="run_agent normal memory output validation",
+            path=path,
+        )
+        applied.append("run_agent:normal_memory_output_validation")
+
+    delivery_anchor = (
+        "        if final_response and not interrupted:\n"
+        "            try:\n"
+        "                from hermes_cli.plugins import invoke_hook as _invoke_hook\n"
+    )
+    delivery_replacement = (
+        "        if final_response and not interrupted:\n"
+        "            self._record_external_memory_validation_delivery(final_response)\n"
+        "            try:\n"
+        "                from hermes_cli.plugins import invoke_hook as _invoke_hook\n"
+    )
+    if "self._record_external_memory_validation_delivery(final_response)" not in text:
+        text = _replace_once(
+            text,
+            delivery_anchor,
+            delivery_replacement,
+            label="run_agent memory output validation delivery record",
+            path=path,
+        )
+        applied.append("run_agent:memory_output_validation_delivery_record")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_run_agent_terminal_final_guard_seam(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    if "def _terminal_tool_final_guard_nudge(" not in text:
+        helper_anchor = "    def _replace_last_assistant_response_content(\n"
+        helper_block = (
+            "    @staticmethod\n"
+            "    def _terminal_guard_text(value: Any) -> str:\n"
+            "        if isinstance(value, str):\n"
+            "            return value\n"
+            "        try:\n"
+            "            return _summarize_user_message_for_log(value)\n"
+            "        except Exception:\n"
+            "            return str(value or \"\")\n"
+            "\n"
+            "    @staticmethod\n"
+            "    def _terminal_guard_url_literals(text: str) -> set[str]:\n"
+            "        if not text:\n"
+            "            return set()\n"
+            "        return {\n"
+            "            match.rstrip(\".,);]\\\"'\")\n"
+            "            for match in re.findall(r\"https?://[^\\s<>()\\\"']+\", text)\n"
+            "            if match\n"
+            "        }\n"
+            "\n"
+            "    def _terminal_guard_latest_user_text(self, messages: Any) -> str:\n"
+            "        if not isinstance(messages, list):\n"
+            "            return \"\"\n"
+            "        for msg in reversed(messages):\n"
+            "            if not isinstance(msg, dict) or msg.get(\"role\") != \"user\":\n"
+            "                continue\n"
+            "            text = self._terminal_guard_text(msg.get(\"content\") or \"\")\n"
+            "            if text.startswith(\"Runtime guard:\"):\n"
+            "                continue\n"
+            "            return text\n"
+            "        return \"\"\n"
+            "\n"
+            "    @staticmethod\n"
+            "    def _terminal_guard_tool_name(tool_call: Any) -> str:\n"
+            "        if isinstance(tool_call, dict):\n"
+            "            fn = tool_call.get(\"function\")\n"
+            "            if isinstance(fn, dict):\n"
+            "                return str(fn.get(\"name\") or \"\")\n"
+            "            return str(tool_call.get(\"name\") or \"\")\n"
+            "        fn = getattr(tool_call, \"function\", None)\n"
+            "        return str(getattr(fn, \"name\", \"\") or getattr(tool_call, \"name\", \"\") or \"\")\n"
+            "\n"
+            "    @staticmethod\n"
+            "    def _terminal_guard_tool_call_id(tool_call: Any) -> str:\n"
+            "        if isinstance(tool_call, dict):\n"
+            "            return str(tool_call.get(\"id\") or \"\")\n"
+            "        return str(getattr(tool_call, \"id\", \"\") or \"\")\n"
+            "\n"
+            "    def _terminal_tool_result_payloads(self, messages: Any) -> list[dict[str, Any]]:\n"
+            "        if not isinstance(messages, list):\n"
+            "            return []\n"
+            "        terminal_call_ids: set[str] = set()\n"
+            "        for msg in messages:\n"
+            "            if not isinstance(msg, dict) or msg.get(\"role\") != \"assistant\":\n"
+            "                continue\n"
+            "            for tool_call in msg.get(\"tool_calls\") or []:\n"
+            "                if self._terminal_guard_tool_name(tool_call) == \"terminal\":\n"
+            "                    call_id = self._terminal_guard_tool_call_id(tool_call)\n"
+            "                    if call_id:\n"
+            "                        terminal_call_ids.add(call_id)\n"
+            "        if not terminal_call_ids:\n"
+            "            return []\n"
+            "        payloads: list[dict[str, Any]] = []\n"
+            "        for msg in messages:\n"
+            "            if not isinstance(msg, dict) or msg.get(\"role\") != \"tool\":\n"
+            "                continue\n"
+            "            if str(msg.get(\"tool_call_id\") or \"\") not in terminal_call_ids:\n"
+            "                continue\n"
+            "            content = msg.get(\"content\") or \"\"\n"
+            "            parsed: Any = None\n"
+            "            if isinstance(content, str):\n"
+            "                try:\n"
+            "                    parsed = json.loads(content)\n"
+            "                except Exception:\n"
+            "                    parsed = {\"output\": content}\n"
+            "            elif isinstance(content, dict):\n"
+            "                parsed = content\n"
+            "            if isinstance(parsed, dict):\n"
+            "                payloads.append(parsed)\n"
+            "        return payloads\n"
+            "\n"
+            "    @staticmethod\n"
+            "    def _extract_terminal_command_request(user_text: str) -> str:\n"
+            "        if not user_text:\n"
+            "            return \"\"\n"
+            "        fenced = re.search(r\"```(?:bash|sh|shell)?\\\\s*\\\\n(?P<cmd>[^`]+?)\\\\n?```\", user_text, flags=re.IGNORECASE)\n"
+            "        if fenced:\n"
+            "            return fenced.group(\"cmd\").strip()\n"
+            "        command_names = (\n"
+            "            \"pwd\", \"ls\", \"cat\", \"grep\", \"rg\", \"find\", \"python\", \"python3\", \"node\",\n"
+            "            \"npm\", \"pnpm\", \"yarn\", \"git\", \"rm\", \"mkdir\", \"touch\", \"cp\", \"mv\",\n"
+            "            \"sed\", \"awk\", \"curl\", \"wget\", \"docker\", \"pytest\", \"uv\", \"pip\",\n"
+            "            \"bash\", \"sh\",\n"
+            "        )\n"
+            "        command_re = re.compile(\n"
+            "            r\"(?:^|[:\\\\n])\\\\s*(?P<cmd>(?:\" + \"|\".join(re.escape(name) for name in command_names) + r\")\\\\b[^\\\\n]*)\",\n"
+            "            flags=re.IGNORECASE,\n"
+            "        )\n"
+            "        match = command_re.search(user_text)\n"
+            "        if not match:\n"
+            "            return \"\"\n"
+            "        return match.group(\"cmd\").strip()\n"
+            "\n"
+            "    def _terminal_url_fetch_block_message(self, function_name: str, function_args: dict[str, Any], messages: Any) -> str | None:\n"
+            "        if function_name != \"terminal\" or not isinstance(function_args, dict):\n"
+            "            return None\n"
+            "        command = str(function_args.get(\"command\") or \"\")\n"
+            "        command_urls = self._terminal_guard_url_literals(command)\n"
+            "        if not command_urls:\n"
+            "            return None\n"
+            "        user_text = self._terminal_guard_latest_user_text(messages)\n"
+            "        if not user_text or self._extract_terminal_command_request(user_text):\n"
+            "            return None\n"
+            "        user_urls = self._terminal_guard_url_literals(user_text)\n"
+            "        if not (command_urls & user_urls):\n"
+            "            return None\n"
+            "        return (\n"
+            "            \"Implicit terminal URL fetch blocked: the user asked to inspect a URL but did not request shell command execution. \"\n"
+            "            \"Use configured web/browser tools for URL inspection. If web/browser capability is unavailable, report that diagnostic without guessing. \"\n"
+            "            \"Terminal remains available when the user explicitly asks to run a shell command.\"\n"
+            "        )\n"
+            "\n"
+            "    @staticmethod\n"
+            "    def _terminal_success_claim_present(response_text: str, command: str) -> bool:\n"
+            "        lower = response_text.lower()\n"
+            "        if any(marker in lower for marker in (\"sikeresen lefutott\", \"lefutott\", \"executed successfully\", \"deleted\", \"törölve\")):\n"
+            "            return True\n"
+            "        if command.strip().split(\" \", 1)[0] == \"pwd\":\n"
+            "            return bool(re.search(r\"(?m)^\\\\s*/[^\\\\s]+\", response_text.strip()))\n"
+            "        return False\n"
+            "\n"
+            "    def _terminal_tool_final_guard_nudge(\n"
+            "        self,\n"
+            "        *,\n"
+            "        original_user_message: Any,\n"
+            "        final_response: Any,\n"
+            "        messages: Any,\n"
+            "    ) -> str | None:\n"
+            "        user_text = self._terminal_guard_text(original_user_message)\n"
+            "        command = self._extract_terminal_command_request(user_text)\n"
+            "        if not command:\n"
+            "            return None\n"
+            "        if self._terminal_tool_result_payloads(messages):\n"
+            "            return None\n"
+            "        response_text = self._terminal_guard_text(final_response)\n"
+            "        guard_key = hashlib.sha256(f\"{self.session_id or ''}:{user_text}\".encode(\"utf-8\", \"ignore\")).hexdigest()\n"
+            "        if getattr(self, \"_terminal_tool_guard_key\", \"\") != guard_key:\n"
+            "            self._terminal_tool_guard_key = guard_key\n"
+            "            self._terminal_tool_guard_retry_count = 0\n"
+            "        if getattr(self, \"_terminal_tool_guard_retry_count\", 0) >= 2:\n"
+            "            return None\n"
+            "        return (\n"
+            "            \"Runtime guard: the user requested shell/terminal command execution, \"\n"
+            "            \"but the final answer arrived without a terminal tool result in this turn. \"\n"
+            "            f\"Continue the original task by calling the terminal tool for this command: {command!r}. \"\n"
+            "            \"If approval is required or the terminal is unavailable, report that exact runtime result. \"\n"
+            "            \"Do not answer from memory.\"\n"
+            "        )\n"
+            "\n"
+            "    def _validate_terminal_final_response(\n"
+            "        self,\n"
+            "        *,\n"
+            "        original_user_message: Any,\n"
+            "        final_response: Any,\n"
+            "        messages: Any,\n"
+            "        interrupted: bool,\n"
+            "    ) -> Any:\n"
+            "        if interrupted or not (final_response and original_user_message):\n"
+            "            return final_response\n"
+            "        user_text = self._terminal_guard_text(original_user_message)\n"
+            "        command = self._extract_terminal_command_request(user_text)\n"
+            "        if not command:\n"
+            "            return final_response\n"
+            "        terminal_payloads = self._terminal_tool_result_payloads(messages)\n"
+            "        response_text = self._terminal_guard_text(final_response)\n"
+            "        if terminal_payloads:\n"
+            "            blocked = [\n"
+            "                payload for payload in terminal_payloads\n"
+            "                if str(payload.get(\"status\") or \"\").lower() in {\"approval_required\", \"blocked\"}\n"
+            "                or str(payload.get(\"exit_code\") or \"\") == \"-1\"\n"
+            "            ]\n"
+            "            if blocked and self._terminal_success_claim_present(response_text, command):\n"
+            "                output = str(blocked[-1].get(\"output\") or blocked[-1].get(\"error\") or \"Terminal command did not execute.\")\n"
+            "                return output.strip()\n"
+            "            return final_response\n"
+            "        return (\n"
+            "            \"Nem tudom igazolni, hogy a parancs lefutott: nincs terminal tool result ehhez a turnhöz. \"\n"
+            "            \"Ezért nem állítom sikeres végrehajtásnak.\"\n"
+            "        )\n"
+            "\n"
+        )
+        text = _replace_once(
+            text,
+            helper_anchor,
+            helper_block + helper_anchor,
+            label="run_agent terminal final guard helpers",
+            path=path,
+        )
+        applied.append("run_agent:terminal_final_guard_helpers")
+
+    if "def _terminal_url_fetch_block_message(" not in text:
+        helper_anchor = "    @staticmethod\n    def _terminal_success_claim_present(response_text: str, command: str) -> bool:\n"
+        helper_block = (
+            "    @staticmethod\n"
+            "    def _terminal_guard_url_literals(text: str) -> set[str]:\n"
+            "        if not text:\n"
+            "            return set()\n"
+            "        return {\n"
+            "            match.rstrip(\".,);]\\\"'\")\n"
+            "            for match in re.findall(r\"https?://[^\\s<>()\\\"']+\", text)\n"
+            "            if match\n"
+            "        }\n"
+            "\n"
+            "    def _terminal_guard_latest_user_text(self, messages: Any) -> str:\n"
+            "        if not isinstance(messages, list):\n"
+            "            return \"\"\n"
+            "        for msg in reversed(messages):\n"
+            "            if not isinstance(msg, dict) or msg.get(\"role\") != \"user\":\n"
+            "                continue\n"
+            "            text = self._terminal_guard_text(msg.get(\"content\") or \"\")\n"
+            "            if text.startswith(\"Runtime guard:\"):\n"
+            "                continue\n"
+            "            return text\n"
+            "        return \"\"\n"
+            "\n"
+            "    def _terminal_url_fetch_block_message(self, function_name: str, function_args: dict[str, Any], messages: Any) -> str | None:\n"
+            "        if function_name != \"terminal\" or not isinstance(function_args, dict):\n"
+            "            return None\n"
+            "        command = str(function_args.get(\"command\") or \"\")\n"
+            "        command_urls = self._terminal_guard_url_literals(command)\n"
+            "        if not command_urls:\n"
+            "            return None\n"
+            "        user_text = self._terminal_guard_latest_user_text(messages)\n"
+            "        if not user_text or self._extract_terminal_command_request(user_text):\n"
+            "            return None\n"
+            "        user_urls = self._terminal_guard_url_literals(user_text)\n"
+            "        if not (command_urls & user_urls):\n"
+            "            return None\n"
+            "        return (\n"
+            "            \"Implicit terminal URL fetch blocked: the user asked to inspect a URL but did not request shell command execution. \"\n"
+            "            \"Use configured web/browser tools for URL inspection. If web/browser capability is unavailable, report that diagnostic without guessing. \"\n"
+            "            \"Terminal remains available when the user explicitly asks to run a shell command.\"\n"
+            "        )\n"
+            "\n"
+        )
+        text = _replace_once(
+            text,
+            helper_anchor,
+            helper_block + helper_anchor,
+            label="run_agent terminal implicit URL fetch guard helpers",
+            path=path,
+        )
+        applied.append("run_agent:terminal_url_fetch_guard_helpers")
+
+    if (
+        "but the final answer claimed a command result without a terminal tool result in this turn." in text
+        or "if not self._terminal_success_claim_present(response_text, command):\n            return None" in text
+    ):
+        text = text.replace(
+            "        response_text = self._terminal_guard_text(final_response)\n"
+            "        if not self._terminal_success_claim_present(response_text, command):\n"
+            "            return None\n"
+            "        guard_key = hashlib.sha256(f\"{self.session_id or ''}:{user_text}\".encode(\"utf-8\", \"ignore\")).hexdigest()\n",
+            "        response_text = self._terminal_guard_text(final_response)\n"
+            "        guard_key = hashlib.sha256(f\"{self.session_id or ''}:{user_text}\".encode(\"utf-8\", \"ignore\")).hexdigest()\n",
+        )
+        text = text.replace(
+            "            \"but the final answer claimed a command result without a terminal tool result in this turn. \"\n",
+            "            \"but the final answer arrived without a terminal tool result in this turn. \"\n",
+        )
+        text = text.replace(
+            "        if self._terminal_success_claim_present(response_text, command):\n"
+            "            return (\n"
+            "                \"Nem tudom igazolni, hogy a parancs lefutott: nincs terminal tool result ehhez a turnhöz. \"\n"
+            "                \"Ezért nem állítom sikeres végrehajtásnak.\"\n"
+            "            )\n"
+            "        return final_response\n",
+            "        return (\n"
+            "            \"Nem tudom igazolni, hogy a parancs lefutott: nincs terminal tool result ehhez a turnhöz. \"\n"
+            "            \"Ezért nem állítom sikeres végrehajtásnak.\"\n"
+            "        )\n",
+        )
+        applied.append("run_agent:terminal_command_requires_tool_result")
+
+    if "_terminal_url_fetch_block_message(function_name, function_args, messages)" not in text:
+        concurrent_anchor = (
+            "        if block_message is not None:\n"
+            "            return json.dumps({\"error\": block_message}, ensure_ascii=False)\n"
+        )
+        concurrent_replacement = (
+            "        if block_message is None:\n"
+            "            try:\n"
+            "                block_message = self._terminal_url_fetch_block_message(function_name, function_args, messages)\n"
+            "            except Exception:\n"
+            "                pass\n"
+            "        if block_message is not None:\n"
+            "            return json.dumps({\"error\": block_message}, ensure_ascii=False)\n"
+        )
+        text = _replace_once(
+            text,
+            concurrent_anchor,
+            concurrent_replacement,
+            label="run_agent concurrent terminal implicit URL fetch block",
+            path=path,
+        )
+        applied.append("run_agent:terminal_url_fetch_guard_concurrent")
+
+    if "_terminal_url_fetch_block_message(function_name, function_args, messages)" not in text.split("def _execute_tool_calls_sequential", 1)[-1]:
+        sequential_anchor = (
+            "            if _block_msg is not None:\n"
+            "                # Tool blocked by plugin policy — skip counter resets.\n"
+            "                # Execution is handled below in the tool dispatch chain.\n"
+            "                pass\n"
+            "            else:\n"
+        )
+        sequential_replacement = (
+            "            if _block_msg is None:\n"
+            "                try:\n"
+            "                    _block_msg = self._terminal_url_fetch_block_message(function_name, function_args, messages)\n"
+            "                except Exception:\n"
+            "                    pass\n"
+            "\n"
+            "            if _block_msg is not None:\n"
+            "                # Tool blocked by plugin policy or runtime boundary guard — skip counter resets.\n"
+            "                # Execution is handled below in the tool dispatch chain.\n"
+            "                pass\n"
+            "            else:\n"
+        )
+        text = _replace_once(
+            text,
+            sequential_anchor,
+            sequential_replacement,
+            label="run_agent sequential terminal implicit URL fetch block",
+            path=path,
+        )
+        applied.append("run_agent:terminal_url_fetch_guard_sequential")
+
+    if "_terminal_tool_guard_nudge = self._terminal_tool_final_guard_nudge(" not in text:
+        nudge_anchor = (
+            "                    # Fix: unmute output when entering the no-tool-call branch\n"
+            "                    # so the user can see empty-response warnings and recovery\n"
+        )
+        nudge_block = (
+            "                    _terminal_tool_guard_nudge = self._terminal_tool_final_guard_nudge(\n"
+            "                        original_user_message=original_user_message,\n"
+            "                        final_response=final_response,\n"
+            "                        messages=messages,\n"
+            "                    )\n"
+            "                    if _terminal_tool_guard_nudge:\n"
+            "                        self._terminal_tool_guard_retry_count = getattr(\n"
+            "                            self, \"_terminal_tool_guard_retry_count\", 0\n"
+            "                        ) + 1\n"
+            "                        guard_msg = self._build_assistant_message(assistant_message, finish_reason)\n"
+            "                        messages.append(guard_msg)\n"
+            "                        messages.append({\"role\": \"user\", \"content\": _terminal_tool_guard_nudge})\n"
+            "                        continue\n"
+            "                    \n"
+        )
+        text = _replace_once(
+            text,
+            nudge_anchor,
+            nudge_block + nudge_anchor,
+            label="run_agent terminal no-final-before-tool nudge",
+            path=path,
+        )
+        applied.append("run_agent:terminal_final_guard_nudge")
+
+    if "final_response = self._validate_terminal_final_response(" not in text:
+        validation_anchor = (
+            "            final_response = self._validate_external_memory_final_response(\n"
+            "                original_user_message=original_user_message,\n"
+            "                final_response=final_response,\n"
+            "                interrupted=interrupted,\n"
+            "            )\n"
+            "            self._replace_last_assistant_response_content(messages, conversation_history, final_response)\n"
+        )
+        validation_replacement = (
+            "            final_response = self._validate_external_memory_final_response(\n"
+            "                original_user_message=original_user_message,\n"
+            "                final_response=final_response,\n"
+            "                interrupted=interrupted,\n"
+            "            )\n"
+            "            final_response = self._validate_terminal_final_response(\n"
+            "                original_user_message=original_user_message,\n"
+            "                final_response=final_response,\n"
+            "                messages=messages,\n"
+            "                interrupted=interrupted,\n"
+            "            )\n"
+            "            self._replace_last_assistant_response_content(messages, conversation_history, final_response)\n"
+        )
+        text = _replace_once(
+            text,
+            validation_anchor,
+            validation_replacement,
+            label="run_agent terminal final response validation",
+            path=path,
+        )
+        applied.append("run_agent:terminal_final_response_validation")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_memory_answer_renderer_language(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    if "import os\n" not in text:
+        text = _replace_once(
+            text,
+            "from dataclasses import asdict, dataclass\n",
+            "from dataclasses import asdict, dataclass\nimport os\n",
+            label="memory renderer os import",
+            path=path,
+        )
+        applied.append("memory_renderer:language_import")
+
+    if "def _response_language()" not in text:
+        language_helper = (
+            "\n"
+            "def _response_language() -> str:\n"
+            "    value = (os.getenv(\"HERMES_RESPONSE_LANGUAGE\") or os.getenv(\"LANGUAGE\") or \"\").strip().lower()\n"
+            "    if value in {\"hu\", \"hun\", \"hungarian\", \"magyar\"} or value.startswith(\"hu_\"):\n"
+            "        return \"hu\"\n"
+            "    return \"en\"\n"
+            "\n"
+        )
+        text = _replace_once(
+            text,
+            "\n\ndef _render_text(answer_type: str, claim_style: str, answer_value: str) -> str:\n",
+            language_helper + "\ndef _render_text(answer_type: str, claim_style: str, answer_value: str) -> str:\n",
+            label="memory renderer response language helper",
+            path=path,
+        )
+        applied.append("memory_renderer:response_language_helper")
+
+    if 'return "Nincs rögzített aktuális feladat explicit assignment evidence alapján."' not in text:
+        text = _replace_once(
+            text,
+            "def _render_text(answer_type: str, claim_style: str, answer_value: str) -> str:\n"
+            "    if claim_style == \"unsupported\":\n"
+            "        return \"No supported memory evidence for this request.\"\n"
+            "    if claim_style == \"current_assignment_absence\":\n"
+            "        return \"No typed current-assignment evidence is recorded. Background runtime/Pulse evidence alone is not current assignment.\"\n",
+            "def _render_text(answer_type: str, claim_style: str, answer_value: str) -> str:\n"
+            "    if _response_language() == \"hu\":\n"
+            "        if claim_style == \"unsupported\":\n"
+            "            return \"Nincs támogatott memória-evidence ehhez a kéréshez.\"\n"
+            "        if claim_style == \"current_assignment_absence\":\n"
+            "            return \"Nincs rögzített aktuális feladat explicit assignment evidence alapján.\"\n"
+            "        if claim_style == \"bounded_event\":\n"
+            "            return f\"Rögzített esemény a keresett scope-ban: {answer_value}.\"\n"
+            "        if claim_style == \"current_assignment_presence\":\n"
+            "            return f\"Rögzített aktuális feladat: {answer_value}.\"\n"
+            "        if answer_type == \"exact_literal\":\n"
+            "            return f\"Rögzített azonosító: {answer_value}.\"\n"
+            "        return f\"Rögzített érték: {answer_value}.\"\n"
+            "\n"
+            "    if claim_style == \"unsupported\":\n"
+            "        return \"No supported memory evidence for this request.\"\n"
+            "    if claim_style == \"current_assignment_absence\":\n"
+            "        return \"No typed current-assignment evidence is recorded. Background runtime/Pulse evidence alone is not current assignment.\"\n",
+            label="memory renderer localized templates",
+            path=path,
+        )
+        applied.append("memory_renderer:localized_templates")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_terminal_tool_result_hygiene(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    if '"output": message,' not in text:
+        text = _replace_once(
+            text,
+            '                if approval.get("status") == "approval_required":\n'
+            "                    return json.dumps({\n"
+            '                        "output": "",\n'
+            '                        "exit_code": -1,\n'
+            '                        "error": approval.get("message", "Waiting for user approval"),\n',
+            '                if approval.get("status") == "approval_required":\n'
+            '                    message = approval.get("message", "Waiting for user approval")\n'
+            "                    return json.dumps({\n"
+            '                        "output": message,\n'
+            '                        "exit_code": -1,\n'
+            '                        "error": message,\n',
+            label="terminal approval-required output hygiene",
+            path=path,
+        )
+        applied.append("terminal_tool:approval_required_output_hygiene")
+
+    if '"output": approval.get("message", fallback_msg),' not in text:
+        text = _replace_once(
+            text,
+            "                return json.dumps({\n"
+            '                    "output": "",\n'
+            '                    "exit_code": -1,\n'
+            '                    "error": approval.get("message", fallback_msg),\n'
+            '                    "status": "blocked"\n'
+            "                }, ensure_ascii=False)\n",
+            "                return json.dumps({\n"
+            '                    "output": approval.get("message", fallback_msg),\n'
+            '                    "exit_code": -1,\n'
+            '                    "error": approval.get("message", fallback_msg),\n'
+            '                    "status": "blocked"\n'
+            "                }, ensure_ascii=False)\n",
+            label="terminal blocked output hygiene",
+            path=path,
+        )
+        applied.append("terminal_tool:blocked_output_hygiene")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
 def _canonicalize_runtime_user_profile(config_path: Path, dry_run: bool) -> dict[str, Any]:
     runtime_root = config_path.parent
     user_path = runtime_root / "memories" / "USER.md"
@@ -2845,6 +4071,7 @@ services:
       HERMES_UID: "${{HERMES_UID:-1000}}"
       HERMES_GID: "${{HERMES_GID:-1000}}"
       DISCORD_ALLOW_BOTS: "mentions"
+      TERMINAL_CWD: /workspace
 {tei_environment}
     volumes:
       - ./{runtime_ref}:/opt/data
@@ -2930,6 +4157,27 @@ def _patch_compose_discord_bot_mentions(path: Path, dry_run: bool) -> list[str]:
                 path.write_text(text, encoding="utf-8")
             return ["compose:discord_allow_bot_mentions"]
     raise RuntimeError(f"Installer patch anchor missing for compose Discord bot mention allowance in {path}")
+
+
+def _patch_compose_terminal_workspace_cwd(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    if "TERMINAL_CWD:" in text:
+        return []
+    anchors = [
+        '      DISCORD_ALLOW_BOTS: "mentions"\n',
+        "      PYTHONPATH: /opt/hermes/plugins/memory\n",
+        '      HERMES_ENABLE_PROJECT_PLUGINS: "true"\n',
+        "      HERMES_ENABLE_PROJECT_PLUGINS: 'true'\n",
+    ]
+    for anchor in anchors:
+        if anchor in text:
+            text = text.replace(anchor, anchor + "      TERMINAL_CWD: /workspace\n", 1)
+            if not dry_run:
+                path.write_text(text, encoding="utf-8")
+            return ["compose:terminal_cwd_workspace"]
+    raise RuntimeError(f"Installer patch anchor missing for compose terminal workspace cwd in {path}")
 
 
 def _patch_dockerignore(path: Path, dry_run: bool) -> list[str]:
@@ -3379,6 +4627,12 @@ def main() -> int:
 
     host_patches: list[str] = []
     host_patches.extend(_run_host_patch("_patch_run_agent", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_run_agent_deferred_tool_continuation", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_run_agent_memory_output_validation_seam", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_run_agent_terminal_final_guard_seam", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_deferred_tool_loader_contract", target / "hermes_deferred_tools.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_memory_answer_renderer_language", target / "gateway" / "memory_answer_renderer.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_terminal_tool_result_hygiene", target / "tools" / "terminal_tool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_prompt_builder", target / "agent" / "prompt_builder.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_cron_jobs", target / "cron" / "jobs.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_cron_scheduler", target / "cron" / "scheduler.py", args.dry_run, host_patch_mode=args.host_patch_mode))
@@ -3389,6 +4643,7 @@ def main() -> int:
     host_patches.extend(_run_host_patch("_patch_credential_pool_tests", target / "tests" / "agent" / "test_credential_pool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_memory_provider", target / "agent" / "memory_provider.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_memory_manager_required_seam", target / "agent" / "memory_manager.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_memory_manager_output_validation_seam", target / "agent" / "memory_manager.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_memory_manager", target / "agent" / "memory_manager.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_gateway_run", target / "gateway" / "run.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     if args.runtime == "docker":
@@ -3396,6 +4651,8 @@ def main() -> int:
         host_patches.extend(_run_host_patch("_patch_compose_healthcheck", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_compose_runtime_identity", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_compose_plugin_pythonpath", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
+        host_patches.extend(_run_host_patch("_patch_compose_discord_bot_mentions", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
+        host_patches.extend(_run_host_patch("_patch_compose_terminal_workspace_cwd", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_dockerignore", target / ".dockerignore", args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_dockerfile_backend_dependencies", target / "Dockerfile", args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_docker_entrypoint", target / "docker" / "entrypoint.sh", args.dry_run, host_patch_mode=args.host_patch_mode))

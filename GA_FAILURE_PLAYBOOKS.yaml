@@ -24,3 +24,48 @@ PATH_PROOF_MISSING:
     - tests/test_ga_probe_harness.py::test_path_proof_required_for_e2e_claims
   blast_radius_tests:
     - tests/test_ga_dashboard.py
+
+MEMORY_COMMITMENT_WITHOUT_WRITE_RECEIPT:
+  owner: hermes_final_answer_validator
+  repairability: REPAIRABLE_AUTOMATIC
+  allowed_modules:
+    - brainstack/memory_write_receipts.py
+    - brainstack/provider/tools.py
+    - scripts/install_into_hermes.py
+    - run_agent.py
+  forbidden_fixes:
+    - language_keyword_router
+    - Hungarian_regex
+    - assistant_transcript_as_receipt
+    - Brainstack_output_rewrite
+    - capability_shrink
+  required_patch_shape:
+    - require_MemoryWriteReceipt_for_durable_memory_ack
+    - emit_ReceiptCoverage
+    - preserve_AdmissionPolicy_authority
+  minimal_tests:
+    - tests/test_memory_write_receipt_contract.py
+  blast_radius_tests:
+    - tests/test_explicit_capture_contract.py
+    - tests/test_live_discord_e2e_runner.py
+
+INCOMPLETE_RECEIPT_COVERAGE_FOR_FULL_ACK:
+  owner: memory_receipt_coverage
+  repairability: REPAIRABLE_AUTOMATIC
+  allowed_modules:
+    - brainstack/memory_write_receipts.py
+    - brainstack/provider/tools.py
+    - tests/test_memory_write_receipt_contract.py
+  forbidden_fixes:
+    - receipt_count_as_full_ack
+    - partial_write_full_ack
+    - hidden_retry_duplicate_write
+    - benchmark_specific_slot_patch
+  required_patch_shape:
+    - compare_expected_proposal_ids_to_committed_receipts
+    - allow_partial_ack_only_for_partial_coverage
+    - emit_failure_bundle_for_full_ack_attempt
+  minimal_tests:
+    - tests/test_memory_write_receipt_contract.py::test_full_ack_requires_complete_receipt_coverage
+  blast_radius_tests:
+    - tests/test_explicit_capture_contract.py

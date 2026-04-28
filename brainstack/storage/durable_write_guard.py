@@ -169,8 +169,14 @@ def guard_and_normalize_durable_truth_metadata(
         slot
         and isinstance(allowed_slots, list)
         and allowed_slots
-        and _slot_key(slot) not in {_slot_key(item) for item in allowed_slots}
     ):
-        raise DurableTruthWriteViolation(f"TruthWritePermit does not allow slot {slot}")
+        admission = _as_mapping(normalized.get("admission"))
+        candidate_slots = {_slot_key(slot)}
+        target_slot = admission.get("target_slot")
+        if target_slot:
+            candidate_slots.add(_slot_key(target_slot))
+        allowed = {_slot_key(item) for item in allowed_slots}
+        if not candidate_slots.intersection(allowed):
+            raise DurableTruthWriteViolation(f"TruthWritePermit does not allow slot {slot}")
 
     return normalized

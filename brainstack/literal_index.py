@@ -8,11 +8,13 @@ from typing import Any, Mapping
 LITERAL_INDEX_SCHEMA = "brainstack.literal_index.v1"
 EVENT_INDEX_SCHEMA = "brainstack.user_turn_event_index.v1"
 
-ANSWER_LITERAL_CLASSES = {"safe_identifier", "version", "filename", "citation_id"}
+ANSWER_LITERAL_CLASSES = {"safe_identifier", "version", "filename", "citation_id", "url"}
 SUPPORT_ONLY_LITERAL_CLASSES = {"private_path", "secret_shaped", "unknown"}
 
 _PATH_RE = re.compile(r"(?:/[\w .@+-]+){2,}(?:/[\w .@+-]+)?")
 _WINDOWS_PATH_RE = re.compile(r"[A-Za-z]:\\(?:[^\\\s]+\\?)+")
+_URL_RE = re.compile(r"https?://[^\s<>()\"']+", re.IGNORECASE)
+_INTEGER_RE = re.compile(r"(?<![\w-])\d{1,4}(?![\w-])")
 _TOKEN_RE = re.compile(r"(?<![\w@])[\w][\w.+:-]{2,}[\w](?![\w@])", re.UNICODE)
 _VERSION_RE = re.compile(r"^v?\d+(?:\.\d+){1,4}(?:[-+][A-Za-z0-9_.-]+)?$")
 _FILENAME_RE = re.compile(r"^[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8}$")
@@ -49,6 +51,8 @@ def classify_literal(value: str) -> str:
         return "private_path"
     if token.startswith(("/", "\\")):
         return "public_path" if not token.startswith(("/home/", "/Users/", "/root/", "/tmp/")) else "private_path"
+    if _URL_RE.fullmatch(token):
+        return "url"
     if _VERSION_RE.match(token):
         return "version"
     if _FILENAME_RE.match(token):
@@ -73,6 +77,12 @@ def _model_value(value: str, literal_class: str) -> str:
 def detect_literal_tokens(text: str, *, limit: int = 12) -> list[dict[str, Any]]:
     """Extract exact literal sidecars without language-specific keyword logic."""
     value_by_seen: dict[str, str] = {}
+    for match in _URL_RE.finditer(str(text or "")):
+        value = match.group(0).strip().rstrip(".,;)")
+        if value:
+            value_by_seen.setdefault(value, value)
+        if len(value_by_seen) >= limit:
+            break
     for match in [*_PATH_RE.finditer(str(text or "")), *_WINDOWS_PATH_RE.finditer(str(text or ""))]:
         value = match.group(0).strip().rstrip(".,;)")
         if value:
@@ -108,10 +118,54 @@ def detect_literal_tokens(text: str, *, limit: int = 12) -> list[dict[str, Any]]
     return tokens
 
 
+def detect_url_literals(text: str, *, limit: int = 8) -> list[str]:
+    """Return exact URL literals from text without assigning semantic meaning."""
+    urls: list[str] = []
+    seen: set[str] = set()
+    for match in _URL_RE.finditer(str(text or "")):
+        value = match.group(0).strip().rstrip(".,;)")
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        urls.append(value)
+        if len(urls) >= limit:
+            break
+    return urls
+
+
+def detect_integer_literals(
+    text: str,
+    *,
+    min_value: int | None = None,
+    max_value: int | None = None,
+    limit: int = 16,
+) -> list[str]:
+    """Return exact integer literals without assigning semantic meaning."""
+    values: list[str] = []
+    seen: set[str] = set()
+    for match in _INTEGER_RE.finditer(str(text or "")):
+        raw = match.group(0)
+        try:
+            number = int(raw)
+        except ValueError:
+            continue
+        if min_value is not None and number < min_value:
+            continue
+        if max_value is not None and number > max_value:
+            continue
+        if raw in seen:
+            continue
+        seen.add(raw)
+        values.append(raw)
+        if len(values) >= limit:
+            break
+    return values
+
+
 def redact_literal_text(text: str, *, literal_tokens: list[Mapping[str, Any]] | None = None) -> str:
     """Redact high-risk literals from model-facing snippets."""
     output = str(text or "")
-    for match in [*_PATH_RE.finditer(output), *_WINDOWS_PATH_RE.finditer(output), *_TOKEN_RE.finditer(output)]:
+    for match in [*_URL_RE.finditer(output), *_PATH_RE.finditer(output), *_WINDOWS_PATH_RE.finditer(output), *_TOKEN_RE.finditer(output)]:
         raw = match.group(0).strip().rstrip(".,;)")
         literal_class = classify_literal(raw)
         if literal_class not in {"private_path", "secret_shaped"}:

@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+from ..capture_pipeline import build_capture_plan_from_structured
+from ..literal_index import detect_integer_literals, detect_url_literals
+from ..memory_write_receipts import (
+    CapturePlan,
+    build_ack_plan,
+    commitment_guard_trace,
+    compute_receipt_coverage,
+)
+from ..transcript import format_turn_content
 from .provider_protocol import ProviderRuntimeBase
 from .runtime import (
     Any,
@@ -17,9 +26,267 @@ from .runtime import (
     logger,
     summarize_runtime_handoff_dirs,
     validate_output_against_contract,
+    utc_now_iso,
 )
 
+_RECEIPT_CAPTURE_PROFILE_PREFIXES = ("identity.", "preference.", "reference.")
+
+
+def _target_slot_from_profile_item(item: Mapping[str, Any]) -> str:
+    slot = _normalize_compact_text(item.get("slot"))
+    if not slot:
+        return ""
+    if ":" in slot and "." not in slot:
+        slot = slot.replace(":", ".", 1)
+    return slot
+
+
+def _storage_key_from_target_slot(target_slot: str) -> str:
+    slot = _normalize_compact_text(target_slot)
+    if slot.startswith(_RECEIPT_CAPTURE_PROFILE_PREFIXES):
+        return slot.replace(".", ":", 1)
+    return ""
+
+
+def _category_from_target_slot(target_slot: str) -> str:
+    prefix = _normalize_compact_text(target_slot).split(".", 1)[0]
+    return prefix or "profile"
+
+
 class ProviderInspectionMixin(ProviderRuntimeBase):
+    def _receipt_capture_items_from_tier2(
+        self,
+        extracted: Mapping[str, Any],
+        *,
+        source_text: str = "",
+    ) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        source_urls = detect_url_literals(source_text)
+        source_age_numbers = detect_integer_literals(source_text, min_value=0, max_value=130)
+        for index, item in enumerate(list(extracted.get("profile_items") or []), start=1):
+            if not isinstance(item, Mapping):
+                continue
+            target_slot = _target_slot_from_profile_item(item)
+            stable_key = _storage_key_from_target_slot(target_slot)
+            content = _normalize_compact_text(item.get("content"))
+            if target_slot == "reference.repository_url":
+                if content not in source_urls and len(source_urls) == 1:
+                    content = source_urls[0]
+                elif source_urls and content not in source_urls:
+                    content = ""
+            elif target_slot == "identity.age":
+                if content not in source_age_numbers and len(source_age_numbers) == 1:
+                    content = source_age_numbers[0]
+                elif source_age_numbers and content not in source_age_numbers:
+                    content = ""
+            if not target_slot or not stable_key or not content:
+                continue
+            try:
+                confidence = float(item.get("confidence", 0.8))
+            except (TypeError, ValueError):
+                confidence = 0.0
+            if confidence <= 0:
+                continue
+            items.append(
+                {
+                    "target_slot": target_slot,
+                    "stable_key": stable_key,
+                    "normalized_value": content,
+                    "surface_value": content,
+                    "source_span_id": f"tier2_profile_item:{index}:{stable_key}",
+                    "capture_intent": "explicit_capture",
+                    "confidence": confidence,
+                    "required_for_full_ack": True,
+                }
+            )
+        return items
+
+    def _validate_explicit_capture_receipts(
+        self,
+        *,
+        user_content: str,
+        session_id: str,
+    ) -> Dict[str, Any]:
+        trace: Dict[str, Any] = {
+            "schema": "brainstack.live_explicit_capture_validation.v1",
+            "applied": False,
+            "status": "not_applicable",
+            "reason_code": "NO_USER_CONTENT",
+            "capture_plan": None,
+            "memory_write_receipts": [],
+            "receipt_coverage": None,
+            "ack_plan": None,
+            "tier2": {
+                "ran": False,
+                "status": "not_run",
+                "profile_item_count": 0,
+                "state_count": 0,
+                "relation_count": 0,
+            },
+        }
+        user_text = _normalize_compact_text(user_content)
+        if not user_text or self._store is None:
+            return trace
+        if not bool(self._config.get("explicit_capture_validation_enabled", True)):
+            trace.update({"reason_code": "EXPLICIT_CAPTURE_VALIDATION_DISABLED", "status": "skipped"})
+            return trace
+        extractor = getattr(self, "_run_tier2_extractor", None)
+        if not callable(extractor):
+            trace.update({"reason_code": "TIER2_EXTRACTOR_UNAVAILABLE", "status": "skipped"})
+            return trace
+
+        active_session_id = session_id or self._session_id
+        turn_number = int(self._turn_counter or 0)
+        turn_id = f"{active_session_id}:{turn_number}:final_validation"
+        source_event_id = f"{turn_id}:user"
+        transcript_row = {
+            "id": 0,
+            "turn_number": turn_number or 1,
+            "kind": "turn",
+            "content": format_turn_content(user_text, ""),
+            "created_at": utc_now_iso(),
+        }
+        try:
+            extracted = extractor(
+                [transcript_row],
+                session_id=active_session_id,
+                turn_number=turn_number,
+                trigger_reason="final_output_validation_explicit_capture",
+            )
+        except Exception as exc:
+            logger.warning("Brainstack explicit capture validation extractor failed: %s", exc)
+            trace.update(
+                {
+                    "applied": True,
+                    "status": "failed",
+                    "reason_code": "TIER2_EXTRACTOR_FAILED",
+                    "error": str(exc),
+                }
+            )
+            return trace
+        if not isinstance(extracted, Mapping):
+            trace.update(
+                {
+                    "applied": True,
+                    "status": "failed",
+                    "reason_code": "TIER2_EXTRACTOR_INVALID_PAYLOAD",
+                }
+            )
+            return trace
+
+        trace["tier2"] = {
+            "ran": True,
+            "status": "ok",
+            "profile_item_count": len(list(extracted.get("profile_items") or [])),
+            "state_count": len(list(extracted.get("states") or [])),
+            "relation_count": len(list(extracted.get("relations") or [])),
+        }
+
+        reconcile = getattr(self, "_reconcile_tier2_payload", None)
+        if callable(reconcile):
+            try:
+                action_counts, writes_performed, operating_promotions = reconcile(
+                    session_id=active_session_id,
+                    turn_number=turn_number,
+                    trigger_reason="final_output_validation_explicit_capture",
+                    extracted=dict(extracted),
+                    transcript_rows=[transcript_row],
+                    consolidation_source={"source_kind": "current_user_turn", "turn_numbers": [turn_number or 1]},
+                )
+                trace["tier2"].update(
+                    {
+                        "action_counts": dict(action_counts or {}),
+                        "writes_performed": int(writes_performed or 0),
+                        "operating_promotions": dict(operating_promotions or {}),
+                    }
+                )
+            except Exception as exc:
+                logger.warning("Brainstack explicit capture validation reconcile failed: %s", exc)
+                trace["tier2"].update({"reconcile_error": str(exc)})
+
+        capture_items = self._receipt_capture_items_from_tier2(extracted, source_text=user_text)
+        if not capture_items:
+            trace.update(
+                {
+                    "applied": True,
+                    "status": "no_capture",
+                    "reason_code": "NO_RECEIPT_ELIGIBLE_PROFILE_ITEMS",
+                }
+            )
+            return trace
+
+        plan_payload = build_capture_plan_from_structured(
+            turn_id=turn_id,
+            source_event_id=source_event_id,
+            source_role="user",
+            items=capture_items,
+        )
+        plan = CapturePlan.from_proposals(
+            turn_id=turn_id,
+            source_event_id=source_event_id,
+            proposals=plan_payload.get("proposals", []),
+            capture_plan_id=str(plan_payload.get("capture_plan_id") or ""),
+            plan_status=str(plan_payload.get("plan_status") or "has_proposals"),
+        )
+        receipts: List[Mapping[str, Any]] = []
+        for proposal in plan.proposals:
+            capture_item = next(
+                (item for item in capture_items if item.get("stable_key") == proposal.stable_key),
+                None,
+            )
+            if not isinstance(capture_item, Mapping):
+                continue
+            result = self._handle_brainstack_explicit_capture(
+                "remember",
+                {
+                    "shelf": "profile",
+                    "stable_key": proposal.stable_key,
+                    "category": _category_from_target_slot(proposal.target_slot),
+                    "content": proposal.normalized_value,
+                    "source_role": "user",
+                    "authority_class": "profile",
+                    "confidence": float(capture_item.get("confidence") or 0.95),
+                    "metadata": {
+                        "source_event_id": source_event_id,
+                        "source_span_id": proposal.source_span_id,
+                        "target_slot": proposal.target_slot,
+                        "proposal_id": proposal.proposal_id,
+                        "capture_plan_id": plan.capture_plan_id,
+                        "capture_intent": str(capture_item.get("capture_intent") or "explicit_capture"),
+                        "normalization_method": "tier2_structured_extractor",
+                    },
+                },
+                trusted_operator_origin="brainstack_internal",
+            )
+            if isinstance(result, Mapping) and isinstance(result.get("memory_write_receipt"), Mapping):
+                receipts.append(result["memory_write_receipt"])
+
+        coverage = compute_receipt_coverage(
+            plan,
+            receipts,
+            principal_scope_key=self._principal_scope_key,
+            workspace_scope_key=str(getattr(self, "_agent_workspace", "") or ""),
+            session_id=self._session_id,
+        )
+        ack_plan = build_ack_plan(plan, coverage)
+        trace.update(
+            {
+                "applied": True,
+                "status": "receipt_coverage_complete" if coverage.get("full_ack_allowed") else "receipt_coverage_incomplete",
+                "reason_code": "" if coverage.get("full_ack_allowed") else "INCOMPLETE_RECEIPT_COVERAGE",
+                "capture_plan": plan.to_dict(),
+                "memory_write_receipts": [dict(receipt) for receipt in receipts],
+                "receipt_coverage": dict(coverage),
+                "ack_plan": dict(ack_plan),
+                "memory_commitment_guard": commitment_guard_trace(
+                    capture_plan=plan,
+                    coverage=coverage,
+                    commitment_claim_present=True,
+                )["memory_commitment_guard"],
+            }
+        )
+        return trace
+
     def _ensure_behavior_authority_ready(self, *, surface: str) -> Dict[str, Any]:
         if not self._store:
             return {
@@ -449,9 +716,19 @@ class ProviderInspectionMixin(ProviderRuntimeBase):
             source="behavior_policy_correction:provider",
         )
 
-    def validate_assistant_output(self, content: str) -> Dict[str, Any] | None:
+    def validate_assistant_output(
+        self,
+        content: str,
+        *,
+        user_content: str = "",
+        session_id: str = "",
+    ) -> Dict[str, Any] | None:
         if not self._store:
             return None
+        memory_validation = self._validate_explicit_capture_receipts(
+            user_content=user_content,
+            session_id=session_id,
+        )
         if not self._ordinary_reply_output_validation_enabled:
             trace = dict(self._last_behavior_policy_trace or {})
             trace["final_output_validation"] = {
@@ -469,8 +746,25 @@ class ProviderInspectionMixin(ProviderRuntimeBase):
                     "ordinary_reply_validation_enabled": False,
                 },
             }
+            if memory_validation.get("applied"):
+                trace["final_output_validation"]["memory_commitment_validation"] = dict(memory_validation)
             self._last_behavior_policy_trace = trace
-            return None
+            if not memory_validation.get("applied"):
+                return None
+            coverage = memory_validation.get("receipt_coverage")
+            can_ship = True
+            if isinstance(coverage, Mapping) and coverage.get("coverage_status") not in {"complete", "not_applicable"}:
+                can_ship = False
+            return {
+                "content": str(content or ""),
+                "changed": False,
+                "applied": True,
+                "status": str(memory_validation.get("status") or "receipt_validation"),
+                "blocked": not can_ship,
+                "can_ship": can_ship,
+                "block_reason": "" if can_ship else "INCOMPLETE_RECEIPT_COVERAGE",
+                "memory_commitment_validation": dict(memory_validation),
+            }
         authority_state = self._ensure_behavior_authority_ready(surface="final_output_validation")
         if authority_state.get("blocked"):
             result = {
@@ -545,6 +839,17 @@ class ProviderInspectionMixin(ProviderRuntimeBase):
             else 0,
             "contract": dict(contract),
         }
+        if memory_validation.get("applied"):
+            result["memory_commitment_validation"] = dict(memory_validation)
+            trace["final_output_validation"]["memory_commitment_validation"] = dict(memory_validation)
+            coverage = memory_validation.get("receipt_coverage")
+            if isinstance(coverage, Mapping) and coverage.get("coverage_status") not in {"complete", "not_applicable"}:
+                result["blocked"] = True
+                result["can_ship"] = False
+                result["block_reason"] = "INCOMPLETE_RECEIPT_COVERAGE"
+                trace["final_output_validation"]["blocked"] = True
+                trace["final_output_validation"]["can_ship"] = False
+                trace["final_output_validation"]["block_reason"] = "INCOMPLETE_RECEIPT_COVERAGE"
         self._last_behavior_policy_trace = trace
         return result
 
