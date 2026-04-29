@@ -15,7 +15,7 @@ def test_identity_platform_handle_not_preferred_name() -> None:
         claim_id="handle",
         target_shelf="profile",
         target_slot="identity.platform_handle",
-        candidate_value="LauraTom",
+        candidate_value="ExampleHandle",
         authority_class=SourceAuthority.TRUSTED_HOST,
         assertion_speaker=AssertionSpeaker.TRUSTED_HOST,
         span_kind=SpanKind.ASSERTION,
@@ -24,7 +24,7 @@ def test_identity_platform_handle_not_preferred_name() -> None:
         claim_id="preferred",
         target_shelf="profile",
         target_slot="identity.preferred_address_name",
-        candidate_value="Tomi",
+        candidate_value="Alex",
         authority_class=SourceAuthority.USER_EXPLICIT_ASSERTION,
         assertion_speaker=AssertionSpeaker.USER,
         span_kind=SpanKind.ASSERTION,
@@ -39,7 +39,7 @@ def test_no_generic_identity_name_slot() -> None:
         claim_id="bad",
         target_shelf="profile",
         target_slot="identity.name",
-        candidate_value="LauraTom",
+        candidate_value="ExampleHandle",
         authority_class=SourceAuthority.TIER2_SUMMARY,
         assertion_speaker=AssertionSpeaker.UNKNOWN,
     )
@@ -47,4 +47,3 @@ def test_no_generic_identity_name_slot() -> None:
     decision = admit_claim(proposal)
     assert decision.decision == AdmissionDecisionType.QUARANTINE_PROPOSAL
     assert decision.reason_code == "GENERIC_IDENTITY_NAME_REJECTED"
-

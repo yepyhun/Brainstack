@@ -20,5 +20,5 @@ def test_packet_budget_soak_public_safe_thresholds() -> None:
     assert report["retrieval_fusion_next_phase_required"] is False
 
     text = json.dumps(report)
-    assert "LauraTom" not in text
+    assert "ExampleHandle" not in text
     assert "NevaMind" not in text

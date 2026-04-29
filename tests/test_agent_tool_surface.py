@@ -31,7 +31,15 @@ def test_agent_tool_surface_exposes_read_tools_and_schema_gated_capture_tools(tm
         schemas = provider.get_tool_schemas()
         names = {schema["name"] for schema in schemas}
 
-        assert {"brainstack_recall", "brainstack_inspect", "brainstack_stats"}.issubset(names)
+        assert {
+            "brainstack_recall",
+            "brainstack_inspect",
+            "brainstack_stats",
+            "brainstack_proactive_status",
+            "brainstack_proactive_list",
+            "brainstack_proactive_inspect",
+            "brainstack_proactive_control",
+        }.issubset(names)
         assert "brainstack_remember" in names
         assert "brainstack_supersede" in names
         assert "brainstack_invalidate" not in names
@@ -44,6 +52,14 @@ def test_agent_tool_surface_exposes_read_tools_and_schema_gated_capture_tools(tm
                 assert schema.get("x_brainstack_tool_class") == "explicit_memory_write"
             if schema["name"] == "brainstack_consolidate":
                 assert schema.get("x_brainstack_tool_class") == "bounded_memory_maintenance"
+            if schema["name"] == "brainstack_proactive_status":
+                assert schema.get("x_brainstack_tool_class") == "read_only_proactive_status"
+            if schema["name"] == "brainstack_proactive_list":
+                assert schema.get("x_brainstack_tool_class") == "read_only_proactive_items"
+            if schema["name"] == "brainstack_proactive_inspect":
+                assert schema.get("x_brainstack_tool_class") == "read_only_proactive_item_diagnostics"
+            if schema["name"] == "brainstack_proactive_control":
+                assert schema.get("x_brainstack_tool_class") == "explicit_proactive_control"
     finally:
         provider.shutdown()
 

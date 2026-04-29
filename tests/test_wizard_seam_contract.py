@@ -181,7 +181,7 @@ def test_system_projection_includes_truth_eligible_project_metadata(tmp_path: Pa
         store.upsert_graph_state(
             subject_name="Brainstack",
             attribute="created_by",
-            value_text="Canary Tomi",
+            value_text="Canary Alex",
             source="test",
             metadata={
                 "principal_scope_key": scope,
@@ -217,7 +217,7 @@ def test_system_projection_includes_truth_eligible_project_metadata(tmp_path: Pa
             session_id="session:test",
         )
 
-        assert "[project.created.by] Brainstack: Canary Tomi" in str(projection["block"])
+        assert "[project.created.by] Brainstack: Canary Alex" in str(projection["block"])
         assert "[project.component.inspired.by] Brainstack graph layer: Graphiti" in str(projection["block"])
     finally:
         store.close()

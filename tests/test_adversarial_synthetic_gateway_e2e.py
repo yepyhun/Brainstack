@@ -27,8 +27,8 @@ def test_assistant_self_contamination_does_not_refeed_after_reset() -> None:
 def test_identity_split_survives_adversarial_wrong_handle_claim() -> None:
     result = run_adversarial_synthetic_gateway_contract()
 
-    assert result["identity"]["preferred_name"] == "Tomi"
-    assert result["identity"]["platform_handle"] == "LauraTom"
+    assert result["identity"]["preferred_name"] == "Alex"
+    assert result["identity"]["platform_handle"] == "ExampleHandle"
 
 
 def test_reference_url_recalls_exact_after_reset() -> None:

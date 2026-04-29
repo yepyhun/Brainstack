@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from .operating_truth import OPERATING_RECORD_TYPES
+from .core.proactive import ProactiveEventState
 
 
 TASK_STATUS_VALUES = ["pending", "in_progress", "blocked", "completed", "failed", "stale", "cancelled"]
@@ -68,6 +69,87 @@ def stats_tool_schema() -> Dict[str, Any]:
             "properties": {
                 "strict": {"type": "boolean"},
             },
+            "additionalProperties": False,
+        },
+    }
+
+
+def proactive_status_tool_schema() -> Dict[str, Any]:
+    return {
+        "name": "brainstack_proactive_status",
+        "description": (
+            "Return tool-backed status for Brainstack proactive memory: installed surface, config, "
+            "kill switch, item counts, pending outbox, and allowed actions. Read-only. "
+            "Use this before answering questions about proactive heartbeat or proactive extension state."
+        ),
+        "x_brainstack_tool_class": "read_only_proactive_status",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    }
+
+
+def proactive_list_tool_schema() -> Dict[str, Any]:
+    return {
+        "name": "brainstack_proactive_list",
+        "description": (
+            "List scoped Brainstack proactive items. Read-only. "
+            "Does not notify the user, schedule work, or create current assignment evidence."
+        ),
+        "x_brainstack_tool_class": "read_only_proactive_items",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "state": {"type": "string", "enum": [""] + [item.value for item in ProactiveEventState]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            },
+            "additionalProperties": False,
+        },
+    }
+
+
+def proactive_inspect_tool_schema() -> Dict[str, Any]:
+    return {
+        "name": "brainstack_proactive_inspect",
+        "description": (
+            "Inspect one scoped Brainstack proactive item with transitions and outbox data. Read-only. "
+            "Rejects cross-scope item inspection."
+        ),
+        "x_brainstack_tool_class": "read_only_proactive_item_diagnostics",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string"},
+            },
+            "required": ["event_id"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def proactive_control_tool_schema() -> Dict[str, Any]:
+    return {
+        "name": "brainstack_proactive_control",
+        "description": (
+            "Apply a limited Brainstack proactive control change only after an explicit user request. "
+            "Allowed actions: set_item_state, set_kill_switch. Does not schedule, notify, execute tasks, "
+            "install Evolver, or create current assignment evidence."
+        ),
+        "x_brainstack_tool_class": "explicit_proactive_control",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["set_item_state", "set_kill_switch"]},
+                "explicit_user_request": {"type": "boolean"},
+                "event_id": {"type": "string"},
+                "state": {"type": "string", "enum": [item.value for item in ProactiveEventState]},
+                "kill_switch": {"type": "boolean"},
+                "reason_code": {"type": "string"},
+                "trace_id": {"type": "string"},
+            },
+            "required": ["action", "explicit_user_request"],
             "additionalProperties": False,
         },
     }
@@ -227,6 +309,10 @@ def build_tool_schemas(
         recall_tool_schema(),
         inspect_tool_schema(),
         stats_tool_schema(),
+        proactive_status_tool_schema(),
+        proactive_list_tool_schema(),
+        proactive_inspect_tool_schema(),
+        proactive_control_tool_schema(),
         explicit_capture_tool_schema(
             name="brainstack_remember",
             operation="remember",

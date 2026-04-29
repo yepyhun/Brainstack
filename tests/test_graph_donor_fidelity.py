@@ -276,7 +276,7 @@ def test_tier2_unbounded_volatile_status_is_not_current_authority(tmp_path: Path
     store = _open_store(tmp_path)
     try:
         store.upsert_graph_state(
-            subject_name="Tomi",
+            subject_name="Alex",
             attribute="testing_status",
             value_text="active testing of brainstack",
             source="tier2:idle_window",
@@ -299,7 +299,7 @@ def test_tier2_unbounded_volatile_status_is_not_current_authority(tmp_path: Path
 
         report = build_query_inspect(
             store,
-            query="Tomi testing status",
+            query="Alex testing status",
             session_id="session:tier2-volatile-status",
             principal_scope_key=PRINCIPAL_SCOPE,
             graph_limit=4,
@@ -307,7 +307,7 @@ def test_tier2_unbounded_volatile_status_is_not_current_authority(tmp_path: Path
         graph_rows = _selected_graph(report)
         assert graph_rows
         assert graph_rows[0]["fact_class"] == "explicit_state_expired"
-        assert "[state:current] Tomi testing_status=active testing of brainstack" not in report["final_packet"][
+        assert "[state:current] Alex testing_status=active testing of brainstack" not in report["final_packet"][
             "preview"
         ]
     finally:
@@ -376,7 +376,7 @@ def test_tier2_volatile_state_with_explicit_future_validity_can_be_current(tmp_p
     store = _open_store(tmp_path)
     try:
         store.upsert_graph_state(
-            subject_name="Tomi",
+            subject_name="Alex",
             attribute="testing_status",
             value_text="active testing of brainstack",
             source="tier2:idle_window",
@@ -393,7 +393,7 @@ def test_tier2_volatile_state_with_explicit_future_validity_can_be_current(tmp_p
 
         report = build_query_inspect(
             store,
-            query="Tomi testing status",
+            query="Alex testing status",
             session_id="session:tier2-explicit-window",
             principal_scope_key=PRINCIPAL_SCOPE,
             graph_limit=4,

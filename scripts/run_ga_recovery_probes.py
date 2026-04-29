@@ -45,7 +45,7 @@ def main() -> int:
     source = fixture / "source"
     source.mkdir(parents=True, exist_ok=True)
     (source / "brainstack.db").write_text("memory", encoding="utf-8")
-    (source / "profile.json").write_text('{"name":"Tomi"}', encoding="utf-8")
+    (source / "profile.json").write_text('{"name":"Alex"}', encoding="utf-8")
     backup = fixture / "backup"
     restored = fixture / "restored"
     backup_proof = backup_restore_roundtrip(source, backup, restored)

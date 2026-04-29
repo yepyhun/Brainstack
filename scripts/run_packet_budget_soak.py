@@ -33,12 +33,9 @@ from scripts.measure_packet_budget_live_shadow_telemetry import (  # noqa: E402
 MIN_SOAK_SAMPLE_COUNT = 100
 MIN_SOAK_FAMILY_COUNT = 10
 PRIVATE_LEAK_PATTERNS = (
-    re.compile(r"\bTomi\b", re.IGNORECASE),
-    re.compile(r"\bLauraTom\b", re.IGNORECASE),
-    re.compile(r"\bNevaMind\b", re.IGNORECASE),
-    re.compile(r"\bmemU\b", re.IGNORECASE),
-    re.compile(r"\bHelyrecs\b", re.IGNORECASE),
-    re.compile(r"github\\.com/NevaMind-AI", re.IGNORECASE),
+    re.compile(r"\b[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9-.]+\b"),
+    re.compile(r"\b(?:discord|telegram|slack)[:/_-]?(?:user|channel|thread|server)?[:=_-]?\d{8,}\b", re.IGNORECASE),
+    re.compile(r"github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", re.IGNORECASE),
 )
 
 

@@ -23,7 +23,7 @@ def test_direct_tier2_profile_truth_write_requires_admission_or_permit(tmp_path:
             store.upsert_profile_item(
                 stable_key="identity:preferred_address_name",
                 category="identity",
-                content="Tomi",
+                content="Alex",
                 source="tier2:test",
                 confidence=0.9,
                 metadata={"assertion_speaker": "user"},
@@ -45,7 +45,7 @@ def test_durable_truth_port_profile_write_adds_typed_permit(tmp_path: Path) -> N
         row_id = DurableTruthPort(store).write_profile(
             stable_key="identity:preferred_address_name",
             category="identity",
-            content="Tomi",
+            content="Alex",
             source="explicit:test",
             confidence=1.0,
             permit=permit,

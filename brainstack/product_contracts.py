@@ -709,10 +709,10 @@ def run_adversarial_synthetic_gateway_contract() -> dict[str, Any]:
         corrected_at="2026-04-27T00:00:00Z",
     )
     user_truth = [
-        {"evidence_id": "name", "source_role": "user", "truth_eligible": True, "answer_evidence": True, "slot": "identity.preferred_address_name", "value": "Tomi"},
-        {"evidence_id": "handle", "source_role": "platform", "truth_eligible": True, "slot": "identity.platform_handle", "value": "LauraTom"},
+        {"evidence_id": "name", "source_role": "user", "truth_eligible": True, "answer_evidence": True, "slot": "identity.preferred_address_name", "value": "Alex"},
+        {"evidence_id": "handle", "source_role": "platform", "truth_eligible": True, "slot": "identity.platform_handle", "value": "ExampleHandle"},
         {"evidence_id": "age", "source_role": "user", "truth_eligible": True, "answer_evidence": True, "slot": "profile.age", "value": 19},
-        {"evidence_id": "project_creator", "source_role": "user", "truth_eligible": True, "answer_evidence": True, "slot": "project.created_by", "value": "Tomi"},
+        {"evidence_id": "project_creator", "source_role": "user", "truth_eligible": True, "answer_evidence": True, "slot": "project.created_by", "value": "Alex"},
     ]
     reference = admit_reference_url(
         label="resource-x",
@@ -803,7 +803,7 @@ def run_adversarial_synthetic_gateway_contract() -> dict[str, Any]:
         "style_trace": style_trace,
         "final_text": final_text,
         "reference_recall": recall_reference_url([reference], label="resource-x"),
-        "identity": {"preferred_name": "Tomi", "platform_handle": "LauraTom"},
+        "identity": {"preferred_name": "Alex", "platform_handle": "ExampleHandle"},
         "url_guard": url_guard,
         "probes": [probe.to_dict() for probe in probes],
     }

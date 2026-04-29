@@ -428,7 +428,7 @@ def test_background_shared_work_profile_does_not_render_as_stable_project_signal
                 {
                     "category": "identity",
                     "stable_key": "identity:user",
-                    "content": "LauraTom",
+                    "content": "ExampleHandle",
                     "source": "tier2:idle_window",
                 },
             ],
@@ -440,10 +440,10 @@ def test_background_shared_work_profile_does_not_render_as_stable_project_signal
         rendered = render_operating_context_section(snapshot, char_budget=1400)
 
         assert snapshot["stable_profile_entries"] == [
-            {"category": "identity", "stable_key": "identity:user", "content": "LauraTom"}
+            {"category": "identity", "stable_key": "identity:user", "content": "ExampleHandle"}
         ]
         assert "Brainstack development status vs zero-human workstream" not in rendered
-        assert "[identity] LauraTom" in rendered
+        assert "[identity] ExampleHandle" in rendered
     finally:
         store.close()
 
@@ -456,7 +456,7 @@ def test_sync_turn_continuity_strips_prior_assistant_answer_from_model_packet(tm
             turn_number=1,
             kind="turn",
             content=(
-                "user: [LauraTom] Emlékszel, mi a különbség a Brainstack fejlesztési státusz "
+                "user: [ExampleHandle] Emlékszel, mi a különbség a Brainstack fejlesztési státusz "
                 "és a zero-human workstream között? Most melyik a te aktuális feladatod? | "
                 "assistant: WRONG_ASSISTANT_ASSIGNMENT Brainstack development is active current work."
             ),
@@ -605,7 +605,7 @@ def test_assignment_lookup_suppresses_assistant_authored_transcript_residue(tmp_
             turn_number=1,
             kind="turn",
             content=(
-                "User: [LauraTom] Emlékszel, mi a különbség a Brainstack fejlesztési státusz "
+                "User: [ExampleHandle] Emlékszel, mi a különbség a Brainstack fejlesztési státusz "
                 "és a zero-human workstream között? Most melyik a te aktuális feladatod? "
                 "Assistant: A Brainstack Graph Truth szerint a state:current most is "
                 "brainstack development, tehát ez az aktuális feladatom."
@@ -657,7 +657,7 @@ def test_assignment_lookup_suppresses_tier2_graph_runtime_state(tmp_path: Path) 
     store = _open_store(tmp_path)
     try:
         store.upsert_graph_state(
-            subject_name="Tomi",
+            subject_name="Alex",
             attribute="testing_status",
             value_text="active testing of brainstack",
             source="tier2:idle_window",

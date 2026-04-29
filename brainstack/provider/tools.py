@@ -7,6 +7,12 @@ from ..memory_write_receipts import (
     commitment_guard_trace,
     compute_receipt_coverage,
 )
+from ..proactive_agent_contract import (
+    build_proactive_status,
+    control_proactive_agent_surface,
+    inspect_proactive_agent_item,
+    list_proactive_agent_items,
+)
 from .provider_protocol import ProviderRuntimeBase
 from .runtime import (
     ACTIVE_TASK_STATUSES,
@@ -101,6 +107,14 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             return json.dumps(self._handle_brainstack_inspect(args), ensure_ascii=False)
         if tool_name == "brainstack_stats":
             return json.dumps(self._handle_brainstack_stats(args), ensure_ascii=False)
+        if tool_name == "brainstack_proactive_status":
+            return json.dumps(self._handle_brainstack_proactive_status(args), ensure_ascii=False)
+        if tool_name == "brainstack_proactive_list":
+            return json.dumps(self._handle_brainstack_proactive_list(args), ensure_ascii=False)
+        if tool_name == "brainstack_proactive_inspect":
+            return json.dumps(self._handle_brainstack_proactive_inspect(args), ensure_ascii=False)
+        if tool_name == "brainstack_proactive_control":
+            return json.dumps(self._handle_brainstack_proactive_control(args), ensure_ascii=False)
         if tool_name == "brainstack_remember":
             return json.dumps(
                 self._handle_brainstack_explicit_capture(
@@ -471,6 +485,68 @@ class ProviderToolsMixin(ProviderRuntimeBase):
         receipt["read_only"] = not bool(normalized["apply"])
         self._last_maintenance_receipt = json.loads(json.dumps(receipt, ensure_ascii=True))
         return receipt
+
+    def _handle_brainstack_proactive_status(self, args: Mapping[str, Any]) -> Dict[str, Any]:
+        if self._store is None:
+            return {
+                "schema": "brainstack.tool_error.v1",
+                "tool_name": "brainstack_proactive_status",
+                "error_code": "store_unavailable",
+                "error": "Brainstack store is not initialized.",
+                "read_only": True,
+            }
+        return build_proactive_status(
+            store=self._store,
+            principal_scope_key=self._principal_scope_key,
+            config=self._config,
+        )
+
+    def _handle_brainstack_proactive_list(self, args: Mapping[str, Any]) -> Dict[str, Any]:
+        if self._store is None:
+            return {
+                "schema": "brainstack.tool_error.v1",
+                "tool_name": "brainstack_proactive_list",
+                "error_code": "store_unavailable",
+                "error": "Brainstack store is not initialized.",
+                "read_only": True,
+            }
+        return list_proactive_agent_items(
+            store=self._store,
+            principal_scope_key=self._principal_scope_key,
+            state=_normalize_compact_text(args.get("state")),
+            limit=int(args.get("limit") or 20),
+        )
+
+    def _handle_brainstack_proactive_inspect(self, args: Mapping[str, Any]) -> Dict[str, Any]:
+        if self._store is None:
+            return {
+                "schema": "brainstack.tool_error.v1",
+                "tool_name": "brainstack_proactive_inspect",
+                "error_code": "store_unavailable",
+                "error": "Brainstack store is not initialized.",
+                "read_only": True,
+            }
+        return inspect_proactive_agent_item(
+            store=self._store,
+            principal_scope_key=self._principal_scope_key,
+            event_id=_normalize_compact_text(args.get("event_id")),
+        )
+
+    def _handle_brainstack_proactive_control(self, args: Mapping[str, Any]) -> Dict[str, Any]:
+        if self._store is None:
+            return {
+                "schema": "brainstack.tool_error.v1",
+                "tool_name": "brainstack_proactive_control",
+                "error_code": "store_unavailable",
+                "error": "Brainstack store is not initialized.",
+                "read_only": False,
+            }
+        return control_proactive_agent_surface(
+            store=self._store,
+            principal_scope_key=self._principal_scope_key,
+            args=args,
+            config=self._config,
+        )
 
     def _handle_brainstack_recall(self, args: Mapping[str, Any]) -> Dict[str, Any]:
         return handle_brainstack_recall(

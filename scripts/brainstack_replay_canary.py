@@ -365,7 +365,7 @@ def _seed_wrong_assistant_residue(provider: BrainstackMemoryProvider) -> None:
 def _seed_tier2_graph_runtime_state(provider: BrainstackMemoryProvider) -> None:
     assert provider._store is not None
     provider._store.upsert_graph_state(
-        subject_name="Tomi",
+        subject_name="Alex",
         attribute="testing_status",
         value_text="active testing of brainstack",
         source="tier2:idle_window",
@@ -425,7 +425,7 @@ def _seed_exact_literal_marker(provider: BrainstackMemoryProvider) -> None:
         provider,
         stable_key="debug_marker:1231231X",
         category="debug_marker",
-        content="Tomi debug marker is 1231231X.",
+        content="Example debug marker is 1231231X.",
     )
     assert provider._store is not None
     provider._store.add_transcript_entry(

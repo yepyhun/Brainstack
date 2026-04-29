@@ -260,7 +260,7 @@ def _failure_bundle(scenario: PreferenceScenario, error: BaseException) -> Dict[
         "forbidden_fixes": [
             "output emoji filter",
             "language-specific regex",
-            "Tomi-specific rule",
+            "user-specific rule",
             "every-turn full preference dump",
             "fixed turn-count reminder",
             "SOUL disable",

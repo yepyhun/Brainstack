@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -258,6 +260,72 @@ def _check_public_fixtures() -> CheckResult:
     )
 
 
+def _tracked_files() -> list[str]:
+    proc = _run(["git", "ls-files"])
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _private_payload_terms() -> list[str]:
+    denylist_path = ROOT / ".planning" / "private_payload_denylist.txt"
+    if not denylist_path.exists():
+        return []
+    terms: list[str] = []
+    for raw in denylist_path.read_text(encoding="utf-8").splitlines():
+        term = raw.strip()
+        if not term or term.startswith("#"):
+            continue
+        terms.append(term)
+    return terms
+
+
+def _check_public_payload_leaks() -> CheckResult:
+    local_terms = _private_payload_terms()
+    platform_id_pattern = re.compile(
+        r"(?:user_id|channel_id|thread_id|server_id|guild_id|principal|telegram|discord)[^\\n]{0,80}\\b\\d{12,}\\b",
+        re.IGNORECASE,
+    )
+    token_shape_pattern = re.compile(r"\\b[A-Za-z0-9_-]{20,}\\.[A-Za-z0-9_-]{6,}\\.[A-Za-z0-9_-]{20,}\\b")
+    findings: list[dict[str, Any]] = []
+    for relative in _tracked_files():
+        path = ROOT / relative
+        if not path.is_file() or "__pycache__" in path.parts:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if platform_id_pattern.search(line):
+                findings.append({"path": relative, "line": line_number, "kind": "platform_id_shape"})
+            if token_shape_pattern.search(line):
+                findings.append({"path": relative, "line": line_number, "kind": "token_shape"})
+            for term in local_terms:
+                if term in line:
+                    findings.append(
+                        {
+                            "path": relative,
+                            "line": line_number,
+                            "kind": "local_private_denylist",
+                            "term_hash": hashlib.sha256(term.encode("utf-8")).hexdigest()[:16],
+                        }
+                    )
+    passed = not findings
+    return CheckResult(
+        name="public_payload_leak_scan",
+        status=_status(passed),
+        command=["git ls-files", "local private denylist scan if .planning/private_payload_denylist.txt exists"],
+        returncode=0,
+        summary={
+            "tracked_file_count": len(_tracked_files()),
+            "local_private_denylist_loaded": bool(local_terms),
+            "finding_count": len(findings),
+            "findings": findings[:20],
+        },
+    )
+
+
 def _git_porcelain() -> list[str]:
     proc = _run(["git", "status", "--porcelain", "--untracked-files=all"])
     if proc.returncode != 0:
@@ -335,6 +403,7 @@ def run_checklist(*, ignore_git_dirty_for_dev: bool = False) -> dict[str, Any]:
             _check_packet_budget_soak(tmp),
             _check_write_path(tmp),
             _check_public_fixtures(),
+            _check_public_payload_leaks(),
             _check_git_hygiene(),
         ]
     return _report(checks, ignore_git_dirty_for_dev=ignore_git_dirty_for_dev)

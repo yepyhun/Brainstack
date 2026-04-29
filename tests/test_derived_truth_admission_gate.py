@@ -27,28 +27,28 @@ def test_tier2_identity_uses_typed_handle_and_preferred_name_slots(tmp_path: Pat
                     {
                         "category": "identity",
                         "slot": "identity:platform_handle",
-                        "content": "LauraTom",
+                        "content": "ExampleHandle",
                         "confidence": 0.9,
                     },
                     {
                         "category": "identity",
                         "slot": "identity:preferred_address_name",
-                        "content": "Tomi",
+                        "content": "Alex",
                         "confidence": 0.96,
                     },
                     {
                         "category": "identity",
                         "slot": "identity:name",
-                        "content": "LauraTom",
+                        "content": "ExampleHandle",
                         "confidence": 0.7,
                     },
                 ],
             },
         )
 
-        assert store.get_profile_item(stable_key="identity:platform_handle")["content"] == "LauraTom"
+        assert store.get_profile_item(stable_key="identity:platform_handle")["content"] == "ExampleHandle"
         preferred = store.get_profile_item(stable_key="identity:preferred_address_name")
-        assert preferred["content"] == "Tomi"
+        assert preferred["content"] == "Alex"
         assert preferred["metadata"]["admission"]["truth_eligible"] is True
         assert store.get_profile_item(stable_key="identity:name") is None
         assert any(action.get("reason_code") == "GENERIC_IDENTITY_NAME_REJECTED" for action in result["actions"])
@@ -89,7 +89,7 @@ def test_assistant_creator_claim_is_not_durable_graph_truth_but_user_correction_
                     {
                         "subject": "Brainstack",
                         "predicate": "created_by",
-                        "object": "Tomi",
+                        "object": "Alex",
                         "confidence": 0.95,
                     }
                 ]
@@ -106,7 +106,7 @@ def test_assistant_creator_claim_is_not_durable_graph_truth_but_user_correction_
             """
         ).fetchall()
         assert [(row["subject"], row["predicate"], row["object_text"]) for row in rows] == [
-            ("Brainstack", "created_by", "Tomi")
+            ("Brainstack", "created_by", "Alex")
         ]
         assert any(action["action"] == "MARK_CORRECTED_FALSE_EVENT" for action in rejected["actions"])
         assert any(action["action"] == "ADD" for action in accepted["actions"])
@@ -128,7 +128,7 @@ def test_project_metadata_state_uses_canonical_admission_slot_for_permit(tmp_pat
                     {
                         "subject": "Brainstack",
                         "attribute": "created_by",
-                        "value": "Tomi",
+                        "value": "Alex",
                         "confidence": 0.95,
                     }
                 ]
@@ -140,6 +140,72 @@ def test_project_metadata_state_uses_canonical_admission_slot_for_permit(tmp_pat
         assert any(action["action"] == "ADD" for action in result["actions"])
         receipts = store.list_admission_receipts(limit=10)
         assert any(row["target_slot"] == "project.created_by" for row in receipts)
+    finally:
+        store.close()
+
+
+def test_tier2_project_creator_without_user_span_does_not_create_graph_conflict(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        first = store.upsert_graph_state(
+            subject_name="Brainstack",
+            attribute="created_by",
+            value_text="User",
+            source="tier2:idle_window",
+            metadata={"principal_scope_key": "principal:graph-conflict-regression"},
+        )
+        second = store.upsert_graph_state(
+            subject_name="Brainstack",
+            attribute="created_by",
+            value_text="Alex",
+            source="tier2:final_output_validation",
+            metadata={"principal_scope_key": "principal:graph-conflict-regression"},
+        )
+        empty_source = store.upsert_graph_state(
+            subject_name="Brainstack",
+            attribute="created_by",
+            value_text="Casey",
+            source="",
+            metadata={"principal_scope_key": "principal:graph-conflict-regression"},
+        )
+
+        assert first["status"] == "admission_rejected"
+        assert second["status"] == "admission_rejected"
+        assert empty_source["status"] == "admission_rejected"
+        assert store.list_current_graph_states(limit=10) == []
+        assert store.list_graph_conflicts(limit=10) == []
+    finally:
+        store.close()
+
+
+def test_profile_identity_is_not_project_creator_authority(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        result = reconcile_tier2_candidates(
+            store,
+            session_id="s1",
+            turn_number=8,
+            source="tier2:native_profile_mirror",
+            metadata={
+                "source_role": "user",
+                "source_authority": "tier2_summary",
+                "provenance": {"origin": "native_profile_mirror"},
+            },
+            extracted={
+                "states": [
+                    {
+                        "subject": "Brainstack",
+                        "attribute": "created_by",
+                        "value": "Casey",
+                        "confidence": 0.94,
+                    }
+                ]
+            },
+        )
+
+        assert result["actions"][0]["action"] == "QUARANTINE_PROPOSAL"
+        assert store.list_current_graph_states(limit=10) == []
+        assert store.list_graph_conflicts(limit=10) == []
     finally:
         store.close()
 

@@ -10,7 +10,7 @@ def test_claimproposal_required_fields() -> None:
         target_slot="identity.preferred_address_name",
         target_scope="principal",
         surface_value="raw span",
-        normalized_value="Tomi",
+        normalized_value="Alex",
         candidate_value="raw span",
         source_event_id="e1",
         source_span_id="s1",
@@ -21,6 +21,5 @@ def test_claimproposal_required_fields() -> None:
         normalization_method="llm_structured_extraction",
     )
 
-    assert proposal.admitted_value == "Tomi"
+    assert proposal.admitted_value == "Alex"
     assert proposal.normalization_method == "llm_structured_extraction"
-

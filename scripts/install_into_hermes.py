@@ -124,6 +124,11 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "owner": "docker-runtime-seam",
         "removal_condition": "Hermes Docker runtime explicitly sets terminal working directory to mounted workspace.",
     },
+    "_patch_compose_local_tei_jina_runtime": {
+        "category": "required_seam",
+        "owner": "embedding-runtime",
+        "removal_condition": "Hermes Docker runtime provides an explicit healthy embedding runtime for Chroma.",
+    },
     "_patch_compose_remove_discord_forced_heavy_profile": {
         "category": "required_seam",
         "owner": "docker-runtime-seam",
@@ -4134,21 +4139,20 @@ def _write_docker_compose_file(
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
     container_name: tei-jina-v5
     restart: unless-stopped
+    network_mode: host
     command:
       - --model-id
       - jinaai/jina-embeddings-v5-text-small-retrieval
       - --port
-      - "80"
+      - "7997"
       - --pooling
       - last-token
       - --max-batch-tokens
       - "4096"
-    ports:
-      - "7997:80"
     volumes:
       - tei-model-cache:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:7997/health"]
       interval: 15s
       timeout: 10s
       retries: 40
@@ -4383,6 +4387,141 @@ def _patch_compose_remove_discord_forced_heavy_profile(path: Path, dry_run: bool
     if not dry_run:
         path.write_text(text, encoding="utf-8")
     return ["compose:remove_discord_forced_heavy_profile"]
+
+
+_LOCAL_TEI_JINA_SERVICE = """
+  tei-jina:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+    container_name: tei-jina-v5
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --model-id
+      - jinaai/jina-embeddings-v5-text-small-retrieval
+      - --port
+      - "7997"
+      - --pooling
+      - last-token
+      - --max-batch-tokens
+      - "4096"
+    volumes:
+      - tei-model-cache:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:7997/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 300s
+"""
+
+
+def _compose_insert_local_tei_service(text: str) -> tuple[str, bool]:
+    if "  tei-jina:\n" in text:
+        return text, False
+    marker = "services:\n"
+    if marker not in text:
+        raise RuntimeError("Installer patch anchor missing for compose services")
+    return text.replace(marker, marker + _LOCAL_TEI_JINA_SERVICE, 1), True
+
+
+def _compose_normalize_local_tei_service(text: str) -> tuple[str, bool]:
+    pattern = re.compile(r"(?ms)^  tei-jina:\n.*?(?=^  [A-Za-z0-9_.-]+:\n|^volumes:\n|\Z)")
+
+    def _normalize(match: re.Match[str]) -> str:
+        block = match.group(0)
+        updated = block
+        if "    network_mode: host\n" not in updated:
+            updated = updated.replace(
+                "    restart: unless-stopped\n",
+                "    restart: unless-stopped\n    network_mode: host\n",
+                1,
+            )
+        updated = re.sub(
+            r"(?m)^      - --port\n      - \"80\"\n",
+            '      - --port\n      - "7997"\n',
+            updated,
+            count=1,
+        )
+        updated = re.sub(
+            r'(?m)^    ports:\n      - "7997:80"\n',
+            "",
+            updated,
+            count=1,
+        )
+        updated = updated.replace(
+            '      test: ["CMD", "curl", "-f", "http://localhost/health"]\n',
+            '      test: ["CMD", "curl", "-f", "http://127.0.0.1:7997/health"]\n',
+            1,
+        )
+        return updated
+
+    normalized = pattern.sub(_normalize, text, count=1)
+    return normalized, normalized != text
+
+
+def _compose_insert_local_tei_dependency(text: str) -> tuple[str, bool]:
+    if re.search(r"(?m)^    depends_on:\n      tei-jina:\n        condition: service_healthy\n", text):
+        return text, False
+    dependency = "    depends_on:\n      tei-jina:\n        condition: service_healthy\n"
+    command_anchor = re.search(r'(?m)^    command: \["gateway", "run", "--replace"\]\n', text)
+    if command_anchor:
+        return text[: command_anchor.end()] + dependency + text[command_anchor.end() :], True
+    environment_anchor = re.search(r"(?m)^    environment:\n", text)
+    if environment_anchor:
+        return text[: environment_anchor.start()] + dependency + text[environment_anchor.start() :], True
+    raise RuntimeError("Installer patch anchor missing for compose TEI dependency")
+
+
+def _compose_insert_named_volume(text: str, volume_name: str) -> tuple[str, bool]:
+    if re.search(rf"(?m)^  {re.escape(volume_name)}:\n", text):
+        return text, False
+    if re.search(r"(?m)^volumes:\n", text):
+        return re.sub(r"(?m)^volumes:\n", f"volumes:\n  {volume_name}:\n", text, count=1), True
+    return text.rstrip() + f"\n\nvolumes:\n  {volume_name}:\n", True
+
+
+def _patch_compose_local_tei_jina_runtime(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    old_text = text
+    applied: list[str] = []
+    text, inserted_service = _compose_insert_local_tei_service(text)
+    if inserted_service:
+        applied.append("compose:local_tei_jina_service")
+    text, normalized_service = _compose_normalize_local_tei_service(text)
+    if normalized_service:
+        applied.append("compose:local_tei_jina_service_normalized")
+    text, inserted_dependency = _compose_insert_local_tei_dependency(text)
+    if inserted_dependency:
+        applied.append("compose:local_tei_jina_dependency")
+    env_specs = (
+        ("BRAINSTACK_EMBEDDINGS_PROVIDER", "tei", "tei", ("TERMINAL_CWD", "DISCORD_ALLOW_BOTS", "PYTHONPATH")),
+        ("BRAINSTACK_EMBEDDINGS_API", "tei", "tei", ("BRAINSTACK_EMBEDDINGS_PROVIDER",)),
+        ("BRAINSTACK_EMBEDDINGS_URL", "http://127.0.0.1:7997/embed", "http://127.0.0.1:7997/embed", ("BRAINSTACK_EMBEDDINGS_API",)),
+        ("BRAINSTACK_EMBEDDINGS_MODEL", "jinaai/jina-embeddings-v5-text-small-retrieval", "jinaai/jina-embeddings-v5-text-small-retrieval", ("BRAINSTACK_EMBEDDINGS_URL",)),
+        ("BRAINSTACK_EMBEDDINGS_QUERY_PREFIX", '"query: "', "query: ", ("BRAINSTACK_EMBEDDINGS_MODEL",)),
+        ("BRAINSTACK_EMBEDDINGS_DOCUMENT_PREFIX", '"document: "', "document: ", ("BRAINSTACK_EMBEDDINGS_QUERY_PREFIX",)),
+        ("BRAINSTACK_EMBEDDINGS_TIMEOUT_SECONDS", '"15"', "15", ("BRAINSTACK_EMBEDDINGS_DOCUMENT_PREFIX",)),
+        ("BRAINSTACK_DISABLE_CHROMA_DEFAULT_EMBEDDING", '"true"', "true", ("BRAINSTACK_EMBEDDINGS_TIMEOUT_SECONDS",)),
+        ("BRAINSTACK_TEMPORAL_EMBEDDINGS_URL", "http://127.0.0.1:7997/embed", "http://127.0.0.1:7997/embed", ("BRAINSTACK_DISABLE_CHROMA_DEFAULT_EMBEDDING",)),
+        ("BRAINSTACK_TEMPORAL_EMBEDDINGS_MODEL", "jinaai/jina-embeddings-v5-text-small-retrieval", "jinaai/jina-embeddings-v5-text-small-retrieval", ("BRAINSTACK_TEMPORAL_EMBEDDINGS_URL",)),
+        ("BRAINSTACK_TEMPORAL_EMBEDDINGS_QUERY_PREFIX", '"query: "', "query: ", ("BRAINSTACK_TEMPORAL_EMBEDDINGS_MODEL",)),
+        ("BRAINSTACK_TEMPORAL_EMBEDDINGS_DOCUMENT_PREFIX", '"document: "', "document: ", ("BRAINSTACK_TEMPORAL_EMBEDDINGS_QUERY_PREFIX",)),
+        ("BRAINSTACK_TEMPORAL_EMBEDDINGS_TIMEOUT_SECONDS", '"15"', "15", ("BRAINSTACK_TEMPORAL_EMBEDDINGS_DOCUMENT_PREFIX",)),
+    )
+    inserted_env = False
+    for key, mapping_value, list_value, after_keys in env_specs:
+        text, inserted = _compose_ensure_env(text, key, mapping_value, list_value=list_value, after_keys=after_keys)
+        inserted_env = inserted_env or inserted
+    if inserted_env:
+        applied.append("compose:local_tei_jina_environment")
+    text, inserted_volume = _compose_insert_named_volume(text, "tei-model-cache")
+    if inserted_volume:
+        applied.append("compose:local_tei_jina_volume")
+    if text != old_text and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
 
 
 def _patch_dockerignore(path: Path, dry_run: bool) -> list[str]:
@@ -4877,6 +5016,8 @@ def main() -> int:
         host_patches.extend(_run_host_patch("_patch_compose_plugin_pythonpath", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_compose_discord_bot_mentions", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_compose_terminal_workspace_cwd", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
+        if args.embedding_runtime == "local-tei-jina":
+            host_patches.extend(_run_host_patch("_patch_compose_local_tei_jina_runtime", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_compose_remove_discord_forced_heavy_profile", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_dockerignore", target / ".dockerignore", args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_dockerfile_backend_dependencies", target / "Dockerfile", args.dry_run, host_patch_mode=args.host_patch_mode))

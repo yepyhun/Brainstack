@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parents[1]
-FORBIDDEN = re.compile(r"Tominak|\\bhívnak\\b|\\bmagyar regex\\b", re.IGNORECASE)
+FORBIDDEN = re.compile(r"ExampleNameDative|\\bhívnak\\b|\\bmagyar regex\\b", re.IGNORECASE)
 
 
 def main() -> int:

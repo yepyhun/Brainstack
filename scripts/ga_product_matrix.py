@@ -23,8 +23,8 @@ def memory_correctness_matrix() -> dict[str, Any]:
     trace = run_adversarial_synthetic_gateway_contract()
     return {
         "schema": "brainstack.ga.memory_correctness_matrix.v1",
-        "identity_preferred_name": trace["identity"]["preferred_name"] == "Tomi",
-        "platform_handle_separate": trace["identity"]["platform_handle"] == "LauraTom",
+        "identity_preferred_name": trace["identity"]["preferred_name"] == "Alex",
+        "platform_handle_separate": trace["identity"]["platform_handle"] == "ExampleHandle",
         "style_no_emoji": trace["style_trace"]["removed_emoji_count"] >= 1,
         "reference_url_recall": trace["reference_recall"] == "https://example.com/org/resource-x",
         "assistant_contamination_not_refed": trace["phrase_provenance"]["final_verdict"] == "blocked_by_firewall",

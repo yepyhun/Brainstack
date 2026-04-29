@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .durable_write_guard import guard_and_normalize_durable_truth_metadata
-from ..admission_policy import admit_claim, graph_claim_proposal, is_runtime_capability_slot
+from ..admission_policy import admit_claim, canonical_graph_slot, graph_claim_proposal, is_runtime_capability_slot
 from .store_protocol import StoreRuntimeBase
 from .store_runtime import (
     Any,
@@ -645,6 +645,14 @@ class GraphStateSnapshotMixin(StoreRuntimeBase):
             metadata=metadata,
             slot=str(attribute or "").strip(),
         )
+        blocked_write = checked_metadata.get("durable_graph_write_blocked")
+        if isinstance(blocked_write, Mapping):
+            return {
+                "status": "admission_rejected",
+                "entity_id": 0,
+                "reason_code": str(blocked_write.get("reason_code") or "GRAPH_WRITE_REJECTED_BY_ADMISSION"),
+                "target_slot": str(blocked_write.get("target_slot") or ""),
+            }
         outcome = self._sqlite_upsert_graph_state(
             subject_name=subject_name,
             attribute=attribute,
@@ -675,6 +683,14 @@ class GraphStateSnapshotMixin(StoreRuntimeBase):
             return merged
         if is_runtime_capability_slot(attribute) or str(merged.get("source_authority") or "").casefold() == "runtime_diagnostic":
             return merged
+        target_slot = canonical_graph_slot(attribute=attribute)
+        if target_slot.startswith("project.") and not str(source or "").strip():
+            merged["durable_graph_write_blocked"] = {
+                "schema": "brainstack.durable_graph_write_block.v1",
+                "reason_code": "PROJECT_GRAPH_TRUTH_REQUIRES_SOURCE",
+                "target_slot": target_slot,
+            }
+            return merged
         if not str(source or "").casefold().startswith(("tier2:", "consolidation:", "session_recap:", "pulse:", "background:")):
             return merged
         proposal = graph_claim_proposal(
@@ -688,6 +704,14 @@ class GraphStateSnapshotMixin(StoreRuntimeBase):
         )
         decision = admit_claim(proposal)
         merged.update(decision.metadata_payload())
+        if target_slot.startswith("project.") and not decision.accepted:
+            merged["durable_graph_write_blocked"] = {
+                "schema": "brainstack.durable_graph_write_block.v1",
+                "reason_code": decision.reason_code,
+                "target_slot": decision.target_slot,
+                "authority_class": proposal.authority_class.value,
+                "decision": decision.decision.value,
+            }
         return merged
 
     def upsert_typed_entity(

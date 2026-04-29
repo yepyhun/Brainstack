@@ -89,6 +89,26 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def _default_compose_service(compose_path: Path) -> str | None:
+    data = _load_yaml(compose_path)
+    services = data.get("services") if isinstance(data, dict) else None
+    if isinstance(services, dict):
+        for name, config in services.items():
+            if str(name).startswith("hermes"):
+                return str(name)
+            if isinstance(config, dict) and str(config.get("container_name") or "").startswith("hermes"):
+                return str(name)
+        for name, config in services.items():
+            if not isinstance(config, dict):
+                continue
+            raw_command = config.get("command")
+            if isinstance(raw_command, list):
+                command = " ".join(str(part) for part in raw_command)
+            else:
+                command = str(raw_command or "")
+            if "gateway" in command and "run" in command:
+                return str(name)
+        for name in services:
+            return str(name)
     text = _read(compose_path)
     in_services = False
     for raw_line in text.splitlines():

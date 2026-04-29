@@ -34,6 +34,9 @@ def test_generated_docker_compose_includes_local_tei_jina_runtime(tmp_path):
     assert "tei-jina:" in text
     assert "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9" in text
     assert "jinaai/jina-embeddings-v5-text-small-retrieval" in text
+    assert "network_mode: host" in text
+    assert '"7997"' in text
+    assert '"7997:80"' not in text
     assert "BRAINSTACK_EMBEDDINGS_URL: http://127.0.0.1:7997/embed" in text
     assert "BRAINSTACK_DISABLE_CHROMA_DEFAULT_EMBEDDING: \"true\"" in text
     assert "condition: service_healthy" in text
@@ -68,6 +71,118 @@ def test_generated_docker_compose_allows_external_embedding_runtime(tmp_path):
     assert "TERMINAL_CWD: /workspace" in text
     assert "HERMES_DISCORD_TURN_PROFILE" not in text
     assert "HERMES_DISCORD_TOOL_PROFILE" not in text
+
+
+def test_existing_docker_compose_is_patched_with_local_tei_runtime(tmp_path):
+    compose = tmp_path / "docker-compose.bestie.yml"
+    compose.write_text(
+        """
+name: hermes-bestie
+
+services:
+  hermes-bestie:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hermes-bestie-live
+    working_dir: /opt/data
+    restart: unless-stopped
+    network_mode: host
+    command: ["gateway", "run", "--replace"]
+    environment:
+      HERMES_HOME: /opt/data
+      HERMES_ENABLE_PROJECT_PLUGINS: "true"
+      PYTHONPATH: /opt/hermes/plugins/memory
+      DISCORD_ALLOW_BOTS: "mentions"
+      TERMINAL_CWD: /workspace
+    volumes:
+      - ./hermes-config/bestie:/opt/data
+      - ./runtime/workspace:/workspace
+""",
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_compose_local_tei_jina_runtime(compose, dry_run=False)
+
+    text = compose.read_text(encoding="utf-8")
+    assert "compose:local_tei_jina_service" in applied
+    assert "compose:local_tei_jina_environment" in applied
+    assert "compose:local_tei_jina_dependency" in applied
+    assert "compose:local_tei_jina_volume" in applied
+    assert "tei-jina:" in text
+    assert "network_mode: host" in text
+    assert '"7997:80"' not in text
+    assert "condition: service_healthy" in text
+    assert "BRAINSTACK_EMBEDDINGS_URL: http://127.0.0.1:7997/embed" in text
+    assert "BRAINSTACK_DISABLE_CHROMA_DEFAULT_EMBEDDING: \"true\"" in text
+    assert "tei-model-cache:" in text
+
+
+def test_existing_docker_compose_migrates_old_tei_port_mapping(tmp_path):
+    compose = tmp_path / "docker-compose.bestie.yml"
+    compose.write_text(
+        """
+name: hermes-bestie
+
+services:
+  tei-jina:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+    container_name: tei-jina-v5
+    restart: unless-stopped
+    command:
+      - --model-id
+      - jinaai/jina-embeddings-v5-text-small-retrieval
+      - --port
+      - "80"
+    ports:
+      - "7997:80"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+
+  hermes-bestie:
+    command: ["gateway", "run", "--replace"]
+    environment:
+      HERMES_HOME: /opt/data
+""",
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_compose_local_tei_jina_runtime(compose, dry_run=False)
+
+    text = compose.read_text(encoding="utf-8")
+    assert "compose:local_tei_jina_service_normalized" in applied
+    assert "network_mode: host" in text
+    assert '      - "7997"\n' in text
+    assert '"7997:80"' not in text
+    assert "http://127.0.0.1:7997/health" in text
+
+
+def test_docker_doctor_prefers_hermes_service_when_tei_is_first(tmp_path):
+    compose = tmp_path / "docker-compose.bestie.yml"
+    compose.write_text(
+        """
+name: hermes-bestie
+
+services:
+  tei-jina:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+    container_name: tei-jina-v5
+    command:
+      - --model-id
+      - jinaai/jina-embeddings-v5-text-small-retrieval
+
+  hermes-bestie:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hermes-bestie-live
+    command: ["gateway", "run", "--replace"]
+""",
+        encoding="utf-8",
+    )
+
+    assert brainstack_doctor._default_compose_service(compose) == "hermes-bestie"
+    assert brainstack_doctor._default_container_name(compose) == "hermes-bestie-live"
 
 
 def test_compose_plugin_pythonpath_patch_prevents_runtime_state_shadowing(tmp_path):

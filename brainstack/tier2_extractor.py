@@ -642,7 +642,7 @@ def extract_tier2_candidates(
                 "- identity slots: identity:preferred_address_name for how the user wants to be called; identity:age for explicit age; identity:platform_handle for platform handle; identity:platform_display_name for display name; identity:legal_name only if explicitly stated\n"
                 "- preference slots: preference:addressing, preference:communication_style, preference:formatting, preference:verbosity\n"
                 "- reference slots: reference:repository_url for an explicit named repository URL the user asks to remember; preserve the exact URL literal and do not infer fetched web content\n"
-                "- project facts belong in states/relations, not profile_items; use states for explicit project metadata such as subject=Brainstack, attribute=created_by, value=Tomi, or subject=Brainstack graph layer, attribute=component_inspired_by, value=Graphiti\n"
+                "- project facts belong in states/relations, not profile_items; use states for explicit project metadata such as subject=ExampleProject, attribute=created_by, value=Alex, or subject=ExampleProject graph layer, attribute=component_inspired_by, value=ExampleGraph\n"
                 "- when the user teaches a named long-form communication pack or multi-section rule set, emit that detailed pack in style_contract instead of trying to squeeze it into profile_items\n"
                 "- style_contract is optional; emit it only for durable multi-rule communication contracts the user wants remembered across sessions\n"
                 "- if style_contract is present, it must contain the full detailed rule pack and overlapping rule lines must not be duplicated in profile_items\n"

@@ -311,8 +311,14 @@ def _authority_from_payload(payload: Mapping[str, Any], *, source: str) -> Sourc
         return SourceAuthority.RUNTIME_DIAGNOSTIC
     if speaker in {AssertionSpeaker.TRUSTED_HOST, AssertionSpeaker.TRUSTED_IMPORT}:
         return SourceAuthority.TRUSTED_HOST
-    if speaker == AssertionSpeaker.USER or source_text.startswith("tier2:") or source_text.startswith("user"):
+    if speaker == AssertionSpeaker.USER or source_text.startswith("user"):
         return SourceAuthority.USER_CORRECTION if span_kind == SpanKind.CORRECTION else SourceAuthority.USER_EXPLICIT_ASSERTION
+    if source_text.startswith("tier2:") or source_text.startswith("consolidation:"):
+        return SourceAuthority.TIER2_SUMMARY
+    if source_text.startswith("session_recap:"):
+        return SourceAuthority.SESSION_RECAP
+    if source_text.startswith("pulse:") or source_text.startswith("background:"):
+        return SourceAuthority.PULSE_BACKGROUND
     return SourceAuthority.UNKNOWN
 
 
