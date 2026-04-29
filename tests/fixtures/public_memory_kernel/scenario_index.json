@@ -1,0 +1,127 @@
+{
+  "schema": "brainstack.public_memory_kernel.scenario_index.v1",
+  "oracle_policy": "contract_and_trace_first",
+  "private_data_policy": {
+    "raw_private_data_allowed": false,
+    "blocked_static_marker_patterns": [
+      "local_absolute_home_path",
+      "discord_channel_url",
+      "private_runtime_container_name",
+      "private_repository_owner_literal"
+    ],
+    "blocked_secret_patterns": [
+      "discord_bot_or_user_token",
+      "openai_style_secret_key",
+      "github_personal_access_token"
+    ]
+  },
+  "scenarios": [
+    {
+      "scenario_id": "explicit_capture_complete_public_001",
+      "fixture": "conversations/explicit_capture_complete_public_001.json",
+      "represents_private_failure_class": "receipt_backed_explicit_capture_reset_recall",
+      "invariant": "full memory acknowledgement requires complete receipt coverage",
+      "forbidden_regression": "full_ack_without_complete_receipt_coverage",
+      "required_trace_reason_code": "selected_receipt_backed_fact",
+      "expected_oracle": "contract_and_trace",
+      "does_not_contain_private_data": true
+    },
+    {
+      "scenario_id": "partial_capture_public_001",
+      "fixture": "conversations/partial_capture_public_001.json",
+      "represents_private_failure_class": "partial_receipt_full_ack",
+      "invariant": "partial receipt coverage cannot produce full acknowledgement",
+      "forbidden_regression": "partial_coverage_allows_full_ack",
+      "required_trace_reason_code": "full_ack_requires_complete_receipt_coverage",
+      "expected_oracle": "contract_and_trace",
+      "does_not_contain_private_data": true
+    },
+    {
+      "scenario_id": "assistant_contamination_public_001",
+      "fixture": "conversations/assistant_contamination_public_001.json",
+      "represents_private_failure_class": "assistant_self_claim_refeed",
+      "invariant": "assistant output cannot become answer truth",
+      "forbidden_regression": "assistant_self_claim_model_facing_after_reset",
+      "required_trace_reason_code": "dropped_assistant_claim_not_truth_authority",
+      "expected_oracle": "contract_and_trace",
+      "does_not_contain_private_data": true
+    },
+    {
+      "scenario_id": "correction_public_001",
+      "fixture": "conversations/correction_public_001.json",
+      "represents_private_failure_class": "corrected_false_selected_as_current_truth",
+      "invariant": "corrected-false evidence cannot be selected as current truth",
+      "forbidden_regression": "corrected_false_answer_evidence",
+      "required_trace_reason_code": "dropped_corrected_false",
+      "expected_oracle": "contract_and_trace",
+      "does_not_contain_private_data": true
+    },
+    {
+      "scenario_id": "reference_url_no_fetch_public_001",
+      "fixture": "conversations/reference_url_no_fetch_public_001.json",
+      "represents_private_failure_class": "reference_url_save_without_fetch",
+      "invariant": "reference URL save preserves literal without web fetch success claim",
+      "forbidden_regression": "url_content_invented_or_fetch_claimed",
+      "required_trace_reason_code": "selected_receipt_backed_fact",
+      "expected_oracle": "contract_and_trace",
+      "does_not_contain_private_data": true
+    },
+    {
+      "scenario_id": "budget_support_noise_public_001",
+      "fixture": "conversations/budget_support_noise_public_001.json",
+      "represents_private_failure_class": "low_authority_packet_noise_displaces_truth",
+      "invariant": "budget pressure drops support-only transcript noise before receipt-backed facts",
+      "forbidden_regression": "support_context_displaces_authority_critical_evidence",
+      "required_trace_reason_code": "dropped_budget_support_only",
+      "expected_oracle": "contract_and_trace",
+      "does_not_contain_private_data": true
+    },
+    {
+      "scenario_id": "budget_duplicate_public_001",
+      "fixture": "conversations/budget_duplicate_public_001.json",
+      "represents_private_failure_class": "duplicate_lower_authority_packet_waste",
+      "invariant": "lower-authority duplicate evidence is dropped before unique receipt-backed evidence",
+      "forbidden_regression": "duplicate_support_summary_kept_over_receipt_backed_fact",
+      "required_trace_reason_code": "dropped_budget_duplicate_lower_authority",
+      "expected_oracle": "contract_and_trace",
+      "does_not_contain_private_data": true
+    },
+    {
+      "scenario_id": "budget_authority_minimum_public_001",
+      "fixture": "conversations/budget_authority_minimum_public_001.json",
+      "represents_private_failure_class": "authority_minimum_exceeds_budget",
+      "invariant": "budget insufficiency fails closed instead of silently dropping authority-critical evidence",
+      "forbidden_regression": "receipt_backed_fact_dropped_to_meet_budget",
+      "required_trace_reason_code": "budget_insufficient_for_authority_minimum",
+      "expected_oracle": "contract_and_trace",
+      "does_not_contain_private_data": true
+    }
+  ],
+  "negative_fixtures": [
+    {
+      "negative_id": "assistant_truth_eligible",
+      "fixture": "negative/assistant_truth_eligible.json",
+      "expected_error": "assistant_claim_cannot_be_answer_truth"
+    },
+    {
+      "negative_id": "budget_protected_dropped",
+      "fixture": "negative/budget_protected_dropped.json",
+      "expected_error": "budget_dropped_authority_critical_evidence"
+    },
+    {
+      "negative_id": "free_text_reason",
+      "fixture": "negative/free_text_reason.json",
+      "expected_error": "unknown_reason_code"
+    },
+    {
+      "negative_id": "raw_text_included",
+      "fixture": "negative/raw_text_included.json",
+      "expected_error": "raw_text_included"
+    },
+    {
+      "negative_id": "support_only_answer_allowed",
+      "fixture": "negative/support_only_answer_allowed.json",
+      "expected_error": "support_only_cannot_be_answer_evidence"
+    }
+  ]
+}
