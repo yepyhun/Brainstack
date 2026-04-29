@@ -73,6 +73,8 @@ def _classify(file: str, method: str, caller: str) -> tuple[str, str]:
         return "TEST_OR_CANARY_SEED", "packet-budget live-like shadow measurement fixture seed"
     if file.startswith("scripts/measure_packet_budget_active_rollout.py"):
         return "TEST_OR_CANARY_SEED", "packet-budget active rollout measurement fixture seed"
+    if file.startswith("scripts/verify_packet_budget_runtime_parity.py"):
+        return "TEST_OR_CANARY_SEED", "packet-budget runtime parity measurement fixture seed"
     if file.startswith("scripts/brainstack_replay_canary.py"):
         return "TEST_OR_CANARY_SEED", "replay canary fixture seed"
     if file.startswith("tests/"):
