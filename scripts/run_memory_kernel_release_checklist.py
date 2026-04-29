@@ -176,6 +176,55 @@ def _check_active_packet_budget(tmp: Path) -> CheckResult:
     )
 
 
+def _check_packet_budget_soak(tmp: Path) -> CheckResult:
+    out = tmp / "packet_budget_soak.json"
+    command = [
+        sys.executable,
+        "scripts/run_packet_budget_soak.py",
+        "--sample-count",
+        "100",
+        "--budget-max-candidate-tokens",
+        "120",
+        "--out",
+        str(out),
+    ]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("scenario_count", 0) >= 100
+        and data.get("scenario_family_count", 0) >= 10
+        and data.get("protected_truth_drop_attempts") == 0
+        and data.get("selected_evidence_fingerprint_mismatch_count") == 0
+        and data.get("trace_complete_count") == data.get("scenario_count")
+        and data.get("soak_artifact_leak_findings") == 0
+        and data.get("failure_bundle_count") == 0
+        and data.get("retrieval_fusion_next_phase_required") is False
+    )
+    return CheckResult(
+        name="packet_budget_soak",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "scenario_count": data.get("scenario_count"),
+            "scenario_family_count": data.get("scenario_family_count"),
+            "candidate_token_delta_percent": data.get("candidate_token_delta_percent"),
+            "protected_truth_drop_attempts": data.get("protected_truth_drop_attempts"),
+            "selected_evidence_fingerprint_mismatch_count": data.get(
+                "selected_evidence_fingerprint_mismatch_count"
+            ),
+            "trace_complete_count": data.get("trace_complete_count"),
+            "soak_artifact_leak_findings": data.get("soak_artifact_leak_findings"),
+            "failure_bundle_count": data.get("failure_bundle_count"),
+            "retrieval_fusion_next_phase_required": data.get(
+                "retrieval_fusion_next_phase_required"
+            ),
+        },
+    )
+
+
 def _check_write_path(tmp: Path) -> CheckResult:
     out = tmp / "write_path_closure_audit.json"
     command = [sys.executable, "scripts/brainstack_write_path_closure_audit.py", "--json-out", str(out)]
@@ -283,6 +332,7 @@ def run_checklist(*, ignore_git_dirty_for_dev: bool = False) -> dict[str, Any]:
             _check_evidence_trace(tmp),
             _check_packet_budget(tmp),
             _check_active_packet_budget(tmp),
+            _check_packet_budget_soak(tmp),
             _check_write_path(tmp),
             _check_public_fixtures(),
             _check_git_hygiene(),
