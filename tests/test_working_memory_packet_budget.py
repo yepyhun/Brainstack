@@ -55,6 +55,7 @@ def test_working_memory_packet_budget_shadow_does_not_change_block(tmp_path: Pat
             query="What is my name?",
             session_id=session,
             principal_scope_key=scope,
+            packet_budget_mode="off",
             **_packet_defaults(),
         )
         shadow = build_working_memory_packet(

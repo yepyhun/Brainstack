@@ -15,7 +15,12 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from .core.packet_budget import PacketBudgetPolicy, apply_packet_budget
+from .core.packet_budget import (
+    PacketBudgetPolicy,
+    apply_packet_budget,
+    resolve_packet_budget_max_candidate_tokens,
+    resolve_packet_budget_mode,
+)
 
 PRODUCT_PROBE_SCHEMA = "brainstack.product_probe.v1"
 FAILURE_BUNDLE_SCHEMA = "brainstack.failure_bundle.v1"
@@ -342,7 +347,7 @@ def model_facing_packet_firewall(
     candidates: Sequence[Mapping[str, Any]],
     *,
     query_mode: str = "normal",
-    packet_budget_mode: str = "off",
+    packet_budget_mode: str | None = None,
     packet_budget_max_candidate_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Filter final memory packet candidates before prompt assembly."""
@@ -428,19 +433,33 @@ def model_facing_packet_firewall(
         if bool(item.get("answer_evidence", False)):
             answer_evidence.append(item)
 
+    if packet_budget_mode is None and history_mode:
+        resolved_packet_budget_mode = "off"
+        packet_budget_disabled_reason = "unsupported_query_mode"
+    else:
+        resolved_packet_budget_mode = resolve_packet_budget_mode(packet_budget_mode)
+        packet_budget_disabled_reason = ""
+    resolved_packet_budget_max_candidate_tokens = resolve_packet_budget_max_candidate_tokens(
+        packet_budget_max_candidate_tokens
+    )
     packet_budget = {
-        "mode": packet_budget_mode,
-        "enabled": packet_budget_mode in {"shadow", "active"},
-        "max_candidate_tokens": packet_budget_max_candidate_tokens,
+        "mode": resolved_packet_budget_mode,
+        "enabled": resolved_packet_budget_mode in {"shadow", "active"},
+        "max_candidate_tokens": resolved_packet_budget_max_candidate_tokens,
         "applied_to_output": False,
     }
-    if packet_budget_mode in {"shadow", "active"} and packet_budget_max_candidate_tokens is not None:
+    if packet_budget_disabled_reason:
+        packet_budget["disabled_reason"] = packet_budget_disabled_reason
+    if (
+        resolved_packet_budget_mode in {"shadow", "active"}
+        and resolved_packet_budget_max_candidate_tokens is not None
+    ):
         budget_result = apply_packet_budget(
             kept,
-            PacketBudgetPolicy(max_candidate_tokens=packet_budget_max_candidate_tokens),
+            PacketBudgetPolicy(max_candidate_tokens=resolved_packet_budget_max_candidate_tokens),
         )
         packet_budget.update(budget_result.to_trace_packet_budget())
-        if packet_budget_mode == "active":
+        if resolved_packet_budget_mode == "active":
             kept = [item for item in budget_result.candidates if item.get("decision") == "selected"]
             budget_dropped = [
                 item for item in budget_result.candidates if item.get("decision") == "dropped"

@@ -130,6 +130,52 @@ def _check_packet_budget(tmp: Path) -> CheckResult:
     )
 
 
+def _check_active_packet_budget(tmp: Path) -> CheckResult:
+    out = tmp / "packet_budget_active_rollout.json"
+    command = [
+        sys.executable,
+        "scripts/measure_packet_budget_active_rollout.py",
+        "--sample-count",
+        "24",
+        "--budget-max-candidate-tokens",
+        "120",
+        "--out",
+        str(out),
+    ]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    passed = (
+        proc.returncode == 0
+        and data.get("active_budget_enabled_for_supported_paths") is True
+        and data.get("protected_truth_drop_attempts") == 0
+        and data.get("budget_decision_trace_present") is True
+        and data.get("budget_reason_code_registry_pass") is True
+        and data.get("raw_text_in_budget_trace") is False
+        and data.get("unsupported_path_fail_closed_count") == 1
+    )
+    return CheckResult(
+        name="packet_budget_active_rollout",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "active_budget_enabled_for_supported_paths": data.get(
+                "active_budget_enabled_for_supported_paths"
+            ),
+            "scenario_count": data.get("scenario_count"),
+            "distinct_scenario_family_count": data.get("distinct_scenario_family_count"),
+            "candidate_token_delta_percent": data.get("candidate_token_delta_percent"),
+            "packet_build_latency_overhead_ms_p95": data.get(
+                "packet_build_latency_overhead_ms_p95"
+            ),
+            "protected_truth_drop_attempts": data.get("protected_truth_drop_attempts"),
+            "budget_reason_code_registry_pass": data.get("budget_reason_code_registry_pass"),
+            "raw_text_in_budget_trace": data.get("raw_text_in_budget_trace"),
+            "unsupported_path_fail_closed_count": data.get("unsupported_path_fail_closed_count"),
+        },
+    )
+
+
 def _check_write_path(tmp: Path) -> CheckResult:
     out = tmp / "write_path_closure_audit.json"
     command = [sys.executable, "scripts/brainstack_write_path_closure_audit.py", "--json-out", str(out)]
@@ -236,6 +282,7 @@ def run_checklist(*, ignore_git_dirty_for_dev: bool = False) -> dict[str, Any]:
             _check_public_corpus(tmp),
             _check_evidence_trace(tmp),
             _check_packet_budget(tmp),
+            _check_active_packet_budget(tmp),
             _check_write_path(tmp),
             _check_public_fixtures(),
             _check_git_hygiene(),

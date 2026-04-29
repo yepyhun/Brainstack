@@ -7,6 +7,7 @@ which already-built evidence candidates survive a token budget.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -27,6 +28,8 @@ BUDGET_STATUS_NOT_APPLICABLE = "not_applicable"
 BUDGET_STATUS_WITHIN_LIMIT = "within_limit"
 BUDGET_STATUS_APPLIED = "applied"
 BUDGET_STATUS_INSUFFICIENT_AUTHORITY = "insufficient_for_authority_minimum"
+DEFAULT_PACKET_BUDGET_MODE = "off"
+DEFAULT_PACKET_BUDGET_MAX_CANDIDATE_TOKENS = 120
 
 _DROPPED_DECISIONS = {DECISION_DROPPED, DECISION_DEMOTED}
 _PROTECTED_AUTHORITIES = {
@@ -34,6 +37,49 @@ _PROTECTED_AUTHORITIES = {
     AUTHORITY_DURABLE_TRUTH,
     AUTHORITY_CITED_CORPUS,
 }
+ALLOWED_PACKET_BUDGET_REASON_CODES = {
+    ReasonCode.BUDGET_INSUFFICIENT_FOR_AUTHORITY_MINIMUM.value,
+    ReasonCode.DROPPED_BUDGET_DUPLICATE_LOWER_AUTHORITY.value,
+    ReasonCode.DROPPED_BUDGET_LOW_AUTHORITY.value,
+    ReasonCode.DROPPED_BUDGET_OVERFLOW.value,
+    ReasonCode.DROPPED_BUDGET_STALE_TRANSCRIPT.value,
+    ReasonCode.DROPPED_BUDGET_SUPPORT_ONLY.value,
+    ReasonCode.SELECTED_BUDGET_PROTECTED_AUTHORITY.value,
+    ReasonCode.SELECTED_BUDGET_WITHIN_LIMIT.value,
+}
+PACKET_BUDGET_TRACE_DECISION_FIELDS = {
+    "candidate_id",
+    "decision",
+    "reason_code",
+    "token_estimate",
+}
+
+
+def resolve_packet_budget_mode(mode: str | None = None) -> str:
+    """Resolve packet-budget mode from explicit value, env, then safe default."""
+
+    configured = mode
+    if configured is None:
+        configured = os.environ.get("BRAINSTACK_PACKET_BUDGET_MODE")
+    resolved = " ".join(str(configured or DEFAULT_PACKET_BUDGET_MODE).strip().split()).casefold()
+    if resolved not in {"off", "shadow", "active"}:
+        return "off"
+    return resolved
+
+
+def resolve_packet_budget_max_candidate_tokens(value: int | None = None) -> int | None:
+    """Resolve packet-budget cap from explicit value, env, then default."""
+
+    if value is not None:
+        return value
+    configured = os.environ.get("BRAINSTACK_PACKET_BUDGET_MAX_CANDIDATE_TOKENS")
+    if configured:
+        try:
+            parsed = int(configured)
+        except ValueError:
+            return None
+        return parsed if parsed > 0 else None
+    return DEFAULT_PACKET_BUDGET_MAX_CANDIDATE_TOKENS
 
 
 def _text(value: object) -> str:
@@ -173,6 +219,11 @@ class PacketBudgetResult:
                 }
                 for item in self.candidates
             ],
+            "budget_reason_code_registry_pass": all(
+                _text(item.get("reason_code")) in ALLOWED_PACKET_BUDGET_REASON_CODES
+                for item in self.candidates
+            ),
+            "raw_text_in_budget_trace": False,
         }
 
 
@@ -447,6 +498,22 @@ def validate_packet_budget_trace(trace: Mapping[str, Any]) -> list[str]:
             errors.append("budget_dropped_authority_critical_evidence")
     packet_budget = trace.get("packet_budget")
     if isinstance(packet_budget, Mapping):
+        decisions = packet_budget.get("budget_decisions")
+        if isinstance(decisions, list):
+            for decision in decisions:
+                if not isinstance(decision, Mapping):
+                    errors.append("budget_decision_not_mapping")
+                    continue
+                extra_fields = set(decision) - PACKET_BUDGET_TRACE_DECISION_FIELDS
+                if extra_fields:
+                    errors.append("budget_decision_contains_unregistered_fields")
+                reason_code = _text(decision.get("reason_code"))
+                if reason_code not in ALLOWED_PACKET_BUDGET_REASON_CODES:
+                    errors.append("budget_reason_code_not_registered")
+        if packet_budget.get("budget_reason_code_registry_pass") is False:
+            errors.append("budget_reason_code_registry_failed")
+        if packet_budget.get("raw_text_in_budget_trace") is True:
+            errors.append("budget_trace_contains_raw_text")
         for key in (
             "answer_evidence_preserved",
             "receipt_coverage_preserved",

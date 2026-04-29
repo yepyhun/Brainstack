@@ -12,6 +12,7 @@ from .provider.runtime import (
     resolve_user_timezone,
     threading,
 )
+from .core.packet_budget import DEFAULT_PACKET_BUDGET_MAX_CANDIDATE_TOKENS
 from .provider.config_lifecycle import ConfigLifecycleMixin
 from .provider.explicit_capture import ExplicitCaptureMixin
 from .provider.prefetch_sync import PrefetchSyncMixin
@@ -68,6 +69,13 @@ class BrainstackMemoryProvider(
         self._tier2_transcript_limit = int(self._config.get("tier2_transcript_limit", 8))
         self._tier2_timeout_seconds = float(self._config.get("tier2_timeout_seconds", 15))
         self._tier2_max_tokens = int(self._config.get("tier2_max_tokens", 900))
+        self._packet_budget_mode = str(self._config.get("packet_budget_mode", "active") or "active")
+        self._packet_budget_max_candidate_tokens = int(
+            self._config.get(
+                "packet_budget_max_candidate_tokens",
+                DEFAULT_PACKET_BUDGET_MAX_CANDIDATE_TOKENS,
+            )
+        )
         self._route_resolver_override = None
         self._last_prefetch_policy: Dict[str, Any] | None = None
         self._last_prefetch_routing: Dict[str, Any] | None = None

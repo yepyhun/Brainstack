@@ -280,6 +280,7 @@ def measure_live_like_shadow(
                     query=query,
                     session_id=session,
                     principal_scope_key=scope,
+                    packet_budget_mode="off",
                     **_packet_defaults(),
                 )
                 shadow = build_working_memory_packet(

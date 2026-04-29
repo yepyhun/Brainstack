@@ -26,6 +26,8 @@ class ProviderRuntimeBase:
     _last_write_receipt: Any
     _pending_explicit_write_count: int
     _pending_tier2_turns: int
+    _packet_budget_max_candidate_tokens: int
+    _packet_budget_mode: str
     _principal_scope: dict[str, str]
     _principal_scope_key: str
     _recent_user_messages: list[str]

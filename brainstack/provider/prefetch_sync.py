@@ -143,6 +143,8 @@ class PrefetchSyncMixin(ProviderRuntimeBase):
             route_resolver=self._route_resolver_override,
             system_substrate=system_substrate,
             render_ordinary_contract=self._ordinary_packet_behavior_contract_enabled,
+            packet_budget_mode=self._packet_budget_mode,
+            packet_budget_max_candidate_tokens=self._packet_budget_max_candidate_tokens,
         )
         self._last_prefetch_policy = packet["policy"]
         self._last_prefetch_routing = dict(packet.get("routing") or {})

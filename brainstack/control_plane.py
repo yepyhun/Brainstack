@@ -4,7 +4,12 @@ from dataclasses import asdict, dataclass
 import json
 from typing import Any, Callable, Dict, Mapping
 
-from .core.packet_budget import PacketBudgetPolicy, apply_packet_budget
+from .core.packet_budget import (
+    PacketBudgetPolicy,
+    apply_packet_budget,
+    resolve_packet_budget_max_candidate_tokens,
+    resolve_packet_budget_mode,
+)
 from .db import BrainstackStore
 from .executive_retrieval import retrieve_executive_context
 from .local_typed_understanding import analyze_local_query
@@ -503,7 +508,7 @@ def _working_memory_budget_candidates(
 
 def _apply_working_memory_packet_budget(
     *,
-    mode: str,
+    mode: str | None,
     max_candidate_tokens: int | None,
     profile_items: list[dict[str, Any]],
     task_rows: list[dict[str, Any]],
@@ -514,16 +519,21 @@ def _apply_working_memory_packet_budget(
     graph_rows: list[dict[str, Any]],
     corpus_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    normalized_mode = str(mode or "off").strip().casefold()
-    if normalized_mode not in {"off", "shadow", "active"}:
-        normalized_mode = "off"
+    requested_mode = "" if mode is None else str(mode)
+    normalized_mode = resolve_packet_budget_mode(mode)
+    resolved_max_candidate_tokens = resolve_packet_budget_max_candidate_tokens(max_candidate_tokens)
     telemetry: dict[str, Any] = {
         "mode": normalized_mode,
         "enabled": normalized_mode in {"shadow", "active"},
         "applied_to_output": False,
-        "max_candidate_tokens": max_candidate_tokens,
+        "max_candidate_tokens": resolved_max_candidate_tokens,
+        "requested_mode": requested_mode or None,
     }
-    if normalized_mode == "off" or max_candidate_tokens is None:
+    if requested_mode and normalized_mode == "off" and requested_mode.strip().casefold() != "off":
+        telemetry["disabled_reason"] = "invalid_packet_budget_mode"
+    if normalized_mode == "off" or resolved_max_candidate_tokens is None:
+        if normalized_mode in {"shadow", "active"} and resolved_max_candidate_tokens is None:
+            telemetry["disabled_reason"] = "missing_packet_budget_max_candidate_tokens"
         return {
             "telemetry": telemetry,
             "profile_items": profile_items,
@@ -547,7 +557,7 @@ def _apply_working_memory_packet_budget(
     )
     result = apply_packet_budget(
         candidates,
-        PacketBudgetPolicy(max_candidate_tokens=max_candidate_tokens),
+        PacketBudgetPolicy(max_candidate_tokens=resolved_max_candidate_tokens),
     )
     telemetry.update(result.to_trace_packet_budget())
     if normalized_mode == "shadow":
@@ -617,7 +627,7 @@ def build_working_memory_packet(
     system_substrate: Dict[str, Any] | None = None,
     render_ordinary_contract: bool = False,
     record_retrievals: bool = True,
-    packet_budget_mode: str = "off",
+    packet_budget_mode: str | None = None,
     packet_budget_max_candidate_tokens: int | None = None,
 ) -> Dict[str, Any]:
     analysis = analyze_query(
