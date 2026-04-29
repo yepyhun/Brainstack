@@ -52,8 +52,11 @@ class BrainstackMemoryProvider(
         self._corpus_match_limit = int(self._config.get("corpus_match_limit", 4))
         self._corpus_char_budget = int(self._config.get("corpus_char_budget", 700))
         self._corpus_section_max_chars = int(self._config.get("corpus_section_max_chars", 900))
+        self._active_preference_contract_enabled = bool(
+            self._config.get("active_preference_contract_enabled", True)
+        )
         self._system_prompt_behavior_contract_enabled = bool(
-            self._config.get("system_prompt_behavior_contract_enabled", False)
+            self._config.get("system_prompt_behavior_contract_enabled", self._active_preference_contract_enabled)
         )
         self._ordinary_packet_behavior_contract_enabled = bool(
             self._config.get("ordinary_packet_behavior_contract_enabled", False)

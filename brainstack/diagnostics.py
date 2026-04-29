@@ -8,6 +8,7 @@ from .db_diagnostics import build_db_substrate_snapshot
 from .graph_lineage import compact_graph_source_lineage
 from .literal_index import detect_literal_tokens, redact_literal_text, semantic_anchor_text
 from .answerability import build_memory_answerability
+from .backend_health_contract import build_backend_health_contract
 from .retrieval_candidate import build_candidate_trace
 from .working_memory_allocator import build_global_allocator_shadow
 
@@ -103,6 +104,12 @@ def _backend_capability(
         lowered_error = error_text.casefold()
         if "std::bad_alloc" in lowered_error or "memoryerror" in lowered_error:
             error_class = "backend_open_memory_error"
+        elif "chroma default embedding is disabled" in lowered_error:
+            error_class = "backend_embedding_config_missing"
+        elif "permission denied" in lowered_error or "operation not permitted" in lowered_error:
+            error_class = "backend_permission_error"
+        elif "could not set lock on file" in lowered_error or "docs.kuzudb.com/concurrency" in lowered_error:
+            error_class = "backend_active_runtime_lock_expected"
         elif "no module" in lowered_error or "import" in lowered_error:
             error_class = "backend_dependency_missing"
         else:
@@ -219,9 +226,19 @@ def _query_capability_health(store: BrainstackStore) -> Dict[str, Any]:
     db_substrate: Mapping[str, Any] = db_substrate_raw if isinstance(db_substrate_raw, Mapping) else {}
     semantic_index: Mapping[str, Any] = semantic_index_raw if isinstance(semantic_index_raw, Mapping) else {}
     graph_recall: Mapping[str, Any] = graph_recall_raw if isinstance(graph_recall_raw, Mapping) else {}
+    backend_health = build_backend_health_contract(
+        {
+            "graph": graph,
+            "corpus": corpus,
+            "db_substrate": db_substrate,
+            "semantic_index": semantic_index,
+            "graph_recall": graph_recall,
+        }
+    )
     return {
         "schema": "brainstack.query_capability_health.v1",
         "verdict": str(doctor.get("verdict") or "degraded"),
+        "backend_health": backend_health,
         "sqlite": dict(db_substrate),
         "graph": dict(graph),
         "corpus": dict(corpus),
@@ -303,19 +320,22 @@ def build_memory_kernel_doctor(
         verdict = "fail"
     elif issues:
         verdict = "degraded"
+    capabilities = {
+        "db_substrate": db_substrate,
+        "graph": graph,
+        "corpus": corpus,
+        "semantic_index": semantic_index,
+        "graph_recall": graph_recall,
+        "tier2": tier2,
+    }
+    backend_health = build_backend_health_contract(capabilities)
     return {
         "schema": "brainstack.memory_kernel_doctor.v1",
         "strict": bool(strict),
         "verdict": verdict,
         "terms": dict(DIAGNOSTIC_TERMS),
-        "capabilities": {
-            "db_substrate": db_substrate,
-            "graph": graph,
-            "corpus": corpus,
-            "semantic_index": semantic_index,
-            "graph_recall": graph_recall,
-            "tier2": tier2,
-        },
+        "capabilities": capabilities,
+        "backend_health": backend_health,
         "row_counts": row_counts,
         "last_writes": last_writes,
         "issues": issues,

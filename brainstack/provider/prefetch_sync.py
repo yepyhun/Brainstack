@@ -83,6 +83,9 @@ class PrefetchSyncMixin(ProviderRuntimeBase):
             "surface": "system_prompt_block",
             "injected": bool(contract_title and contract_title in block),
             "section_present": bool(projection.get("contract_present")),
+            "active_preference_contract_delivery": dict(
+                projection.get("active_preference_delivery_trace") or {}
+            ),
             "title_present": bool(contract_title and contract_title in block),
             "snapshot": snapshot,
             "projection": dict(projection),
@@ -180,6 +183,9 @@ class PrefetchSyncMixin(ProviderRuntimeBase):
         trace["prefetch"] = {
             "surface": "prefetch",
             "route_mode": str(packet.get("routing", {}).get("applied_mode") or "fact"),
+            "active_preference_contract_delivery": dict(
+                system_substrate.get("active_preference_delivery_trace") or {}
+            ),
             "style_contract_activated_before_prefetch": False,
             "task_capture_activated_before_prefetch": False,
             "operating_truth_activated_before_prefetch": False,

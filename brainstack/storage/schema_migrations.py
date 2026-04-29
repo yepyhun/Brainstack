@@ -66,6 +66,17 @@ class SchemaMigrationMixin(StoreRuntimeBase):
         except Exception:
             pass
 
+    def _disable_corpus_backend(self, *, reason: str) -> None:
+        self._corpus_backend_error = str(reason or "corpus backend disabled")
+        backend = self._corpus_backend
+        self._corpus_backend = None
+        if backend is None:
+            return
+        try:
+            backend.close()
+        except Exception:
+            pass
+
     def _resolve_session_principal_scope(
         self,
         *,

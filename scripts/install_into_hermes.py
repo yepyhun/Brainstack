@@ -100,12 +100,12 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "removal_condition": "Upstream Hermes tests cover stale Nous agent-key rejection.",
     },
     "_patch_compose_healthcheck": {
-        "category": "compat_hotfix",
+        "category": "required_seam",
         "owner": "private-runtime",
         "removal_condition": "Runtime deployment provides an explicit readiness healthcheck outside source patching.",
     },
     "_patch_compose_runtime_identity": {
-        "category": "compat_hotfix",
+        "category": "required_seam",
         "owner": "private-runtime",
         "removal_condition": "Runtime deployment provides UID/GID mapping outside source patching.",
     },
@@ -133,6 +133,11 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "category": "required_seam",
         "owner": "gateway-runtime-seam",
         "removal_condition": "Hermes Discord turn profiles preserve native platform toolsets by default while deferred ToolLoader support is incomplete.",
+    },
+    "_patch_gateway_run_turn_profile_resolution": {
+        "category": "required_seam",
+        "owner": "gateway-runtime-seam",
+        "removal_condition": "Hermes Gateway natively resolves turn profiles while preserving configured platform toolsets.",
     },
     "_patch_deferred_tool_loader_contract": {
         "category": "compat_hotfix",
@@ -365,6 +370,14 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_modes": ("source", "docker"),
         "purpose": "Prevent Discord conversation mode from replacing Hermes' native platform toolset with an empty compact profile.",
         "why": "Brainstack integration must not make native file, terminal, web, or workflow tools disappear behind hidden mode selection.",
+    },
+    {
+        "patcher": "_patch_gateway_run_turn_profile_resolution",
+        "target": "gateway/run.py",
+        "scope": "gateway-capability-preservation-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Wire Gateway turns through the capability-preserving turn profile resolver.",
+        "why": "The profile module is inert unless Gateway uses it before constructing the per-turn agent.",
     },
     {
         "patcher": "_patch_config",
@@ -3673,6 +3686,46 @@ def _patch_gateway_turn_profiles_capability_preserving_default(path: Path, dry_r
     return ["gateway_turn_profiles:capability_preserving_default"]
 
 
+def _patch_gateway_run_turn_profile_resolution(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    if "from gateway.turn_profiles import resolve_turn_profile" in text and "_last_turn_profile_resolution" in text:
+        return []
+
+    anchor = (
+        "        from hermes_cli.tools_config import _get_platform_tools\n"
+        "        enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))\n"
+    )
+    matches = list(re.finditer(re.escape(anchor), text))
+    if not matches:
+        raise RuntimeError(f"Installer patch anchor missing for gateway turn profile resolution in {path}")
+
+    rebuilt: list[str] = []
+    last = 0
+    applied = 0
+    for index, match in enumerate(matches):
+        rebuilt.append(text[last : match.end()])
+        local_context = text[max(0, match.start() - 2500) : match.start()]
+        prompt_expr = "prompt" if index == 0 and "prompt: str" in local_context else "message"
+        rebuilt.append(
+            "        from gateway.turn_profiles import resolve_turn_profile\n"
+            "        turn_profile_resolution = resolve_turn_profile(\n"
+            "            platform=platform_key,\n"
+            f"            prompt={prompt_expr},\n"
+            "            current_enabled_toolsets=enabled_toolsets,\n"
+            "        )\n"
+            "        enabled_toolsets = list(turn_profile_resolution.enabled_toolsets)\n"
+            "        self._last_turn_profile_resolution = turn_profile_resolution.to_dict()\n"
+        )
+        last = match.end()
+        applied += 1
+    rebuilt.append(text[last:])
+    if not dry_run:
+        path.write_text("".join(rebuilt), encoding="utf-8")
+    return [f"gateway_run:turn_profile_resolution:{applied}"]
+
+
 def _patch_auxiliary_client(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
@@ -4168,89 +4221,149 @@ def _patch_compose_runtime_identity(path: Path, dry_run: bool) -> list[str]:
         return []
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
-    if 'HERMES_UID:' in text and 'HERMES_GID:' in text:
-        return applied
-    anchors = [
-        '      HERMES_ENABLE_PROJECT_PLUGINS: "true"\n',
-        "      HERMES_ENABLE_PROJECT_PLUGINS: 'true'\n",
-    ]
-    inject = (
-        '      HERMES_ENABLE_PROJECT_PLUGINS: "true"\n'
-        '      HERMES_UID: "${HERMES_UID:-1000}"\n'
-        '      HERMES_GID: "${HERMES_GID:-1000}"\n'
+    old_text = text
+    text, inserted_plugins = _compose_ensure_env(
+        text,
+        "HERMES_ENABLE_PROJECT_PLUGINS",
+        '"true"',
+        list_value="true",
     )
-    for anchor in anchors:
-        if anchor in text:
-            text = text.replace(anchor, inject, 1)
-            applied.append("compose:runtime_identity_mapping")
-            break
-    if not applied:
-        raise RuntimeError(f"Installer patch anchor missing for compose runtime identity in {path}")
+    if inserted_plugins:
+        applied.append("compose:enable_project_plugins")
+    text, inserted_home = _compose_ensure_env(
+        text,
+        "HERMES_HOME",
+        "/opt/data",
+        list_value="/opt/data",
+    )
+    if inserted_home:
+        applied.append("compose:hermes_home")
+    text, inserted_uid = _compose_ensure_env(
+        text,
+        "HERMES_UID",
+        '"${HERMES_UID:-1000}"',
+        list_value="${HERMES_UID:-1000}",
+    )
+    text, inserted_gid = _compose_ensure_env(
+        text,
+        "HERMES_GID",
+        '"${HERMES_GID:-1000}"',
+        list_value="${HERMES_GID:-1000}",
+    )
+    if inserted_uid or inserted_gid:
+        applied.append("compose:runtime_identity_mapping")
+    if text == old_text:
+        return applied
     if not dry_run:
         path.write_text(text, encoding="utf-8")
     return applied
+
+
+def _compose_env_present(text: str, key: str) -> bool:
+    return re.search(rf"(?m)^\s*(?:-\s*)?{re.escape(key)}(?::|=)", text) is not None
+
+
+def _compose_detect_environment_style(text: str) -> str:
+    if re.search(r"(?m)^\s*-\s*[A-Z0-9_]+=", text):
+        return "list"
+    return "mapping"
+
+
+def _compose_ensure_env(
+    text: str,
+    key: str,
+    mapping_value: str,
+    *,
+    list_value: str | None = None,
+    after_keys: tuple[str, ...] = (),
+) -> tuple[str, bool]:
+    if _compose_env_present(text, key):
+        return text, False
+
+    style = _compose_detect_environment_style(text)
+    if style == "list":
+        rendered_value = list_value if list_value is not None else mapping_value.strip("\"")
+        entry = f"      - {key}={rendered_value}\n"
+        anchors = [
+            re.compile(rf"(?m)^      - {re.escape(anchor_key)}=.*\n")
+            for anchor_key in after_keys
+        ] + [
+            re.compile(r"(?m)^      - HERMES_GID=.*\n"),
+            re.compile(r"(?m)^      - HERMES_UID=.*\n"),
+            re.compile(r"(?m)^    environment:\n"),
+        ]
+    else:
+        entry = f"      {key}: {mapping_value}\n"
+        anchors = [
+            re.compile(rf"(?m)^      {re.escape(anchor_key)}: .*\n")
+            for anchor_key in after_keys
+        ] + [
+            re.compile(r"(?m)^      HERMES_ENABLE_PROJECT_PLUGINS: .*\n"),
+            re.compile(r"(?m)^      HERMES_GID: .*\n"),
+            re.compile(r"(?m)^      HERMES_UID: .*\n"),
+            re.compile(r"(?m)^      HERMES_HOME: .*\n"),
+            re.compile(r"(?m)^    environment:\n"),
+        ]
+
+    for anchor in anchors:
+        match = anchor.search(text)
+        if match:
+            return text[: match.end()] + entry + text[match.end() :], True
+    raise RuntimeError(f"Installer patch anchor missing for compose env {key}")
 
 
 def _patch_compose_plugin_pythonpath(path: Path, dry_run: bool) -> list[str]:
     if not path.exists():
         return []
     text = path.read_text(encoding="utf-8")
-    if "PYTHONPATH:" in text:
-        if "/opt/hermes/plugins/memory" in text:
-            return []
+    if _compose_env_present(text, "PYTHONPATH") and "/opt/hermes/plugins/memory" not in text:
         raise RuntimeError(f"Refusing to overwrite existing compose PYTHONPATH in {path}")
-    anchors = [
-        '      HERMES_ENABLE_PROJECT_PLUGINS: "true"\n',
-        "      HERMES_ENABLE_PROJECT_PLUGINS: 'true'\n",
-    ]
-    for anchor in anchors:
-        if anchor in text:
-            text = text.replace(anchor, anchor + "      PYTHONPATH: /opt/hermes/plugins/memory\n", 1)
-            if not dry_run:
-                path.write_text(text, encoding="utf-8")
-            return ["compose:plugin_pythonpath"]
-    raise RuntimeError(f"Installer patch anchor missing for compose plugin PYTHONPATH in {path}")
+    text, inserted = _compose_ensure_env(
+        text,
+        "PYTHONPATH",
+        "/opt/hermes/plugins/memory",
+        list_value="/opt/hermes/plugins/memory",
+        after_keys=("HERMES_ENABLE_PROJECT_PLUGINS",),
+    )
+    if inserted and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return ["compose:plugin_pythonpath"] if inserted else []
 
 
 def _patch_compose_discord_bot_mentions(path: Path, dry_run: bool) -> list[str]:
     if not path.exists():
         return []
     text = path.read_text(encoding="utf-8")
-    if "DISCORD_ALLOW_BOTS:" in text:
+    if _compose_env_present(text, "DISCORD_ALLOW_BOTS"):
         return []
-    anchors = [
-        "      PYTHONPATH: /opt/hermes/plugins/memory\n",
-        '      HERMES_ENABLE_PROJECT_PLUGINS: "true"\n',
-        "      HERMES_ENABLE_PROJECT_PLUGINS: 'true'\n",
-    ]
-    for anchor in anchors:
-        if anchor in text:
-            text = text.replace(anchor, anchor + '      DISCORD_ALLOW_BOTS: "mentions"\n', 1)
-            if not dry_run:
-                path.write_text(text, encoding="utf-8")
-            return ["compose:discord_allow_bot_mentions"]
-    raise RuntimeError(f"Installer patch anchor missing for compose Discord bot mention allowance in {path}")
+    text, inserted = _compose_ensure_env(
+        text,
+        "DISCORD_ALLOW_BOTS",
+        '"mentions"',
+        list_value="mentions",
+        after_keys=("PYTHONPATH",),
+    )
+    if inserted and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return ["compose:discord_allow_bot_mentions"] if inserted else []
 
 
 def _patch_compose_terminal_workspace_cwd(path: Path, dry_run: bool) -> list[str]:
     if not path.exists():
         return []
     text = path.read_text(encoding="utf-8")
-    if "TERMINAL_CWD:" in text:
+    if _compose_env_present(text, "TERMINAL_CWD"):
         return []
-    anchors = [
-        '      DISCORD_ALLOW_BOTS: "mentions"\n',
-        "      PYTHONPATH: /opt/hermes/plugins/memory\n",
-        '      HERMES_ENABLE_PROJECT_PLUGINS: "true"\n',
-        "      HERMES_ENABLE_PROJECT_PLUGINS: 'true'\n",
-    ]
-    for anchor in anchors:
-        if anchor in text:
-            text = text.replace(anchor, anchor + "      TERMINAL_CWD: /workspace\n", 1)
-            if not dry_run:
-                path.write_text(text, encoding="utf-8")
-            return ["compose:terminal_cwd_workspace"]
-    raise RuntimeError(f"Installer patch anchor missing for compose terminal workspace cwd in {path}")
+    text, inserted = _compose_ensure_env(
+        text,
+        "TERMINAL_CWD",
+        "/workspace",
+        list_value="/workspace",
+        after_keys=("DISCORD_ALLOW_BOTS",),
+    )
+    if inserted and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return ["compose:terminal_cwd_workspace"] if inserted else []
 
 
 def _patch_compose_remove_discord_forced_heavy_profile(path: Path, dry_run: bool) -> list[str]:
@@ -4261,6 +4374,8 @@ def _patch_compose_remove_discord_forced_heavy_profile(path: Path, dry_run: bool
     for line in (
         "      HERMES_DISCORD_TURN_PROFILE: heavy\n",
         "      HERMES_DISCORD_TOOL_PROFILE: heavy\n",
+        "      - HERMES_DISCORD_TURN_PROFILE=heavy\n",
+        "      - HERMES_DISCORD_TOOL_PROFILE=heavy\n",
     ):
         text = text.replace(line, "")
     if text == old_text:
@@ -4486,10 +4601,27 @@ def _patch_compose_healthcheck(path: Path, dry_run: bool) -> list[str]:
         return []
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
+    command_plain = '    command: ["gateway", "run"]\n'
+    command_replace = '    command: ["gateway", "run", "--replace"]\n'
+    if command_replace not in text and command_plain in text:
+        text = text.replace(command_plain, command_replace, 1)
+        applied.append("compose:gateway_run_replace")
     old = '      test: ["CMD-SHELL", "tr \'\\\\000\' \' \' </proc/1/cmdline | grep -q \'hermes gateway run --replace\' || exit 1"]\n'
     new = '      test: ["CMD", "python3", "/opt/hermes/scripts/hermes-gateway-healthcheck.py", "--quiet"]\n'
     if new not in text and old in text:
         text = text.replace(old, new, 1)
+        applied.append("compose:readiness_healthcheck")
+    elif "hermes-gateway-healthcheck.py" not in text and command_replace in text:
+        healthcheck = (
+            command_replace
+            + "    healthcheck:\n"
+            + '      test: ["CMD", "python3", "/opt/hermes/scripts/hermes-gateway-healthcheck.py", "--quiet"]\n'
+            + "      interval: 30s\n"
+            + "      timeout: 10s\n"
+            + "      retries: 3\n"
+            + "      start_period: 20s\n"
+        )
+        text = text.replace(command_replace, healthcheck, 1)
         applied.append("compose:readiness_healthcheck")
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -4737,6 +4869,7 @@ def main() -> int:
     host_patches.extend(_run_host_patch("_patch_memory_manager", target / "agent" / "memory_manager.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_gateway_run", target / "gateway" / "run.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_gateway_turn_profiles_capability_preserving_default", target / "gateway" / "turn_profiles.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_gateway_run_turn_profile_resolution", target / "gateway" / "run.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     if args.runtime == "docker":
         assert compose_path is not None
         host_patches.extend(_run_host_patch("_patch_compose_healthcheck", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
@@ -4748,6 +4881,16 @@ def main() -> int:
         host_patches.extend(_run_host_patch("_patch_dockerignore", target / ".dockerignore", args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_dockerfile_backend_dependencies", target / "Dockerfile", args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_docker_entrypoint", target / "docker" / "entrypoint.sh", args.dry_run, host_patch_mode=args.host_patch_mode))
+
+    if gateway_patch_mode != "skip" and not args.dry_run:
+        hermes_gateway_patches["after_host_patches"] = inspect_gateway_patch_support(target)
+        if hermes_gateway_patches["after_host_patches"]["status"] != "upstream_gateway_supported":
+            print(
+                "Hermes Gateway patch did not reach supported state after host patches: "
+                f"{hermes_gateway_patches['after_host_patches']['status']}",
+                file=sys.stderr,
+            )
+            return 2
 
     if config_path is not None:
         runtime_state_canonicalization = _canonicalize_runtime_user_profile(config_path, args.dry_run)

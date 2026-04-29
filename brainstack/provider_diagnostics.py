@@ -364,6 +364,8 @@ def handle_brainstack_stats(
 ) -> dict[str, Any]:
     strict_value = args.get("strict", False) if isinstance(args, Mapping) else False
     strict = strict_value if isinstance(strict_value, bool) else str(strict_value).strip().lower() in {"1", "true", "yes"}
+    report = memory_kernel_doctor(strict=strict)
+    raw_backend_health = report.get("backend_health") if isinstance(report, Mapping) else None
     return {
         "schema": "brainstack.tool_stats.v1",
         "tool_name": "brainstack_stats",
@@ -371,5 +373,6 @@ def handle_brainstack_stats(
         "principal_scope_key": principal_scope_key,
         "lifecycle": lifecycle_status(),
         "maintenance": dict(last_maintenance_receipt or {}),
-        "report": memory_kernel_doctor(strict=strict),
+        "backend_health": dict(raw_backend_health) if isinstance(raw_backend_health, Mapping) else {},
+        "report": report,
     }

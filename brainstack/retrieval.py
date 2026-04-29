@@ -4,6 +4,12 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping
 
 from .db import BrainstackStore
+from .active_preference_contract import (
+    DELIVERY_REASON_SESSION_SUBSTRATE_REBUILT,
+    build_active_preference_contract,
+    build_active_preference_delivery_trace,
+    render_active_preference_contract_section,
+)
 from .graph_lineage import compact_graph_source_lineage
 from .literal_index import redact_literal_text
 from .operating_context import render_operating_context_section
@@ -200,10 +206,29 @@ def build_system_prompt_projection(
     principal_scope_key: str = "",
     session_id: str = "",
     include_behavior_contract: bool = True,
+    delivery_reason: str = DELIVERY_REASON_SESSION_SUBSTRATE_REBUILT,
+    prompt_rebuild_id: str | None = None,
+    compaction_event_id: str | None = None,
 ) -> Dict[str, Any]:
     fetch_limit = max(profile_limit * 3, 10)
     items = store.list_profile_items(limit=fetch_limit, principal_scope_key=principal_scope_key)
     behavior_snapshot = store.get_behavior_policy_snapshot(principal_scope_key=principal_scope_key)
+    active_preference_contract = build_active_preference_contract(
+        behavior_snapshot,
+        principal_scope_key=principal_scope_key,
+    )
+    active_preference_section = (
+        render_active_preference_contract_section(active_preference_contract)
+        if include_behavior_contract
+        else ""
+    )
+    active_preference_delivery_trace = build_active_preference_delivery_trace(
+        active_preference_contract,
+        delivered=bool(active_preference_section),
+        delivery_reason=delivery_reason,
+        prompt_rebuild_id=prompt_rebuild_id,
+        compaction_event_id=compaction_event_id,
+    )
     canonical_style_present = bool(
         isinstance(behavior_snapshot, Mapping)
         and isinstance(behavior_snapshot.get("raw_contract"), Mapping)
@@ -253,6 +278,8 @@ def build_system_prompt_projection(
             project_lines.append(line)
 
     sections: List[str] = []
+    if active_preference_section:
+        sections.append(active_preference_section)
     if operating_context_section:
         sections.append(operating_context_section)
     if operating_context_section or profile_lines:
@@ -272,8 +299,10 @@ def build_system_prompt_projection(
 
     return {
         "block": "\n\n".join(section for section in sections if section.strip()),
-        "contract_present": False,
+        "contract_present": bool(active_preference_section),
         "native_preferences_present": False,
+        "active_preference_contract": active_preference_contract,
+        "active_preference_delivery_trace": active_preference_delivery_trace,
         "operating_context_present": bool(operating_context_section),
         "truthful_memory_operations_present": bool(
             operating_context_section or profile_lines
@@ -285,7 +314,11 @@ def build_system_prompt_projection(
         "hidden_profile_keys": tuple(sorted(hidden_profile_keys)),
         "canonical_style_present": canonical_style_present,
         "native_explicit_style_present": native_explicit_style_present,
-        "active_lane_source_revision": 0,
+        "active_lane_source_revision": int(
+            active_preference_contract.get("source_preference_refs", [{}])[0].get("revision_number") or 0
+        )
+        if active_preference_contract.get("source_preference_refs")
+        else 0,
     }
 
 
@@ -768,6 +801,9 @@ def build_system_prompt_block(
     principal_scope_key: str = "",
     session_id: str = "",
     include_behavior_contract: bool = True,
+    delivery_reason: str = DELIVERY_REASON_SESSION_SUBSTRATE_REBUILT,
+    prompt_rebuild_id: str | None = None,
+    compaction_event_id: str | None = None,
 ) -> str:
     return str(
         build_system_prompt_projection(
@@ -776,6 +812,9 @@ def build_system_prompt_block(
             principal_scope_key=principal_scope_key,
             session_id=session_id,
             include_behavior_contract=include_behavior_contract,
+            delivery_reason=delivery_reason,
+            prompt_rebuild_id=prompt_rebuild_id,
+            compaction_event_id=compaction_event_id,
         ).get("block")
         or ""
     )

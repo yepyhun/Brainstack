@@ -50,9 +50,14 @@ class ConfigLifecycleMixin(ProviderRuntimeBase):
             {"key": "corpus_char_budget", "description": "Approximate character budget for packed corpus recall", "default": "700"},
             {"key": "corpus_section_max_chars", "description": "Maximum size of an ingested corpus section", "default": "900"},
             {
+                "key": "active_preference_contract_enabled",
+                "description": "Deliver the compact active user preference contract at session-facing prompt rebuild seams",
+                "default": "true",
+            },
+            {
                 "key": "system_prompt_behavior_contract_enabled",
-                "description": "Legacy compatibility toggle for archived rule-pack projection; keep disabled for normal runtime",
-                "default": "false",
+                "description": "Compatibility alias for active preference contract delivery in the system prompt substrate",
+                "default": "true",
             },
             {
                 "key": "ordinary_packet_behavior_contract_enabled",

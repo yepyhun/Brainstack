@@ -91,6 +91,85 @@ services:
     assert text.index("HERMES_ENABLE_PROJECT_PLUGINS") < text.index("PYTHONPATH")
 
 
+def test_compose_list_environment_patch_preserves_latest_upstream_shape(tmp_path):
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        """
+services:
+  gateway:
+    environment:
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+    command: ["gateway", "run"]
+""",
+        encoding="utf-8",
+    )
+
+    applied = []
+    applied.extend(install_into_hermes._patch_compose_runtime_identity(compose, dry_run=False))
+    applied.extend(install_into_hermes._patch_compose_plugin_pythonpath(compose, dry_run=False))
+    applied.extend(install_into_hermes._patch_compose_discord_bot_mentions(compose, dry_run=False))
+    applied.extend(install_into_hermes._patch_compose_terminal_workspace_cwd(compose, dry_run=False))
+
+    text = compose.read_text(encoding="utf-8")
+    assert "compose:enable_project_plugins" in applied
+    assert "compose:plugin_pythonpath" in applied
+    assert "      - HERMES_HOME=/opt/data" in text
+    assert "      - HERMES_ENABLE_PROJECT_PLUGINS=true" in text
+    assert "      - PYTHONPATH=/opt/hermes/plugins/memory" in text
+    assert "      - DISCORD_ALLOW_BOTS=mentions" in text
+    assert "      - TERMINAL_CWD=/workspace" in text
+    assert text.index("HERMES_GID") < text.index("HERMES_ENABLE_PROJECT_PLUGINS")
+
+
+def test_compose_runtime_identity_is_core_install_seam():
+    assert install_into_hermes._host_patch_selected("_patch_compose_runtime_identity", "core")
+
+
+def test_planned_docker_install_reports_gateway_and_home_as_planned(tmp_path):
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        """
+services:
+  gateway:
+    command: ["gateway", "run"]
+    environment:
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+""",
+        encoding="utf-8",
+    )
+
+    checks = brainstack_doctor._check_compose(compose, planned_install=True)
+    status = {check.name: check.status for check in checks}
+
+    assert status["docker_gateway_mode"] == "pass"
+    assert status["docker_hermes_home"] == "pass"
+
+
+def test_compose_healthcheck_patch_handles_latest_upstream_gateway_command(tmp_path):
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        """
+services:
+  gateway:
+    command: ["gateway", "run"]
+  dashboard:
+    command: ["dashboard", "--host", "127.0.0.1", "--no-open"]
+""",
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_compose_healthcheck(compose, dry_run=False)
+
+    text = compose.read_text(encoding="utf-8")
+    assert "compose:gateway_run_replace" in applied
+    assert "compose:readiness_healthcheck" in applied
+    assert 'command: ["gateway", "run", "--replace"]' in text
+    assert "hermes-gateway-healthcheck.py" in text
+    assert 'command: ["dashboard", "--host", "127.0.0.1", "--no-open"]' in text
+
+
 def test_compose_discord_bot_mentions_patch_allows_live_canary_sender(tmp_path):
     compose = tmp_path / "docker-compose.yml"
     compose.write_text(
@@ -194,6 +273,38 @@ def resolve_turn_profile(*, platform, prompt, current_enabled_toolsets, env=None
     assert 'tool_profile="existing_platform_default"' in text
     assert "enabled_toolsets=current" in text
     assert 'reason_code="DISCORD_DEFAULT_CAPABILITY_PRESERVED"' in text
+
+
+def test_gateway_run_patch_wires_turn_profile_resolution(tmp_path):
+    module = tmp_path / "run.py"
+    module.write_text(
+        '''
+class GatewayRunner:
+    async def _run_background_task(self, prompt: str):
+        user_config = {}
+        platform_key = "discord"
+        from hermes_cli.tools_config import _get_platform_tools
+        enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        return enabled_toolsets
+
+    async def _run_agent(self, message: str):
+        user_config = {}
+        platform_key = "discord"
+        from hermes_cli.tools_config import _get_platform_tools
+        enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        return enabled_toolsets
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_gateway_run_turn_profile_resolution(module, dry_run=False)
+
+    text = module.read_text(encoding="utf-8")
+    assert applied == ["gateway_run:turn_profile_resolution:2"]
+    assert text.count("from gateway.turn_profiles import resolve_turn_profile") == 2
+    assert "prompt=prompt" in text
+    assert "prompt=message" in text
+    assert "self._last_turn_profile_resolution = turn_profile_resolution.to_dict()" in text
 
 
 def test_deferred_tool_loader_contract_patch_preserves_alias_capability(tmp_path):
@@ -616,6 +727,63 @@ def test_planned_install_treats_missing_backend_dependencies_as_planned(monkeypa
     assert dependency_checks == {
         "graph_backend_dependency": "pass",
         "corpus_backend_dependency": "pass",
+    }
+
+
+def test_docker_doctor_accepts_fresh_image_build_dependency_proof(monkeypatch, tmp_path):
+    config = tmp_path / "config.yaml"
+    compose = tmp_path / "docker-compose.yml"
+    dockerfile = tmp_path / "Dockerfile"
+    config.write_text("{}", encoding="utf-8")
+    compose.write_text("services:\n  gateway:\n    build: .\n", encoding="utf-8")
+    dockerfile.write_text("RUN pip install kuzu chromadb openai croniter\n", encoding="utf-8")
+
+    monkeypatch.setattr(brainstack_doctor, "_docker_python_can_import", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(brainstack_doctor, "_python_can_import", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        brainstack_doctor,
+        "_load_yaml",
+        lambda _path: {
+            "memory": {
+                "provider": "brainstack",
+                "memory_enabled": True,
+                "user_profile_enabled": True,
+            },
+            "plugins": {
+                "brainstack": {
+                    "graph_backend": "kuzu",
+                    "graph_db_path": "$HERMES_HOME/brainstack/brainstack.kuzu",
+                    "corpus_backend": "chroma",
+                    "corpus_db_path": "$HERMES_HOME/brainstack/brainstack.chroma",
+                }
+            },
+        },
+    )
+
+    checks = brainstack_doctor._check_config(
+        config,
+        planned_install=False,
+        python_bin=tmp_path / ".venv" / "bin" / "python",
+        runtime="docker",
+        compose_path=compose,
+    )
+
+    dependency_checks = {
+        check.name: check.status
+        for check in checks
+        if check.name
+        in {
+            "graph_backend_dependency",
+            "corpus_backend_dependency",
+            "route_hint_dependency",
+            "cron_dependency",
+        }
+    }
+    assert dependency_checks == {
+        "graph_backend_dependency": "pass",
+        "corpus_backend_dependency": "pass",
+        "route_hint_dependency": "pass",
+        "cron_dependency": "pass",
     }
 
 

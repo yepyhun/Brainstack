@@ -103,16 +103,26 @@ class BrainstackStore(
             )
             self._disable_graph_backend(reason=str(exc))
         self._corpus_backend = create_corpus_backend(self._corpus_backend_name, db_path=self._corpus_db_path)
+        if self._corpus_backend is None and self._corpus_backend_name not in {"", "none", "sqlite"}:
+            self._corpus_backend_error = (
+                f"Corpus backend {self._corpus_backend_name!r} was requested but no backend adapter is active."
+            )
         if self._corpus_backend is not None:
             try:
                 self._corpus_backend.open()
-            except ModuleNotFoundError as exc:
-                self._corpus_backend_error = str(exc)
-                self._corpus_backend = None
-            else:
                 self._corpus_backend_error = ""
                 self._bootstrap_corpus_backend_if_needed()
                 self._replay_corpus_publications_if_needed()
+            except ModuleNotFoundError as exc:
+                self._disable_corpus_backend(reason=str(exc))
+            except Exception as exc:
+                logger.warning(
+                    "Brainstack corpus backend unavailable; disabling corpus backend and continuing with SQLite: %s",
+                    exc,
+                )
+                self._disable_corpus_backend(reason=str(exc))
+            else:
+                self._corpus_backend_error = ""
 
     @_locked
     def close(self) -> None:

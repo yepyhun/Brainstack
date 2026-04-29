@@ -19,6 +19,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PATCH_DIR = REPO_ROOT / "patches" / "hermes_gateway"
+PATCH_PAYLOAD_DIR = PATCH_DIR / "files"
 PATCH_SCHEMA = "brainstack.hermes_gateway_patch_bundle.v1"
 
 UPSTREAM_TRACKING = [
@@ -103,37 +104,18 @@ REQUIRED_GATEWAY_PROBES: dict[str, tuple[str, ...]] = {
         "hermes.memory_answer_renderer.v1",
         "render_memory_answer",
         "current_assignment_absence",
-        "generic_no_evidence_forbidden",
-        "_response_language",
     ),
     "gateway/run.py": (
         "resolve_turn_profile",
         "_last_turn_profile_resolution",
-        "HERMES_DEFERRED_TOOL_SCHEMA",
-        "deferred_tool_schema_mode",
-        "tool_loader_trace",
-    ),
-    "hermes_deferred_tools.py": (
-        "hermes.tool_loader.result.v1",
-        "LOAD_TOOLS_NAME",
-        "build_load_tools_schema",
-        "tool_load_continuation.v1",
-        "brainstack_remember",
-        "next_step_instruction",
     ),
     "run_agent.py": (
-        "deferred_tool_schema_mode",
-        "LOAD_TOOLS_NAME",
-        "_handle_deferred_tool_load",
-        "TOOL_NOT_LOADED_OR_NOT_CONFIGURED",
-        "_deferred_tool_final_guard_nudge",
-        "_terminal_tool_final_guard_nudge",
-        "_validate_terminal_final_response",
+        "validate_assistant_output_all",
+        "validate_assistant_output",
     ),
     "agent/memory_manager.py": (
-        "direct_render_preflight",
-        "memory_direct_render_preflight.v1",
-        "query_inspect",
+        "validate_assistant_output_all",
+        "validate_assistant_output",
     ),
 }
 
@@ -161,6 +143,16 @@ def patch_files() -> list[Path]:
     ]
 
 
+def payload_files() -> list[Path]:
+    if not PATCH_PAYLOAD_DIR.exists():
+        return []
+    return [
+        path
+        for path in sorted(PATCH_PAYLOAD_DIR.rglob("*"))
+        if path.is_file() and "__pycache__" not in path.parts and not path.name.endswith(".pyc")
+    ]
+
+
 def patch_bundle_manifest() -> dict[str, Any]:
     files = [
         {
@@ -170,14 +162,28 @@ def patch_bundle_manifest() -> dict[str, Any]:
         }
         for path in patch_files()
     ]
+    payloads = [
+        {
+            "path": str(path.relative_to(PATCH_PAYLOAD_DIR)).replace("\\", "/"),
+            "sha256": _sha256(path),
+            "bytes": path.stat().st_size,
+        }
+        for path in payload_files()
+    ]
     bundle_hash = hashlib.sha256(
-        json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(
+            {"patches": files, "payloads": payloads},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
     ).hexdigest()
     return {
         "schema": PATCH_SCHEMA,
         "patch_dir": str(PATCH_DIR),
+        "payload_dir": str(PATCH_PAYLOAD_DIR),
         "bundle_sha256": bundle_hash,
         "patches": files,
+        "payloads": payloads,
         "upstream_tracking": UPSTREAM_TRACKING,
     }
 
@@ -256,6 +262,36 @@ def _git_apply(target: Path, patch: Path) -> None:
         raise RuntimeError(f"Failed to apply {patch.name}: {detail}")
 
 
+def _copy_payload_files(target: Path, *, dry_run: bool) -> list[dict[str, Any]]:
+    copied: list[dict[str, Any]] = []
+    for source in payload_files():
+        relative = source.relative_to(PATCH_PAYLOAD_DIR)
+        destination = target / relative
+        source_hash = _sha256(source)
+        destination_hash = _sha256(destination) if destination.exists() else None
+        if destination_hash == source_hash:
+            copied.append(
+                {
+                    "path": str(relative).replace("\\", "/"),
+                    "status": "already_current",
+                    "sha256": source_hash,
+                }
+            )
+            continue
+        existed = destination.exists()
+        if not dry_run:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        copied.append(
+            {
+                "path": str(relative).replace("\\", "/"),
+                "status": "planned" if dry_run else ("updated" if existed else "created"),
+                "sha256": source_hash,
+            }
+        )
+    return copied
+
+
 def apply_gateway_patch_bundle(target: Path, *, dry_run: bool) -> dict[str, Any]:
     target = target.expanduser().resolve()
     before = inspect_gateway_patch_support(target)
@@ -267,7 +303,8 @@ def apply_gateway_patch_bundle(target: Path, *, dry_run: bool) -> dict[str, Any]
             "before": before,
             "after": before,
             "applied_patches": [],
-                "rollback": "none_needed",
+            "copied_payloads": [],
+            "rollback": "none_needed",
         }
     if dry_run:
         with tempfile.TemporaryDirectory(prefix="brainstack-gateway-patch-dry-run-") as tmp:
@@ -286,60 +323,28 @@ def apply_gateway_patch_bundle(target: Path, *, dry_run: bool) -> dict[str, Any]
                     "memories",
                 ),
             )
-            subprocess.run(["git", "-C", str(probe_target), "init"], check=True, capture_output=True)
-            subprocess.run(["git", "-C", str(probe_target), "add", "-A"], check=True, capture_output=True)
             simulated = apply_gateway_patch_bundle(probe_target, dry_run=False)
             simulated["dry_run"] = True
-            if simulated["status"] == "gateway_patch_applied":
+            if simulated["status"] == "gateway_patch_payload_installed":
                 simulated["status"] = "gateway_patch_planned"
             simulated["before"] = before
             simulated["rollback"] = "none_written_dry_run"
             return simulated
 
-    patches = patch_files()
-    if not patches:
-        raise RuntimeError(f"Hermes Gateway patch bundle is empty: {PATCH_DIR}")
-
-    check_results: list[dict[str, Any]] = []
-    patches_to_apply: list[Path] = []
-    already_applied: list[str] = []
-    for patch in patches:
-        ok, detail = _git_apply_check(target, patch)
-        reverse_ok, reverse_detail = _git_apply_reverse_check(target, patch)
-        state = "can_apply" if ok else ("already_applied" if reverse_ok else "blocked")
-        check_results.append(
-            {
-                "patch": patch.name,
-                "state": state,
-                "can_apply": ok,
-                "already_applied": reverse_ok,
-                "detail": detail,
-                "reverse_detail": reverse_detail,
-            }
-        )
-        if ok:
-            patches_to_apply.append(patch)
-            if not dry_run:
-                _git_apply(target, patch)
-        elif reverse_ok:
-            already_applied.append(patch.name)
-        else:
-            raise RuntimeError(
-                f"Hermes Gateway patch check failed for {patch.name}: {detail or reverse_detail}"
-            )
-
-    after = inspect_gateway_patch_support(target) if not dry_run else before
-    if not dry_run and after["status"] != "upstream_gateway_supported":
-        raise RuntimeError(f"Hermes Gateway patch did not reach supported state: {after['status']}")
+    if not payload_files():
+        raise RuntimeError(f"Hermes Gateway patch payload is empty: {PATCH_PAYLOAD_DIR}")
+    copied_payloads = _copy_payload_files(target, dry_run=False)
+    after = inspect_gateway_patch_support(target)
 
     return {
         "schema": "brainstack.hermes_gateway_patch_apply.v1",
-        "status": "gateway_patch_planned" if dry_run else "gateway_patch_applied",
+        "status": "gateway_patch_payload_installed",
         "dry_run": dry_run,
         "before": before,
         "after": after,
-        "apply_checks": check_results,
-        "applied_patches": [patch.name for patch in patches_to_apply],
-        "already_applied_patches": already_applied,
+        "apply_checks": [],
+        "applied_patches": [],
+        "already_applied_patches": [],
+        "copied_payloads": copied_payloads,
         "rollback": "git checkout -- <patched files> or reset target checkout before reinstall",
     }

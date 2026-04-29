@@ -261,8 +261,11 @@ def test_brainstack_payload_refuses_private_runtime_sources() -> None:
 def test_gateway_patch_bundle_contains_capability_preserving_toolloader_patch() -> None:
     manifest = hermes_gateway_patch_support.patch_bundle_manifest()
     patch_names = {entry["name"] for entry in manifest["patches"]}
+    payload_paths = {entry["path"] for entry in manifest["payloads"]}
 
     assert "002-capability-preserving-deferred-tool-schema.patch" in patch_names
+    assert "gateway/turn_profiles.py" in payload_paths
+    assert "gateway/memory_answer_renderer.py" in payload_paths
 
     patch_text = (
         Path(__file__).resolve().parents[1]
@@ -279,12 +282,8 @@ def test_gateway_patch_bundle_contains_capability_preserving_toolloader_patch() 
 def test_gateway_patch_probes_enforce_boost_only_toolloader_contract() -> None:
     probes = hermes_gateway_patch_support.REQUIRED_GATEWAY_PROBES
 
-    assert "hermes_deferred_tools.py" in probes
-    assert "build_load_tools_schema" in probes["hermes_deferred_tools.py"]
-    assert "tool_load_continuation.v1" in probes["hermes_deferred_tools.py"]
-    assert "deferred_tool_schema_mode" in probes["run_agent.py"]
-    assert "_terminal_tool_final_guard_nudge" in probes["run_agent.py"]
-    assert "_validate_terminal_final_response" in probes["run_agent.py"]
-    assert "direct_render_preflight" in probes["agent/memory_manager.py"]
+    assert "hermes_deferred_tools.py" not in probes
+    assert "validate_assistant_output_all" in probes["run_agent.py"]
+    assert "validate_assistant_output_all" in probes["agent/memory_manager.py"]
     assert "capability_preserving_default" in probes["gateway/turn_profiles.py"]
-    assert "generic_no_evidence_forbidden" in probes["gateway/memory_answer_renderer.py"]
+    assert "render_memory_answer" in probes["gateway/memory_answer_renderer.py"]

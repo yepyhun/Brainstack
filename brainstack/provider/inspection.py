@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from ..active_preference_contract import (
+    build_active_preference_contract,
+    build_active_preference_inspect_payload,
+)
 from ..capture_pipeline import build_capture_plan_from_structured
+from ..diagnostics import build_memory_kernel_doctor
 from ..literal_index import detect_integer_literals, detect_url_literals
 from ..memory_write_receipts import (
     CapturePlan,
@@ -363,6 +368,33 @@ class ProviderInspectionMixin(ProviderRuntimeBase):
         if not self._store:
             return None
         return self._store.get_behavior_policy_snapshot(principal_scope_key=self._principal_scope_key)
+
+    def active_preference_contract(self) -> Dict[str, Any] | None:
+        if not self._store:
+            return None
+        snapshot = self._store.get_behavior_policy_snapshot(principal_scope_key=self._principal_scope_key)
+        contract = build_active_preference_contract(
+            snapshot,
+            principal_scope_key=self._principal_scope_key,
+        )
+        return json.loads(json.dumps(contract, ensure_ascii=True))
+
+    def inspect_active_preference_contract(self) -> Dict[str, Any] | None:
+        contract = self.active_preference_contract()
+        if contract is None:
+            return None
+        return json.loads(
+            json.dumps(build_active_preference_inspect_payload(contract), ensure_ascii=True)
+        )
+
+    def inspect_backend_health(self) -> Dict[str, Any] | None:
+        if not self._store:
+            return None
+        report = build_memory_kernel_doctor(self._store, strict=False)
+        backend_health = report.get("backend_health") if isinstance(report, Mapping) else None
+        if not isinstance(backend_health, Mapping):
+            return None
+        return json.loads(json.dumps(backend_health, ensure_ascii=True))
 
     def memory_authority_debug(self) -> Dict[str, Any] | None:
         if self._last_memory_authority_debug is None:

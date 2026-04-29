@@ -51,6 +51,13 @@ REQUIRED_PLUGIN_FILES = [
     "donors/corpus_adapter.py",
 ]
 
+DOCKER_RUNTIME_DEPENDENCIES = {
+    "chromadb": "chromadb",
+    "croniter": "croniter",
+    "kuzu": "kuzu",
+    "openai": "openai",
+}
+
 
 @dataclass
 class Check:
@@ -524,7 +531,15 @@ def _check_config(
 
     def dependency_import_ok(module_name: str) -> bool | None:
         if runtime == "docker" and compose_path and not planned_install:
-            return _docker_python_can_import(module_name, compose_path)
+            docker_state = _docker_python_can_import(module_name, compose_path)
+            if docker_state is True:
+                return True
+            if _python_can_import(module_name, python_bin) and _dockerfile_declares_runtime_dependency(
+                compose_path,
+                module_name,
+            ):
+                return True
+            return docker_state
         return _python_can_import(module_name, python_bin)
 
     def backend_open_checks(*, backend: str, configured_path: str) -> list[Check]:
@@ -813,6 +828,20 @@ def _python_can_import(module_name: str, python_bin: Path | None) -> bool:
         return False
 
 
+def _dockerfile_declares_runtime_dependency(compose_path: Path | None, module_name: str) -> bool:
+    if compose_path is None:
+        return False
+    dockerfile = compose_path.parent / "Dockerfile"
+    if not dockerfile.exists():
+        return False
+    try:
+        text = dockerfile.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    dependency = DOCKER_RUNTIME_DEPENDENCIES.get(module_name, module_name)
+    return dependency in text
+
+
 def _docker_python_can_import(module_name: str, compose_path: Path | None, *, service: str | None = None) -> bool | None:
     if compose_path is None or not compose_path.exists():
         return False
@@ -872,10 +901,18 @@ def _backend_probe_code(*, backend: str, configured_path: str, default_suffix: s
     raw_path = configured_path or f"$HERMES_HOME/brainstack/{default_suffix}"
     if backend == "kuzu":
         open_code = "import kuzu; kuzu.Database(path)"
+        skip_missing = True
     elif backend == "chroma":
-        open_code = "import chromadb; chromadb.PersistentClient(path=path)"
+        open_code = (
+            "from brainstack.corpus_backend_chroma import ChromaCorpusBackend\n"
+            "    backend = ChromaCorpusBackend(db_path=path)\n"
+            "    backend.open()\n"
+            "    backend.close()"
+        )
+        skip_missing = False
     else:
         open_code = "raise RuntimeError('unsupported backend')"
+        skip_missing = True
     return (
         "import json, os, sys\n"
         "from pathlib import Path\n"
@@ -883,10 +920,12 @@ def _backend_probe_code(*, backend: str, configured_path: str, default_suffix: s
         "path = os.path.expandvars(raw)\n"
         "exists = Path(path).exists()\n"
         "payload = {'path': path, 'exists': exists, 'openable': None, 'error': '', 'error_class': ''}\n"
-        "if not exists:\n"
+        f"skip_missing = {skip_missing!r}\n"
+        "if skip_missing and not exists:\n"
         "    print(json.dumps(payload)); sys.exit(0)\n"
         "try:\n"
         f"    {open_code}\n"
+        "    payload['exists'] = Path(path).exists()\n"
         "    payload['openable'] = True\n"
         "except Exception as exc:\n"
         "    payload['openable'] = False\n"
@@ -894,17 +933,56 @@ def _backend_probe_code(*, backend: str, configured_path: str, default_suffix: s
         "    text = str(exc).casefold()\n"
         "    if 'std::bad_alloc' in text or exc.__class__.__name__ == 'MemoryError':\n"
         "        payload['error_class'] = 'backend_open_memory_error'\n"
+        "    elif 'chroma default embedding is disabled' in text:\n"
+        "        payload['error_class'] = 'backend_embedding_config_missing'\n"
+        "    elif 'no module named' in text or exc.__class__.__name__ == 'ModuleNotFoundError':\n"
+        "        payload['error_class'] = 'backend_dependency_missing'\n"
         "    else:\n"
         "        payload['error_class'] = exc.__class__.__name__\n"
         "print(json.dumps(payload))\n"
     )
 
 
-def _is_docker_runtime_kuzu_lock(*, backend: str, runtime: str, error: str) -> bool:
-    if backend != "kuzu" or runtime != "docker":
+def _is_kuzu_lock_error(*, backend: str, error: str) -> bool:
+    if backend != "kuzu":
         return False
     lowered = error.casefold()
     return "could not set lock on file" in lowered or "docs.kuzudb.com/concurrency" in lowered
+
+
+def _gateway_process_owns_path(path: str) -> bool:
+    if not path:
+        return False
+    commands: list[list[str]] = [
+        ["fuser", path],
+        ["lsof", "-t", "--", path],
+    ]
+    pids: set[str] = set()
+    for command in commands:
+        try:
+            proc = subprocess.run(command, capture_output=True, text=True, timeout=3)
+        except Exception:
+            continue
+        for token in f"{proc.stdout}\n{proc.stderr}".replace(":", " ").split():
+            if token.isdigit():
+                pids.add(token)
+    for pid in pids:
+        try:
+            cmdline = Path("/proc", pid, "cmdline").read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        normalized = cmdline.replace("\x00", " ").casefold()
+        if "gateway run" in normalized and ("hermes" in normalized or "hermes_cli" in normalized):
+            return True
+    return False
+
+
+def _is_expected_active_kuzu_lock(*, backend: str, runtime: str, error: str, path: str) -> bool:
+    if not _is_kuzu_lock_error(backend=backend, error=error):
+        return False
+    if runtime == "docker":
+        return True
+    return _gateway_process_owns_path(path)
 
 
 def _run_python_probe(
@@ -1018,19 +1096,37 @@ def _backend_openability_checks(
     if payload is None:
         return [Check(check_name, "warn", f"Could not probe {backend} backend openability")]
     path = str(payload.get("path") or configured_path or default_suffix)
-    if not bool(payload.get("exists")):
+    if not bool(payload.get("exists")) and payload.get("openable") is None:
         status = "pass" if planned_install else "warn"
         return [Check(check_name, status, f"{backend} backend path does not exist yet: {path}")]
     if payload.get("openable") is True:
         return [Check(check_name, "pass", f"{backend} backend opens successfully at {path}")]
     error = str(payload.get("error") or "unknown backend open failure")
     error_class = str(payload.get("error_class") or "backend_open_failure")
-    if _is_docker_runtime_kuzu_lock(backend=backend, runtime=runtime, error=error):
+    if _is_expected_active_kuzu_lock(backend=backend, runtime=runtime, error=error, path=path):
+        if runtime == "docker":
+            message = (
+                f"{backend} backend is locked by the active Docker runtime at {path}; "
+                "dependency import and container health must be checked separately"
+            )
+        else:
+            message = (
+                f"{backend} backend external probe is blocked by the active runtime owner at {path}; "
+                "dependency import and runtime health must be checked separately"
+            )
         return [
             Check(
                 check_name,
                 "warn",
-                f"{backend} backend is locked by the active Docker runtime at {path}; dependency import and container health must be checked separately",
+                message,
+            )
+        ]
+    if backend == "chroma" and error_class == "backend_embedding_config_missing":
+        return [
+            Check(
+                check_name,
+                "warn",
+                f"{backend} backend is configured but unavailable at {path}: embedding config is missing or default embeddings are disabled",
             )
         ]
     return [Check(check_name, "fail", f"{backend} backend exists but cannot be opened at {path}: {error_class}: {error}")]
@@ -1045,10 +1141,14 @@ def _check_compose(compose_path: Path, planned_install: bool) -> list[Check]:
     compact = " ".join(text.replace("[", " ").replace("]", " ").replace(",", " ").split())
     if "gateway" in compact and "run" in compact and "--replace" in compact:
         checks.append(Check("docker_gateway_mode", "pass", "Docker compose starts Hermes Gateway mode"))
+    elif planned_install:
+        checks.append(Check("docker_gateway_mode", "pass", "Docker compose gateway command will be patched to `gateway run --replace`"))
     else:
         checks.append(Check("docker_gateway_mode", "fail", "Docker compose does not clearly start `gateway run --replace`"))
     if "/opt/data" in text and "HERMES_HOME" in text:
         checks.append(Check("docker_hermes_home", "pass", "Docker compose mounts/configures HERMES_HOME"))
+    elif planned_install:
+        checks.append(Check("docker_hermes_home", "pass", "Docker HERMES_HOME mapping will be patched by installer"))
     else:
         checks.append(Check("docker_hermes_home", "warn", "Docker HERMES_HOME mapping is not obvious"))
     if "HERMES_UID" in text and "HERMES_GID" in text:
