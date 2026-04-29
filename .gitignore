@@ -28,6 +28,7 @@ SOUL.md
 reports/
 brainstack.chroma/
 brainstack.kuzu
+local/private_live_tools/
 
 # Local proof/development tests stay off the public release payload unless promoted deliberately.
 tests/test_phase*.py
