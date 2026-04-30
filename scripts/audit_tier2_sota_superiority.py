@@ -170,7 +170,10 @@ def _pass(name: str, passed: bool, evidence: Mapping[str, Any]) -> dict[str, Any
 
 
 def build_packet(*, phase_dir: Path = PHASE_DIR) -> dict[str, Any]:
-    release = _load_json(phase_dir / "231-RELEASE-CHECKLIST-DEV.json")
+    clean_release_path = phase_dir / "231-RELEASE-CHECKLIST-CLEAN.json"
+    release = _load_json(
+        clean_release_path if clean_release_path.exists() else phase_dir / "231-RELEASE-CHECKLIST-DEV.json"
+    )
     packet_soak = _load_json(phase_dir / "231-PACKET-SOAK-RERUN.json")
     graph_conflict = _load_json(phase_dir / "231-GRAPH-CONFLICT-AUDIT-RERUN.json")
     active_pref = _load_json(phase_dir / "active-preference-rerun/active_preference_contract_gauntlet_report.json")
