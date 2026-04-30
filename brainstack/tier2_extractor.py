@@ -346,6 +346,9 @@ def _normalize_profile_items(items: Any) -> List[Dict[str, Any]]:
             "confidence": confidence,
             "source": "tier2_llm",
         }
+        source_quote = _normalize_text(raw.get("source_quote"))
+        if source_quote:
+            item["source_quote"] = source_quote
         if slot:
             item["slot"] = slot
         expanded = [item]
@@ -379,6 +382,9 @@ def _normalize_states(items: Any) -> List[Dict[str, Any]]:
             "supersede": bool(raw.get("supersede", False)),
             "confidence": _coerce_confidence(raw.get("confidence"), default=0.82),
         }
+        source_quote = _normalize_text(raw.get("source_quote"))
+        if source_quote:
+            item["source_quote"] = source_quote
         temporal_payload = raw.get("temporal_scope") if isinstance(raw.get("temporal_scope"), Mapping) else raw.get("temporal")
         if isinstance(temporal_payload, Mapping):
             temporal = normalize_temporal_fields(
@@ -406,14 +412,16 @@ def _normalize_relations(items: Any) -> List[Dict[str, Any]]:
         object_value = _normalize_text(raw.get("object"))
         if not subject or not predicate or not object_value:
             continue
-        normalized.append(
-            {
-                "subject": subject,
-                "predicate": predicate,
-                "object": object_value,
-                "confidence": _coerce_confidence(raw.get("confidence"), default=0.8),
-            }
-        )
+        item: Dict[str, Any] = {
+            "subject": subject,
+            "predicate": predicate,
+            "object": object_value,
+            "confidence": _coerce_confidence(raw.get("confidence"), default=0.8),
+        }
+        source_quote = _normalize_text(raw.get("source_quote"))
+        if source_quote:
+            item["source_quote"] = source_quote
+        normalized.append(item)
     return normalized[:8]
 
 
@@ -433,6 +441,9 @@ def _normalize_inferred_relations(items: Any) -> List[Dict[str, Any]]:
             "object": object_value,
             "confidence": _coerce_confidence(raw.get("confidence"), default=0.62),
         }
+        source_quote = _normalize_text(raw.get("source_quote"))
+        if source_quote:
+            item["source_quote"] = source_quote
         reason = _normalize_text(raw.get("reason"))
         if reason:
             item["metadata"] = {"inference_reason": reason}
@@ -621,11 +632,11 @@ def extract_tier2_candidates(
                 "Return one compact JSON object only. Do not use markdown fences, explanations, or trailing text.\n"
                 "Schema:\n"
                 "{\n"
-                '  "profile_items": [{"category":"identity|preference|shared_work","content":"...","slot":"optional-stable-slot","confidence":0.0}],\n'
+                '  "profile_items": [{"category":"identity|preference|shared_work","content":"...","slot":"optional-stable-slot","source_quote":"exact user evidence span","confidence":0.0}],\n'
                 '  "style_contract": {"title":"optional explicit pack name or empty string","sections":[{"heading":"...","lines":["..."]}],"confidence":0.0} | null,\n'
-                '  "states": [{"subject":"...","attribute":"...","value":"...","supersede":true,"confidence":0.0,"temporal":{"observed_at":"optional ISO time","valid_from":"optional ISO time","valid_to":"optional ISO time"}}],\n'
-                '  "relations": [{"subject":"...","predicate":"...","object":"...","confidence":0.0}],\n'
-                '  "inferred_relations": [{"subject":"...","predicate":"...","object":"...","confidence":0.0,"reason":"short evidence"}],\n'
+                '  "states": [{"subject":"...","attribute":"...","value":"...","source_quote":"exact user evidence span","supersede":true,"confidence":0.0,"temporal":{"observed_at":"optional ISO time","valid_from":"optional ISO time","valid_to":"optional ISO time"}}],\n'
+                '  "relations": [{"subject":"...","predicate":"...","object":"...","source_quote":"exact user evidence span","confidence":0.0}],\n'
+                '  "inferred_relations": [{"subject":"...","predicate":"...","object":"...","source_quote":"exact user evidence span","confidence":0.0,"reason":"short evidence"}],\n'
                 '  "typed_entities": [{"turn_number":0,"name":"specific short label","entity_type":"snake_case_type","subject":"User","attributes":{"metric_key":"value"},"confidence":0.0}],\n'
                 '  "temporal_events": [{"turn_number":0,"content":"standalone factual event summary","confidence":0.0}],\n'
                 '  "continuity_summary": "short durable summary or empty string",\n'
@@ -633,6 +644,7 @@ def extract_tier2_candidates(
                 "}\n"
                 "Rules:\n"
                 "- the provided batch contains user-authored evidence only; assistant replies were intentionally omitted and must not be reconstructed\n"
+                "- every profile_item/state/relation/inferred_relation needs source_quote copied exactly from a User evidence line; omit candidates when no exact user quote exists\n"
                 "- prefer durable user facts and current project context grounded in the provided user-authored evidence only\n"
                 "- ignore markdown tables, quoted transcript dumps, code, wrappers, and assistant policy chatter\n"
                 "- keep the JSON compact; prefer the fewest useful items rather than broad coverage\n"

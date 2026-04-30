@@ -11,7 +11,7 @@ def _write(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data), encoding="utf-8")
 
 
-def test_tier2_sota_superiority_packet_blocks_without_verified_user_span_path(tmp_path: Path) -> None:
+def test_tier2_sota_superiority_packet_supports_verified_user_span_path(tmp_path: Path) -> None:
     _write(
         tmp_path / "231-RELEASE-CHECKLIST-DEV.json",
         {
@@ -54,13 +54,14 @@ def test_tier2_sota_superiority_packet_blocks_without_verified_user_span_path(tm
     packet = build_packet(phase_dir=tmp_path)
 
     assert packet["schema"] == "brainstack.tier2_sota_superiority_packet.v1"
-    assert packet["status"] == "fail"
-    assert packet["supported_scope_sota_superiority"] is False
-    assert packet["tier2_product_supported_prerequisite_met"] is False
+    assert packet["status"] == "pass"
+    assert packet["supported_scope_sota_superiority"] is True
+    assert packet["tier2_product_supported_prerequisite_met"] is True
     assert packet["tier2_product_release_ready"] is False
-    assert "verified_user_span_durable_write_path_missing" in packet["blockers"]
+    assert "verified_user_span_durable_write_path_missing" not in packet["blockers"]
+    assert "clean_git_release_parity_not_satisfied" in packet["blockers"]
     invariant_status = {item["name"]: item["status"] for item in packet["donor_invariants"]}
-    assert invariant_status["hindsight_verified_explicit_write_path"] == "fail"
+    assert invariant_status["hindsight_verified_explicit_write_path"] == "pass"
     assert invariant_status["hindsight_failure_does_not_poison_memory"] == "pass"
     assert all(item["status"] == "pass" for item in packet["baseline_comparison"])
     assert packet["critical_counters"]["tier2_assistant_authored_writes"] == 0

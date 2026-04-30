@@ -8,6 +8,7 @@ from typing import Any, Mapping
 from .admission_policy import canonical_graph_slot, canonical_profile_slot
 from .profile_contract import normalize_profile_slot
 from .style_contract import STYLE_CONTRACT_SLOT
+from .transcript import split_turn_content
 
 
 TIER2_CONSOLIDATION_PLAN_SCHEMA = "brainstack.tier2_consolidation_plan.v1"
@@ -26,6 +27,8 @@ TIER2_KIND_CAPS: dict[str, int] = {
 TIER2_TOTAL_CANDIDATE_CAP = 32
 TIER2_CONTINUITY_SUMMARY_MAX_CHARS = 480
 TIER2_DECISION_MAX_CHARS = 240
+TRUSTED_TIER2_USER_SPAN_PROOFS_KEY = "trusted_tier2_verified_user_span_proofs"
+VERIFIED_USER_SPAN_PROOF_KEY = "verified_user_span_proof"
 
 
 def _text(value: Any) -> str:
@@ -52,6 +55,108 @@ def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def _row_metadata(row: Mapping[str, Any]) -> dict[str, Any]:
+    return _mapping(row.get("metadata"))
+
+
+def _conversation_event_type(row: Mapping[str, Any]) -> str:
+    metadata = _row_metadata(row)
+    event = _mapping(metadata.get("conversation_event"))
+    return _text(event.get("event_type") or metadata.get("event_type")).casefold()
+
+
+def _trusted_user_content(row: Mapping[str, Any]) -> str:
+    kind = _text(row.get("kind")).casefold()
+    event_type = _conversation_event_type(row)
+    if "assistant" in kind or event_type == "assistant_response":
+        return ""
+    parts = split_turn_content(row.get("content"))
+    user = _text(parts.get("user"))
+    if user:
+        return user
+    if kind.startswith("user") or event_type.startswith("user_") or event_type == "user_turn":
+        return _text(row.get("content"))
+    return ""
+
+
+def _source_quote(candidate: Mapping[str, Any]) -> str:
+    for key in ("source_quote", "source_span", "evidence_quote", "raw_user_span"):
+        value = _text(candidate.get(key))
+        if value:
+            return value
+    metadata = _mapping(candidate.get("metadata"))
+    for key in ("source_quote", "source_span", "evidence_quote", "raw_user_span"):
+        value = _text(metadata.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _candidate_paths(extracted: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
+    paths: list[tuple[str, Mapping[str, Any]]] = []
+    if isinstance(extracted.get("style_contract"), Mapping):
+        paths.append(("style_contract", extracted["style_contract"]))
+    for field in TIER2_KIND_CAPS:
+        for index, item in enumerate(_list(extracted.get(field))):
+            if isinstance(item, Mapping):
+                paths.append((f"{field}[{index}]", item))
+    return paths
+
+
+def build_verified_user_span_proofs(
+    extracted: Mapping[str, Any],
+    transcript_rows: list[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Return trusted proof map for Tier2 candidates grounded in user-owned transcript spans."""
+    user_rows: list[dict[str, Any]] = []
+    for row in transcript_rows:
+        user_content = _trusted_user_content(row)
+        if not user_content:
+            continue
+        metadata = _row_metadata(row)
+        event = _mapping(metadata.get("conversation_event"))
+        row_id = int(row.get("id") or event.get("transcript_row_id") or 0)
+        turn_number = int(row.get("turn_number") or event.get("turn_number") or 0)
+        user_rows.append(
+            {
+                "row_id": row_id,
+                "turn_number": turn_number,
+                "session_id": _text(row.get("session_id") or event.get("session_id")),
+                "event_id": _text(event.get("event_id")) or f"{row.get('session_id') or ''}:{turn_number}:{row_id}:user_turn",
+                "content": user_content,
+            }
+        )
+
+    proofs: dict[str, dict[str, Any]] = {}
+    for candidate_path, candidate in _candidate_paths(extracted):
+        quote = _source_quote(candidate)
+        if not quote:
+            continue
+        normalized_quote = _text(quote)
+        if not normalized_quote:
+            continue
+        quote_hash = hashlib.sha256(normalized_quote.encode("utf-8")).hexdigest()
+        for row in user_rows:
+            if normalized_quote not in str(row["content"]):
+                continue
+            source_span_id = f"usrspan_{row['row_id']}_{quote_hash[:16]}"
+            proofs[candidate_path] = {
+                "schema": "brainstack.tier2_verified_user_span_proof.v1",
+                "status": "verified",
+                "method": "exact_source_quote_in_user_transcript_segment",
+                "source_event_id": row["event_id"],
+                "source_turn_id": str(row["turn_number"]),
+                "source_span_id": source_span_id,
+                "transcript_row_id": row["row_id"],
+                "session_id": row["session_id"],
+                "turn_number": row["turn_number"],
+                "source_quote_hash": quote_hash,
+                "source_role": "user",
+            }
+            break
+    return proofs
+
+
 def _profile_stable_key(candidate: Mapping[str, Any]) -> str:
     category = _text(candidate.get("category")).lower()
     slot = normalize_profile_slot(candidate.get("slot"))
@@ -74,6 +179,7 @@ def _candidate_hash(candidate: Mapping[str, Any]) -> str:
             "object": candidate.get("object"),
             "value": candidate.get("value"),
             "content": candidate.get("content"),
+            "source_quote_hash": _hash(candidate.get("source_quote"), length=24),
             "name": candidate.get("name"),
             "entity_type": candidate.get("entity_type"),
             "turn_number": candidate.get("turn_number"),
@@ -210,6 +316,7 @@ def build_tier2_consolidation_plan(
     source: str,
     metadata: Mapping[str, Any],
     consolidation_source: Mapping[str, Any],
+    verified_user_span_proofs: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     source_fingerprint = _text(consolidation_source.get("source_fingerprint"))
     source_id_list = _source_ids(consolidation_source)
@@ -359,6 +466,15 @@ def build_tier2_consolidation_plan(
     counts: dict[str, int] = {}
     for proposal in proposals:
         counts[proposal["kind"]] = counts.get(proposal["kind"], 0) + 1
+        proof = _mapping((verified_user_span_proofs or {}).get(str(proposal.get("candidate_path") or "")))
+        if proof:
+            proposal["user_span_verification"] = {
+                "status": "verified",
+                "source_span_id": _text(proof.get("source_span_id")),
+                "source_event_id": _text(proof.get("source_event_id")),
+                "turn_number": int(proof.get("turn_number") or 0),
+                "source_quote_hash": _text(proof.get("source_quote_hash")),
+            }
     return {
         "schema": TIER2_CONSOLIDATION_PLAN_SCHEMA,
         "plan_id": plan_id,
@@ -374,7 +490,10 @@ def build_tier2_consolidation_plan(
     }
 
 
-def attach_consolidation_plan_metadata(extracted: Mapping[str, Any], plan: Mapping[str, Any]) -> dict[str, Any]:
+def attach_consolidation_plan_metadata(
+    extracted: Mapping[str, Any],
+    plan: Mapping[str, Any],
+) -> dict[str, Any]:
     payload = deepcopy(dict(extracted))
     proposals = {str(item.get("candidate_path")): dict(item) for item in list(plan.get("proposals") or []) if isinstance(item, Mapping)}
 

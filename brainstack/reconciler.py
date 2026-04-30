@@ -8,7 +8,11 @@ from .db import BrainstackStore
 from .provenance import merge_provenance
 from .storage.projection_writer import ProjectionWriter
 from .style_contract import STYLE_CONTRACT_SLOT, normalize_style_contract_payload
-from .tier2_consolidation import bound_tier2_extracted_payload
+from .tier2_consolidation import (
+    TRUSTED_TIER2_USER_SPAN_PROOFS_KEY,
+    VERIFIED_USER_SPAN_PROOF_KEY,
+    bound_tier2_extracted_payload,
+)
 from .tier1_extractor import build_profile_stable_key
 
 
@@ -73,21 +77,32 @@ def _candidate_metadata(
     source: str = "",
 ) -> Dict[str, Any]:
     payload = dict(base_metadata)
+    trusted_proofs = payload.pop(TRUSTED_TIER2_USER_SPAN_PROOFS_KEY, {})
     payload["confidence"] = float(confidence)
     raw_metadata = candidate.get("metadata")
     if isinstance(raw_metadata, Mapping):
         payload.update(raw_metadata)
     if str(source or "").strip().lower().startswith(("tier2:", "consolidation:")):
+        payload.pop(TRUSTED_TIER2_USER_SPAN_PROOFS_KEY, None)
+        payload.pop(VERIFIED_USER_SPAN_PROOF_KEY, None)
+        payload.pop("tier2_verified_user_span_proof", None)
+        hard_non_user_marker = False
         for key in ("assertion_speaker", "speaker", "source_role", "role", "author_role"):
             value = str(payload.get(key) or "").strip().lower()
+            if value in {"assistant", "quoted_assistant", "runtime"}:
+                hard_non_user_marker = True
             if value not in {"assistant", "quoted_assistant", "runtime"}:
                 payload.pop(key, None)
         for key in ("authority", "authority_class", "source_authority"):
             value = str(payload.get(key) or "").strip().lower()
+            if value in {"assistant_claim", "assistant_self_claim", "runtime_diagnostic"}:
+                hard_non_user_marker = True
             if value not in {"assistant_claim", "assistant_self_claim", "runtime_diagnostic"}:
                 payload.pop(key, None)
         for key in ("span_kind", "kind"):
             value = str(payload.get(key) or "").strip().lower()
+            if value in {"assistant_answer", "runtime_diagnostic"}:
+                hard_non_user_marker = True
             if value not in {"assistant_answer", "runtime_diagnostic"}:
                 payload.pop(key, None)
         if str(payload.get("source_authority") or "").strip().lower() not in {
@@ -97,6 +112,22 @@ def _candidate_metadata(
         }:
             payload["source_authority"] = "tier2_summary"
         payload["authority_boundary"] = "tier2_candidate_metadata_cannot_upgrade_authority"
+        consolidation = payload.get("consolidation") if isinstance(payload.get("consolidation"), Mapping) else {}
+        candidate_path = str(consolidation.get("candidate_path") or "").strip()
+        proof = trusted_proofs.get(candidate_path) if isinstance(trusted_proofs, Mapping) else None
+        if not hard_non_user_marker and isinstance(proof, Mapping) and str(proof.get("status") or "") == "verified":
+            payload[VERIFIED_USER_SPAN_PROOF_KEY] = dict(proof)
+            payload["source_event_id"] = str(proof.get("source_event_id") or "")
+            payload["source_turn_id"] = str(proof.get("source_turn_id") or proof.get("turn_number") or "")
+            payload["source_span_id"] = str(proof.get("source_span_id") or "")
+            payload["turn_role"] = "user"
+            payload["assertion_speaker"] = "user"
+            payload["source_role"] = "user"
+            payload["span_kind"] = "assertion"
+            payload["source_authority"] = "user_explicit_assertion"
+            payload["normalization_method"] = "tier2_verified_user_span_exact_quote"
+            payload["authority_boundary"] = "tier2_verified_user_span_proof_required"
+        payload["_candidate_metadata_sanitized"] = True
     raw_temporal = candidate.get("temporal")
     if isinstance(raw_temporal, Mapping):
         payload["temporal"] = {**payload.get("temporal", {}), **raw_temporal}

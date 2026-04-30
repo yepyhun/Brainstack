@@ -27,6 +27,7 @@ REASON_ASSISTANT_CLAIM_NOT_USER_TRUTH = "ASSISTANT_CLAIM_NOT_USER_TRUTH"
 REASON_UNKNOWN_DERIVED_GRAPH_SLOT = "UNKNOWN_DERIVED_GRAPH_SLOT"
 REASON_UNSUPPORTED_AUTHORITY = "UNSUPPORTED_ADMISSION_AUTHORITY"
 REASON_MISSING_VALUE = "MISSING_CANDIDATE_VALUE"
+VERIFIED_USER_SPAN_PROOF_KEY = "verified_user_span_proof"
 
 TRUSTED_AUTHORITIES = frozenset(
     {
@@ -269,6 +270,8 @@ def _enum_value(enum_cls: type[Any], value: Any, default: Any) -> Any:
 
 def _metadata(candidate: Mapping[str, Any], base_metadata: Mapping[str, Any] | None) -> dict[str, Any]:
     payload = dict(base_metadata or {})
+    if payload.pop("_candidate_metadata_sanitized", None):
+        return payload
     raw = candidate.get("metadata")
     if isinstance(raw, Mapping):
         payload.update(raw)
@@ -312,6 +315,9 @@ def _authority_from_payload(payload: Mapping[str, Any], *, source: str) -> Sourc
             return SourceAuthority.ASSISTANT_CLAIM
         if span_kind == SpanKind.RUNTIME_DIAGNOSTIC or speaker == AssertionSpeaker.RUNTIME:
             return SourceAuthority.RUNTIME_DIAGNOSTIC
+        proof = payload.get(VERIFIED_USER_SPAN_PROOF_KEY)
+        if isinstance(proof, Mapping) and str(proof.get("status") or "") == "verified":
+            return SourceAuthority.USER_EXPLICIT_ASSERTION
         return SourceAuthority.TIER2_SUMMARY
     if explicit_authority != SourceAuthority.UNKNOWN:
         return explicit_authority

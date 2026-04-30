@@ -5,6 +5,7 @@ from ..tier2_consolidation import (
     attach_consolidation_plan_metadata,
     bound_tier2_extracted_payload,
     build_tier2_consolidation_plan,
+    build_verified_user_span_proofs,
 )
 from .runtime import (
     Any,
@@ -245,6 +246,9 @@ class Tier2WorkerMixin(ProviderRuntimeBase):
             "transcript_ids": [int(row["id"]) for row in transcript_rows if row.get("id") is not None],
             "consolidation_source": dict(consolidation_source),
         })
+        verified_user_span_proofs = build_verified_user_span_proofs(bounded_extracted, transcript_rows)
+        if verified_user_span_proofs:
+            metadata["trusted_tier2_verified_user_span_proofs"] = verified_user_span_proofs
         consolidation_plan = build_tier2_consolidation_plan(
             store=self._store,
             extracted=bounded_extracted,
@@ -253,6 +257,7 @@ class Tier2WorkerMixin(ProviderRuntimeBase):
             source=f"tier2:{trigger_reason}",
             metadata=metadata,
             consolidation_source=consolidation_source,
+            verified_user_span_proofs=verified_user_span_proofs,
         )
         planned_extracted = attach_consolidation_plan_metadata(bounded_extracted, consolidation_plan)
         reconcile_report = reconcile_tier2_candidates(
