@@ -295,16 +295,26 @@ def _first_metadata_text(payload: Mapping[str, Any], keys: tuple[str, ...]) -> s
 
 
 def _authority_from_payload(payload: Mapping[str, Any], *, source: str) -> SourceAuthority:
+    source_text = _lower(source)
     explicit = _first_metadata_text(payload, ("authority_class", "source_authority", "authority"))
-    if explicit:
-        return _enum_value(SourceAuthority, explicit, SourceAuthority.UNKNOWN)
+    explicit_authority = _enum_value(SourceAuthority, explicit, SourceAuthority.UNKNOWN) if explicit else SourceAuthority.UNKNOWN
     speaker = _enum_value(
         AssertionSpeaker,
         _first_metadata_text(payload, ("assertion_speaker", "speaker", "source_role", "role")),
         AssertionSpeaker.UNKNOWN,
     )
     span_kind = _enum_value(SpanKind, _first_metadata_text(payload, ("span_kind", "kind")), SpanKind.UNKNOWN)
-    source_text = _lower(source)
+    if source_text.startswith("tier2:") or source_text.startswith("consolidation:"):
+        if speaker in {AssertionSpeaker.ASSISTANT, AssertionSpeaker.QUOTED_ASSISTANT} or explicit_authority in {
+            SourceAuthority.ASSISTANT_CLAIM,
+            SourceAuthority.ASSISTANT_SELF_CLAIM,
+        }:
+            return SourceAuthority.ASSISTANT_CLAIM
+        if span_kind == SpanKind.RUNTIME_DIAGNOSTIC or speaker == AssertionSpeaker.RUNTIME:
+            return SourceAuthority.RUNTIME_DIAGNOSTIC
+        return SourceAuthority.TIER2_SUMMARY
+    if explicit_authority != SourceAuthority.UNKNOWN:
+        return explicit_authority
     if speaker in {AssertionSpeaker.ASSISTANT, AssertionSpeaker.QUOTED_ASSISTANT}:
         return SourceAuthority.ASSISTANT_CLAIM
     if span_kind == SpanKind.RUNTIME_DIAGNOSTIC or speaker == AssertionSpeaker.RUNTIME:
@@ -313,8 +323,6 @@ def _authority_from_payload(payload: Mapping[str, Any], *, source: str) -> Sourc
         return SourceAuthority.TRUSTED_HOST
     if speaker == AssertionSpeaker.USER or source_text.startswith("user"):
         return SourceAuthority.USER_CORRECTION if span_kind == SpanKind.CORRECTION else SourceAuthority.USER_EXPLICIT_ASSERTION
-    if source_text.startswith("tier2:") or source_text.startswith("consolidation:"):
-        return SourceAuthority.TIER2_SUMMARY
     if source_text.startswith("session_recap:"):
         return SourceAuthority.SESSION_RECAP
     if source_text.startswith("pulse:") or source_text.startswith("background:"):
@@ -328,6 +336,8 @@ def _speaker_from_payload(payload: Mapping[str, Any], authority: SourceAuthority
         _first_metadata_text(payload, ("assertion_speaker", "speaker", "source_role", "role")),
         AssertionSpeaker.UNKNOWN,
     )
+    if authority == SourceAuthority.TIER2_SUMMARY and speaker == AssertionSpeaker.USER:
+        return AssertionSpeaker.UNKNOWN
     if speaker != AssertionSpeaker.UNKNOWN:
         return speaker
     if authority in {SourceAuthority.USER_EXPLICIT_ASSERTION, SourceAuthority.USER_CORRECTION}:

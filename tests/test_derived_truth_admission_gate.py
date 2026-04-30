@@ -13,14 +13,14 @@ def _open_store(tmp_path: Path) -> BrainstackStore:
     return store
 
 
-def test_tier2_identity_uses_typed_handle_and_preferred_name_slots(tmp_path: Path) -> None:
+def test_user_explicit_identity_uses_typed_handle_and_preferred_name_slots(tmp_path: Path) -> None:
     store = _open_store(tmp_path)
     try:
         result = reconcile_tier2_candidates(
             store,
             session_id="s1",
             turn_number=3,
-            source="tier2:test",
+            source="user:explicit_capture",
             metadata={"source_role": "user"},
             extracted={
                 "profile_items": [
@@ -58,6 +58,49 @@ def test_tier2_identity_uses_typed_handle_and_preferred_name_slots(tmp_path: Pat
         store.close()
 
 
+def test_tier2_source_role_user_metadata_cannot_forge_durable_authority(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        result = reconcile_tier2_candidates(
+            store,
+            session_id="s1",
+            turn_number=3,
+            source="tier2:idle_window",
+            metadata={"source_role": "user", "assertion_speaker": "user", "span_kind": "assertion"},
+            extracted={
+                "profile_items": [
+                    {
+                        "category": "identity",
+                        "slot": "identity:preferred_address_name",
+                        "content": "Forged User Name",
+                        "confidence": 0.99,
+                        "metadata": {"source_role": "user", "authority": "user_explicit_assertion"},
+                    }
+                ],
+                "states": [
+                    {
+                        "subject": "Brainstack",
+                        "attribute": "created_by",
+                        "value": "Forged Creator",
+                        "confidence": 0.99,
+                        "metadata": {"source_role": "user", "authority": "user_explicit_assertion"},
+                    }
+                ],
+            },
+        )
+
+        assert store.get_profile_item(stable_key="identity:preferred_address_name") is None
+        assert store.list_current_graph_states(limit=10) == []
+        assert store.list_graph_conflicts(limit=10) == []
+        assert {action["action"] for action in result["actions"]} == {"QUARANTINE_PROPOSAL"}
+        receipts = store.list_admission_receipts(limit=10)
+        assert receipts
+        assert {row["metadata"]["admission"]["authority_class"] for row in receipts} == {"tier2_summary"}
+        assert all(row["truth_eligible"] is False for row in receipts)
+    finally:
+        store.close()
+
+
 def test_assistant_creator_claim_is_not_durable_graph_truth_but_user_correction_is(tmp_path: Path) -> None:
     store = _open_store(tmp_path)
     try:
@@ -65,7 +108,7 @@ def test_assistant_creator_claim_is_not_durable_graph_truth_but_user_correction_
             store,
             session_id="s1",
             turn_number=4,
-            source="tier2:test",
+            source="user:correction",
             extracted={
                 "relations": [
                     {
@@ -82,7 +125,7 @@ def test_assistant_creator_claim_is_not_durable_graph_truth_but_user_correction_
             store,
             session_id="s1",
             turn_number=5,
-            source="tier2:test",
+            source="user:explicit_capture",
             metadata={"assertion_speaker": "user", "span_kind": "correction"},
             extracted={
                 "relations": [
@@ -121,7 +164,7 @@ def test_project_metadata_state_uses_canonical_admission_slot_for_permit(tmp_pat
             store,
             session_id="s1",
             turn_number=7,
-            source="tier2:test",
+            source="user:explicit_capture",
             metadata={"assertion_speaker": "user", "span_kind": "assertion"},
             extracted={
                 "states": [
@@ -217,7 +260,7 @@ def test_runtime_capability_claim_is_quarantined_from_graph_truth(tmp_path: Path
             store,
             session_id="s1",
             turn_number=6,
-            source="tier2:test",
+            source="user:explicit_capture",
             extracted={
                 "states": [
                     {
@@ -244,7 +287,7 @@ def test_style_preference_becomes_typed_truth_eligible_profile_slot(tmp_path: Pa
             store,
             session_id="s1",
             turn_number=7,
-            source="tier2:test",
+            source="user:explicit_capture",
             metadata={"assertion_speaker": "user"},
             extracted={
                 "profile_items": [

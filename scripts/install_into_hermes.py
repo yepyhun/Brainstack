@@ -3878,7 +3878,7 @@ def _generated_compose_path(target: Path, config_path: Path) -> Path:
     return target / f"docker-compose.{_sanitize_compose_slug(runtime_home.name)}.yml"
 
 
-def _patch_config(config_path: Path, dry_run: bool) -> dict[str, Any]:
+def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = "external") -> dict[str, Any]:
     config = _load_yaml(config_path)
     config.setdefault("memory", {})
     if not isinstance(config["memory"], dict):
@@ -3896,8 +3896,12 @@ def _patch_config(config_path: Path, dry_run: bool) -> dict[str, Any]:
     brainstack.setdefault("db_path", "$HERMES_HOME/brainstack/brainstack.db")
     brainstack.setdefault("graph_backend", "kuzu")
     brainstack.setdefault("graph_db_path", "$HERMES_HOME/brainstack/brainstack.kuzu")
-    brainstack.setdefault("corpus_backend", "chroma")
-    brainstack.setdefault("corpus_db_path", "$HERMES_HOME/brainstack/brainstack.chroma")
+    if embedding_runtime == "none":
+        brainstack["corpus_backend"] = "none"
+        brainstack.pop("corpus_db_path", None)
+    else:
+        brainstack.setdefault("corpus_backend", "chroma")
+        brainstack.setdefault("corpus_db_path", "$HERMES_HOME/brainstack/brainstack.chroma")
     brainstack.setdefault("profile_prompt_limit", 6)
     brainstack.setdefault("profile_match_limit", 4)
     brainstack.setdefault("continuity_recent_limit", 4)
@@ -4847,8 +4851,8 @@ def main() -> int:
         choices=["local-tei-jina", "external", "none"],
         default="local-tei-jina",
         help=(
-            "Embedding runtime for generated Docker compose. "
-            "local-tei-jina adds a local TEI Jina v5 service and cache volume; "
+            "Embedding runtime contract. "
+            "local-tei-jina requires --runtime docker and adds a local TEI Jina v5 service and cache volume; "
             "external expects operator-provided embedding env; none writes no embedding service."
         ),
     )
@@ -4931,6 +4935,14 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    if args.enable and args.embedding_runtime == "local-tei-jina" and args.runtime != "docker":
+        print(
+            "FAIL --embedding-runtime local-tei-jina requires --runtime docker. "
+            "Use --embedding-runtime external for an operator-managed embedding endpoint, "
+            "or --embedding-runtime none to configure corpus search unavailable instead of broken Chroma.",
+            file=sys.stderr,
+        )
+        return 2
 
     compose_path: Path | None = None
     if args.runtime == "docker" or args.compose_file:
@@ -4988,7 +5000,7 @@ def main() -> int:
     config_result = None
     if args.enable:
         assert config_path is not None
-        config_result = _patch_config(config_path, args.dry_run)
+        config_result = _patch_config(config_path, args.dry_run, embedding_runtime=args.embedding_runtime)
     deps_result = _ensure_backend_dependencies(selected_python, dry_run=args.dry_run, skip_deps=args.skip_deps)
 
     host_helper_files: list[dict[str, str]] = []

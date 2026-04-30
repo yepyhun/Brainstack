@@ -59,14 +59,15 @@ def test_tier2_run_result_is_persisted_with_counts(tmp_path: Path) -> None:
         )
         assert result["status"] == "ok"
         assert result["json_parse_status"] == "ok"
-        assert result["writes_performed"] >= 1
+        assert result["writes_performed"] == 0
+        assert result["action_counts"]["QUARANTINE_PROPOSAL"] == 1
         assert provider._store is not None
         latest = provider._store.latest_tier2_run_record(session_id="tier2-session")
         assert latest is not None
         assert latest["run_id"] == result["run_id"]
         assert latest["status"] == "ok"
         assert latest["parse_status"] == "ok"
-        assert latest["writes_performed"] >= 1
+        assert latest["writes_performed"] == 0
         doctor = provider.memory_kernel_doctor(strict=True)
         assert doctor["capabilities"]["tier2"]["latest_persistent_run"]["run_id"] == result["run_id"]
     finally:

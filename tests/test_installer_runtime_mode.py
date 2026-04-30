@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from argparse import Namespace
 from pathlib import Path
+import sys
 
 from scripts import brainstack_doctor
 from scripts import install_into_hermes
@@ -71,6 +72,43 @@ def test_generated_docker_compose_allows_external_embedding_runtime(tmp_path):
     assert "TERMINAL_CWD: /workspace" in text
     assert "HERMES_DISCORD_TURN_PROFILE" not in text
     assert "HERMES_DISCORD_TOOL_PROFILE" not in text
+
+
+def test_config_patch_embedding_none_makes_corpus_explicitly_unavailable(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("{}", encoding="utf-8")
+
+    install_into_hermes._patch_config(config, dry_run=False, embedding_runtime="none")
+
+    data = install_into_hermes._load_yaml(config)
+    brainstack = data["plugins"]["brainstack"]
+    assert brainstack["corpus_backend"] == "none"
+    assert "corpus_db_path" not in brainstack
+
+
+def test_local_install_rejects_local_tei_runtime_without_docker(monkeypatch, capsys, tmp_path):
+    target = tmp_path / "hermes"
+    target.mkdir()
+    (target / "run_agent.py").write_text("# hermes\n", encoding="utf-8")
+    config = target / "config.yaml"
+    config.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "install_into_hermes.py",
+            str(target),
+            "--config",
+            str(config),
+            "--runtime",
+            "local",
+            "--enable",
+        ],
+    )
+
+    assert install_into_hermes.main() == 2
+    assert "local-tei-jina requires --runtime docker" in capsys.readouterr().err
 
 
 def test_existing_docker_compose_is_patched_with_local_tei_runtime(tmp_path):

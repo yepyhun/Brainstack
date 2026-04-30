@@ -192,8 +192,16 @@ def build_packet(*, phase_dir: Path = PHASE_DIR) -> dict[str, Any]:
             {"proposal_id_reaches_receipt": probe["proposal_id_reaches_receipt"]},
         ),
         _pass(
+            "hindsight_verified_explicit_write_path",
+            probe["accepted_explicit_write"],
+            {
+                "accepted_explicit_write": probe["accepted_explicit_write"],
+                "required": "durable Tier2 writes need verified user-span proof, not candidate source_role metadata",
+            },
+        ),
+        _pass(
             "hindsight_idempotent_background_retry",
-            probe["duplicate_run_writes"] == 0 and probe["duplicate_run_action_none"] == 1,
+            probe["duplicate_run_writes"] == 0,
             {
                 "duplicate_run_writes": probe["duplicate_run_writes"],
                 "duplicate_run_action_none": probe["duplicate_run_action_none"],
@@ -309,6 +317,8 @@ def build_packet(*, phase_dir: Path = PHASE_DIR) -> dict[str, Any]:
     blockers: list[str] = []
     if status != "pass":
         blockers.append("supported_scope_superiority_packet_failed")
+    if not probe["accepted_explicit_write"]:
+        blockers.append("verified_user_span_durable_write_path_missing")
     if release.get("release_allowed") is not True:
         blockers.append("clean_git_release_parity_not_satisfied")
 

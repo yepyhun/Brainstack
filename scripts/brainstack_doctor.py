@@ -772,6 +772,14 @@ def _check_config(
             checks.append(Check("corpus_backend_dependency", "pass", "Python chromadb package is not present yet, but installer will add it"))
         else:
             checks.append(Check("corpus_backend_dependency", "fail", "Python chromadb package is missing for corpus_backend='chroma' in the active runtime"))
+    elif corpus_backend in {"none", "sqlite"}:
+        checks.append(
+            Check(
+                "corpus_backend_target",
+                "pass",
+                f"plugins.brainstack.corpus_backend is {corpus_backend!r}; semantic corpus backend is explicitly unavailable",
+            )
+        )
     elif planned_install:
         checks.append(Check("corpus_backend_target", "pass", "corpus backend is not Chroma yet, but installer will set it"))
     else:

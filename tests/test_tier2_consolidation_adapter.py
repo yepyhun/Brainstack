@@ -39,7 +39,7 @@ def _provider(tmp_path: Path, extractor) -> BrainstackMemoryProvider:
     return provider
 
 
-def test_tier2_batch_emits_hindsight_style_plan_before_admission_receipt(tmp_path: Path) -> None:
+def test_tier2_batch_emits_hindsight_style_plan_before_quarantine_receipt(tmp_path: Path) -> None:
     def extractor(*args, **kwargs):
         return {
             "profile_items": [
@@ -63,7 +63,8 @@ def test_tier2_batch_emits_hindsight_style_plan_before_admission_receipt(tmp_pat
         )
 
         assert result["status"] == "ok"
-        assert result["writes_performed"] == 1
+        assert result["writes_performed"] == 0
+        assert result["action_counts"]["QUARANTINE_PROPOSAL"] == 1
         assert result["consolidation_budget"]["status"] == "within_budget"
 
         plan = result["consolidation_plan"]
@@ -80,12 +81,17 @@ def test_tier2_batch_emits_hindsight_style_plan_before_admission_receipt(tmp_pat
         receipts = provider._store.list_admission_receipts(limit=10)
         assert receipts[0]["source_span_id"] == proposal["proposal_id"]
         assert receipts[0]["trace_id"] == proposal["proposal_id"]
-        assert receipts[0]["truth_eligible"] is True
+        assert receipts[0]["truth_eligible"] is False
+        assert receipts[0]["metadata"]["admission"]["authority_class"] == "tier2_summary"
+        assert provider._store.get_profile_item(
+            stable_key="identity:preferred_address_name",
+            principal_scope_key=provider._principal_scope_key,
+        ) is None
     finally:
         provider.shutdown()
 
 
-def test_tier2_duplicate_background_run_becomes_noop_not_memory_bloat(tmp_path: Path) -> None:
+def test_tier2_duplicate_background_run_cannot_become_durable_memory_bloat(tmp_path: Path) -> None:
     def extractor(*args, **kwargs):
         return {
             "profile_items": [
@@ -113,10 +119,15 @@ def test_tier2_duplicate_background_run_becomes_noop_not_memory_bloat(tmp_path: 
             trigger_reason="followup_pending_work",
         )
 
-        assert first["writes_performed"] == 1
+        assert first["writes_performed"] == 0
         assert second["writes_performed"] == 0
-        assert second["consolidation_plan"]["proposals"][0]["proposed_action"] == "NONE"
-        assert second["action_counts"]["NONE"] == 1
+        assert first["action_counts"]["QUARANTINE_PROPOSAL"] == 1
+        assert second["action_counts"]["QUARANTINE_PROPOSAL"] == 1
+        assert provider._store is not None
+        assert provider._store.get_profile_item(
+            stable_key="identity:preferred_address_name",
+            principal_scope_key=provider._principal_scope_key,
+        ) is None
     finally:
         provider.shutdown()
 

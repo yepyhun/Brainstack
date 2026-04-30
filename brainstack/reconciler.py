@@ -70,12 +70,33 @@ def _candidate_metadata(
     *,
     base_metadata: Mapping[str, Any],
     confidence: float,
+    source: str = "",
 ) -> Dict[str, Any]:
     payload = dict(base_metadata)
     payload["confidence"] = float(confidence)
     raw_metadata = candidate.get("metadata")
     if isinstance(raw_metadata, Mapping):
         payload.update(raw_metadata)
+    if str(source or "").strip().lower().startswith(("tier2:", "consolidation:")):
+        for key in ("assertion_speaker", "speaker", "source_role", "role", "author_role"):
+            value = str(payload.get(key) or "").strip().lower()
+            if value not in {"assistant", "quoted_assistant", "runtime"}:
+                payload.pop(key, None)
+        for key in ("authority", "authority_class", "source_authority"):
+            value = str(payload.get(key) or "").strip().lower()
+            if value not in {"assistant_claim", "assistant_self_claim", "runtime_diagnostic"}:
+                payload.pop(key, None)
+        for key in ("span_kind", "kind"):
+            value = str(payload.get(key) or "").strip().lower()
+            if value not in {"assistant_answer", "runtime_diagnostic"}:
+                payload.pop(key, None)
+        if str(payload.get("source_authority") or "").strip().lower() not in {
+            "assistant_claim",
+            "assistant_self_claim",
+            "runtime_diagnostic",
+        }:
+            payload["source_authority"] = "tier2_summary"
+        payload["authority_boundary"] = "tier2_candidate_metadata_cannot_upgrade_authority"
     raw_temporal = candidate.get("temporal")
     if isinstance(raw_temporal, Mapping):
         payload["temporal"] = {**payload.get("temporal", {}), **raw_temporal}
@@ -133,6 +154,7 @@ def _reconcile_profile_items(
             candidate,
             base_metadata=metadata,
             confidence=float(candidate.get("confidence", 0.75)),
+            source=source,
         )
         proposal = profile_claim_proposal(
             candidate,
@@ -192,6 +214,7 @@ def _reconcile_style_contract(
         normalized,
         base_metadata=metadata,
         confidence=float(normalized.get("confidence") or 0.9),
+        source=source,
     )
     proposal = profile_claim_proposal(
         normalized,
@@ -249,6 +272,7 @@ def _reconcile_states(
             candidate,
             base_metadata=metadata,
             confidence=float(candidate.get("confidence", 0.82)),
+            source=source,
         )
         proposal = graph_claim_proposal(
             candidate,
@@ -303,6 +327,7 @@ def _reconcile_relations(
             candidate,
             base_metadata=metadata,
             confidence=float(candidate.get("confidence", 0.8)),
+            source=source,
         )
         proposal = graph_claim_proposal(
             candidate,
@@ -349,6 +374,7 @@ def _reconcile_inferred_relations(
             candidate,
             base_metadata=metadata,
             confidence=float(candidate.get("confidence", 0.62)),
+            source=source,
         )
         proposal = graph_claim_proposal(
             candidate,
@@ -411,6 +437,7 @@ def _reconcile_typed_entities(
             candidate,
             base_metadata=metadata,
             confidence=float(candidate.get("confidence", 0.78)),
+            source=source,
         )
         raw_attributes_value = candidate.get("attributes")
         raw_attributes: Mapping[Any, Any] = raw_attributes_value if isinstance(raw_attributes_value, Mapping) else {}
@@ -478,6 +505,7 @@ def _reconcile_continuity(
             event,
             base_metadata=metadata,
             confidence=float(event.get("confidence", 0.76)),
+            source=source,
         )
         if store.find_continuity_event(session_id=session_id, kind="temporal_event", content=content) is not None:
             actions.append({"kind": "continuity", "action": "NONE", "type": "temporal_event", "content": content})
