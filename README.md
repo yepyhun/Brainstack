@@ -295,7 +295,7 @@ python install_into_hermes.py /path/to/hermes-agent --enable --doctor --dry-run 
 
 By default the installer uses `--host-patch-mode core`, which applies only Brainstack payload/config/dependency work plus minimal memory-provider seams. Use `--host-patch-mode compat` only for explicit host-runtime compatibility hotfixes, and `--host-patch-mode legacy` only for emergency rollback/testing of the previous broad host patch behavior.
 
-The installer also uses `--gateway-patch-mode auto` by default. This detects whether the target Hermes checkout already contains the required Gateway TurnContract/tool-profile/context-budget/SLO/renderer support. If upstream support is missing, it applies the bundled Hermes Gateway patch set and records the bundle hash in `.brainstack-install-manifest.json`. Use `--gateway-patch-mode skip` only when you intentionally want raw upstream Hermes without the optimized Bestie/Discord gateway path.
+The installer also uses `--gateway-patch-mode auto` by default. This detects whether the target Hermes checkout already contains the required Gateway TurnContract/tool-profile/context-budget/SLO/renderer support. If upstream support is missing, it applies the bundled Hermes Gateway patch set and records the bundle hash in `.brainstack-install-manifest.json`. Use `--gateway-patch-mode skip` only when you intentionally want raw upstream Hermes without the optimized Discord gateway path.
 
 Real install:
 

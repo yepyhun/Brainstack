@@ -3,7 +3,7 @@
 
 This is an installer boundary shim, not Brainstack runtime governance. The
 patch bundle keeps a fresh upstream Hermes checkout aligned with the Gateway
-contracts required by Bestie/Discord while upstream PRs are pending.
+contracts required for the Discord gateway while upstream PRs are pending.
 """
 
 from __future__ import annotations

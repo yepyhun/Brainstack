@@ -55,7 +55,7 @@ def _provider(tmp_path: Path, extractor: Callable[..., Mapping[str, Any]]):
         session_id="tier2-sota-session",
         turn_number=1,
         kind="turn",
-        content="User: My preferred name is SOTA_PRIVATE_SENTINEL_SHOULD_NOT_APPEAR.",
+        content="User: My preferred name is PUBLIC_SAFE_SENTINEL_SHOULD_NOT_APPEAR.",
         source="public-sota",
         metadata=provider._scoped_metadata(),
     )
@@ -75,7 +75,7 @@ def _run_provider_case(tmp_path: Path, extractor: Callable[..., Mapping[str, Any
 
 
 def _tier2_supported_scope_probe() -> dict[str, Any]:
-    sentinel = "SOTA_PRIVATE_SENTINEL_SHOULD_NOT_APPEAR"
+    sentinel = "PUBLIC_SAFE_SENTINEL_SHOULD_NOT_APPEAR"
     with tempfile.TemporaryDirectory(prefix="brainstack-tier2-sota-") as temp:
         root = Path(temp)
 
@@ -358,7 +358,7 @@ def build_packet(*, phase_dir: Path = PHASE_DIR) -> dict[str, Any]:
         "not_claimed": [
             "global KG-RAG SOTA",
             "all external donor runtimes beaten in their native deployments",
-            "full Hermes/Bestie product readiness",
+            "full Hermes product readiness",
         ],
         "supported_scope_sota_superiority": status == "pass",
         "tier2_product_supported_prerequisite_met": status == "pass",
