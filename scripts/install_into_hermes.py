@@ -43,6 +43,8 @@ SOURCE_HERMES_PROACTIVE_EXTENSION = REPO_ROOT / "extensions" / "hermes_proactive
 BACKEND_DEPENDENCIES = {
     "kuzu": "kuzu",
     "chromadb": "chromadb",
+    "hindsight_client": "hindsight-all-slim",
+    "pg0": "hindsight-api-slim[embedded-db]",
     "openai": "openai",
     "croniter": "croniter",
 }
@@ -128,6 +130,11 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "category": "required_seam",
         "owner": "embedding-runtime",
         "removal_condition": "Hermes Docker runtime provides an explicit healthy embedding runtime for Chroma.",
+    },
+    "_patch_compose_hindsight_local_tier2_runtime": {
+        "category": "required_seam",
+        "owner": "tier2-donor-runtime",
+        "removal_condition": "Hermes Docker runtime provides a first-class local Hindsight memory runtime binding.",
     },
     "_patch_compose_remove_discord_forced_heavy_profile": {
         "category": "required_seam",
@@ -431,6 +438,14 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_modes": ("docker",),
         "purpose": "Make terminal commands execute from the mounted workspace by default.",
         "why": "Docker file/terminal canaries need an explicit workspace contract instead of inherited image cwd.",
+    },
+    {
+        "patcher": "_patch_compose_hindsight_local_tier2_runtime",
+        "target": "docker-compose*.yml",
+        "scope": "tier2-donor-runtime-seam",
+        "runtime_modes": ("docker",),
+        "purpose": "Bind Tier2 shadow runtime to local Hindsight over local Ollama with no cloud route or secret.",
+        "why": "Tier2 cannot claim runtime readiness until the donor spine is explicitly local, inspectable, and reproducible by the installer.",
     },
     {
         "patcher": "_patch_compose_remove_discord_forced_heavy_profile",
@@ -3911,6 +3926,28 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
     brainstack.setdefault("graph_match_limit", 6)
     brainstack.setdefault("corpus_match_limit", 4)
     brainstack.setdefault("corpus_char_budget", 700)
+    brainstack.setdefault("tier2_mode", "shadow")
+    brainstack.setdefault("tier2_runtime", "hindsight_public_api_bridge")
+    brainstack.setdefault("tier2_hindsight_mode", "local_embedded")
+    brainstack.setdefault("tier2_hindsight_bank_id", "brainstack-tier2")
+    brainstack.setdefault("tier2_hindsight_llm_provider", "hermes_managed")
+    brainstack.setdefault("tier2_hindsight_llm_model", "")
+    brainstack.setdefault("tier2_hindsight_llm_base_url", "")
+    if (
+        brainstack.get("tier2_hindsight_llm_provider") == "ollama"
+        and brainstack.get("tier2_hindsight_llm_model") == "qwen3.5:9b"
+        and brainstack.get("tier2_hindsight_llm_base_url") == "http://127.0.0.1:11434/v1"
+    ):
+        brainstack["tier2_hindsight_llm_provider"] = "hermes_managed"
+        brainstack["tier2_hindsight_llm_model"] = ""
+        brainstack["tier2_hindsight_llm_base_url"] = ""
+    brainstack.setdefault("tier2_hindsight_embeddings_provider", "tei")
+    brainstack.setdefault("tier2_hindsight_embeddings_tei_url", "http://127.0.0.1:7997")
+    brainstack.setdefault("tier2_hindsight_reranker_provider", "rrf")
+    brainstack.setdefault("tier2_hindsight_retain_extraction_mode", "chunks")
+    brainstack.setdefault("tier2_hindsight_retain_extract_causal_links", False)
+    brainstack.setdefault("tier2_hindsight_api_command", "/opt/hermes/.venv/bin/hindsight-api")
+    brainstack.setdefault("tier2_hindsight_budget", "low")
     config.setdefault("auxiliary", {})
     if not isinstance(config["auxiliary"], dict):
         raise RuntimeError("config.yaml has non-object `auxiliary` section")
@@ -4189,6 +4226,23 @@ def _write_docker_compose_file(
 volumes:
   tei-model-cache:
 """
+    tier2_hindsight_environment = """      BRAINSTACK_TIER2_MODE: shadow
+      BRAINSTACK_TIER2_HINDSIGHT_MODE: local_embedded
+      BRAINSTACK_TIER2_HINDSIGHT_PROFILE: brainstack-tier2
+      BRAINSTACK_TIER2_HINDSIGHT_BANK_ID: brainstack-tier2
+      BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER: hermes_managed
+      BRAINSTACK_TIER2_HINDSIGHT_LLM_MODEL: ""
+      BRAINSTACK_TIER2_HINDSIGHT_LLM_BASE_URL: ""
+      BRAINSTACK_TIER2_HINDSIGHT_EMBEDDINGS_PROVIDER: tei
+      BRAINSTACK_TIER2_HINDSIGHT_EMBEDDINGS_TEI_URL: http://127.0.0.1:7997
+      BRAINSTACK_TIER2_HINDSIGHT_RERANKER_PROVIDER: rrf
+      BRAINSTACK_TIER2_HINDSIGHT_RETAIN_EXTRACTION_MODE: chunks
+      BRAINSTACK_TIER2_HINDSIGHT_RETAIN_EXTRACT_CAUSAL_LINKS: "false"
+      BRAINSTACK_TIER2_HINDSIGHT_API_COMMAND: /opt/hermes/.venv/bin/hindsight-api
+      BRAINSTACK_TIER2_HINDSIGHT_BUDGET: low
+      BRAINSTACK_TIER2_HINDSIGHT_TIMEOUT_SECONDS: "180"
+      BRAINSTACK_TIER2_HINDSIGHT_RETAIN_ASYNC: "false"
+"""
     content = f"""name: hermes-{service_slug}
 
 services:
@@ -4211,6 +4265,7 @@ services:
       HERMES_GID: "${{HERMES_GID:-1000}}"
       DISCORD_ALLOW_BOTS: "mentions"
       TERMINAL_CWD: /workspace
+{tier2_hindsight_environment}
 {tei_environment}
     volumes:
       - ./{runtime_ref}:/opt/data
@@ -4403,6 +4458,55 @@ def _patch_compose_terminal_workspace_cwd(path: Path, dry_run: bool) -> list[str
     return ["compose:terminal_cwd_workspace"] if inserted else []
 
 
+def _patch_compose_hindsight_local_tier2_runtime(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    old_text = text
+    for old, new in (
+        ("      BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER: ollama\n", "      BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER: hermes_managed\n"),
+        ("      BRAINSTACK_TIER2_HINDSIGHT_LLM_MODEL: qwen3.5:9b\n", '      BRAINSTACK_TIER2_HINDSIGHT_LLM_MODEL: ""\n'),
+        ("      BRAINSTACK_TIER2_HINDSIGHT_LLM_BASE_URL: http://127.0.0.1:11434/v1\n", '      BRAINSTACK_TIER2_HINDSIGHT_LLM_BASE_URL: ""\n'),
+        ("      - BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER=ollama\n", "      - BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER=hermes_managed\n"),
+        ("      - BRAINSTACK_TIER2_HINDSIGHT_LLM_MODEL=qwen3.5:9b\n", "      - BRAINSTACK_TIER2_HINDSIGHT_LLM_MODEL=\n"),
+        ("      - BRAINSTACK_TIER2_HINDSIGHT_LLM_BASE_URL=http://127.0.0.1:11434/v1\n", "      - BRAINSTACK_TIER2_HINDSIGHT_LLM_BASE_URL=\n"),
+    ):
+        text = text.replace(old, new)
+    specs = (
+        ("BRAINSTACK_TIER2_MODE", "shadow", "shadow", ("TERMINAL_CWD",)),
+        ("BRAINSTACK_TIER2_HINDSIGHT_MODE", "local_embedded", "local_embedded", ("BRAINSTACK_TIER2_MODE",)),
+        ("BRAINSTACK_TIER2_HINDSIGHT_PROFILE", "brainstack-tier2", "brainstack-tier2", ("BRAINSTACK_TIER2_HINDSIGHT_MODE",)),
+        ("BRAINSTACK_TIER2_HINDSIGHT_BANK_ID", "brainstack-tier2", "brainstack-tier2", ("BRAINSTACK_TIER2_HINDSIGHT_PROFILE",)),
+        ("BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER", "hermes_managed", "hermes_managed", ("BRAINSTACK_TIER2_HINDSIGHT_BANK_ID",)),
+        ("BRAINSTACK_TIER2_HINDSIGHT_LLM_MODEL", '""', "", ("BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER",)),
+        ("BRAINSTACK_TIER2_HINDSIGHT_LLM_BASE_URL", '""', "", ("BRAINSTACK_TIER2_HINDSIGHT_LLM_MODEL",)),
+        ("BRAINSTACK_TIER2_HINDSIGHT_EMBEDDINGS_PROVIDER", "tei", "tei", ("BRAINSTACK_TIER2_HINDSIGHT_LLM_BASE_URL",)),
+        ("BRAINSTACK_TIER2_HINDSIGHT_EMBEDDINGS_TEI_URL", "http://127.0.0.1:7997", "http://127.0.0.1:7997", ("BRAINSTACK_TIER2_HINDSIGHT_EMBEDDINGS_PROVIDER",)),
+        ("BRAINSTACK_TIER2_HINDSIGHT_RERANKER_PROVIDER", "rrf", "rrf", ("BRAINSTACK_TIER2_HINDSIGHT_EMBEDDINGS_TEI_URL",)),
+        ("BRAINSTACK_TIER2_HINDSIGHT_RETAIN_EXTRACTION_MODE", "chunks", "chunks", ("BRAINSTACK_TIER2_HINDSIGHT_RERANKER_PROVIDER",)),
+        ("BRAINSTACK_TIER2_HINDSIGHT_RETAIN_EXTRACT_CAUSAL_LINKS", '"false"', "false", ("BRAINSTACK_TIER2_HINDSIGHT_RETAIN_EXTRACTION_MODE",)),
+        ("BRAINSTACK_TIER2_HINDSIGHT_API_COMMAND", "/opt/hermes/.venv/bin/hindsight-api", "/opt/hermes/.venv/bin/hindsight-api", ("BRAINSTACK_TIER2_HINDSIGHT_RETAIN_EXTRACT_CAUSAL_LINKS",)),
+        ("BRAINSTACK_TIER2_HINDSIGHT_BUDGET", "low", "low", ("BRAINSTACK_TIER2_HINDSIGHT_API_COMMAND",)),
+        ("BRAINSTACK_TIER2_HINDSIGHT_TIMEOUT_SECONDS", '"180"', "180", ("BRAINSTACK_TIER2_HINDSIGHT_BUDGET",)),
+        ("BRAINSTACK_TIER2_HINDSIGHT_RETAIN_ASYNC", '"false"', "false", ("BRAINSTACK_TIER2_HINDSIGHT_TIMEOUT_SECONDS",)),
+    )
+    applied = text != old_text
+    for key, mapping_value, list_value, after_keys in specs:
+        text, inserted = _compose_ensure_env(
+            text,
+            key,
+            mapping_value,
+            list_value=list_value,
+            after_keys=after_keys,
+        )
+        applied = applied or inserted
+        text, normalized = _compose_quote_existing_list_env(text, key)
+        applied = applied or normalized
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return ["compose:hindsight_local_tier2_runtime"] if applied else []
+
+
 def _patch_compose_remove_discord_forced_heavy_profile(path: Path, dry_run: bool) -> list[str]:
     if not path.exists():
         return []
@@ -4591,21 +4695,14 @@ def _patch_dockerfile_backend_dependencies(path: Path, dry_run: bool) -> list[st
     install_line = f'uv pip install --no-cache-dir {backend_packages}'
     if install_line in text:
         return []
-    current_backend_line = "uv pip install --no-cache-dir chromadb kuzu"
-    upgraded_backend_line = "uv pip install --no-cache-dir chromadb croniter kuzu"
-    if current_backend_line in text and upgraded_backend_line not in text:
-        text = text.replace(current_backend_line, upgraded_backend_line, 1)
+    existing_backend_pattern = re.compile(
+        r"uv pip install --no-cache-dir (?=[^\n]*(?:chromadb|kuzu))[^\n]*"
+    )
+    if existing_backend_pattern.search(text):
+        text = existing_backend_pattern.sub(install_line, text, count=1)
         if not dry_run:
             path.write_text(text, encoding="utf-8")
         return ["dockerfile:install_runtime_dependencies"]
-    if (
-        "uv pip install --no-cache-dir -r /tmp/requirements.txt" in text
-        and upgraded_backend_line in text
-    ):
-        # Newer Hermes Dockerfiles already install core requirements from the
-        # lock export and keep runtime extras that Brainstack depends on in a
-        # dedicated backend layer, so no further patch is needed.
-        return []
     anchor = '    uv pip install --no-cache-dir -e ".[all]"\n'
     if anchor not in text:
         raise RuntimeError(f"Installer patch anchor missing for docker backend deps in {path}")
@@ -4976,6 +5073,24 @@ def main() -> int:
     files = _copy_tree(SOURCE_PLUGIN, plugin_target, args.dry_run)
     _assert_no_private_payload_files(files)
     helper_files: list[dict[str, str]] = []
+    shadow_probe_script = REPO_ROOT / "scripts" / "run_hindsight_runtime_shadow_probe.py"
+    if shadow_probe_script.exists():
+        helper_files.append(
+            _copy_file(
+                shadow_probe_script,
+                target / "scripts" / "run_hindsight_runtime_shadow_probe.py",
+                args.dry_run,
+            )
+        )
+    local_mode_matrix_script = REPO_ROOT / "scripts" / "run_hindsight_local_mode_matrix.py"
+    if local_mode_matrix_script.exists():
+        helper_files.append(
+            _copy_file(
+                local_mode_matrix_script,
+                target / "scripts" / "run_hindsight_local_mode_matrix.py",
+                args.dry_run,
+            )
+        )
 
     generated_files: list[dict[str, str]] = []
     if args.runtime == "docker":
@@ -5061,6 +5176,7 @@ def main() -> int:
         host_patches.extend(_run_host_patch("_patch_compose_terminal_workspace_cwd", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         if args.embedding_runtime == "local-tei-jina":
             host_patches.extend(_run_host_patch("_patch_compose_local_tei_jina_runtime", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
+        host_patches.extend(_run_host_patch("_patch_compose_hindsight_local_tier2_runtime", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_compose_remove_discord_forced_heavy_profile", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_dockerignore", target / ".dockerignore", args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_dockerfile_backend_dependencies", target / "Dockerfile", args.dry_run, host_patch_mode=args.host_patch_mode))

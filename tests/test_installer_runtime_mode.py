@@ -45,6 +45,17 @@ def test_generated_docker_compose_includes_local_tei_jina_runtime(tmp_path):
     assert "PYTHONPATH: /opt/hermes/plugins/memory" in text
     assert 'DISCORD_ALLOW_BOTS: "mentions"' in text
     assert "TERMINAL_CWD: /workspace" in text
+    assert "BRAINSTACK_TIER2_MODE: shadow" in text
+    assert "BRAINSTACK_TIER2_HINDSIGHT_MODE: local_embedded" in text
+    assert "BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER: hermes_managed" in text
+    assert 'BRAINSTACK_TIER2_HINDSIGHT_LLM_MODEL: ""' in text
+    assert 'BRAINSTACK_TIER2_HINDSIGHT_LLM_BASE_URL: ""' in text
+    assert "BRAINSTACK_TIER2_HINDSIGHT_EMBEDDINGS_PROVIDER: tei" in text
+    assert "BRAINSTACK_TIER2_HINDSIGHT_EMBEDDINGS_TEI_URL: http://127.0.0.1:7997" in text
+    assert "BRAINSTACK_TIER2_HINDSIGHT_RERANKER_PROVIDER: rrf" in text
+    assert "BRAINSTACK_TIER2_HINDSIGHT_RETAIN_EXTRACTION_MODE: chunks" in text
+    assert 'BRAINSTACK_TIER2_HINDSIGHT_RETAIN_EXTRACT_CAUSAL_LINKS: "false"' in text
+    assert "BRAINSTACK_TIER2_HINDSIGHT_API_COMMAND: /opt/hermes/.venv/bin/hindsight-api" in text
     assert "HERMES_DISCORD_TURN_PROFILE" not in text
     assert "HERMES_DISCORD_TOOL_PROFILE" not in text
 
@@ -84,6 +95,18 @@ def test_config_patch_embedding_none_makes_corpus_explicitly_unavailable(tmp_pat
     brainstack = data["plugins"]["brainstack"]
     assert brainstack["corpus_backend"] == "none"
     assert "corpus_db_path" not in brainstack
+    assert brainstack["tier2_mode"] == "shadow"
+    assert brainstack["tier2_runtime"] == "hindsight_public_api_bridge"
+    assert brainstack["tier2_hindsight_mode"] == "local_embedded"
+    assert brainstack["tier2_hindsight_llm_provider"] == "hermes_managed"
+    assert brainstack["tier2_hindsight_llm_model"] == ""
+    assert brainstack["tier2_hindsight_llm_base_url"] == ""
+    assert brainstack["tier2_hindsight_embeddings_provider"] == "tei"
+    assert brainstack["tier2_hindsight_embeddings_tei_url"] == "http://127.0.0.1:7997"
+    assert brainstack["tier2_hindsight_reranker_provider"] == "rrf"
+    assert brainstack["tier2_hindsight_retain_extraction_mode"] == "chunks"
+    assert brainstack["tier2_hindsight_retain_extract_causal_links"] is False
+    assert brainstack["tier2_hindsight_api_command"] == "/opt/hermes/.venv/bin/hindsight-api"
 
 
 def test_local_install_rejects_local_tei_runtime_without_docker(monkeypatch, capsys, tmp_path):
@@ -154,6 +177,70 @@ services:
     assert "BRAINSTACK_EMBEDDINGS_URL: http://127.0.0.1:7997/embed" in text
     assert "BRAINSTACK_DISABLE_CHROMA_DEFAULT_EMBEDDING: \"true\"" in text
     assert "tei-model-cache:" in text
+
+
+def test_existing_docker_compose_is_patched_with_local_hindsight_tier2(tmp_path):
+    compose = tmp_path / "docker-compose.bestie.yml"
+    compose.write_text(
+        """
+services:
+  hermes-bestie:
+    environment:
+      HERMES_HOME: /opt/data
+      HERMES_ENABLE_PROJECT_PLUGINS: "true"
+      PYTHONPATH: /opt/hermes/plugins/memory
+      DISCORD_ALLOW_BOTS: "mentions"
+      TERMINAL_CWD: /workspace
+""",
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_compose_hindsight_local_tier2_runtime(compose, dry_run=False)
+
+    text = compose.read_text(encoding="utf-8")
+    assert applied == ["compose:hindsight_local_tier2_runtime"]
+    assert "BRAINSTACK_TIER2_MODE: shadow" in text
+    assert "BRAINSTACK_TIER2_HINDSIGHT_MODE: local_embedded" in text
+    assert "BRAINSTACK_TIER2_HINDSIGHT_BANK_ID: brainstack-tier2" in text
+    assert "BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER: hermes_managed" in text
+    assert 'BRAINSTACK_TIER2_HINDSIGHT_LLM_MODEL: ""' in text
+    assert 'BRAINSTACK_TIER2_HINDSIGHT_LLM_BASE_URL: ""' in text
+    assert "BRAINSTACK_TIER2_HINDSIGHT_EMBEDDINGS_PROVIDER: tei" in text
+    assert "BRAINSTACK_TIER2_HINDSIGHT_EMBEDDINGS_TEI_URL: http://127.0.0.1:7997" in text
+    assert "BRAINSTACK_TIER2_HINDSIGHT_RERANKER_PROVIDER: rrf" in text
+    assert "BRAINSTACK_TIER2_HINDSIGHT_RETAIN_EXTRACTION_MODE: chunks" in text
+    assert 'BRAINSTACK_TIER2_HINDSIGHT_RETAIN_EXTRACT_CAUSAL_LINKS: "false"' in text
+    assert "BRAINSTACK_TIER2_HINDSIGHT_API_COMMAND: /opt/hermes/.venv/bin/hindsight-api" in text
+    assert 'BRAINSTACK_TIER2_HINDSIGHT_RETAIN_ASYNC: "false"' in text
+
+
+def test_existing_list_env_compose_is_patched_with_local_hindsight_tier2(tmp_path):
+    compose = tmp_path / "docker-compose.bestie.yml"
+    compose.write_text(
+        """
+services:
+  hermes-bestie:
+    environment:
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+      - TERMINAL_CWD=/workspace
+""",
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_compose_hindsight_local_tier2_runtime(compose, dry_run=False)
+
+    text = compose.read_text(encoding="utf-8")
+    assert applied == ["compose:hindsight_local_tier2_runtime"]
+    assert "      - BRAINSTACK_TIER2_MODE=shadow" in text
+    assert "      - BRAINSTACK_TIER2_HINDSIGHT_MODE=local_embedded" in text
+    assert "      - BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER=hermes_managed" in text
+    assert "      - BRAINSTACK_TIER2_HINDSIGHT_LLM_MODEL=" in text
+    assert "      - BRAINSTACK_TIER2_HINDSIGHT_LLM_BASE_URL=" in text
+    assert "      - BRAINSTACK_TIER2_HINDSIGHT_EMBEDDINGS_TEI_URL=http://127.0.0.1:7997" in text
+    assert "      - BRAINSTACK_TIER2_HINDSIGHT_RERANKER_PROVIDER=rrf" in text
+    assert "      - BRAINSTACK_TIER2_HINDSIGHT_RETAIN_EXTRACTION_MODE=chunks" in text
+    assert "      - BRAINSTACK_TIER2_HINDSIGHT_RETAIN_EXTRACT_CAUSAL_LINKS=false" in text
 
 
 def test_existing_docker_compose_quotes_colon_space_list_env(tmp_path):

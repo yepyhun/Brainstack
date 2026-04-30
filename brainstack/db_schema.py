@@ -114,6 +114,33 @@ ON admission_receipts(decision, target_shelf, target_slot, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_admission_receipts_trace
 ON admission_receipts(trace_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS canonical_memory_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    schema_version TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    source_event_id TEXT NOT NULL DEFAULT '',
+    source_span_id TEXT NOT NULL DEFAULT '',
+    principal_scope_key TEXT NOT NULL DEFAULT '',
+    workspace_scope_key TEXT NOT NULL DEFAULT '',
+    session_id TEXT NOT NULL DEFAULT '',
+    stable_fact_id TEXT NOT NULL DEFAULT '',
+    target_slot TEXT NOT NULL DEFAULT '',
+    authority_class TEXT NOT NULL DEFAULT '',
+    truth_eligible INTEGER NOT NULL DEFAULT 0,
+    support_visibility TEXT NOT NULL DEFAULT 'inspect_only',
+    receipt_id TEXT NOT NULL DEFAULT '',
+    event_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_canonical_memory_events_scope
+ON canonical_memory_events(principal_scope_key, event_type, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_canonical_memory_events_receipt
+ON canonical_memory_events(receipt_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS behavior_contracts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     storage_key TEXT NOT NULL UNIQUE,

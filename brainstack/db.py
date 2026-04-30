@@ -25,6 +25,7 @@ from .storage.graph_state_store import GraphStateStoreMixin
 from .storage.proactive_store import ProactiveStoreMixin
 from .storage.telemetry_store import TelemetryStoreMixin
 from .storage.admission_receipts import AdmissionReceiptStoreMixin
+from .storage.canonical_memory_events import CanonicalMemoryEventStoreMixin
 
 __all__ = ["BrainstackStore", "utc_now_iso"]
 
@@ -43,6 +44,7 @@ class BrainstackStore(
     ProactiveStoreMixin,
     TelemetryStoreMixin,
     AdmissionReceiptStoreMixin,
+    CanonicalMemoryEventStoreMixin,
 ):
     def __init__(
         self,

@@ -1,6 +1,6 @@
 [project]
 name = "brainstack-hermes-plugin"
-version = "1.0.51"
+version = "1.0.52"
 description = "Brainstack memory-kernel plugin for Hermes."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,6 +12,10 @@ dependencies = [
 backends = [
   "chromadb",
   "kuzu",
+]
+donors = [
+  "hindsight-all-slim>=0.5.6",
+  "hindsight-api-slim[embedded-db]>=0.5.6",
 ]
 dev = [
   "pytest>=8.0",

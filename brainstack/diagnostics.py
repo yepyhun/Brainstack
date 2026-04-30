@@ -43,6 +43,7 @@ _COUNT_TABLES: tuple[str, ...] = (
     "corpus_sections",
     "semantic_evidence_index",
     "tier2_run_records",
+    "canonical_memory_events",
 )
 
 _LAST_WRITE_COLUMNS: dict[str, str] = {
@@ -63,6 +64,7 @@ _LAST_WRITE_COLUMNS: dict[str, str] = {
     "corpus_sections": "created_at",
     "semantic_evidence_index": "updated_at",
     "tier2_run_records": "updated_at",
+    "canonical_memory_events": "created_at",
 }
 
 

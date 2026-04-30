@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from ..canonical_memory_event import canonical_event_from_admission_decision
 from ..core.admission import AdmissionDecision, TruthShelf, TruthWritePermit
 from .durable_truth_port import DurableTruthPort
+from .store_runtime import utc_now_iso
 
 
 def merge_admission_metadata(
@@ -27,6 +29,36 @@ class ProjectionWriter:
         self.store = store
         self.port = DurableTruthPort(store)
 
+    def _record_receipt_and_event(
+        self,
+        *,
+        decision: AdmissionDecision,
+        metadata: Mapping[str, Any] | None = None,
+        durable_row_id: int = 0,
+    ) -> int:
+        payload = dict(metadata or {})
+        receipt_id = int(
+            self.store.record_admission_receipt(
+                decision=decision,
+                durable_row_id=int(durable_row_id or 0),
+                metadata=payload,
+            )
+        )
+        if hasattr(self.store, "record_canonical_memory_event"):
+            proposal = decision.proposal
+            # Canonical events require real source-span provenance. Legacy direct writes
+            # remain receipt-only until their caller supplies a source event/span.
+            if proposal.source_event_id and proposal.source_span_id:
+                event = canonical_event_from_admission_decision(
+                    decision=decision,
+                    receipt_id=receipt_id,
+                    durable_row_id=int(durable_row_id or 0),
+                    metadata=payload,
+                    observed_at=utc_now_iso(),
+                )
+                self.store.record_canonical_memory_event(event)
+        return receipt_id
+
     def record_decision(
         self,
         *,
@@ -34,12 +66,10 @@ class ProjectionWriter:
         metadata: Mapping[str, Any] | None = None,
         durable_row_id: int = 0,
     ) -> int:
-        return int(
-            self.store.record_admission_receipt(
-                decision=decision,
-                durable_row_id=int(durable_row_id or 0),
-                metadata=dict(metadata or {}),
-            )
+        return self._record_receipt_and_event(
+            decision=decision,
+            durable_row_id=int(durable_row_id or 0),
+            metadata=dict(metadata or {}),
         )
 
     def write_profile(
@@ -68,7 +98,7 @@ class ProjectionWriter:
                 metadata=merge_admission_metadata(metadata, decision=decision),
             )
         )
-        self.store.record_admission_receipt(decision=decision, durable_row_id=row_id, metadata=dict(metadata or {}))
+        self._record_receipt_and_event(decision=decision, durable_row_id=row_id, metadata=dict(metadata or {}))
         return row_id
 
     def write_graph_state(
@@ -95,7 +125,7 @@ class ProjectionWriter:
             supersede=decision.supersede,
             metadata=merge_admission_metadata(metadata, decision=decision),
         )
-        self.store.record_admission_receipt(
+        self._record_receipt_and_event(
             decision=decision,
             durable_row_id=int(outcome.get("state_id") or 0),
             metadata=dict(metadata or {}),
@@ -127,7 +157,7 @@ class ProjectionWriter:
             metadata=merge_admission_metadata(metadata, decision=decision),
             inferred=inferred,
         )
-        self.store.record_admission_receipt(
+        self._record_receipt_and_event(
             decision=decision,
             durable_row_id=int(outcome.get("relation_id") or 0),
             metadata=dict(metadata or {}),
