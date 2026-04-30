@@ -41,7 +41,7 @@ def test_tier2_run_result_is_persisted_with_counts(tmp_path: Path) -> None:
             "profile_items": [
                 {
                     "category": "identity",
-                    "slot": "identity:name",
+                    "slot": "identity:preferred_address_name",
                     "content": "ExampleUser",
                     "confidence": 0.95,
                     "metadata": {"source_role": "user"},

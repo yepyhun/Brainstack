@@ -8,6 +8,7 @@ from .db import BrainstackStore
 from .provenance import merge_provenance
 from .storage.projection_writer import ProjectionWriter
 from .style_contract import STYLE_CONTRACT_SLOT, normalize_style_contract_payload
+from .tier2_consolidation import bound_tier2_extracted_payload
 from .tier1_extractor import build_profile_stable_key
 
 
@@ -543,13 +544,14 @@ def reconcile_tier2_candidates(
     extracted: Mapping[str, Any],
     metadata: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
+    bounded_extracted, budget_report = bound_tier2_extracted_payload(extracted)
     payload = dict(metadata or {})
     payload.update({"session_id": session_id, "turn_number": turn_number, "tier": "tier2"})
     actions: List[Dict[str, Any]] = []
     actions.extend(
         _reconcile_style_contract(
             store,
-            candidate=extracted.get("style_contract"),
+            candidate=bounded_extracted.get("style_contract"),
             source=source,
             metadata=payload,
         )
@@ -557,7 +559,7 @@ def reconcile_tier2_candidates(
     actions.extend(
         _reconcile_profile_items(
             store,
-            candidates=extracted.get("profile_items", []),
+            candidates=bounded_extracted.get("profile_items", []),
             source=source,
             metadata=payload,
         )
@@ -570,7 +572,7 @@ def reconcile_tier2_candidates(
     actions.extend(
         _reconcile_states(
             store,
-            candidates=extracted.get("states", []),
+            candidates=bounded_extracted.get("states", []),
             metadata=payload,
             source=source,
             user_name=user_name,
@@ -579,7 +581,7 @@ def reconcile_tier2_candidates(
     actions.extend(
         _reconcile_relations(
             store,
-            candidates=extracted.get("relations", []),
+            candidates=bounded_extracted.get("relations", []),
             metadata=payload,
             source=source,
             user_name=user_name,
@@ -588,7 +590,7 @@ def reconcile_tier2_candidates(
     actions.extend(
         _reconcile_inferred_relations(
             store,
-            candidates=extracted.get("inferred_relations", []),
+            candidates=bounded_extracted.get("inferred_relations", []),
             metadata=payload,
             source=source,
             user_name=user_name,
@@ -597,7 +599,7 @@ def reconcile_tier2_candidates(
     actions.extend(
         _reconcile_typed_entities(
             store,
-            candidates=extracted.get("typed_entities", []),
+            candidates=bounded_extracted.get("typed_entities", []),
             metadata=payload,
             source=source,
             user_name=user_name,
@@ -608,11 +610,11 @@ def reconcile_tier2_candidates(
             store,
             session_id=session_id,
             turn_number=turn_number,
-            temporal_events=extracted.get("temporal_events", []),
-            continuity_summary=_normalize_text(extracted.get("continuity_summary")),
-            decisions=extracted.get("decisions", []),
+            temporal_events=bounded_extracted.get("temporal_events", []),
+            continuity_summary=_normalize_text(bounded_extracted.get("continuity_summary")),
+            decisions=bounded_extracted.get("decisions", []),
             source=source,
             metadata=payload,
         )
     )
-    return {"actions": actions}
+    return {"actions": actions, "consolidation_budget": budget_report}

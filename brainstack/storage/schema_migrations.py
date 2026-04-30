@@ -15,6 +15,7 @@ from .store_runtime import (
     MIGRATION_COMPILED_BEHAVIOR_POLICY_V1,
     MIGRATION_COMPILED_BEHAVIOR_POLICY_V2,
     MIGRATION_EXPLICIT_IDENTITY_BACKFILL_V1,
+    MIGRATION_GRAPH_CONFLICT_LIFECYCLE_V1,
     MIGRATION_GRAPH_SOURCE_LINEAGE_V1,
     MIGRATION_RECENT_WORK_AUTHORITY_V1,
     MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V1,
@@ -239,6 +240,125 @@ class SchemaMigrationMixin(StoreRuntimeBase):
                 shelf="graph",
                 metadata={"migration": MIGRATION_GRAPH_SOURCE_LINEAGE_V1},
             )
+
+    def _apply_graph_conflict_lifecycle_migration_v1(self) -> None:
+        allowed_statuses = {
+            "open",
+            "accepted_current",
+            "accepted_candidate",
+            "quarantined_candidate",
+            "superseded_with_new_value",
+        }
+        table_row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'graph_conflicts'"
+        ).fetchone()
+        table_sql = str(table_row["sql"] or "") if table_row else ""
+        if table_sql and "CHECK(status IN" not in table_sql:
+            legacy_name = "graph_conflicts_legacy_lifecycle_v1"
+            self.conn.execute("DROP TABLE IF EXISTS graph_conflict_resolutions")
+            self.conn.execute(f"DROP TABLE IF EXISTS {legacy_name}")
+            self.conn.execute(f"ALTER TABLE graph_conflicts RENAME TO {legacy_name}")
+            self.conn.execute(
+                """
+                CREATE TABLE graph_conflicts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entity_id INTEGER NOT NULL,
+                    attribute TEXT NOT NULL,
+                    current_state_id INTEGER NOT NULL,
+                    candidate_value_text TEXT NOT NULL,
+                    candidate_source TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN (
+                        'open',
+                        'accepted_current',
+                        'accepted_candidate',
+                        'quarantined_candidate',
+                        'superseded_with_new_value'
+                    )),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(entity_id) REFERENCES graph_entities(id),
+                    FOREIGN KEY(current_state_id) REFERENCES graph_states(id)
+                )
+                """
+            )
+            self.conn.execute(
+                """
+                INSERT INTO graph_conflicts (
+                    id, entity_id, attribute, current_state_id, candidate_value_text,
+                    candidate_source, metadata_json, status, created_at, updated_at
+                )
+                SELECT
+                    id,
+                    entity_id,
+                    attribute,
+                    current_state_id,
+                    candidate_value_text,
+                    candidate_source,
+                    metadata_json,
+                    CASE
+                        WHEN status IN (
+                            'open',
+                            'accepted_current',
+                            'accepted_candidate',
+                            'quarantined_candidate',
+                            'superseded_with_new_value'
+                        ) THEN status
+                        ELSE 'open'
+                    END,
+                    created_at,
+                    updated_at
+                FROM graph_conflicts_legacy_lifecycle_v1
+                """
+            )
+            self.conn.execute(f"DROP TABLE {legacy_name}")
+            self.conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_graph_conflicts_entity
+                ON graph_conflicts(entity_id, attribute, status, updated_at DESC)
+                """
+            )
+
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS graph_conflict_resolutions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conflict_id INTEGER NOT NULL,
+                decision TEXT NOT NULL CHECK(decision IN (
+                    'accept_current',
+                    'accept_candidate',
+                    'quarantine_candidate',
+                    'supersede_with_new_value'
+                )),
+                previous_status TEXT NOT NULL,
+                new_status TEXT NOT NULL,
+                approved_by TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+                before_json TEXT NOT NULL DEFAULT '{}',
+                after_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(conflict_id) REFERENCES graph_conflicts(id)
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_graph_conflict_resolutions_conflict
+            ON graph_conflict_resolutions(conflict_id, created_at DESC)
+            """
+        )
+        rows = self.conn.execute("SELECT id, status FROM graph_conflicts").fetchall()
+        for row in rows:
+            status = str(row["status"] or "").strip()
+            if status in allowed_statuses:
+                continue
+            self.conn.execute(
+                "UPDATE graph_conflicts SET status = 'open' WHERE id = ?",
+                (int(row["id"]),),
+            )
+        self._mark_migration_applied(MIGRATION_GRAPH_CONFLICT_LIFECYCLE_V1)
+        self.conn.commit()
 
     @_locked
     def _apply_recent_work_authority_migration_v1(self) -> None:

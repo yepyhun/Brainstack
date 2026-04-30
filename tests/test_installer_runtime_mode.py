@@ -118,6 +118,31 @@ services:
     assert "tei-model-cache:" in text
 
 
+def test_existing_docker_compose_quotes_colon_space_list_env(tmp_path):
+    compose = tmp_path / "docker-compose.bestie.yml"
+    compose.write_text(
+        (
+            """
+services:
+  gateway:
+    image: hermes
+    environment:
+      - HERMES_UID=${HERMES_UID:-10000}
+"""
+            "      - BRAINSTACK_EMBEDDINGS_QUERY_PREFIX=query: \n"
+            "      - BRAINSTACK_EMBEDDINGS_DOCUMENT_PREFIX=document: \n"
+        ),
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_compose_local_tei_jina_runtime(compose, dry_run=False)
+
+    text = compose.read_text(encoding="utf-8")
+    assert "compose:local_tei_jina_environment" in applied
+    assert '- "BRAINSTACK_EMBEDDINGS_QUERY_PREFIX=query: "' in text
+    assert '- "BRAINSTACK_EMBEDDINGS_DOCUMENT_PREFIX=document: "' in text
+
+
 def test_existing_docker_compose_migrates_old_tei_port_mapping(tmp_path):
     compose = tmp_path / "docker-compose.bestie.yml"
     compose.write_text(
@@ -551,6 +576,23 @@ class AIAgent:
     assert "DECLARED_EXTERNAL_CAPABILITY_NOT_USED" in text
 
 
+def test_run_agent_deferred_tool_continuation_patch_skips_when_seam_absent(tmp_path):
+    module = tmp_path / "run_agent.py"
+    module.write_text(
+        '''
+class AIAgent:
+    def __init__(self):
+        self.tools = []
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_run_agent_deferred_tool_continuation(module, dry_run=False)
+
+    assert applied == []
+    assert module.read_text(encoding="utf-8").strip().startswith("class AIAgent")
+
+
 def test_memory_manager_output_validation_patch_adds_provider_receipt_seam(tmp_path):
     module = tmp_path / "memory_manager.py"
     module.write_text(
@@ -742,6 +784,25 @@ def _render_text(answer_type: str, claim_style: str, answer_value: str) -> str:
     ]
     assert "def _response_language()" in text
     assert "Nincs rögzített aktuális feladat explicit assignment evidence alapján." in text
+
+
+def test_memory_answer_renderer_language_patch_skips_new_answer_evidence_signature(tmp_path):
+    module = tmp_path / "memory_answer_renderer.py"
+    module.write_text(
+        '''"""renderer"""
+from typing import Any, Mapping, Sequence
+
+
+def _render_text(answer_type: str, claim_style: str, answer_evidence: Sequence[Mapping[str, Any]]) -> str:
+    return "Recorded value."
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_memory_answer_renderer_language(module, dry_run=False)
+
+    assert applied == []
+    assert "def _response_language()" not in module.read_text(encoding="utf-8")
 
 
 def test_doctor_accepts_fenced_private_recall_wrapper():

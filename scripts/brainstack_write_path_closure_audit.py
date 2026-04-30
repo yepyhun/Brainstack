@@ -81,6 +81,8 @@ def _classify(file: str, method: str, caller: str) -> tuple[str, str]:
         return "TEST_OR_CANARY_SEED", "active preference contract gauntlet fixture seed"
     if file.startswith("scripts/run_backend_lifecycle_gauntlet.py"):
         return "TEST_OR_CANARY_SEED", "backend lifecycle gauntlet fixture seed"
+    if file.startswith("scripts/audit_graph_conflict_lifecycle.py"):
+        return "TEST_OR_CANARY_SEED", "graph conflict lifecycle audit fixture seed"
     if file.startswith("scripts/brainstack_replay_canary.py"):
         return "TEST_OR_CANARY_SEED", "replay canary fixture seed"
     if file.startswith("tests/"):

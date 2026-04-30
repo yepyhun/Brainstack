@@ -303,7 +303,13 @@ CREATE TABLE IF NOT EXISTS graph_conflicts (
     candidate_value_text TEXT NOT NULL,
     candidate_source TEXT NOT NULL,
     metadata_json TEXT NOT NULL DEFAULT '{}',
-    status TEXT NOT NULL DEFAULT 'open',
+    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN (
+        'open',
+        'accepted_current',
+        'accepted_candidate',
+        'quarantined_candidate',
+        'superseded_with_new_value'
+    )),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY(entity_id) REFERENCES graph_entities(id),
@@ -312,6 +318,29 @@ CREATE TABLE IF NOT EXISTS graph_conflicts (
 
 CREATE INDEX IF NOT EXISTS idx_graph_conflicts_entity
 ON graph_conflicts(entity_id, attribute, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS graph_conflict_resolutions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conflict_id INTEGER NOT NULL,
+    decision TEXT NOT NULL CHECK(decision IN (
+        'accept_current',
+        'accept_candidate',
+        'quarantine_candidate',
+        'supersede_with_new_value'
+    )),
+    previous_status TEXT NOT NULL,
+    new_status TEXT NOT NULL,
+    approved_by TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+    before_json TEXT NOT NULL DEFAULT '{}',
+    after_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(conflict_id) REFERENCES graph_conflicts(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_graph_conflict_resolutions_conflict
+ON graph_conflict_resolutions(conflict_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS publish_journal (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

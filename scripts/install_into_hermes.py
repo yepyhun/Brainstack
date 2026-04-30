@@ -2271,6 +2271,8 @@ def _patch_run_agent_deferred_tool_continuation(path: Path, dry_run: bool) -> li
         return []
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
+    if "hermes_deferred_tools" not in text and "LOAD_TOOLS_NAME" not in text:
+        return []
 
     if "    BUNDLE_TO_TOOLS,\n" not in text:
         text = _replace_once(
@@ -2995,6 +2997,9 @@ def _patch_memory_answer_renderer_language(path: Path, dry_run: bool) -> list[st
         return []
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
+    old_render_signature = "def _render_text(answer_type: str, claim_style: str, answer_value: str) -> str:"
+    if old_render_signature not in text and "def _render_text(answer_type: str, claim_style: str, answer_evidence" in text:
+        return []
 
     if "import os\n" not in text:
         text = _replace_once(
@@ -4287,7 +4292,7 @@ def _compose_ensure_env(
     style = _compose_detect_environment_style(text)
     if style == "list":
         rendered_value = list_value if list_value is not None else mapping_value.strip("\"")
-        entry = f"      - {key}={rendered_value}\n"
+        entry = _compose_list_env_entry(key, rendered_value)
         anchors = [
             re.compile(rf"(?m)^      - {re.escape(anchor_key)}=.*\n")
             for anchor_key in after_keys
@@ -4314,6 +4319,30 @@ def _compose_ensure_env(
         if match:
             return text[: match.end()] + entry + text[match.end() :], True
     raise RuntimeError(f"Installer patch anchor missing for compose env {key}")
+
+
+def _compose_list_env_entry(key: str, value: str) -> str:
+    scalar = f"{key}={value}"
+    if _compose_list_env_scalar_needs_quotes(scalar):
+        return f"      - {json.dumps(scalar, ensure_ascii=True)}\n"
+    return f"      - {scalar}\n"
+
+
+def _compose_list_env_scalar_needs_quotes(scalar: str) -> bool:
+    return ": " in scalar or scalar.endswith(" ") or scalar.startswith(("{", "[", "&", "*", "!", "|", ">"))
+
+
+def _compose_quote_existing_list_env(text: str, key: str) -> tuple[str, bool]:
+    pattern = re.compile(rf"(?m)^(?P<indent>\s*)-\s+{re.escape(key)}=(?P<value>.*)$")
+
+    def repl(match: re.Match[str]) -> str:
+        scalar = f"{key}={match.group('value')}"
+        if not _compose_list_env_scalar_needs_quotes(scalar):
+            return match.group(0)
+        return f"{match.group('indent')}- {json.dumps(scalar, ensure_ascii=True)}"
+
+    updated, count = pattern.subn(repl, text)
+    return updated, updated != text and count > 0
 
 
 def _patch_compose_plugin_pythonpath(path: Path, dry_run: bool) -> list[str]:
@@ -4514,6 +4543,8 @@ def _patch_compose_local_tei_jina_runtime(path: Path, dry_run: bool) -> list[str
     for key, mapping_value, list_value, after_keys in env_specs:
         text, inserted = _compose_ensure_env(text, key, mapping_value, list_value=list_value, after_keys=after_keys)
         inserted_env = inserted_env or inserted
+        text, normalized_env = _compose_quote_existing_list_env(text, key)
+        inserted_env = inserted_env or normalized_env
     if inserted_env:
         applied.append("compose:local_tei_jina_environment")
     text, inserted_volume = _compose_insert_named_volume(text, "tei-model-cache")

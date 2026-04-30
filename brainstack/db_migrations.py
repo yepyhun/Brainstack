@@ -17,6 +17,7 @@ MIGRATION_COMPILED_BEHAVIOR_POLICY_V2 = "compiled_behavior_policy_v2"
 MIGRATION_STYLE_CONTRACT_BEHAVIOR_DEMOTION_V1 = "style_contract_behavior_demotion_v1"
 MIGRATION_RECENT_WORK_AUTHORITY_V1 = "recent_work_authority_v1"
 MIGRATION_GRAPH_SOURCE_LINEAGE_V1 = "graph_source_lineage_v1"
+MIGRATION_GRAPH_CONFLICT_LIFECYCLE_V1 = "graph_conflict_lifecycle_v1"
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,10 @@ COMPATIBILITY_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec(
         MIGRATION_GRAPH_SOURCE_LINEAGE_V1,
         "_apply_graph_source_lineage_migration_v1",
+    ),
+    MigrationSpec(
+        MIGRATION_GRAPH_CONFLICT_LIFECYCLE_V1,
+        "_apply_graph_conflict_lifecycle_migration_v1",
     ),
 )
 

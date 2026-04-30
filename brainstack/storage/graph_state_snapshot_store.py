@@ -14,6 +14,7 @@ from .store_runtime import (
     _decode_json_object,
     _graph_sort_key,
     _graph_structured_field_match_score,
+    _locked,
     _merge_graph_record_metadata,
     _merge_record_metadata,
     _normalize_graph_record_metadata,
@@ -31,6 +32,19 @@ from .store_runtime import (
     merge_temporal,
     utc_now_iso,
 )
+
+_GRAPH_CONFLICT_OPEN_STATUS = "open"
+_GRAPH_CONFLICT_RESOLUTION_STATUSES = {
+    "accept_current": "accepted_current",
+    "accept_candidate": "accepted_candidate",
+    "quarantine_candidate": "quarantined_candidate",
+    "supersede_with_new_value": "superseded_with_new_value",
+}
+
+
+def _normalized_conflict_value(value: Any) -> str:
+    return " ".join(str(value or "").casefold().split())
+
 
 class GraphStateSnapshotMixin(StoreRuntimeBase):
     def _sqlite_upsert_graph_state(
@@ -300,6 +314,48 @@ class GraphStateSnapshotMixin(StoreRuntimeBase):
             )
             self.conn.commit()
             return {"status": "conflict", "entity_id": entity_id, "conflict_id": int(conflict["id"])}
+        inverse_rows = self.conn.execute(
+            """
+            SELECT gc.id, gc.metadata_json, gc.candidate_value_text, gs.value_text AS current_value
+            FROM graph_conflicts gc
+            JOIN graph_states gs ON gs.id = gc.current_state_id
+            WHERE gc.entity_id = ? AND gc.attribute = ? AND gc.status = 'open'
+            """,
+            (entity_id, attribute),
+        ).fetchall()
+        current_value = str(current["value_text"] or "")
+        normalized_candidate = _normalized_conflict_value(value_text)
+        normalized_current = _normalized_conflict_value(current_value)
+        for inverse in inverse_rows:
+            if _normalized_conflict_value(inverse["current_value"]) != normalized_candidate:
+                continue
+            if _normalized_conflict_value(inverse["candidate_value_text"]) != normalized_current:
+                continue
+            merged = _merge_graph_record_metadata(
+                inverse["metadata_json"],
+                {
+                    **normalized_metadata,
+                    "duplicate_bidirectional_conflict_collapsed": True,
+                    "duplicate_current_state_id": int(current["id"]),
+                    "duplicate_candidate_value_text": value_text.strip(),
+                },
+                source=source,
+                graph_kind="state_conflict",
+            )
+            self.conn.execute(
+                """
+                UPDATE graph_conflicts
+                SET metadata_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(merged, ensure_ascii=True, sort_keys=True),
+                    now,
+                    int(inverse["id"]),
+                ),
+            )
+            self.conn.commit()
+            return {"status": "conflict", "entity_id": entity_id, "conflict_id": int(inverse["id"])}
         conflict_metadata = _merge_graph_record_metadata(
             None,
             normalized_metadata,
@@ -326,6 +382,228 @@ class GraphStateSnapshotMixin(StoreRuntimeBase):
         )
         self.conn.commit()
         return {"status": "conflict", "entity_id": entity_id, "conflict_id": _cursor_lastrowid(cur)}
+
+    def _sqlite_fetch_graph_conflict(self, *, conflict_id: int) -> Dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT
+                gc.id,
+                gc.entity_id,
+                ge.canonical_name AS entity_name,
+                gc.attribute,
+                gc.current_state_id,
+                gs.value_text AS current_value,
+                gs.source AS current_source,
+                gs.metadata_json AS current_metadata_json,
+                gc.candidate_value_text,
+                gc.candidate_source,
+                gc.metadata_json,
+                gc.status,
+                gc.created_at,
+                gc.updated_at
+            FROM graph_conflicts gc
+            JOIN graph_entities ge ON ge.id = gc.entity_id
+            JOIN graph_states gs ON gs.id = gc.current_state_id
+            WHERE gc.id = ?
+            """,
+            (int(conflict_id),),
+        ).fetchone()
+        return _row_to_dict(row) if row else None
+
+    def _sqlite_resolution_before_snapshot(self, conflict: Mapping[str, Any]) -> Dict[str, Any]:
+        return {
+            "conflict_id": int(conflict.get("id") or 0),
+            "entity_id": int(conflict.get("entity_id") or 0),
+            "entity_name": str(conflict.get("entity_name") or ""),
+            "attribute": str(conflict.get("attribute") or ""),
+            "current_state_id": int(conflict.get("current_state_id") or 0),
+            "current_value": str(conflict.get("current_value") or ""),
+            "candidate_value_text": str(conflict.get("candidate_value_text") or ""),
+            "candidate_source": str(conflict.get("candidate_source") or ""),
+            "status": str(conflict.get("status") or ""),
+            "metadata": _decode_json_object(conflict.get("metadata_json")),
+        }
+
+    def _sqlite_insert_graph_conflict_resolution(
+        self,
+        *,
+        conflict_id: int,
+        decision: str,
+        previous_status: str,
+        new_status: str,
+        approved_by: str,
+        reason: str,
+        evidence_refs: List[str],
+        before: Mapping[str, Any],
+        after: Mapping[str, Any],
+        now: str,
+    ) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO graph_conflict_resolutions (
+                conflict_id, decision, previous_status, new_status, approved_by, reason,
+                evidence_refs_json, before_json, after_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(conflict_id),
+                decision,
+                previous_status,
+                new_status,
+                approved_by,
+                reason,
+                json.dumps(list(evidence_refs), ensure_ascii=True),
+                json.dumps(dict(before), ensure_ascii=True, sort_keys=True),
+                json.dumps(dict(after), ensure_ascii=True, sort_keys=True),
+                now,
+            ),
+        )
+        return _cursor_lastrowid(cur)
+
+    @_locked
+    def _sqlite_resolve_graph_conflict(
+        self,
+        *,
+        conflict_id: int,
+        decision: str,
+        approved_by: str,
+        reason: str,
+        evidence_refs: List[str] | None = None,
+        new_value_text: str = "",
+    ) -> Dict[str, Any]:
+        normalized_decision = str(decision or "").strip()
+        if normalized_decision not in _GRAPH_CONFLICT_RESOLUTION_STATUSES:
+            raise ValueError(f"Unsupported graph conflict resolution decision: {decision!r}")
+        normalized_approved_by = " ".join(str(approved_by or "").strip().split())
+        normalized_reason = " ".join(str(reason or "").strip().split())
+        if not normalized_approved_by:
+            raise ValueError("Graph conflict resolution requires approved_by")
+        if not normalized_reason:
+            raise ValueError("Graph conflict resolution requires reason")
+
+        conflict = self._sqlite_fetch_graph_conflict(conflict_id=int(conflict_id))
+        if conflict is None:
+            raise ValueError(f"Graph conflict not found: {conflict_id}")
+        previous_status = str(conflict.get("status") or "").strip()
+        if previous_status != _GRAPH_CONFLICT_OPEN_STATUS:
+            return {
+                "status": "already_closed",
+                "conflict_id": int(conflict_id),
+                "previous_status": previous_status,
+            }
+        candidate_source = str(conflict.get("candidate_source") or "").strip()
+        if not candidate_source:
+            raise ValueError("Graph conflict resolution requires candidate_source provenance")
+
+        now = utc_now_iso()
+        new_status = _GRAPH_CONFLICT_RESOLUTION_STATUSES[normalized_decision]
+        before = self._sqlite_resolution_before_snapshot(conflict)
+        after: Dict[str, Any] = {
+            "conflict_id": int(conflict_id),
+            "decision": normalized_decision,
+            "new_status": new_status,
+            "state_id": 0,
+            "prior_state_id": int(conflict.get("current_state_id") or 0),
+        }
+
+        if normalized_decision in {"accept_candidate", "supersede_with_new_value"}:
+            replacement_value = str(conflict.get("candidate_value_text") or "").strip()
+            replacement_source = candidate_source
+            if normalized_decision == "supersede_with_new_value":
+                replacement_value = " ".join(str(new_value_text or "").strip().split())
+                if not replacement_value:
+                    raise ValueError("supersede_with_new_value requires new_value_text")
+                replacement_source = f"operator:graph_conflict_resolution:{normalized_approved_by}"
+            current = self.conn.execute(
+                "SELECT * FROM graph_states WHERE id = ?",
+                (int(conflict.get("current_state_id") or 0),),
+            ).fetchone()
+            if current is None:
+                raise ValueError("Graph conflict current_state_id does not resolve to graph_states row")
+            conflict_metadata = _decode_json_object(conflict.get("metadata_json"))
+            state_metadata = _merge_graph_record_metadata(
+                None,
+                {
+                    **conflict_metadata,
+                    "conflict_resolution": {
+                        "schema": "brainstack.graph_conflict_resolution.v1",
+                        "conflict_id": int(conflict_id),
+                        "decision": normalized_decision,
+                        "approved_by": normalized_approved_by,
+                        "reason": normalized_reason,
+                        "resolved_at": now,
+                    },
+                },
+                source=replacement_source,
+                graph_kind="state",
+            )
+            self._sqlite_mark_prior_graph_state(
+                current=current,
+                valid_from=now,
+                source=replacement_source,
+            )
+            new_state_id = self._sqlite_insert_graph_state(
+                entity_id=int(conflict.get("entity_id") or 0),
+                attribute=str(conflict.get("attribute") or ""),
+                value_text=replacement_value,
+                source=replacement_source,
+                state_metadata=state_metadata,
+                valid_from=now,
+                valid_to="",
+            )
+            self._sqlite_link_graph_state_supersession(
+                current=current,
+                new_state_id=new_state_id,
+                state_metadata=state_metadata,
+                valid_from=now,
+                source=replacement_source,
+            )
+            after["state_id"] = new_state_id
+            after["replacement_value_text"] = replacement_value
+
+        self.conn.execute(
+            """
+            UPDATE graph_conflicts
+            SET status = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (new_status, now, int(conflict_id)),
+        )
+        resolution_id = self._sqlite_insert_graph_conflict_resolution(
+            conflict_id=int(conflict_id),
+            decision=normalized_decision,
+            previous_status=previous_status,
+            new_status=new_status,
+            approved_by=normalized_approved_by,
+            reason=normalized_reason,
+            evidence_refs=list(evidence_refs or []),
+            before=before,
+            after=after,
+            now=now,
+        )
+        self.conn.commit()
+        entity_id = int(conflict.get("entity_id") or 0)
+        if self._graph_backend is not None and entity_id > 0:
+            self._publish_entity_subgraph(entity_id)
+        self._refresh_semantic_evidence_shelf(
+            shelf="graph",
+            metadata={
+                "graph_conflict_resolution": {
+                    "conflict_id": int(conflict_id),
+                    "decision": normalized_decision,
+                    "resolution_id": resolution_id,
+                }
+            },
+        )
+        return {
+            "status": "resolved",
+            "conflict_id": int(conflict_id),
+            "resolution_id": resolution_id,
+            "decision": normalized_decision,
+            "new_status": new_status,
+            "state_id": int(after.get("state_id") or 0),
+            "prior_state_id": int(after.get("prior_state_id") or 0),
+        }
 
     def _sqlite_mark_prior_graph_state(self, *, current: Any, valid_from: str, source: str) -> None:
         prior_temporal = merge_temporal(
@@ -446,21 +724,60 @@ class GraphStateSnapshotMixin(StoreRuntimeBase):
             (int(current["id"]), new_state_id, "superseded_by_new_current_state", valid_from),
         )
 
-    def _sqlite_list_graph_conflicts(self, *, limit: int) -> List[Dict[str, Any]]:
+    def _sqlite_list_graph_conflicts(self, *, limit: int, include_closed: bool = False) -> List[Dict[str, Any]]:
+            status_filter = "" if include_closed else "WHERE gc.status = 'open'"
             rows = self.conn.execute(
-                """
+                f"""
                 SELECT gc.id, ge.canonical_name AS entity_name, gc.attribute, gs.value_text AS current_value,
-                       gc.candidate_value_text, gc.status, gc.updated_at, gc.metadata_json
+                       gc.candidate_value_text, gc.candidate_source, gc.status, gc.updated_at,
+                       gc.created_at, gc.metadata_json
                 FROM graph_conflicts gc
                 JOIN graph_entities ge ON ge.id = gc.entity_id
                 JOIN graph_states gs ON gs.id = gc.current_state_id
-                WHERE gc.status = 'open'
+                {status_filter}
                 ORDER BY gc.updated_at DESC, gc.id DESC
                 LIMIT ?
                 """,
                 (limit,),
             ).fetchall()
             return [_row_to_dict(row) for row in rows]
+
+    def _sqlite_list_graph_conflict_resolutions(
+        self,
+        *,
+        conflict_id: int | None = None,
+        limit: int = 25,
+    ) -> List[Dict[str, Any]]:
+            where = ""
+            params: List[Any] = []
+            if conflict_id is not None:
+                where = "WHERE conflict_id = ?"
+                params.append(int(conflict_id))
+            params.append(int(limit))
+            rows = self.conn.execute(
+                f"""
+                SELECT id, conflict_id, decision, previous_status, new_status, approved_by,
+                       reason, evidence_refs_json, before_json, after_json, created_at
+                FROM graph_conflict_resolutions
+                {where}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+            parsed = []
+            for row in rows:
+                item = _row_to_dict(row)
+                refs_raw = str(item.pop("evidence_refs_json", "") or "[]")
+                try:
+                    refs = json.loads(refs_raw)
+                except json.JSONDecodeError:
+                    refs = []
+                item["evidence_refs"] = refs if isinstance(refs, list) else []
+                item["before"] = _decode_json_object(item.pop("before_json", "{}"))
+                item["after"] = _decode_json_object(item.pop("after_json", "{}"))
+                parsed.append(item)
+            return parsed
 
     def _sqlite_search_graph(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
             patterns = build_like_tokens(query)
@@ -767,17 +1084,35 @@ class GraphStateSnapshotMixin(StoreRuntimeBase):
                 )
             return actions
 
-    def list_graph_conflicts(self, *, limit: int) -> List[Dict[str, Any]]:
-            if self._graph_backend is None:
-                return self._sqlite_list_graph_conflicts(limit=limit)
-            try:
-                rows = self._graph_backend.list_graph_conflicts(limit=limit)
-            except Exception as exc:
-                self._disable_graph_backend(reason=str(exc))
-                logger.warning("Brainstack graph conflict lookup failed; falling back to SQLite: %s", exc)
-                return self._sqlite_list_graph_conflicts(limit=limit)
-            self._graph_backend_error = ""
-            return rows
+    def list_graph_conflicts(self, *, limit: int, include_closed: bool = False) -> List[Dict[str, Any]]:
+            return self._sqlite_list_graph_conflicts(limit=limit, include_closed=include_closed)
+
+    def list_graph_conflict_resolutions(
+        self,
+        *,
+        conflict_id: int | None = None,
+        limit: int = 25,
+    ) -> List[Dict[str, Any]]:
+            return self._sqlite_list_graph_conflict_resolutions(conflict_id=conflict_id, limit=limit)
+
+    def resolve_graph_conflict(
+        self,
+        *,
+        conflict_id: int,
+        decision: str,
+        approved_by: str,
+        reason: str,
+        evidence_refs: List[str] | None = None,
+        new_value_text: str = "",
+    ) -> Dict[str, Any]:
+            return self._sqlite_resolve_graph_conflict(
+                conflict_id=conflict_id,
+                decision=decision,
+                approved_by=approved_by,
+                reason=reason,
+                evidence_refs=evidence_refs,
+                new_value_text=new_value_text,
+            )
 
     def search_graph(self, *, query: str, limit: int, principal_scope_key: str = "") -> List[Dict[str, Any]]:
             external_requested = self._graph_backend_name not in {"", "none", "sqlite"}

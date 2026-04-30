@@ -246,6 +246,34 @@ def _check_write_path(tmp: Path) -> CheckResult:
     )
 
 
+def _check_graph_conflict_lifecycle(tmp: Path) -> CheckResult:
+    out = tmp / "graph_conflict_lifecycle_audit.json"
+    command = [sys.executable, "scripts/audit_graph_conflict_lifecycle.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("issue_count") == 0
+        and data.get("release_blocked_before_resolution") is True
+        and data.get("open_conflict_count_after_resolution") == 0
+        and data.get("resolution_ledger_count") == 1
+    )
+    return CheckResult(
+        name="graph_conflict_lifecycle",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": data.get("issue_count"),
+            "release_blocked_before_resolution": data.get("release_blocked_before_resolution"),
+            "open_conflict_count_after_resolution": data.get("open_conflict_count_after_resolution"),
+            "resolution_ledger_count": data.get("resolution_ledger_count"),
+        },
+    )
+
+
 def _check_public_fixtures() -> CheckResult:
     command = [sys.executable, "scripts/run_public_memory_kernel_fixtures.py", "--contract-only"]
     proc = _run(command)
@@ -402,6 +430,7 @@ def run_checklist(*, ignore_git_dirty_for_dev: bool = False) -> dict[str, Any]:
             _check_active_packet_budget(tmp),
             _check_packet_budget_soak(tmp),
             _check_write_path(tmp),
+            _check_graph_conflict_lifecycle(tmp),
             _check_public_fixtures(),
             _check_public_payload_leaks(),
             _check_git_hygiene(),
