@@ -331,6 +331,9 @@ def _check_phase249_ralph_gate(tmp: Path) -> CheckResult:
             "issues": (data.get("issues") or [])[:20],
             "open_item_count": len(data.get("open_items") or []),
             "blocked_item_count": len(data.get("blocked_items") or []),
+            "done_allowed": data.get("done_allowed"),
+            "stop_allowed": data.get("stop_allowed"),
+            "loop_enforcement": data.get("loop_enforcement"),
             "next_action": data.get("next_action"),
         },
     )

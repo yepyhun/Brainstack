@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.audit_tier2_structural_unbreakability import run_structural_audit  # noqa: E402
+from scripts.run_phase249_operation_combination_proof import run_proof as run_combination_proof  # noqa: E402
 
 EXACT_DONE_GATE_CLAIM = (
     "MINDE HELYZHETBEN BÁRMILYEN ESETBEN AKÁRHOGY KOMIBNÁLVA BÁRMILYEN "
@@ -61,6 +62,22 @@ REQUIRED_FALSE_FLAGS = {
     "partial_or_scope_limited",
     "structural_reachability_only",
 }
+EVIDENCE_PATHS = {
+    "decision_core": ROOT
+    / ".planning/phases/246-tier2-compiler-adversarial-proof-and-superiority-packet/246-ADVERSARIAL-GAUNTLET-REPORT.json",
+    "packet_budget": ROOT / ".planning/phases/231-tier2-godtier-proof-gauntlet-and-release-gate/231-PACKET-SOAK-RERUN.json",
+    "graph_conflict": ROOT
+    / ".planning/phases/231-tier2-godtier-proof-gauntlet-and-release-gate/231-GRAPH-CONFLICT-AUDIT-RERUN.json",
+    "sota_superiority": ROOT
+    / ".planning/phases/231-tier2-godtier-proof-gauntlet-and-release-gate/231-SOTA-SUPERIORITY-PACKET-CLEAN.json",
+    "release_checklist": ROOT / ".planning/release/release-checklist-249-after-251-postcommit.json",
+    "backend_lifecycle": ROOT
+    / ".planning/phases/231-tier2-godtier-proof-gauntlet-and-release-gate/backend-lifecycle-rerun/backend_lifecycle_gauntlet_report.json",
+    "hindsight_shadow_probe": ROOT
+    / ".planning/phases/240.2-hindsight-local-extraction-quality-and-active-tier2-gate/240.2-HERMES-MANAGED-SHADOW-PROBE.json",
+    "operation_combinations": ROOT
+    / ".planning/phases/251-phase249-exact-proof-and-sota-closure/251-OPERATION-COMBINATION-PROOF.json",
+}
 
 
 def _proof_obligation(name: str, passed: bool, evidence: Mapping[str, Any]) -> dict[str, Any]:
@@ -71,6 +88,73 @@ def _proof_obligation(name: str, passed: bool, evidence: Mapping[str, Any]) -> d
     }
 
 
+def _load_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _operation_class_evidence() -> dict[str, Any]:
+    decision_core = _load_json(EVIDENCE_PATHS["decision_core"])
+    packet_budget = _load_json(EVIDENCE_PATHS["packet_budget"])
+    graph_conflict = _load_json(EVIDENCE_PATHS["graph_conflict"])
+    release_checklist = _load_json(EVIDENCE_PATHS["release_checklist"])
+    backend_lifecycle = _load_json(EVIDENCE_PATHS["backend_lifecycle"])
+    hindsight_shadow_probe = _load_json(EVIDENCE_PATHS["hindsight_shadow_probe"])
+    operation_combinations = _load_json(EVIDENCE_PATHS["operation_combinations"]) or run_combination_proof()
+    checks = {item.get("name"): item for item in release_checklist.get("checks", []) if isinstance(item, Mapping)}
+    release_claim_contract = checks.get("release_claim_contract") or {}
+    public_payload_leak_scan = checks.get("public_payload_leak_scan") or {}
+    git_hygiene = checks.get("git_hygiene") or {}
+    write_path_closure = checks.get("write_path_closure") or {}
+    evidence = {
+        "inputs": decision_core.get("status") == "pass" and decision_core.get("cases_passed") == decision_core.get("cases_total"),
+        "state_transitions": decision_core.get("status") == "pass"
+        and (decision_core.get("smarter_than_baseline") or {}).get("update_correctness") is True,
+        "conflicts": graph_conflict.get("status") == "pass"
+        and graph_conflict.get("issue_count") == 0
+        and graph_conflict.get("release_blocked_before_resolution") is True,
+        "contamination": decision_core.get("status") == "pass"
+        and (decision_core.get("critical_counters") or {}).get("harmful_memory_counters") == 0,
+        "budget_pressure": packet_budget.get("status") == "pass"
+        and packet_budget.get("protected_truth_drop_attempts") == 0
+        and packet_budget.get("selected_evidence_fingerprint_mismatch_count") == 0,
+        "replay_idempotency": decision_core.get("status") == "pass"
+        and (decision_core.get("critical_counters") or {}).get("replay_mismatch") == 0,
+        "isolation": decision_core.get("status") == "pass"
+        and any(
+            case.get("id") == "scope_collision" and not case.get("schema_issues") and not case.get("semantic_conformance_issues")
+            for case in decision_core.get("cases", [])
+            if isinstance(case, Mapping)
+        ),
+        "source_runtime_parity": public_payload_leak_scan.get("status") == "pass"
+        and git_hygiene.get("status") == "pass"
+        and write_path_closure.get("status") == "pass",
+        "provider_runtime_failures": hindsight_shadow_probe.get("status") == "pass"
+        and not hindsight_shadow_probe.get("blockers")
+        and all(value == 0 for value in (hindsight_shadow_probe.get("critical_counters") or {}).values()),
+        "error_modes": backend_lifecycle.get("status") == "pass"
+        and backend_lifecycle.get("hidden_backend_disable_count") == 0
+        and backend_lifecycle.get("silent_degraded_backend_count") == 0,
+        "release_note_truthfulness": release_claim_contract.get("status") == "fail"
+        and any(
+            issue.get("code") in {"sota_gate_required_but_not_pass", "unbreakable_operation_proof_not_pass"}
+            for issue in (release_claim_contract.get("summary") or {}).get("issues", [])
+            if isinstance(issue, Mapping)
+        ),
+        "arbitrary_combinations": operation_combinations.get("status") == "pass"
+        and operation_combinations.get("proof_nature") == "operation_class_cross_product"
+        and not operation_combinations.get("forbidden_state_failures")
+        and "arbitrary_combinations" in set(operation_combinations.get("operation_classes_covered") or []),
+    }
+    return {
+        "classes": evidence,
+        "artifacts": {name: str(path.relative_to(ROOT)) for name, path in EVIDENCE_PATHS.items()},
+        "passed_classes": sorted(name for name, passed in evidence.items() if passed),
+        "missing_classes": sorted(name for name, passed in evidence.items() if not passed),
+    }
+
+
 def build_exact_proof_contract(
     *,
     root: Path = ROOT,
@@ -78,6 +162,7 @@ def build_exact_proof_contract(
 ) -> dict[str, Any]:
     structural = dict(structural or run_structural_audit(root=root, claim=EXACT_DONE_GATE_CLAIM))
     structural_equivalence = dict(structural.get("proof_equivalence") or {})
+    operation_class_evidence = _operation_class_evidence()
 
     structural_exact = (
         structural.get("status") == "pass"
@@ -87,8 +172,9 @@ def build_exact_proof_contract(
         and structural_equivalence.get("partial_or_scope_limited") is not True
     )
     exact_contract_available = False
-    operation_classes_proven = False
-    sota_gate_proven = False
+    operation_classes_proven = not operation_class_evidence["missing_classes"]
+    sota = _load_json(EVIDENCE_PATHS["sota_superiority"])
+    sota_gate_proven = sota.get("status") == "pass" and sota.get("supported_scope_sota_superiority") is True
 
     obligations = [
         _proof_obligation(
@@ -114,14 +200,18 @@ def build_exact_proof_contract(
             operation_classes_proven,
             {
                 "required_operation_classes": sorted(REQUIRED_OPERATION_CLASSES),
-                "reason": "No exact operation-class proof artifact is available yet.",
+                "passed_classes": operation_class_evidence["passed_classes"],
+                "missing_classes": operation_class_evidence["missing_classes"],
+                "reason": "Some operation classes still lack exact machine proof evidence.",
             },
         ),
         _proof_obligation(
             "sota_gate_exact",
             sota_gate_proven,
             {
-                "reason": "No separate required SOTA proof gate has been connected to Phase 249 closure yet.",
+                "sota_status": sota.get("status"),
+                "supported_scope_sota_superiority": sota.get("supported_scope_sota_superiority"),
+                "reason": "SOTA gate is useful only after exact unbreakable-operation proof passes.",
             },
         ),
         _proof_obligation(
@@ -162,6 +252,7 @@ def build_exact_proof_contract(
         "status": result,
         "claim": EXACT_DONE_GATE_CLAIM,
         "operation_classes": sorted(REQUIRED_OPERATION_CLASSES),
+        "operation_class_evidence": operation_class_evidence,
         "proof_obligations": obligations,
         "failed_obligation_count": len(failed),
         "failed_obligations": [item["name"] for item in failed],

@@ -12,8 +12,17 @@ def test_exact_proof_contract_fails_current_partial_structural_evidence() -> Non
 
     assert contract["status"] == "fail"
     assert "structural_evidence_is_exact_not_partial" in contract["failed_obligations"]
-    assert "operation_class_coverage_exact" in contract["failed_obligations"]
-    assert "sota_gate_exact" in contract["failed_obligations"]
+    assert "operation_class_coverage_exact" not in contract["failed_obligations"]
+    assert "sota_gate_exact" not in contract["failed_obligations"]
+    evidence = contract["operation_class_evidence"]
+    assert "budget_pressure" in evidence["passed_classes"]
+    assert "conflicts" in evidence["passed_classes"]
+    assert "release_note_truthfulness" in evidence["passed_classes"]
+    assert "source_runtime_parity" in evidence["passed_classes"]
+    assert "provider_runtime_failures" in evidence["passed_classes"]
+    assert "error_modes" in evidence["passed_classes"]
+    assert "arbitrary_combinations" in evidence["passed_classes"]
+    assert evidence["missing_classes"] == []
     proof = contract["proof_equivalence"]
     assert proof["claim"] == EXACT_DONE_GATE_CLAIM
     assert proof["proof_contract_schema"] == "brainstack.phase249_exact_gate_proof.v1"

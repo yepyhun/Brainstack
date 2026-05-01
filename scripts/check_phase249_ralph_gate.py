@@ -27,12 +27,26 @@ def _section_items(text: str, heading: str) -> list[str]:
 
 def run_check(path: Path = PLAN) -> dict[str, object]:
     if not path.exists():
+        next_action = {
+            "action": "continue_loop",
+            "work_item": f"Create missing Phase 249 implementation plan at {path}",
+            "rule": "Do not stop at a missing plan. Create the plan, add the blocker, and rerun this gate.",
+        }
         return {
             "schema": "brainstack.phase249_ralph_gate.v1",
             "status": "fail",
             "issue_count": 1,
             "issues": [{"code": "implementation_plan_missing", "path": str(path)}],
             "open_items": [],
+            "blocked_items": [],
+            "done_allowed": False,
+            "stop_allowed": False,
+            "loop_enforcement": {
+                "mode": "force_continue_until_phase_done",
+                "must_continue": True,
+                "next_action": next_action,
+            },
+            "next_action": next_action,
         }
     text = path.read_text(encoding="utf-8")
     open_items = _section_items(text, "Open")
@@ -50,13 +64,21 @@ def run_check(path: Path = PLAN) -> dict[str, object]:
             "work_item": open_items[0],
             "rule": "Do not report Phase 249 done. Execute the first open item or open/execute its linked phase, then rerun this gate.",
         }
+    done_allowed = not issues
     return {
         "schema": "brainstack.phase249_ralph_gate.v1",
-        "status": "pass" if not issues else "fail",
+        "status": "pass" if done_allowed else "fail",
         "issue_count": len(issues),
         "issues": issues,
         "open_items": actionable_open_items,
         "blocked_items": blocked_items,
+        "done_allowed": done_allowed,
+        "stop_allowed": done_allowed,
+        "loop_enforcement": {
+            "mode": "force_continue_until_phase_done",
+            "must_continue": not done_allowed,
+            "next_action": next_action,
+        },
         "next_action": next_action,
     }
 
