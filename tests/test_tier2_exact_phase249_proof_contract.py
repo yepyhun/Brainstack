@@ -7,11 +7,12 @@ from scripts.build_phase249_exact_proof_contract import (
 )
 
 
-def test_exact_proof_contract_fails_current_partial_structural_evidence() -> None:
+def test_exact_proof_contract_passes_current_combined_evidence() -> None:
     contract = build_exact_proof_contract()
 
-    assert contract["status"] == "fail"
-    assert "structural_evidence_is_exact_not_partial" in contract["failed_obligations"]
+    assert contract["status"] == "pass"
+    assert contract["failed_obligations"] == []
+    assert "structural_evidence_is_exact_not_partial" not in contract["failed_obligations"]
     assert "operation_class_coverage_exact" not in contract["failed_obligations"]
     assert "sota_gate_exact" not in contract["failed_obligations"]
     evidence = contract["operation_class_evidence"]
@@ -26,12 +27,36 @@ def test_exact_proof_contract_fails_current_partial_structural_evidence() -> Non
     proof = contract["proof_equivalence"]
     assert proof["claim"] == EXACT_DONE_GATE_CLAIM
     assert proof["proof_contract_schema"] == "brainstack.phase249_exact_gate_proof.v1"
-    assert proof["proof_contract_result"] == "fail"
+    assert proof["proof_contract_result"] == "pass"
+    assert proof["machine_proof_same_as_claim"] is True
+    assert proof["partial_or_scope_limited"] is False
+    assert proof["structural_reachability_only"] is False
+
+
+def test_exact_proof_contract_rejects_incomplete_structural_evidence() -> None:
+    contract = build_exact_proof_contract(
+        structural={
+            "status": "pass",
+            "issue_count": 0,
+            "issues": [],
+            "covered_structural_families": ["profile"],
+            "proof_equivalence": {
+                "status": "partial",
+                "machine_proof_same_as_claim": False,
+                "structural_reachability_only": True,
+                "partial_or_scope_limited": True,
+            },
+        }
+    )
+
+    assert contract["status"] == "fail"
+    assert "structural_evidence_is_exact_not_partial" in contract["failed_obligations"]
+    proof = contract["proof_equivalence"]
     assert proof["machine_proof_same_as_claim"] is False
     assert proof["partial_or_scope_limited"] is True
 
 
-def test_unbreakable_operation_rejects_exact_contract_until_all_obligations_pass() -> None:
+def test_unbreakable_operation_accepts_exact_contract_when_all_obligations_pass() -> None:
     contract = build_exact_proof_contract()
     packet = {
         "status": "pass",
@@ -51,8 +76,5 @@ def test_unbreakable_operation_rejects_exact_contract_until_all_obligations_pass
 
     result = evaluate_unbreakable_operation(packet)
 
-    assert result["status"] == "fail"
-    codes = {issue["code"] for issue in result["issues"]}
-    assert "proof_equivalence_status_not_pass" in codes
-    assert "machine_proof_not_equivalent_to_done_gate" in codes
-    assert "exact_proof_contract_result_not_pass" in codes
+    assert result["status"] == "pass"
+    assert result["issues"] == []

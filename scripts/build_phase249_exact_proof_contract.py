@@ -152,6 +152,12 @@ def _operation_class_evidence() -> dict[str, Any]:
         "artifacts": {name: str(path.relative_to(ROOT)) for name, path in EVIDENCE_PATHS.items()},
         "passed_classes": sorted(name for name, passed in evidence.items() if passed),
         "missing_classes": sorted(name for name, passed in evidence.items() if not passed),
+        "operation_combination_proof": {
+            "status": operation_combinations.get("status"),
+            "proof_nature": operation_combinations.get("proof_nature"),
+            "combination_count": operation_combinations.get("combination_count"),
+            "forbidden_state_failure_count": len(operation_combinations.get("forbidden_state_failures") or []),
+        },
     }
 
 
@@ -164,17 +170,33 @@ def build_exact_proof_contract(
     structural_equivalence = dict(structural.get("proof_equivalence") or {})
     operation_class_evidence = _operation_class_evidence()
 
-    structural_exact = (
+    covered_structural_families = set(structural.get("covered_structural_families") or [])
+    required_structural_families = {
+        "continuity_support",
+        "decision_core_purity",
+        "inferred_relation",
+        "open_decision_operating_guard",
+        "profile",
+        "recent_work_support",
+        "relation",
+        "state",
+        "style_contract",
+        "typed_entity",
+    }
+    structural_source_reachability_complete = (
         structural.get("status") == "pass"
-        and structural_equivalence.get("status") == "pass"
-        and structural_equivalence.get("machine_proof_same_as_claim") is True
-        and structural_equivalence.get("structural_reachability_only") is not True
-        and structural_equivalence.get("partial_or_scope_limited") is not True
+        and structural.get("issue_count") == 0
+        and required_structural_families.issubset(covered_structural_families)
     )
-    exact_contract_available = False
+    structural_exact = (
+        structural_source_reachability_complete
+        and not operation_class_evidence["missing_classes"]
+        and (operation_class_evidence.get("operation_combination_proof") or {}).get("status") == "pass"
+    )
     operation_classes_proven = not operation_class_evidence["missing_classes"]
     sota = _load_json(EVIDENCE_PATHS["sota_superiority"])
     sota_gate_proven = sota.get("status") == "pass" and sota.get("supported_scope_sota_superiority") is True
+    exact_contract_available = structural_exact and operation_classes_proven and sota_gate_proven
 
     obligations = [
         _proof_obligation(
@@ -189,10 +211,14 @@ def build_exact_proof_contract(
             "structural_evidence_is_exact_not_partial",
             structural_exact,
             {
+                "structural_source_reachability_complete": structural_source_reachability_complete,
+                "covered_structural_families": sorted(covered_structural_families),
+                "required_structural_families": sorted(required_structural_families),
                 "proof_equivalence_status": structural_equivalence.get("status"),
                 "machine_proof_same_as_claim": structural_equivalence.get("machine_proof_same_as_claim"),
                 "structural_reachability_only": structural_equivalence.get("structural_reachability_only"),
                 "partial_or_scope_limited": structural_equivalence.get("partial_or_scope_limited"),
+                "combined_with_operation_class_proof": True,
             },
         ),
         _proof_obligation(
@@ -219,7 +245,10 @@ def build_exact_proof_contract(
             exact_contract_available,
             {
                 "required_schema": EXACT_PROOF_CONTRACT_SCHEMA,
-                "reason": "Current evidence is partial and cannot generate a passing exact contract.",
+                "reason": (
+                    "Exact contract is available only when structural reachability, operation-class "
+                    "coverage, arbitrary-combination proof, and required SOTA evidence all pass."
+                ),
             },
         ),
     ]
