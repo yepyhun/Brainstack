@@ -25,6 +25,11 @@ REQUIRED_PROOF_FAMILIES = {
     "multi_hop_preservation",
     "hindsight_update_rehearsal",
 }
+EXACT_DONE_GATE_CLAIM = (
+    "MINDE HELYZHETBEN BÁRMILYEN ESETBEN AKÁRHOGY KOMIBNÁLVA BÁRMILYEN "
+    "HASZNÁLAT KÖZBEN NEM TÖRHET EL SEMMILYEN ESETBEN SEM SOHA SEHHOGY!"
+)
+FINITE_PROOF_SOURCES = {"gauntlet", "fixture", "oracle", "metamorphic", "counter"}
 
 
 def evaluate_unbreakable_operation(packet: Mapping[str, Any]) -> dict[str, Any]:
@@ -61,6 +66,32 @@ def evaluate_unbreakable_operation(packet: Mapping[str, Any]) -> dict[str, Any]:
             {"code": "tier2_canonical_events_missing", "canonical_event_count": canonical_event_count}
         )
 
+    proof_equivalence = packet.get("proof_equivalence")
+    if not isinstance(proof_equivalence, Mapping):
+        issues.append({"code": "proof_equivalence_missing"})
+        proof_equivalence = {}
+    if proof_equivalence:
+        if proof_equivalence.get("claim") != EXACT_DONE_GATE_CLAIM:
+            issues.append({"code": "proof_equivalence_claim_mismatch"})
+        if proof_equivalence.get("status") != "pass":
+            issues.append(
+                {"code": "proof_equivalence_status_not_pass", "value": proof_equivalence.get("status")}
+            )
+        if proof_equivalence.get("machine_proof_same_as_claim") is not True:
+            issues.append({"code": "machine_proof_not_equivalent_to_done_gate"})
+        if proof_equivalence.get("finite_gauntlet_used_as_universal_proof") is not False:
+            issues.append({"code": "finite_gauntlet_used_as_universal_proof"})
+        if proof_equivalence.get("release_allowed_used_as_phase_success") is not False:
+            issues.append({"code": "release_allowed_used_as_phase_success"})
+        proof_source = str(proof_equivalence.get("proof_source") or "").strip()
+        if proof_source in FINITE_PROOF_SOURCES:
+            issues.append(
+                {
+                    "code": "finite_proof_source_cannot_prove_universal_claim",
+                    "proof_source": proof_source,
+                }
+            )
+
     return {
         "schema": "brainstack.tier2_unbreakable_operation_audit.v1",
         "status": "pass" if not issues else "fail",
@@ -68,6 +99,7 @@ def evaluate_unbreakable_operation(packet: Mapping[str, Any]) -> dict[str, Any]:
         "issues": issues,
         "critical_counters": critical_counters,
         "proof_families": {family: proof_families.get(family) for family in sorted(REQUIRED_PROOF_FAMILIES)},
+        "proof_equivalence": dict(proof_equivalence),
         "canonical_event_count": canonical_event_count,
     }
 
