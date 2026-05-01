@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Dict, Iterable, List, Mapping
 
 from .admission_policy import admit_claim, graph_claim_proposal, profile_claim_proposal
@@ -13,11 +15,17 @@ from .tier2_consolidation import (
     VERIFIED_USER_SPAN_PROOF_KEY,
     bound_tier2_extracted_payload,
 )
+from .tier2_decision_runtime_gate import evaluate_tier2_decision_core_gate
 from .tier1_extractor import build_profile_stable_key
 
 
 def _normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
+
+
+def _json_fingerprint(value: Any) -> str:
+    payload = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _extract_identity_name(value: Any) -> str:
@@ -196,13 +204,36 @@ def _reconcile_profile_items(
             content=content,
         )
         decision = admit_claim(proposal)
+        existing = store.get_profile_item(
+            stable_key=decision.stable_key or stable_key,
+            principal_scope_key=str(metadata.get("principal_scope_key") or "").strip(),
+        )
+        existing_ref = None
+        if existing:
+            existing_ref = {
+                "memory_ref": f"profile:{existing.get('id')}",
+                "stable_key": decision.stable_key or stable_key,
+                "value_fingerprint": _json_fingerprint(existing.get("content")),
+            }
+        core_block = evaluate_tier2_decision_core_gate(
+            kind="profile",
+            candidate_metadata=candidate_metadata,
+            base_metadata=metadata,
+            source=source,
+            target_kind="style_rule" if category == "preference" else "profile_fact",
+            target_slot=decision.target_slot or stable_key,
+            stable_key=decision.stable_key or stable_key,
+            normalized_value=content,
+            existing_ref=existing_ref,
+        )
         if not decision.accepted:
             writer.record_decision(decision=decision, metadata=candidate_metadata)
             actions.append(_admission_action("profile", decision))
             continue
+        if core_block:
+            actions.append(core_block)
+            continue
         category = decision.target_slot.split(".", 1)[0] if "." in decision.target_slot else category
-        principal_scope_key = str(metadata.get("principal_scope_key") or "").strip()
-        existing = store.get_profile_item(stable_key=decision.stable_key, principal_scope_key=principal_scope_key)
         if existing and _normalize_text(existing.get("content")) == content:
             writer.record_decision(decision=decision, metadata=candidate_metadata, durable_row_id=int(existing.get("id") or 0))
             actions.append({"kind": "profile", "action": "NONE", "stable_key": decision.stable_key, "category": category})
@@ -256,13 +287,33 @@ def _reconcile_style_contract(
         content=str(normalized.get("content") or "").strip(),
     )
     decision = admit_claim(proposal)
-    if not decision.accepted:
-        writer.record_decision(decision=decision, metadata=candidate_metadata)
-        return [_admission_action("style_contract", decision)]
     existing = store.get_profile_item(
         stable_key=STYLE_CONTRACT_SLOT,
         principal_scope_key=principal_scope_key,
     )
+    existing_ref = None
+    if existing:
+        existing_ref = {
+            "memory_ref": f"profile:{existing.get('id')}",
+            "stable_key": decision.stable_key or STYLE_CONTRACT_SLOT,
+            "value_fingerprint": _json_fingerprint(existing.get("content")),
+        }
+    core_block = evaluate_tier2_decision_core_gate(
+        kind="style_contract",
+        candidate_metadata=candidate_metadata,
+        base_metadata=metadata,
+        source=source,
+        target_kind="style_rule",
+        target_slot=decision.target_slot or STYLE_CONTRACT_SLOT,
+        stable_key=decision.stable_key or STYLE_CONTRACT_SLOT,
+        normalized_value=str(normalized.get("content") or "").strip(),
+        existing_ref=existing_ref,
+    )
+    if not decision.accepted:
+        writer.record_decision(decision=decision, metadata=candidate_metadata)
+        return [_admission_action("style_contract", decision)]
+    if core_block:
+        return [core_block]
     content = str(normalized.get("content") or "").strip()
     if existing and str(existing.get("content") or "").strip() == content:
         writer.record_decision(decision=decision, metadata=candidate_metadata, durable_row_id=int(existing.get("id") or 0))
@@ -315,9 +366,28 @@ def _reconcile_states(
             value=value_text,
         )
         decision = admit_claim(proposal)
+        core_block = evaluate_tier2_decision_core_gate(
+            kind="state",
+            candidate_metadata=candidate_metadata,
+            base_metadata=metadata,
+            source=source,
+            target_kind="relation",
+            target_slot=attribute,
+            stable_key=f"{subject_name}:{attribute}",
+            normalized_value=value_text,
+            relation_shape={
+                "subject_ref": subject_name,
+                "predicate": attribute,
+                "object_ref": value_text,
+                "direction": "forward",
+            },
+        )
         if not decision.accepted:
             writer.record_decision(decision=decision, metadata=candidate_metadata)
             actions.append(_admission_action("state", decision))
+            continue
+        if core_block:
+            actions.append(core_block)
             continue
         outcome = writer.write_graph_state(
             decision=decision,
@@ -370,9 +440,28 @@ def _reconcile_relations(
             value=object_name,
         )
         decision = admit_claim(proposal)
+        core_block = evaluate_tier2_decision_core_gate(
+            kind="relation",
+            candidate_metadata=candidate_metadata,
+            base_metadata=metadata,
+            source=source,
+            target_kind="relation",
+            target_slot=predicate,
+            stable_key=f"{subject_name}:{predicate}:{object_name}",
+            normalized_value=object_name,
+            relation_shape={
+                "subject_ref": subject_name,
+                "predicate": predicate,
+                "object_ref": object_name,
+                "direction": "forward",
+            },
+        )
         if not decision.accepted:
             writer.record_decision(decision=decision, metadata=candidate_metadata)
             actions.append(_admission_action("relation", decision))
+            continue
+        if core_block:
+            actions.append(core_block)
             continue
         outcome = writer.write_graph_relation(
             decision=decision,

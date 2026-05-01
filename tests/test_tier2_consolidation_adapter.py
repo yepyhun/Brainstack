@@ -83,6 +83,9 @@ def test_tier2_batch_emits_hindsight_style_plan_before_quarantine_receipt(tmp_pa
         assert receipts[0]["trace_id"] == proposal["proposal_id"]
         assert receipts[0]["truth_eligible"] is False
         assert receipts[0]["metadata"]["admission"]["authority_class"] == "tier2_summary"
+        core = receipts[0]["metadata"]["tier2_decision_core"]
+        assert core["decision_class"] == "inspect_only"
+        assert core["truth_eligible"] is False
         assert provider._store.get_profile_item(
             stable_key="identity:preferred_address_name",
             principal_scope_key=provider._principal_scope_key,
@@ -130,6 +133,8 @@ def test_tier2_verified_user_span_can_write_durable_memory(tmp_path: Path) -> No
         )
         assert item is not None
         assert item["content"] == "Alex"
+        assert item["metadata"]["tier2_decision_core"]["decision_class"] == "durable_fact_candidate"
+        assert item["metadata"]["tier2_decision_core"]["truth_eligible"] is True
 
         receipts = provider._store.list_admission_receipts(limit=10)
         assert receipts[0]["trace_id"] == proposal["proposal_id"]
@@ -140,6 +145,61 @@ def test_tier2_verified_user_span_can_write_durable_memory(tmp_path: Path) -> No
         assert proof["status"] == "verified"
         assert proof["source_span_id"] == receipts[0]["source_span_id"]
         assert proof["source_role"] == "user"
+    finally:
+        provider.shutdown()
+
+
+def test_tier2_verified_user_span_relation_passes_decision_core_gate(tmp_path: Path) -> None:
+    def extractor(*args, **kwargs):
+        return {
+            "relations": [
+                {
+                    "subject": "Brainstack",
+                    "predicate": "created_by",
+                    "object": "Alex",
+                    "source_quote": "Brainstack was created by Alex.",
+                    "confidence": 0.97,
+                    "metadata": {"source_role": "user"},
+                }
+            ],
+            "_meta": {"json_parse_status": "ok", "parse_context": "test"},
+        }
+
+    provider = _provider(tmp_path, extractor)
+    try:
+        assert provider._store is not None
+        provider._store.add_transcript_entry(
+            session_id="tier2-consolidation-session",
+            turn_number=2,
+            kind="turn",
+            content="User: Brainstack was created by Alex.",
+            source="test",
+            metadata=provider._scoped_metadata(),
+        )
+
+        result = provider._run_tier2_batch(
+            session_id="tier2-consolidation-session",
+            turn_number=2,
+            trigger_reason="idle_window",
+        )
+
+        assert result["writes_performed"] == 1
+        assert result["action_counts"]["ADD"] == 1
+        rows = provider._store.conn.execute(
+            """
+            SELECT s.canonical_name AS subject, r.predicate, r.object_text, r.metadata_json
+            FROM graph_relations r
+            JOIN graph_entities s ON s.id = r.subject_entity_id
+            WHERE r.active = 1
+            ORDER BY r.id
+            """
+        ).fetchall()
+        assert [(row["subject"], row["predicate"], row["object_text"]) for row in rows] == [
+            ("Brainstack", "created_by", "Alex")
+        ]
+        metadata = json.loads(rows[0]["metadata_json"])
+        assert metadata["tier2_decision_core"]["decision_class"] == "relation_candidate"
+        assert metadata["tier2_decision_core"]["truth_eligible"] is True
     finally:
         provider.shutdown()
 
