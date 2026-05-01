@@ -78,6 +78,7 @@ EVIDENCE_PATHS = {
     "operation_combinations": ROOT
     / ".planning/phases/251-phase249-exact-proof-and-sota-closure/251-OPERATION-COMBINATION-PROOF.json",
 }
+LITERAL_UNIVERSAL_PROOF_ARTIFACT = ROOT / ".planning/phases/249-release-claim-contract-hard-gate/249-LITERAL-UNIVERSAL-PROOF.json"
 
 
 def _proof_obligation(name: str, passed: bool, evidence: Mapping[str, Any]) -> dict[str, Any]:
@@ -161,6 +162,28 @@ def _operation_class_evidence() -> dict[str, Any]:
     }
 
 
+def _literal_universal_proof_available() -> dict[str, Any]:
+    artifact = _load_json(LITERAL_UNIVERSAL_PROOF_ARTIFACT)
+    passed = (
+        artifact.get("schema") == "brainstack.phase249.literal_universal_proof.v1"
+        and artifact.get("status") == "pass"
+        and artifact.get("claim") == EXACT_DONE_GATE_CLAIM
+        and artifact.get("covers_unbounded_real_world_use") is True
+        and artifact.get("not_reduced_to_operation_classes") is True
+        and artifact.get("not_scenario_count") is True
+        and artifact.get("not_scope_limited") is True
+    )
+    return {
+        "status": "pass" if passed else "fail",
+        "path": str(LITERAL_UNIVERSAL_PROOF_ARTIFACT.relative_to(ROOT)),
+        "artifact_present": bool(artifact),
+        "reason": (
+            "Formal operation-class evidence is not the same as a literal universal "
+            "all-real-world-situations proof."
+        ),
+    }
+
+
 def build_exact_proof_contract(
     *,
     root: Path = ROOT,
@@ -196,7 +219,11 @@ def build_exact_proof_contract(
     operation_classes_proven = not operation_class_evidence["missing_classes"]
     sota = _load_json(EVIDENCE_PATHS["sota_superiority"])
     sota_gate_proven = sota.get("status") == "pass" and sota.get("supported_scope_sota_superiority") is True
-    exact_contract_available = structural_exact and operation_classes_proven and sota_gate_proven
+    literal_universal_proof = _literal_universal_proof_available()
+    literal_universal_proven = literal_universal_proof["status"] == "pass"
+    exact_contract_available = (
+        structural_exact and operation_classes_proven and sota_gate_proven and literal_universal_proven
+    )
 
     obligations = [
         _proof_obligation(
@@ -241,13 +268,19 @@ def build_exact_proof_contract(
             },
         ),
         _proof_obligation(
+            "literal_universal_claim_proven",
+            literal_universal_proven,
+            literal_universal_proof,
+        ),
+        _proof_obligation(
             "exact_contract_available",
             exact_contract_available,
             {
                 "required_schema": EXACT_PROOF_CONTRACT_SCHEMA,
                 "reason": (
                     "Exact contract is available only when structural reachability, operation-class "
-                    "coverage, arbitrary-combination proof, and required SOTA evidence all pass."
+                    "coverage, arbitrary-combination proof, required SOTA evidence, and literal "
+                    "universal proof all pass."
                 ),
             },
         ),
