@@ -205,6 +205,15 @@ def _check_release_claim_contract(
         if immutable.get("violations") not in ([], None):
             issues.append({"code": "immutable_principles_violations_present"})
 
+        sota_gate_required = contract.get("sota_gate_required")
+        if not isinstance(sota_gate_required, bool):
+            issues.append({"code": "sota_gate_requirement_missing"})
+            sota_gate_required = False
+        if sota_gate_required:
+            sota_gate = contract.get("sota_gate")
+            if not isinstance(sota_gate, dict) or sota_gate.get("status") != "pass":
+                issues.append({"code": "sota_gate_required_but_not_pass"})
+
         evidence = contract.get("evidence")
         if not isinstance(evidence, list) or not evidence:
             issues.append({"code": "evidence_missing"})

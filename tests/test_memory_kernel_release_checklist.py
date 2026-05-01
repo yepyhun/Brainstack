@@ -44,6 +44,7 @@ def _valid_contract() -> dict[str, object]:
             **{pattern: False for pattern in GATE_EVASION_PATTERNS},
         },
         "immutable_principles": {"status": "pass", "violations": []},
+        "sota_gate_required": False,
         "evidence": [
             {
                 "name": "oracle_and_metamorphic_proof",
@@ -261,6 +262,18 @@ def test_release_claim_contract_blocks_sota_claim_without_sota_gate(tmp_path: Pa
 
     assert result.status == "fail"
     assert {"code": "superiority_claim_without_sota_gate"} in result.summary["issues"]
+
+
+def test_release_claim_contract_blocks_required_sota_gate_even_without_sota_notes(tmp_path: Path) -> None:
+    contract = _valid_contract()
+    contract["sota_gate_required"] = True
+    contract["sota_gate"] = {"status": "not_started"}
+    contract_path, notes_path = _write_contract_and_notes(tmp_path, contract)
+
+    result = _check_release_claim_contract(contract_path, notes_path)
+
+    assert result.status == "fail"
+    assert {"code": "sota_gate_required_but_not_pass"} in result.summary["issues"]
 
 
 def test_release_claim_contract_valid_contract_passes(tmp_path: Path) -> None:

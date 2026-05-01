@@ -234,6 +234,7 @@ def run_structural_audit(*, root: Path = ROOT, claim: str = "") -> dict[str, Any
     )
 
     status = "pass" if not issues else "fail"
+    proof_equivalence_status = "partial" if status == "pass" else "fail"
     return {
         "schema": "brainstack.tier2_structural_unbreakability_proof.v1",
         "status": status,
@@ -252,12 +253,19 @@ def run_structural_audit(*, root: Path = ROOT, claim: str = "") -> dict[str, Any
             "decision_core_purity",
         ],
         "proof_equivalence": {
-            "status": status,
+            "status": proof_equivalence_status,
             "claim": claim,
-            "machine_proof_same_as_claim": status == "pass",
+            "machine_proof_same_as_claim": False,
             "finite_gauntlet_used_as_universal_proof": False,
             "release_allowed_used_as_phase_success": False,
             "proof_source": "structural_source_reachability_proof",
+            "proof_scope": "tier2_durable_write_structural_reachability",
+            "structural_reachability_only": True,
+            "partial_or_scope_limited": True,
+            "reason": (
+                "Structural source-reachability proof is necessary Tier2 write-path evidence, "
+                "but it is not equivalent to the exact Phase 249 universal operation gate."
+            ),
         },
     }
 

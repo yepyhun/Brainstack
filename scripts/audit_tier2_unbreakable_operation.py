@@ -30,7 +30,40 @@ EXACT_DONE_GATE_CLAIM = (
     "MINDE HELYZHETBEN BÁRMILYEN ESETBEN AKÁRHOGY KOMIBNÁLVA BÁRMILYEN "
     "HASZNÁLAT KÖZBEN NEM TÖRHET EL SEMMILYEN ESETBEN SEM SOHA SEHHOGY!"
 )
-FINITE_PROOF_SOURCES = {"gauntlet", "fixture", "oracle", "metamorphic", "counter"}
+EXACT_PROOF_CONTRACT_SCHEMA = "brainstack.phase249_exact_gate_proof.v1"
+DISALLOWED_PROOF_SOURCES = {
+    "counter",
+    "exhaustive_structural_proof",
+    "fixture",
+    "gauntlet",
+    "metamorphic",
+    "oracle",
+    "release_checklist",
+    "self_attested_structural_proof",
+    "source_reachability_proof",
+    "structural_source_reachability_proof",
+}
+REQUIRED_EXACT_PROOF_TRUE_FLAGS = {
+    "arbitrary_combinations_proven",
+    "exact_done_gate_claim_proven",
+    "forbidden_states_structurally_impossible",
+    "independent_proof_contract",
+    "no_capability_shutdown",
+    "no_dumbing_down",
+    "no_fail_closed_as_solution",
+    "no_feature_removal",
+    "no_permanent_degraded_mode",
+    "no_regression",
+    "no_release_note_softening",
+    "no_scope_shrink",
+    "no_sota_claim_split",
+    "universal_operation_space_proven",
+}
+REQUIRED_EXACT_PROOF_FALSE_FLAGS = {
+    "known_failure_family_uncovered",
+    "partial_or_scope_limited",
+    "structural_reachability_only",
+}
 
 
 def evaluate_unbreakable_operation(packet: Mapping[str, Any]) -> dict[str, Any]:
@@ -85,13 +118,38 @@ def evaluate_unbreakable_operation(packet: Mapping[str, Any]) -> dict[str, Any]:
         if proof_equivalence.get("release_allowed_used_as_phase_success") is not False:
             issues.append({"code": "release_allowed_used_as_phase_success"})
         proof_source = str(proof_equivalence.get("proof_source") or "").strip()
-        if proof_source in FINITE_PROOF_SOURCES:
+        if proof_source in DISALLOWED_PROOF_SOURCES:
             issues.append(
                 {
-                    "code": "finite_proof_source_cannot_prove_universal_claim",
+                    "code": "proof_source_too_weak_for_exact_gate",
                     "proof_source": proof_source,
                 }
             )
+        if proof_equivalence.get("proof_contract_schema") != EXACT_PROOF_CONTRACT_SCHEMA:
+            issues.append(
+                {
+                    "code": "exact_proof_contract_schema_missing_or_invalid",
+                    "expected": EXACT_PROOF_CONTRACT_SCHEMA,
+                    "value": proof_equivalence.get("proof_contract_schema"),
+                }
+            )
+        if proof_equivalence.get("proof_contract_scope") != EXACT_DONE_GATE_CLAIM:
+            issues.append({"code": "exact_proof_contract_scope_mismatch"})
+        if proof_equivalence.get("proof_contract_result") != "pass":
+            issues.append(
+                {
+                    "code": "exact_proof_contract_result_not_pass",
+                    "value": proof_equivalence.get("proof_contract_result"),
+                }
+            )
+        if not str(proof_equivalence.get("independent_verifier") or "").strip():
+            issues.append({"code": "exact_proof_independent_verifier_missing"})
+        for field in sorted(REQUIRED_EXACT_PROOF_TRUE_FLAGS):
+            if proof_equivalence.get(field) is not True:
+                issues.append({"code": "exact_proof_required_flag_not_true", "field": field})
+        for field in sorted(REQUIRED_EXACT_PROOF_FALSE_FLAGS):
+            if proof_equivalence.get(field) is not False:
+                issues.append({"code": "exact_proof_forbidden_flag_not_false", "field": field})
 
     return {
         "schema": "brainstack.tier2_unbreakable_operation_audit.v1",

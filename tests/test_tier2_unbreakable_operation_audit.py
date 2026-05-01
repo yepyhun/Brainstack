@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from scripts.audit_tier2_unbreakable_operation import (
     EXACT_DONE_GATE_CLAIM,
+    EXACT_PROOF_CONTRACT_SCHEMA,
     REQUIRED_PROOF_FAMILIES,
+    REQUIRED_EXACT_PROOF_FALSE_FLAGS,
+    REQUIRED_EXACT_PROOF_TRUE_FLAGS,
     evaluate_unbreakable_operation,
 )
 
@@ -28,7 +31,13 @@ def _packet() -> dict[str, object]:
             "machine_proof_same_as_claim": True,
             "finite_gauntlet_used_as_universal_proof": False,
             "release_allowed_used_as_phase_success": False,
-            "proof_source": "exhaustive_structural_proof",
+            "proof_source": "exact_independent_universal_operation_proof",
+            "proof_contract_schema": EXACT_PROOF_CONTRACT_SCHEMA,
+            "proof_contract_scope": EXACT_DONE_GATE_CLAIM,
+            "proof_contract_result": "pass",
+            "independent_verifier": "phase249_exact_gate_verifier",
+            **{field: True for field in REQUIRED_EXACT_PROOF_TRUE_FLAGS},
+            **{field: False for field in REQUIRED_EXACT_PROOF_FALSE_FLAGS},
         },
     }
 
@@ -113,7 +122,7 @@ def test_tier2_unbreakable_operation_blocks_finite_gauntlet_as_universal_proof()
     codes = {issue["code"] for issue in result["issues"]}
     assert "machine_proof_not_equivalent_to_done_gate" in codes
     assert "finite_gauntlet_used_as_universal_proof" in codes
-    assert "finite_proof_source_cannot_prove_universal_claim" in codes
+    assert "proof_source_too_weak_for_exact_gate" in codes
 
 
 def test_tier2_unbreakable_operation_blocks_release_allowed_as_success() -> None:
@@ -126,3 +135,26 @@ def test_tier2_unbreakable_operation_blocks_release_allowed_as_success() -> None
 
     assert result["status"] == "fail"
     assert {"code": "release_allowed_used_as_phase_success"} in result["issues"]
+
+
+def test_tier2_unbreakable_operation_blocks_structural_proof_laundering() -> None:
+    packet = _packet()
+    packet["proof_equivalence"] = {
+        "status": "pass",
+        "claim": EXACT_DONE_GATE_CLAIM,
+        "machine_proof_same_as_claim": True,
+        "finite_gauntlet_used_as_universal_proof": False,
+        "release_allowed_used_as_phase_success": False,
+        "proof_source": "structural_source_reachability_proof",
+        "structural_reachability_only": True,
+        "partial_or_scope_limited": True,
+    }
+
+    result = evaluate_unbreakable_operation(packet)
+
+    assert result["status"] == "fail"
+    codes = {issue["code"] for issue in result["issues"]}
+    assert "proof_source_too_weak_for_exact_gate" in codes
+    assert "exact_proof_contract_schema_missing_or_invalid" in codes
+    assert "exact_proof_contract_result_not_pass" in codes
+    assert "exact_proof_forbidden_flag_not_false" in codes

@@ -15,8 +15,10 @@ def test_structural_audit_passes_current_tier2_write_boundaries() -> None:
 
     assert result["status"] == "pass"
     assert result["issue_count"] == 0
-    assert result["proof_equivalence"]["machine_proof_same_as_claim"] is True
+    assert result["proof_equivalence"]["status"] == "partial"
+    assert result["proof_equivalence"]["machine_proof_same_as_claim"] is False
     assert result["proof_equivalence"]["proof_source"] == "structural_source_reachability_proof"
+    assert result["proof_equivalence"]["structural_reachability_only"] is True
 
 
 def test_structural_audit_detects_reconciler_write_before_gate() -> None:
