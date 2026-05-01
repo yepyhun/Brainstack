@@ -300,6 +300,31 @@ def _check_tier2_unbreakable_operation(tmp: Path) -> CheckResult:
     )
 
 
+def _check_phase249_ralph_gate(tmp: Path) -> CheckResult:
+    out = tmp / "phase249_ralph_gate.json"
+    command = [
+        sys.executable,
+        "scripts/check_phase249_ralph_gate.py",
+        "--out",
+        str(out),
+    ]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    passed = proc.returncode == 0 and data.get("status") == "pass" and data.get("issue_count") == 0
+    return CheckResult(
+        name="phase249_ralph_gate",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": data.get("issue_count"),
+            "issues": (data.get("issues") or [])[:20],
+            "open_item_count": len(data.get("open_items") or []),
+        },
+    )
+
+
 def _check_public_corpus(tmp: Path) -> CheckResult:
     out = tmp / "public_corpus_audit.json"
     command = [sys.executable, "scripts/audit_public_memory_kernel_corpus.py", "--out", str(out)]
@@ -683,6 +708,7 @@ def run_checklist(
         checks = [
             _check_release_claim_contract(release_claim_contract, release_notes),
             _check_tier2_unbreakable_operation(tmp),
+            _check_phase249_ralph_gate(tmp),
             _check_public_corpus(tmp),
             _check_evidence_trace(tmp),
             _check_packet_budget(tmp),

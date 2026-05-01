@@ -158,6 +158,21 @@ def test_release_report_fails_tier2_unbreakable_operation_even_in_dev_mode() -> 
     assert report["non_git_failures"] == ["tier2_unbreakable_operation"]
 
 
+def test_release_report_fails_phase249_ralph_gate_even_in_dev_mode() -> None:
+    checks = [
+        CheckResult("release_claim_contract", "pass", ["contract"], 0, {}),
+        CheckResult("tier2_unbreakable_operation", "pass", ["tier2"], 0, {}),
+        CheckResult("phase249_ralph_gate", "fail", ["ralph"], 2, {}),
+        CheckResult("git_hygiene", "fail", ["git"], 0, {"git_dirty": True}),
+    ]
+
+    report = _report(checks, ignore_git_dirty_for_dev=True)
+
+    assert report["status"] == "fail"
+    assert report["release_allowed"] is False
+    assert report["non_git_failures"] == ["phase249_ralph_gate"]
+
+
 def test_release_claim_contract_blocks_missing_contract(tmp_path: Path) -> None:
     result = _check_release_claim_contract(tmp_path / "missing.json", tmp_path / "missing.md")
 
