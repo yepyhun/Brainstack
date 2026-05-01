@@ -38,6 +38,7 @@ def _trace_hook(edge: Mapping[str, Any]) -> dict[str, Any]:
 def _readiness_edge(edge: Mapping[str, Any], *, traversal_allowed: bool, reason_code: str) -> dict[str, Any]:
     return {
         "relation_id": _text(edge.get("edge_id")),
+        "event_id": _text(edge.get("event_id")),
         "stable_fact_id": _text(edge.get("stable_fact_id")),
         "subject_ref": _text(edge.get("subject_ref")),
         "predicate": _text(edge.get("predicate")),

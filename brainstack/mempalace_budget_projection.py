@@ -5,6 +5,7 @@ import json
 from typing import Any, Iterable, Mapping
 
 from .canonical_memory_event import CANONICAL_MEMORY_EVENT_CORE_GROUPS, validate_canonical_memory_event
+from .projection_semantics import classify_projection_semantics
 
 MEMPALACE_BUDGET_PROJECTION_SCHEMA_VERSION = "brainstack.mempalace_budget_projection.v1"
 ACTIVE_BUDGET_CLASSES = {"always_active", "active_if_task_relevant"}
@@ -59,19 +60,19 @@ def _normalize_budget_class(event: Mapping[str, Any]) -> str:
     budget_class = _text(projection.get("budget_class"))
     truth_eligible = bool(authority.get("truth_eligible"))
     support_visibility = _text(authority.get("support_visibility"))
-    authority_critical = bool(projection.get("authority_critical"))
 
+    semantics = classify_projection_semantics(event)
     if budget_class in SUPPORTED_BUDGET_CLASSES:
-        if budget_class == "archived" and authority_critical and truth_eligible:
+        if budget_class == "archived" and semantics.is_authority_critical and truth_eligible:
             return "active_if_task_relevant"
         return budget_class
-    if authority_critical and truth_eligible and support_visibility == "answer_evidence":
+    if semantics.is_authority_critical and truth_eligible and support_visibility == "answer_evidence":
         if memory_kind in {"profile", "preference"}:
             return "always_active"
         return "active_if_task_relevant"
-    if support_visibility in {"normal", "support_context"}:
+    if semantics.is_support_only:
         return "support_only"
-    if truth_eligible:
+    if semantics.is_retrieval_only or truth_eligible:
         return "retrieval_only"
     return "archived"
 
@@ -94,8 +95,8 @@ def _card(event: Mapping[str, Any], *, budget_class: str) -> dict[str, Any]:
     scope = _mapping(event.get("scope"))
     claim = _mapping(event.get("claim"))
     authority = _mapping(event.get("authority"))
-    projection = _mapping(event.get("projection"))
     temporal = _mapping(event.get("temporal"))
+    semantics = classify_projection_semantics(event)
     return {
         "card_id": _hash([event_group.get("event_id"), claim.get("stable_fact_id"), budget_class]),
         "event_id": _text(event_group.get("event_id")),
@@ -109,11 +110,14 @@ def _card(event: Mapping[str, Any], *, budget_class: str) -> dict[str, Any]:
         "authority_class": _text(authority.get("authority_class")),
         "truth_eligible": bool(authority.get("truth_eligible")),
         "support_visibility": _text(authority.get("support_visibility")),
-        "authority_critical": bool(projection.get("authority_critical")),
+        "authority_critical": semantics.is_authority_critical,
+        "answer_safe": semantics.is_answer_safe,
         "budget_class": budget_class,
         "estimated_tokens": _estimated_tokens(event),
         "valid_from": _text(temporal.get("valid_from")),
         "valid_to": _text(temporal.get("valid_to")),
+        "projection_reason_codes": [reason.value for reason in semantics.reason_codes],
+        "projection_semantics": semantics.to_public_dict(),
     }
 
 
@@ -181,9 +185,12 @@ def project_canonical_events_to_mempalace_budget(
             "memory_kind": card["memory_kind"],
             "budget_class": card["budget_class"],
             "authority_critical": card["authority_critical"],
+            "answer_safe": card["answer_safe"],
             "estimated_tokens": card["estimated_tokens"],
             "decision": "drop",
             "reason_code": "ARCHIVED_NO_PROMPT",
+            "projection_reason_codes": list(card["projection_reason_codes"]),
+            "projection_semantics": dict(card["projection_semantics"]),
         }
         if card["authority_critical"]:
             active_cards.append(card)

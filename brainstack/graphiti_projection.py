@@ -5,6 +5,7 @@ import json
 from typing import Any, Iterable, Mapping
 
 from .canonical_memory_event import CANONICAL_MEMORY_EVENT_CORE_GROUPS, validate_canonical_memory_event
+from .projection_semantics import classify_projection_semantics
 
 GRAPHITI_PROJECTION_SCHEMA_VERSION = "brainstack.graphiti_projection.v1"
 GRAPH_MEMORY_KINDS = {"graph_relation", "graph_state", "temporal_event"}
@@ -152,18 +153,14 @@ def project_canonical_events_to_graphiti(events: Iterable[Mapping[str, Any]]) ->
             else:
                 entities[ref] = incoming
 
+        semantics = classify_projection_semantics(event)
         truth_eligible = bool(authority.get("truth_eligible"))
         support_visibility = _text(authority.get("support_visibility"))
         event_type = _text(event_group.get("event_type"))
         valid_to = _text(temporal.get("valid_to"))
-        conflicted = support_visibility == "contradiction_only" or event_type == "conflict_opened"
-        current = not valid_to and event_type in ANSWERABLE_EVENT_TYPES
-        answerable = (
-            current
-            and truth_eligible
-            and support_visibility == "answer_evidence"
-            and not conflicted
-        )
+        answerable = semantics.is_answer_safe
+        current = semantics.is_current
+        conflicted = semantics.is_conflicted
         edge = {
             "edge_id": _hash([event_id, subject_ref, predicate, object_ref]),
             "event_id": event_id,
@@ -181,8 +178,10 @@ def project_canonical_events_to_graphiti(events: Iterable[Mapping[str, Any]]) ->
             "truth_eligible": truth_eligible,
             "support_visibility": support_visibility,
             "answerable": answerable,
-            "current": current and not valid_to,
+            "current": current,
             "conflicted": conflicted,
+            "projection_reason_codes": [reason.value for reason in semantics.reason_codes],
+            "projection_semantics": semantics.to_public_dict(),
         }
         if edge["answerable"] and not truth_eligible:
             counters["truth_ineligible_answerable_edge"] += 1

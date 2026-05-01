@@ -104,7 +104,13 @@ def test_mempalace_budget_preserves_authority_critical_under_pressure() -> None:
 
     assert projection["status"] == "pass"
     assert [card["stable_fact_id"] for card in projection["active_cards"]] == ["profile:truth"]
+    truth_card = projection["active_cards"][0]
+    assert truth_card["answer_safe"] is True
+    assert "projection_authority_critical_cannot_drop" in truth_card["projection_reason_codes"]
     assert projection["support_only"]
+    support_card = projection["support_only"][0]
+    assert support_card["answer_safe"] is False
+    assert "projection_support_only" in support_card["projection_reason_codes"]
     assert projection["estimated_delta_tokens"] > 0
     assert projection["critical_counters"]["authority_critical_dropped"] == 0
 
@@ -127,6 +133,8 @@ def test_mempalace_budget_fails_closed_without_dropping_authority_truth() -> Non
     assert projection["status"] == "pass"
     assert projection["fail_closed"] is True
     assert len(projection["active_cards"]) == 3
+    assert all("projection_authority_critical_keep" in card["projection_reason_codes"] for card in projection["active_cards"])
+    assert all(card["answer_safe"] is True for card in projection["active_cards"])
     assert projection["selected_active_tokens"] > projection["max_active_tokens"]
     assert projection["critical_counters"]["authority_critical_dropped"] == 0
 
@@ -147,6 +155,8 @@ def test_mempalace_budget_keeps_memory_kind_in_every_decision() -> None:
     assert projection["status"] == "pass"
     assert projection["budget_decisions"][0]["memory_kind"] == "reference"
     assert projection["budget_decisions"][0]["reason_code"] == "DROP_RETRIEVAL_ONLY"
+    assert projection["budget_decisions"][0]["answer_safe"] is False
+    assert "projection_retrieval_only" in projection["budget_decisions"][0]["projection_reason_codes"]
 
 
 def test_mempalace_budget_does_not_emit_raw_extension_text() -> None:
@@ -164,3 +174,4 @@ def test_mempalace_budget_does_not_emit_raw_extension_text() -> None:
     assert projection["status"] == "pass"
     assert "private source text" not in str(projection)
     assert projection["critical_counters"]["raw_text_in_budget_projection"] == 0
+    assert projection["support_only"][0]["projection_semantics"]["is_support_only"] is True

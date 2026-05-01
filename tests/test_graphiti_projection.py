@@ -12,6 +12,7 @@ def _event(
     event_type: str = "durable_fact_committed",
     truth_eligible: bool = True,
     support_visibility: str = "answer_evidence",
+    receipt_id: str = "1",
     valid_to: str = "",
     principal_scope_key: str = "principal:a",
 ) -> dict:
@@ -52,7 +53,7 @@ def _event(
             "support_visibility": support_visibility,
             "confidence": 0.99,
             "admission_decision_id": "adm_1",
-            "receipt_id": "1",
+            "receipt_id": receipt_id,
         },
         "temporal": {
             "valid_from": "2026-04-30T10:00:00Z",
@@ -91,6 +92,8 @@ def test_graphiti_projection_projects_answerable_current_edge() -> None:
     assert len(projection["current_edges"]) == 1
     edge = projection["current_edges"][0]
     assert edge["answerable"] is True
+    assert "projection_answer_safe_current_source_backed" in edge["projection_reason_codes"]
+    assert edge["projection_semantics"]["is_answer_safe"] is True
     assert edge["source_event_id"] == "evt_1"
     assert edge["source_span_id"] == "span_1"
     assert edge["valid_to"] == ""
@@ -117,7 +120,10 @@ def test_graphiti_projection_keeps_support_only_graph_relation_inspect_only() ->
     assert projection["status"] == "pass"
     assert projection["current_edges"] == []
     assert len(projection["inspect_only_edges"]) == 1
-    assert projection["inspect_only_edges"][0]["answerable"] is False
+    edge = projection["inspect_only_edges"][0]
+    assert edge["answerable"] is False
+    assert "projection_support_only" in edge["projection_reason_codes"]
+    assert edge["projection_semantics"]["is_support_only"] is True
 
 
 def test_graphiti_projection_keeps_expired_relation_prior_not_current() -> None:
@@ -128,7 +134,10 @@ def test_graphiti_projection_keeps_expired_relation_prior_not_current() -> None:
     assert projection["status"] == "pass"
     assert projection["current_edges"] == []
     assert len(projection["prior_edges"]) == 1
-    assert projection["prior_edges"][0]["answerable"] is False
+    edge = projection["prior_edges"][0]
+    assert edge["answerable"] is False
+    assert edge["current"] is False
+    assert "projection_prior_expired" in edge["projection_reason_codes"]
 
 
 def test_graphiti_projection_keeps_conflict_non_answerable() -> None:
@@ -144,8 +153,40 @@ def test_graphiti_projection_keeps_conflict_non_answerable() -> None:
     assert projection["status"] == "pass"
     assert projection["current_edges"] == []
     assert len(projection["inspect_only_edges"]) == 1
-    assert projection["inspect_only_edges"][0]["conflicted"] is True
-    assert projection["inspect_only_edges"][0]["answerable"] is False
+    edge = projection["inspect_only_edges"][0]
+    assert edge["conflicted"] is True
+    assert edge["answerable"] is False
+    assert "projection_contradiction_only" in edge["projection_reason_codes"]
+    assert edge["projection_semantics"]["is_conflicted"] is True
+
+
+def test_graphiti_projection_blocks_missing_receipt_proposal_accepted() -> None:
+    event = _event(
+        event_id="cme_missing_receipt",
+        event_type="proposal_accepted",
+        receipt_id="",
+    )
+
+    projection = project_canonical_events_to_graphiti([event])
+
+    assert projection["status"] == "pass"
+    assert projection["current_edges"] == []
+    assert len(projection["inspect_only_edges"]) == 1
+    edge = projection["inspect_only_edges"][0]
+    assert edge["answerable"] is False
+    assert edge["current"] is True
+    assert "projection_not_answerable_missing_receipt" in edge["projection_reason_codes"]
+    assert edge["projection_semantics"]["is_answer_safe"] is False
+
+
+def test_graphiti_projection_shared_semantics_are_public_safe() -> None:
+    event = _event(event_id="cme_raw_extension")
+    event["extensions"] = {"debug.v1": {"raw_text": "private source text"}}
+
+    projection = project_canonical_events_to_graphiti([event])
+
+    edge = projection["current_edges"][0]
+    assert "private source text" not in str(edge["projection_semantics"])
 
 
 def test_graphiti_projection_rebuild_is_deterministic() -> None:

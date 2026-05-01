@@ -7,6 +7,7 @@ from scripts.run_memory_kernel_release_checklist import (
     GATE_EVASION_PATTERNS,
     REQUIRED_OPERATION_CLASSES,
     UNBREAKABLE_TARGET,
+    _check_projection_semantics_runtime_parity,
     _check_release_claim_contract,
     _git_hygiene_from_lists,
     _report,
@@ -80,6 +81,18 @@ def _write_contract_and_notes(tmp_path: Path, contract: dict[str, object] | None
         encoding="utf-8",
     )
     return contract_path, notes_path
+
+
+def test_projection_semantics_runtime_parity_check_passes(tmp_path: Path) -> None:
+    result = _check_projection_semantics_runtime_parity(tmp_path)
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["inspect_verdict"] == "pass"
+    assert result.summary["doctor_status"] == "active"
+    assert result.summary["unsafe_selected_event_ids"] == []
+    assert result.summary["packet_authority_critical_dropped"] == 0
+    assert result.summary["public_safe"] is True
 
 
 def test_git_hygiene_blocks_dirty_source() -> None:

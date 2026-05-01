@@ -103,7 +103,7 @@ def is_authority_critical(candidate: Mapping[str, Any]) -> bool:
 
     if bool(candidate.get("protected")) or bool(candidate.get("required_for_answer")):
         return True
-    if _text(candidate.get("receipt_id")):
+    if _text(candidate.get("receipt_id")) and _answer_allowed(candidate):
         return True
     authority = _text(candidate.get("authority"))
     if authority in _PROTECTED_AUTHORITIES and _answer_allowed(candidate):

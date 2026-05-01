@@ -579,6 +579,42 @@ def _check_public_fixtures() -> CheckResult:
     )
 
 
+def _check_projection_semantics_runtime_parity(tmp: Path) -> CheckResult:
+    out = tmp / "projection_semantics_runtime_parity.json"
+    command = [sys.executable, "scripts/verify_projection_semantics_runtime_parity.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    counters = data.get("critical_counters") if isinstance(data.get("critical_counters"), dict) else {}
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("inspect_verdict") == "pass"
+        and data.get("doctor_status") == "active"
+        and data.get("conformance_status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("unsafe_selected_event_ids") == []
+        and counters.get("packet_authority_critical_dropped") == 0
+    )
+    return CheckResult(
+        name="projection_semantics_runtime_parity",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "inspect_verdict": data.get("inspect_verdict"),
+            "doctor_status": data.get("doctor_status"),
+            "conformance_status": data.get("conformance_status"),
+            "event_count": data.get("event_count"),
+            "selected_event_ids": data.get("selected_event_ids"),
+            "unsafe_selected_event_ids": data.get("unsafe_selected_event_ids"),
+            "packet_authority_critical_dropped": counters.get("packet_authority_critical_dropped"),
+            "public_safe": data.get("public_safe"),
+            "issue_count": len(data.get("issues") or []),
+        },
+    )
+
+
 def _tracked_files() -> list[str]:
     proc = _run(["git", "ls-files"])
     if proc.returncode != 0:
@@ -731,6 +767,7 @@ def run_checklist(
             _check_write_path(tmp),
             _check_graph_conflict_lifecycle(tmp),
             _check_public_fixtures(),
+            _check_projection_semantics_runtime_parity(tmp),
             _check_public_payload_leaks(),
             _check_git_hygiene(),
         ]
