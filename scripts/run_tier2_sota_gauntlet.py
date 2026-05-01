@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -24,8 +25,14 @@ from brainstack.hindsight_spine_adapter import (  # noqa: E402
 )
 
 PHASE_DIR = ROOT / ".planning/phases/239-tier2-proof-gauntlet"
-DONOR_DIR = Path("/home/lauratom/Asztal/ai/donor-first-review/hindsight")
 PUBLIC_SENTINEL = "PUBLIC_SAFE_SENTINEL_SHOULD_NOT_APPEAR"
+
+
+def _default_donor_dir() -> Path:
+    configured = os.environ.get("BRAINSTACK_HINDSIGHT_DONOR_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return ROOT.parents[1] / "donor-first-review" / "hindsight"
 
 
 def _json_dump(path: Path, data: Mapping[str, Any]) -> None:
@@ -596,7 +603,7 @@ def run(*, phase_dir: Path, donor_dir: Path, artifact_prefix: str = "239") -> di
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--phase-dir", type=Path, default=PHASE_DIR)
-    parser.add_argument("--donor-dir", type=Path, default=DONOR_DIR)
+    parser.add_argument("--donor-dir", type=Path, default=_default_donor_dir())
     parser.add_argument("--artifact-prefix", default="239")
     args = parser.parse_args()
     packet = run(phase_dir=args.phase_dir, donor_dir=args.donor_dir, artifact_prefix=args.artifact_prefix)
