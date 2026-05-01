@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail Phase 249 closeout while Ralph-style implementation plan has open work."""
+"""Fail Phase 249 closeout and force the next loop while work remains."""
 
 from __future__ import annotations
 
@@ -9,10 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PLAN = ROOT / ".planning" / "phases" / "249-release-claim-contract-hard-gate" / "IMPLEMENTATION_PLAN.md"
-BLOCKED_SENTINEL = (
-    "No open implementation items in Phase 249. Phase remains blocked by proof-equivalence until "
-    "linked Phase 250 resolves it."
-)
+BLOCKED_SENTINEL_PREFIX = "BLOCKED:"
 
 
 def _section_items(text: str, heading: str) -> list[str]:
@@ -40,19 +37,27 @@ def run_check(path: Path = PLAN) -> dict[str, object]:
     text = path.read_text(encoding="utf-8")
     open_items = _section_items(text, "Open")
     issues = []
-    actionable_open_items = [
-        item
-        for item in open_items
-        if item != BLOCKED_SENTINEL
-    ]
+    blocked_items = [item for item in open_items if item.startswith(BLOCKED_SENTINEL_PREFIX)]
+    actionable_open_items = [item for item in open_items if item not in blocked_items]
     if actionable_open_items:
         issues.append({"code": "implementation_plan_open_items", "count": len(actionable_open_items)})
+    if blocked_items:
+        issues.append({"code": "implementation_plan_blocked_items", "count": len(blocked_items)})
+    next_action = None
+    if open_items:
+        next_action = {
+            "action": "continue_loop",
+            "work_item": open_items[0],
+            "rule": "Do not report Phase 249 done. Execute the first open item or open/execute its linked phase, then rerun this gate.",
+        }
     return {
         "schema": "brainstack.phase249_ralph_gate.v1",
         "status": "pass" if not issues else "fail",
         "issue_count": len(issues),
         "issues": issues,
         "open_items": actionable_open_items,
+        "blocked_items": blocked_items,
+        "next_action": next_action,
     }
 
 
