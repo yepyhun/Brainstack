@@ -64,6 +64,10 @@ def _list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, list) else []
 
 
+def _has_source_refs(action: Mapping[str, Any]) -> bool:
+    return bool(_list(action.get("source_span_ids"))) and bool(_list(action.get("source_event_ids")))
+
+
 def _hash_json(value: Any, *, length: int = 32) -> str:
     payload = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:length]
@@ -410,6 +414,8 @@ def build_tier2_decision_plan(input_packet: Mapping[str, Any]) -> dict[str, Any]
         source, blocked_by = _action_source(action, spans)
         blocked_by.extend(_scope_blockers(source, spans, scope))
         memory_kind = _memory_kind(action)
+        if memory_kind == "support_context" and _has_source_refs(action):
+            blocked_by = [item for item in blocked_by if item != "REJECTED_MISSING_VERIFIED_SOURCE_SPAN"]
         authority = _authority(source, blocked_by, memory_kind)
         matches = _existing_matches(input_packet, action)
         decision_class = _decision_class(input_packet, action, memory_kind, authority, blocked_by, matches)

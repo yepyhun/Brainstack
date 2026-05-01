@@ -204,6 +204,139 @@ def test_tier2_verified_user_span_relation_passes_decision_core_gate(tmp_path: P
         provider.shutdown()
 
 
+def test_tier2_verified_inferred_relation_passes_decision_core_gate(tmp_path: Path) -> None:
+    def extractor(*args, **kwargs):
+        return {
+            "inferred_relations": [
+                {
+                    "subject": "Project Alpha",
+                    "predicate": "created_by",
+                    "object": "Alex",
+                    "source_quote": "Project Alpha was created by Alex.",
+                    "confidence": 0.88,
+                    "metadata": {"source_role": "user"},
+                }
+            ],
+            "_meta": {"json_parse_status": "ok", "parse_context": "test"},
+        }
+
+    provider = _provider(tmp_path, extractor)
+    try:
+        assert provider._store is not None
+        provider._store.add_transcript_entry(
+            session_id="tier2-consolidation-session",
+            turn_number=2,
+            kind="turn",
+            content="User: Project Alpha was created by Alex.",
+            source="test",
+            metadata=provider._scoped_metadata(),
+        )
+
+        result = provider._run_tier2_batch(
+            session_id="tier2-consolidation-session",
+            turn_number=2,
+            trigger_reason="idle_window",
+        )
+
+        assert result["writes_performed"] == 1
+        rows = provider._store.conn.execute(
+            """
+            SELECT r.metadata_json
+            FROM graph_inferred_relations r
+            WHERE r.active = 1 AND r.predicate = 'created_by'
+            ORDER BY r.id
+            """
+        ).fetchall()
+        assert len(rows) == 1
+        metadata = json.loads(rows[0]["metadata_json"])
+        assert metadata["tier2_decision_core"]["decision_class"] == "relation_candidate"
+        assert metadata["tier2_decision_core"]["truth_eligible"] is True
+    finally:
+        provider.shutdown()
+
+
+def test_tier2_verified_typed_entity_state_passes_decision_core_gate(tmp_path: Path) -> None:
+    def extractor(*args, **kwargs):
+        return {
+            "typed_entities": [
+                {
+                    "name": "Project Alpha",
+                    "entity_type": "project",
+                    "subject": "Project Alpha",
+                    "attributes": {"created_by": "Alex"},
+                    "source_quote": "Project Alpha was created by Alex.",
+                    "confidence": 0.9,
+                    "metadata": {"source_role": "user"},
+                }
+            ],
+            "_meta": {"json_parse_status": "ok", "parse_context": "test"},
+        }
+
+    provider = _provider(tmp_path, extractor)
+    try:
+        assert provider._store is not None
+        provider._store.add_transcript_entry(
+            session_id="tier2-consolidation-session",
+            turn_number=2,
+            kind="turn",
+            content="User: Project Alpha was created by Alex.",
+            source="test",
+            metadata=provider._scoped_metadata(),
+        )
+
+        result = provider._run_tier2_batch(
+            session_id="tier2-consolidation-session",
+            turn_number=2,
+            trigger_reason="idle_window",
+        )
+
+        assert result["writes_performed"] == 1
+        rows = provider._store.conn.execute(
+            """
+            SELECT metadata_json
+            FROM graph_states
+            WHERE is_current = 1 AND attribute = 'created_by'
+            ORDER BY id
+            """
+        ).fetchall()
+        assert len(rows) == 1
+        metadata = json.loads(rows[0]["metadata_json"])
+        assert metadata["tier2_decision_core"]["decision_class"] == "relation_candidate"
+        assert metadata["tier2_decision_core"]["truth_eligible"] is True
+    finally:
+        provider.shutdown()
+
+
+def test_tier2_continuity_summary_is_support_gated_before_durable_write(tmp_path: Path) -> None:
+    def extractor(*args, **kwargs):
+        return {
+            "continuity_summary": "User is validating a public-safe release gate.",
+            "_meta": {"json_parse_status": "ok", "parse_context": "test"},
+        }
+
+    provider = _provider(tmp_path, extractor)
+    try:
+        result = provider._run_tier2_batch(
+            session_id="tier2-consolidation-session",
+            turn_number=1,
+            trigger_reason="idle_window",
+        )
+
+        assert result["writes_performed"] >= 1
+        assert provider._store is not None
+        row = provider._store.find_continuity_event(
+            session_id="tier2-consolidation-session",
+            kind="tier2_summary",
+            content="User is validating a public-safe release gate.",
+        )
+        assert row is not None
+        metadata = row["metadata"]
+        assert metadata["tier2_decision_core"]["decision_class"] == "support_event"
+        assert metadata["tier2_decision_core"]["truth_eligible"] is False
+    finally:
+        provider.shutdown()
+
+
 def test_tier2_inexact_user_span_stays_support_only(tmp_path: Path) -> None:
     def extractor(*args, **kwargs):
         return {

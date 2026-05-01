@@ -31,6 +31,7 @@ from .runtime import (
     should_promote_open_decision,
     trim_text_boundary,
 )
+from ..tier2_decision_runtime_gate import evaluate_tier2_decision_core_gate
 
 class ExplicitCaptureMixin(ProviderRuntimeBase):
     def _commit_explicit_write(
@@ -638,6 +639,35 @@ class ExplicitCaptureMixin(ProviderRuntimeBase):
             source=source,
             metadata=dict(metadata or {}),
         )
+        scoped_gate_metadata = self._scoped_metadata(recent_work_metadata)
+        consolidation_source = (
+            scoped_gate_metadata.get("consolidation_source")
+            if isinstance(scoped_gate_metadata.get("consolidation_source"), Mapping)
+            else {}
+        )
+        source_ids = [str(item) for item in list(consolidation_source.get("source_ids") or []) if str(item or "").strip()]
+        source_fingerprint = _normalize_compact_text(consolidation_source.get("source_fingerprint"))
+        if source_ids and source_fingerprint:
+            content_hash = hashlib.sha256(compact_summary.encode("utf-8")).hexdigest()[:20]
+            scoped_gate_metadata.setdefault("source_event_id", f"consolidation:{source_fingerprint}")
+            scoped_gate_metadata.setdefault("source_span_id", f"consolidation:recent_work_summary:{content_hash}")
+            scoped_gate_metadata.setdefault("trace_id", f"recent_work_summary:{content_hash}")
+        core_block = evaluate_tier2_decision_core_gate(
+            kind="continuity",
+            candidate_metadata=scoped_gate_metadata,
+            base_metadata=scoped_gate_metadata,
+            source=source,
+            target_kind="support_context",
+            target_slot="operating.recent_work_summary",
+            stable_key=f"recent_work_summary:{hashlib.sha256(compact_summary.encode('utf-8')).hexdigest()[:20]}",
+            normalized_value=compact_summary,
+        )
+        if core_block:
+            self._set_memory_operation_trace(
+                surface="operating_recent_work_rejected",
+                note=f"Tier2 recent work support write blocked: {core_block.get('tier2_decision_reason_code')}",
+            )
+            return False
         stable_key_override = recent_work_stable_key(
             principal_scope_key=self._principal_scope_key,
             workstream_id=str(recent_work_metadata.get("workstream_id") or ""),

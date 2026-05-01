@@ -131,6 +131,7 @@ def evaluate_tier2_decision_core_gate(
         "style_contract": {"durable_fact_candidate", "lifecycle_update_candidate"},
         "state": {"relation_candidate", "lifecycle_update_candidate"},
         "relation": {"relation_candidate", "lifecycle_update_candidate"},
+        "continuity": {"support_event"},
     }
     if not issues and decision_class in allowed_by_kind.get(kind, set()):
         return None
@@ -144,4 +145,3 @@ def evaluate_tier2_decision_core_gate(
         "support_visibility": "inspect_only",
         "issues": list(issues),
     }
-

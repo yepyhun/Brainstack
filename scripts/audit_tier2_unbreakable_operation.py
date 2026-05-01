@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.run_tier2_sota_gauntlet import _default_donor_dir, run as run_tier2_gauntlet  # noqa: E402
+from scripts.audit_tier2_structural_unbreakability import run_structural_audit  # noqa: E402
 
 
 REQUIRED_PROOF_FAMILIES = {
@@ -115,8 +116,12 @@ def run_audit(
         donor_dir=donor_dir or _default_donor_dir(),
         artifact_prefix=artifact_prefix,
     )
+    structural = run_structural_audit(root=ROOT, claim=EXACT_DONE_GATE_CLAIM)
+    packet = dict(packet)
+    packet["proof_equivalence"] = structural["proof_equivalence"]
     result = evaluate_unbreakable_operation(packet)
     result["source_packet_schema"] = packet.get("schema")
+    result["structural_proof"] = structural
     return result
 
 

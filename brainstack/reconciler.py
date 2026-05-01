@@ -144,6 +144,63 @@ def _candidate_metadata(
     return payload
 
 
+def _continuity_candidate_with_source_refs(
+    candidate: Mapping[str, Any] | str,
+    *,
+    base_metadata: Mapping[str, Any],
+    kind: str,
+    content: str,
+) -> Mapping[str, Any]:
+    payload: Dict[str, Any] = dict(candidate) if isinstance(candidate, Mapping) else {"content": content}
+    raw_metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
+    item_metadata = dict(raw_metadata)
+    consolidation_source = (
+        base_metadata.get("consolidation_source")
+        if isinstance(base_metadata.get("consolidation_source"), Mapping)
+        else {}
+    )
+    source_ids = [str(item) for item in list(consolidation_source.get("source_ids") or []) if str(item or "").strip()]
+    source_fingerprint = _normalize_text(consolidation_source.get("source_fingerprint"))
+    if source_ids and source_fingerprint:
+        content_hash = _json_fingerprint({"kind": kind, "content": content}).removeprefix("sha256:")[:20]
+        item_metadata.setdefault("source_event_id", f"consolidation:{source_fingerprint}")
+        item_metadata.setdefault("source_span_id", f"consolidation:{kind}:{content_hash}")
+        item_metadata.setdefault("trace_id", f"continuity:{kind}:{content_hash}")
+        item_metadata.setdefault(
+            "consolidation",
+            {
+                "schema": "brainstack.tier2_continuity_source_ref.v1",
+                "candidate_path": kind,
+                "source_ids": source_ids,
+                "source_fingerprint": source_fingerprint,
+                "proposed_action": "ADD",
+            },
+        )
+    payload["metadata"] = item_metadata
+    return payload
+
+
+def _continuity_core_block(
+    *,
+    kind: str,
+    content: str,
+    candidate_metadata: Dict[str, Any],
+    base_metadata: Mapping[str, Any],
+    source: str,
+    stable_key: str,
+) -> Dict[str, Any] | None:
+    return evaluate_tier2_decision_core_gate(
+        kind="continuity",
+        candidate_metadata=candidate_metadata,
+        base_metadata=base_metadata,
+        source=source,
+        target_kind="support_context",
+        target_slot=f"continuity.{kind}",
+        stable_key=stable_key,
+        normalized_value=content,
+    )
+
+
 def _is_assistant_authored_candidate(candidate: Mapping[str, Any] | None) -> bool:
     if not isinstance(candidate, Mapping):
         return False
@@ -510,6 +567,26 @@ def _reconcile_inferred_relations(
             writer.record_decision(decision=decision, metadata=candidate_metadata)
             actions.append(_admission_action("inferred_relation", decision))
             continue
+        core_block = evaluate_tier2_decision_core_gate(
+            kind="relation",
+            candidate_metadata=candidate_metadata,
+            base_metadata=metadata,
+            source=source,
+            target_kind="relation",
+            target_slot=decision.target_slot or predicate,
+            stable_key=decision.stable_key or decision.target_slot or predicate,
+            normalized_value={"subject": subject_name, "predicate": predicate, "object": object_name},
+            relation_shape={
+                "subject_ref": subject_name,
+                "predicate": predicate,
+                "object_ref": object_name,
+                "direction": "forward",
+            },
+        )
+        if core_block:
+            core_block["kind"] = "inferred_relation"
+            actions.append(core_block)
+            continue
         outcome = writer.write_graph_relation(
             decision=decision,
             subject_name=subject_name,
@@ -580,6 +657,30 @@ def _reconcile_typed_entities(
                 writer.record_decision(decision=decision, metadata=entity_metadata)
                 actions.append(_admission_action("typed_entity", decision))
                 continue
+            core_block = evaluate_tier2_decision_core_gate(
+                kind="state",
+                candidate_metadata=entity_metadata,
+                base_metadata=metadata,
+                source=source,
+                target_kind="relation",
+                target_slot=decision.target_slot or normalized_attribute,
+                stable_key=decision.stable_key or decision.target_slot or normalized_attribute,
+                normalized_value={
+                    "subject": entity_name,
+                    "attribute": normalized_attribute,
+                    "value": normalized_value,
+                },
+                relation_shape={
+                    "subject_ref": entity_name,
+                    "predicate": normalized_attribute,
+                    "object_ref": normalized_value,
+                    "direction": "forward",
+                },
+            )
+            if core_block:
+                core_block["kind"] = "typed_entity"
+                actions.append(core_block)
+                continue
             outcome = writer.write_graph_state(
                 decision=decision,
                 subject_name=entity_name,
@@ -630,6 +731,18 @@ def _reconcile_continuity(
         if store.find_continuity_event(session_id=session_id, kind="temporal_event", content=content) is not None:
             actions.append({"kind": "continuity", "action": "NONE", "type": "temporal_event", "content": content})
             continue
+        core_block = _continuity_core_block(
+            kind="temporal_event",
+            content=content,
+            candidate_metadata=event_metadata,
+            base_metadata=metadata,
+            source=source,
+            stable_key=f"continuity:{session_id}:temporal_event:{_json_fingerprint(content)}",
+        )
+        if core_block:
+            core_block["type"] = "temporal_event"
+            actions.append(core_block)
+            continue
         row_id = store.add_continuity_event(
             session_id=session_id,
             turn_number=event_turn_number,
@@ -650,15 +763,39 @@ def _reconcile_continuity(
 
     if continuity_summary:
         if store.find_continuity_event(session_id=session_id, kind="tier2_summary", content=continuity_summary) is None:
-            row_id = store.add_continuity_event(
-                session_id=session_id,
-                turn_number=turn_number,
+            summary_candidate = _continuity_candidate_with_source_refs(
+                {"content": continuity_summary},
+                base_metadata=metadata,
                 kind="tier2_summary",
                 content=continuity_summary,
-                source=source,
-                metadata=metadata,
             )
-            actions.append({"kind": "continuity", "action": "ADD", "row_id": row_id, "type": "summary"})
+            summary_metadata = _candidate_metadata(
+                summary_candidate,
+                base_metadata=metadata,
+                confidence=0.68,
+                source=source,
+            )
+            core_block = _continuity_core_block(
+                kind="tier2_summary",
+                content=continuity_summary,
+                candidate_metadata=summary_metadata,
+                base_metadata=metadata,
+                source=source,
+                stable_key=f"continuity:{session_id}:tier2_summary:{_json_fingerprint(continuity_summary)}",
+            )
+            if core_block:
+                core_block["type"] = "summary"
+                actions.append(core_block)
+            else:
+                row_id = store.add_continuity_event(
+                    session_id=session_id,
+                    turn_number=turn_number,
+                    kind="tier2_summary",
+                    content=continuity_summary,
+                    source=source,
+                    metadata=summary_metadata,
+                )
+                actions.append({"kind": "continuity", "action": "ADD", "row_id": row_id, "type": "summary"})
         else:
             actions.append({"kind": "continuity", "action": "NONE", "type": "summary"})
 
@@ -666,20 +803,54 @@ def _reconcile_continuity(
         if isinstance(decision, Mapping) and _is_assistant_authored_candidate(decision):
             actions.append({"kind": "continuity", "action": "REJECT_ASSISTANT_AUTHORED", "type": "decision"})
             continue
-        if isinstance(decision, Mapping):
-            decision = _normalize_text(decision.get("content"))
-        if store.find_continuity_event(session_id=session_id, kind="decision", content=decision) is not None:
-            actions.append({"kind": "continuity", "action": "NONE", "type": "decision", "content": decision})
+        decision_candidate = decision if isinstance(decision, Mapping) else {"content": decision}
+        decision_content = _normalize_text(decision_candidate.get("content"))
+        if not decision_content:
+            continue
+        if store.find_continuity_event(session_id=session_id, kind="decision", content=decision_content) is not None:
+            actions.append({"kind": "continuity", "action": "NONE", "type": "decision", "content": decision_content})
+            continue
+        decision_candidate = _continuity_candidate_with_source_refs(
+            decision_candidate,
+            base_metadata=metadata,
+            kind="decision",
+            content=decision_content,
+        )
+        decision_metadata = _candidate_metadata(
+            decision_candidate,
+            base_metadata=metadata,
+            confidence=float(decision_candidate.get("confidence", 0.66)) if isinstance(decision_candidate, Mapping) else 0.66,
+            source=source,
+        )
+        core_block = _continuity_core_block(
+            kind="decision",
+            content=decision_content,
+            candidate_metadata=decision_metadata,
+            base_metadata=metadata,
+            source=source,
+            stable_key=f"continuity:{session_id}:decision:{_json_fingerprint(decision_content)}",
+        )
+        if core_block:
+            core_block["type"] = "decision"
+            actions.append(core_block)
             continue
         row_id = store.add_continuity_event(
             session_id=session_id,
             turn_number=turn_number,
             kind="decision",
-            content=decision,
+            content=decision_content,
             source=source,
-            metadata=metadata,
+            metadata=decision_metadata,
         )
-        actions.append({"kind": "continuity", "action": "ADD", "type": "decision", "row_id": row_id, "content": decision})
+        actions.append(
+            {
+                "kind": "continuity",
+                "action": "ADD",
+                "type": "decision",
+                "row_id": row_id,
+                "content": decision_content,
+            }
+        )
     return actions
 
 
