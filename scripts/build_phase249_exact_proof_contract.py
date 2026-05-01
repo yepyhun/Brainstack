@@ -19,6 +19,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.audit_tier2_structural_unbreakability import run_structural_audit  # noqa: E402
+from scripts.build_phase249_literal_universal_proof import (  # noqa: E402
+    build_literal_universal_proof,
+)
 from scripts.run_phase249_operation_combination_proof import run_proof as run_combination_proof  # noqa: E402
 
 EXACT_DONE_GATE_CLAIM = (
@@ -162,8 +165,14 @@ def _operation_class_evidence() -> dict[str, Any]:
     }
 
 
-def _literal_universal_proof_available() -> dict[str, Any]:
-    artifact = _load_json(LITERAL_UNIVERSAL_PROOF_ARTIFACT)
+def _literal_universal_proof_available(
+    artifact_override: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    artifact = dict(artifact_override) if artifact_override is not None else _load_json(LITERAL_UNIVERSAL_PROOF_ARTIFACT)
+    generated = False
+    if artifact_override is None and not artifact:
+        artifact = build_literal_universal_proof()
+        generated = True
     passed = (
         artifact.get("schema") == "brainstack.phase249.literal_universal_proof.v1"
         and artifact.get("status") == "pass"
@@ -177,9 +186,17 @@ def _literal_universal_proof_available() -> dict[str, Any]:
         "status": "pass" if passed else "fail",
         "path": str(LITERAL_UNIVERSAL_PROOF_ARTIFACT.relative_to(ROOT)),
         "artifact_present": bool(artifact),
+        "generated_from_source": generated,
+        "proof_source": artifact.get("proof_source"),
+        "proof_nature": artifact.get("proof_nature"),
+        "abstract_case_count": artifact.get("abstract_case_count"),
+        "arbitrary_json_case_count": artifact.get("arbitrary_json_case_count"),
+        "failure_count": artifact.get("failure_count"),
+        "arbitrary_json_failure_count": artifact.get("arbitrary_json_failure_count"),
+        "static_purity_issue_count": artifact.get("static_purity_issue_count"),
         "reason": (
-            "Formal operation-class evidence is not the same as a literal universal "
-            "all-real-world-situations proof."
+            "Literal universal proof must be generated from the total Tier2 decision "
+            "machine, not from operation-class evidence alone."
         ),
     }
 
@@ -188,6 +205,7 @@ def build_exact_proof_contract(
     *,
     root: Path = ROOT,
     structural: Mapping[str, Any] | None = None,
+    literal_universal_proof: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     structural = dict(structural or run_structural_audit(root=root, claim=EXACT_DONE_GATE_CLAIM))
     structural_equivalence = dict(structural.get("proof_equivalence") or {})
@@ -219,8 +237,8 @@ def build_exact_proof_contract(
     operation_classes_proven = not operation_class_evidence["missing_classes"]
     sota = _load_json(EVIDENCE_PATHS["sota_superiority"])
     sota_gate_proven = sota.get("status") == "pass" and sota.get("supported_scope_sota_superiority") is True
-    literal_universal_proof = _literal_universal_proof_available()
-    literal_universal_proven = literal_universal_proof["status"] == "pass"
+    literal_universal_proof_evidence = _literal_universal_proof_available(literal_universal_proof)
+    literal_universal_proven = literal_universal_proof_evidence["status"] == "pass"
     exact_contract_available = (
         structural_exact and operation_classes_proven and sota_gate_proven and literal_universal_proven
     )
@@ -270,7 +288,7 @@ def build_exact_proof_contract(
         _proof_obligation(
             "literal_universal_claim_proven",
             literal_universal_proven,
-            literal_universal_proof,
+            literal_universal_proof_evidence,
         ),
         _proof_obligation(
             "exact_contract_available",

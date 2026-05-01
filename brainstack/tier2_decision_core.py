@@ -113,6 +113,8 @@ def _action_source(action: Mapping[str, Any], spans: Mapping[str, Mapping[str, A
         event_id = _text(first_span.get("source_event_id"))
         if event_id:
             source_event_ids = [event_id]
+    if not source_event_ids:
+        blocked_by.append("REJECTED_MISSING_VERIFIED_SOURCE_EVENT")
     return (
         {
             "source_event_ids": source_event_ids,
@@ -200,7 +202,11 @@ def _authority(source: Mapping[str, Any], blocked_by: list[str], memory_kind: st
             "truth_eligible": False,
             "support_visibility": "inspect_only",
         }
-    if "REJECTED_MISSING_VERIFIED_SOURCE_SPAN" in blocked_by or "REJECTED_SCOPE_MISMATCH" in blocked_by:
+    if (
+        "REJECTED_MISSING_VERIFIED_SOURCE_SPAN" in blocked_by
+        or "REJECTED_MISSING_VERIFIED_SOURCE_EVENT" in blocked_by
+        or "REJECTED_SCOPE_MISMATCH" in blocked_by
+    ):
         return {
             "authority_class": "donor_proposal",
             "truth_eligible": False,
@@ -331,11 +337,14 @@ def _decision_class(
         return "reject"
     if "REJECTED_SCOPE_MISMATCH" in blocked_by:
         return "reject"
-    if "REJECTED_MISSING_VERIFIED_SOURCE_SPAN" in blocked_by:
+    if (
+        "REJECTED_MISSING_VERIFIED_SOURCE_SPAN" in blocked_by
+        or "REJECTED_MISSING_VERIFIED_SOURCE_EVENT" in blocked_by
+    ):
         return "inspect_only"
     if memory_kind == "unknown":
         return "clarification_required"
-    if memory_kind != "relation" and not target_slot and memory_kind not in {"support_context", "temporal_event"}:
+    if memory_kind != "relation" and not target_slot and memory_kind not in {"support_context"}:
         return "clarification_required"
     if memory_kind == "relation" and not all((relation_shape["subject_ref"], relation_shape["predicate"], relation_shape["object_ref"])):
         return "clarification_required"
@@ -428,7 +437,10 @@ def build_tier2_decision_plan(input_packet: Mapping[str, Any]) -> dict[str, Any]
         semantic_value = _semantic_value(decision_class, memory_kind, authority)
         receipt_requirement = _receipt_requirement(decision_class)
         reason_code = _reason_code(decision_class, memory_kind, blocked_by, authority, lifecycle)
-        if "REJECTED_MISSING_VERIFIED_SOURCE_SPAN" in blocked_by:
+        if (
+            "REJECTED_MISSING_VERIFIED_SOURCE_SPAN" in blocked_by
+            or "REJECTED_MISSING_VERIFIED_SOURCE_EVENT" in blocked_by
+        ):
             counters["missing_verified_source"] += 1
         if "REJECTED_ASSISTANT_AUTHORED_TRUTH_ATTEMPT" in blocked_by:
             counters["assistant_truth_attempt"] += 1

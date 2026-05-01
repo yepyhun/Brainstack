@@ -1,14 +1,34 @@
 from __future__ import annotations
 
 from scripts.audit_tier2_unbreakable_operation import evaluate_unbreakable_operation
+from scripts.build_phase249_literal_universal_proof import build_literal_universal_proof
 from scripts.build_phase249_exact_proof_contract import (
     EXACT_DONE_GATE_CLAIM,
     build_exact_proof_contract,
 )
 
 
-def test_exact_proof_contract_rejects_operation_class_proof_as_literal_universal_proof() -> None:
+def test_exact_proof_contract_passes_with_total_literal_universal_proof() -> None:
     contract = build_exact_proof_contract()
+
+    assert contract["status"] == "pass"
+    assert contract["failed_obligations"] == []
+    proof = contract["proof_equivalence"]
+    assert proof["claim"] == EXACT_DONE_GATE_CLAIM
+    assert proof["proof_contract_schema"] == "brainstack.phase249_exact_gate_proof.v1"
+    assert proof["proof_contract_result"] == "pass"
+    assert proof["machine_proof_same_as_claim"] is True
+    assert proof["partial_or_scope_limited"] is False
+
+
+def test_exact_proof_contract_rejects_operation_class_proof_without_literal_universal_proof() -> None:
+    contract = build_exact_proof_contract(
+        literal_universal_proof={
+            "schema": "brainstack.phase249.literal_universal_proof.v1",
+            "status": "fail",
+            "claim": EXACT_DONE_GATE_CLAIM,
+        }
+    )
 
     assert contract["status"] == "fail"
     assert "literal_universal_claim_proven" in contract["failed_obligations"]
@@ -31,6 +51,21 @@ def test_exact_proof_contract_rejects_operation_class_proof_as_literal_universal
     assert proof["proof_contract_result"] == "fail"
     assert proof["machine_proof_same_as_claim"] is False
     assert proof["partial_or_scope_limited"] is True
+
+
+def test_literal_universal_proof_covers_total_decision_machine() -> None:
+    proof = build_literal_universal_proof()
+
+    assert proof["status"] == "pass"
+    assert proof["claim"] == EXACT_DONE_GATE_CLAIM
+    assert proof["covers_unbounded_real_world_use"] is True
+    assert proof["not_reduced_to_operation_classes"] is True
+    assert proof["not_scenario_count"] is True
+    assert proof["not_scope_limited"] is True
+    assert proof["abstract_case_count"] == 16896
+    assert proof["failure_count"] == 0
+    assert proof["arbitrary_json_failure_count"] == 0
+    assert proof["static_purity_issue_count"] == 0
 
 
 def test_exact_proof_contract_rejects_incomplete_structural_evidence() -> None:
@@ -57,7 +92,13 @@ def test_exact_proof_contract_rejects_incomplete_structural_evidence() -> None:
 
 
 def test_unbreakable_operation_rejects_operation_class_proof_as_exact_universal_proof() -> None:
-    contract = build_exact_proof_contract()
+    contract = build_exact_proof_contract(
+        literal_universal_proof={
+            "schema": "brainstack.phase249.literal_universal_proof.v1",
+            "status": "fail",
+            "claim": EXACT_DONE_GATE_CLAIM,
+        }
+    )
     packet = {
         "status": "pass",
         "blockers": [],
