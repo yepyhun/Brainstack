@@ -13,6 +13,8 @@ if str(ROOT) not in sys.path:
 plugin_path = HERMES_ROOT / "plugins" / "memory"
 if plugin_path.exists() and str(plugin_path) not in sys.path:
     sys.path.insert(0, str(plugin_path))
+if (HERMES_ROOT / "brainstack").exists() and str(HERMES_ROOT) not in sys.path:
+    sys.path.insert(0, str(HERMES_ROOT))
 
 from hermes_proactive.doctor import proactive_extension_doctor  # noqa: E402
 
@@ -20,8 +22,19 @@ from hermes_proactive.doctor import proactive_extension_doctor  # noqa: E402
 def main() -> int:
     parser = argparse.ArgumentParser(description="Hermes proactive extension doctor.")
     parser.add_argument("--hermes-home", required=True, type=Path)
+    parser.add_argument("--evolver-health-file", type=Path)
     args = parser.parse_args()
-    print(json.dumps(proactive_extension_doctor(hermes_home=args.hermes_home), ensure_ascii=True, indent=2, sort_keys=True))
+    print(
+        json.dumps(
+            proactive_extension_doctor(
+                hermes_home=args.hermes_home,
+                evolver_health_file=args.evolver_health_file,
+            ),
+            ensure_ascii=True,
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0
 
 

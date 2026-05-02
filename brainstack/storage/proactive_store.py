@@ -479,6 +479,31 @@ class ProactiveStoreMixin(StoreRuntimeBase):
             trace_id=trace_id,
             metadata=dict(metadata or {}),
         )
+        if state in {
+            ProactiveEventState.ACCEPTED.value,
+            ProactiveEventState.REJECTED.value,
+            ProactiveEventState.EXPIRED.value,
+            ProactiveEventState.SUPPRESSED.value,
+            ProactiveEventState.BLOCKED.value,
+        }:
+            closed_state = "suppressed" if state == ProactiveEventState.SUPPRESSED.value else "cancelled"
+            self.conn.execute(
+                """
+                UPDATE proactive_outbox
+                SET delivery_state = ?, last_error = ?, updated_at = ?
+                WHERE event_id = ? AND delivery_state = 'pending'
+                """,
+                (closed_state, str(reason_code), now, event_id),
+            )
+            self._append_proactive_transition(
+                event_id=event_id,
+                from_state=None,
+                to_state=closed_state,
+                reason_code=str(reason_code),
+                actor=str(actor),
+                trace_id=trace_id,
+                metadata={"closed_pending_outbox": True, **dict(metadata or {})},
+            )
         if state in {ProactiveEventState.ACCEPTED.value, ProactiveEventState.REJECTED.value}:
             self._close_attention_ask(row, rejected=state == ProactiveEventState.REJECTED.value)
         self.conn.commit()
@@ -546,6 +571,7 @@ class ProactiveStoreMixin(StoreRuntimeBase):
             FROM proactive_outbox o
             JOIN proactive_events e ON e.event_id = o.event_id
             WHERE o.delivery_state = 'pending'
+              AND e.state NOT IN ('accepted', 'rejected', 'expired', 'suppressed', 'blocked')
             ORDER BY o.created_at ASC
             LIMIT ?
             """,

@@ -13,8 +13,39 @@ if str(ROOT) not in sys.path:
 plugin_path = HERMES_ROOT / "plugins" / "memory"
 if plugin_path.exists() and str(plugin_path) not in sys.path:
     sys.path.insert(0, str(plugin_path))
+if (HERMES_ROOT / "brainstack").exists() and str(HERMES_ROOT) not in sys.path:
+    sys.path.insert(0, str(HERMES_ROOT))
 
 from hermes_proactive.pulse_producer import produce_pulse, project_pulse_output  # noqa: E402
+
+
+def _load_runtime_config(hermes_home: Path) -> dict[str, object]:
+    path = hermes_home / "config.yaml"
+    if not path.exists():
+        return {"mode": "dry_run", "kill_switch": False}
+    try:
+        import yaml  # type: ignore[import-untyped]
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {"mode": "dry_run", "kill_switch": False}
+    if not isinstance(data, dict):
+        return {"mode": "dry_run", "kill_switch": False}
+    kernel_memory = data.get("kernel_memory") if isinstance(data.get("kernel_memory"), dict) else {}
+    plugins = data.get("plugins") if isinstance(data.get("plugins"), dict) else {}
+    brainstack = plugins.get("brainstack") if isinstance(plugins.get("brainstack"), dict) else {}
+    mode = data.get("proactive_mode") or kernel_memory.get("proactive_mode") or brainstack.get("proactive_mode") or "dry_run"
+    kill_switch = data.get("proactive_kill_switch")
+    if kill_switch is None:
+        kill_switch = kernel_memory.get("proactive_kill_switch")
+    if kill_switch is None:
+        kill_switch = brainstack.get("proactive_kill_switch")
+    return {"mode": str(mode or "dry_run"), "kill_switch": bool(kill_switch)}
+
+
+def _delivery_allowed(hermes_home: Path, requested: bool) -> bool:
+    config = _load_runtime_config(hermes_home)
+    return bool(requested) and config["mode"] == "live" and not bool(config["kill_switch"])
 
 
 def main() -> int:
@@ -38,7 +69,14 @@ def main() -> int:
         stale_inbox_threshold=args.stale_inbox_threshold,
     )
     if args.command == "trigger" and args.db is not None:
-        output = {**output, "projection": project_pulse_output(db_path=args.db, output=output, create_outbox=args.create_outbox)}
+        output = {
+            **output,
+            "projection": project_pulse_output(
+                db_path=args.db,
+                output=output,
+                create_outbox=_delivery_allowed(args.hermes_home, args.create_outbox),
+            ),
+        }
     print(json.dumps(output, ensure_ascii=True, indent=2, sort_keys=True))
     return 0
 

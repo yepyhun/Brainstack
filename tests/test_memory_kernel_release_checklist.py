@@ -7,6 +7,7 @@ from scripts.run_memory_kernel_release_checklist import (
     GATE_EVASION_PATTERNS,
     REQUIRED_OPERATION_CLASSES,
     UNBREAKABLE_TARGET,
+    _check_hermes_proactive_runtime_parity,
     _check_projection_semantics_runtime_parity,
     _check_release_claim_contract,
     _git_hygiene_from_lists,
@@ -93,6 +94,26 @@ def test_projection_semantics_runtime_parity_check_passes(tmp_path: Path) -> Non
     assert result.summary["unsafe_selected_event_ids"] == []
     assert result.summary["packet_authority_critical_dropped"] == 0
     assert result.summary["public_safe"] is True
+
+
+def test_hermes_proactive_runtime_parity_check_passes(tmp_path: Path) -> None:
+    result = _check_hermes_proactive_runtime_parity(tmp_path)
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["issue_count"] == 0
+    assert result.summary["payload_files_status"] == "present"
+    assert result.summary["payload_missing_count"] == 0
+    assert result.summary["public_safe"] is True
+    assert result.summary["zero_runtime_side_effects"] is True
+    assert result.summary["scenario_statuses"] == {
+        "idle": "idle",
+        "active": "active",
+        "paused": "paused",
+        "dry_run": "observed",
+        "killed": "killed",
+        "malformed": "degraded",
+    }
 
 
 def test_git_hygiene_blocks_dirty_source() -> None:

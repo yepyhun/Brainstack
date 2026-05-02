@@ -18,7 +18,15 @@ PROACTIVE_AGENT_CONTRACT_SCHEMA = "brainstack.proactive_agent_surface.v1"
 PROACTIVE_AGENT_CONTROL_SCHEMA = "brainstack.proactive_agent_control.v1"
 
 PROACTIVE_ALLOWED_READ_ACTIONS = ("status", "doctor", "list", "inspect")
-PROACTIVE_ALLOWED_CONTROL_ACTIONS = ("set_item_state", "set_kill_switch")
+PROACTIVE_ALLOWED_CONTROL_ACTIONS = (
+    "set_item_state",
+    "snooze_item",
+    "mute_item",
+    "set_kill_switch",
+    "pause_proactive",
+    "resume_proactive",
+    "set_cooldown_seconds",
+)
 PROACTIVE_BLOCKED_ACTIONS = (
     "send_notification",
     "start_scheduler",
@@ -26,7 +34,7 @@ PROACTIVE_BLOCKED_ACTIONS = (
     "execute_task",
     "create_current_assignment",
 )
-PROACTIVE_MODE_VALUES = ("disabled", "dry_run", "automatic", "live")
+PROACTIVE_MODE_VALUES = ("disabled", "dry_run", "live")
 
 
 def proactive_capability_card() -> dict[str, Any]:
@@ -154,32 +162,44 @@ def _runtime_config_summary(config_data: Mapping[str, Any], load_status: Mapping
     }
 
 
-def _write_kill_switch_to_config(data: dict[str, Any], kill_switch: bool, reason_code: str) -> None:
-    plugins = data.get("plugins")
-    brainstack_cfg = {}
-    if isinstance(plugins, Mapping):
-        raw_brainstack = plugins.get("brainstack") or {}
-        if isinstance(raw_brainstack, Mapping):
-            brainstack_cfg = raw_brainstack
-    if "proactive_kill_switch" in data:
-        data["proactive_kill_switch"] = bool(kill_switch)
-        data["proactive_control_last_reason"] = reason_code
-        return
+def _brainstack_plugin_config(data: Mapping[str, Any]) -> dict[str, Any]:
+    plugins = data.get("plugins") if isinstance(data, Mapping) else None
+    if not isinstance(plugins, dict):
+        return {}
+    raw = plugins.get("brainstack") or {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _runtime_config_target(data: dict[str, Any], key: str) -> dict[str, Any]:
+    if key in data or "proactive_mode" in data or "proactive_kill_switch" in data or "proactive_cooldown_seconds" in data:
+        return data
     kernel_memory_cfg = data.get("kernel_memory")
     if isinstance(kernel_memory_cfg, dict) and (
-        "proactive_kill_switch" in kernel_memory_cfg or "proactive_mode" in kernel_memory_cfg
+        key in kernel_memory_cfg
+        or "proactive_mode" in kernel_memory_cfg
+        or "proactive_kill_switch" in kernel_memory_cfg
+        or "proactive_cooldown_seconds" in kernel_memory_cfg
     ):
-        kernel_memory_cfg["proactive_kill_switch"] = bool(kill_switch)
-        kernel_memory_cfg["proactive_control_last_reason"] = reason_code
-        return
+        return kernel_memory_cfg
+    brainstack_cfg = _brainstack_plugin_config(data)
     if isinstance(brainstack_cfg, dict) and (
-        "proactive_kill_switch" in brainstack_cfg or "proactive_mode" in brainstack_cfg
+        key in brainstack_cfg
+        or "proactive_mode" in brainstack_cfg
+        or "proactive_kill_switch" in brainstack_cfg
+        or "proactive_cooldown_seconds" in brainstack_cfg
     ):
-        brainstack_cfg["proactive_kill_switch"] = bool(kill_switch)
-        brainstack_cfg["proactive_control_last_reason"] = reason_code
-        return
-    data["proactive_kill_switch"] = bool(kill_switch)
-    data["proactive_control_last_reason"] = reason_code
+        return brainstack_cfg
+    return data
+
+
+def _write_runtime_config_value(data: dict[str, Any], key: str, value: Any, reason_code: str) -> None:
+    target = _runtime_config_target(data, key)
+    target[key] = value
+    target["proactive_control_last_reason"] = reason_code
+
+
+def _write_kill_switch_to_config(data: dict[str, Any], kill_switch: bool, reason_code: str) -> None:
+    _write_runtime_config_value(data, "proactive_kill_switch", bool(kill_switch), reason_code)
 
 
 def _extension_status() -> dict[str, Any]:
@@ -201,14 +221,86 @@ def _extension_status() -> dict[str, Any]:
     }
 
 
+def _agent_item_summary(item: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = item.get("metadata") if isinstance(item, Mapping) else {}
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    signal = metadata.get("evolver_signal") if isinstance(metadata, Mapping) else None
+    wake = metadata.get("wake") if isinstance(metadata, Mapping) else None
+    signal_summary: dict[str, Any] = {}
+    if isinstance(signal, Mapping):
+        signal_summary = {
+            "status": str(signal.get("status") or ""),
+            "reason_code": str(signal.get("reason_code") or ""),
+            "actionable": bool(signal.get("actionable")),
+            "directive_count": _safe_int(signal.get("directive_count"), 0),
+            "directive_kinds": [str(value) for value in signal.get("directive_kinds") or []],
+            "directive_execution": str(signal.get("directive_execution") or ""),
+            "raw_output_present": bool(signal.get("raw_output_present")),
+        }
+    wake_summary: dict[str, Any] = {}
+    if isinstance(wake, Mapping):
+        wake_summary = {
+            "decision": str(wake.get("decision") or ""),
+            "reason_code": str(wake.get("reason_code") or ""),
+            "delivery_requested": bool(wake.get("delivery_requested")),
+        }
+    pending_or_failing_reason = ""
+    if signal_summary.get("reason_code"):
+        pending_or_failing_reason = str(signal_summary["reason_code"])
+    elif wake_summary.get("reason_code"):
+        pending_or_failing_reason = str(wake_summary["reason_code"])
+    else:
+        pending_or_failing_reason = str(item.get("reason_code") or "")
+    return {
+        "source": str(item.get("source") or ""),
+        "kind": str(item.get("kind") or ""),
+        "state": str(item.get("state") or ""),
+        "priority": str(item.get("priority") or ""),
+        "intended_next_action": str(item.get("intended_next_action") or ""),
+        "pending_or_failing_reason": pending_or_failing_reason,
+        "evolver_signal": signal_summary,
+        "wake": wake_summary,
+        "current_assignment_authority": False,
+    }
+
+
+def _outbox_summary(items: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "outbox_id": str(item.get("outbox_id") or ""),
+            "event_id": str(item.get("event_id") or ""),
+            "delivery_target": str(item.get("delivery_target") or ""),
+            "delivery_state": str(item.get("delivery_state") or ""),
+            "attempt_count": _safe_int(item.get("attempt_count"), 0),
+            "intended_next_action": str(item.get("intended_next_action") or ""),
+            "last_error_present": bool(str(item.get("last_error") or "")),
+            "kind": str(item.get("kind") or ""),
+            "priority": str(item.get("priority") or ""),
+            "title": str(item.get("title") or "")[:160],
+            "created_at": str(item.get("created_at") or ""),
+            "updated_at": str(item.get("updated_at") or ""),
+        }
+        for item in items
+    ]
+
+
 def _store_counts(store: Any, principal_scope_key: str) -> dict[str, Any]:
     items = store.list_proactive_items(principal_scope_key=principal_scope_key, limit=200)
     state_counts = Counter(str(item.get("state") or "") for item in items)
     pending_outbox = store.list_pending_proactive_outbox(limit=200)
+    latest = items[0] if items else {}
     return {
         "total_items_sampled": len(items),
         "state_counts": dict(sorted(state_counts.items())),
         "pending_outbox_count": len(pending_outbox),
+        "pending_outbox_sample": _outbox_summary(pending_outbox[:5]),
+        "latest_item_summary": {
+            "event_id": str(latest.get("event_id") or ""),
+            "updated_at": str(latest.get("updated_at") or ""),
+            "agent_summary": _agent_item_summary(latest),
+        }
+        if latest
+        else {},
         "recent_cost": store.proactive_recent_cost(limit=100),
     }
 
@@ -261,14 +353,18 @@ def list_proactive_agent_items(
         summaries.append(
             {
                 "event_id": str(item.get("event_id") or ""),
+                "source": str(item.get("source") or ""),
+                "source_ref": str(item.get("source_ref") or ""),
                 "kind": str(item.get("kind") or ""),
                 "title": str(item.get("title") or ""),
                 "summary": str(item.get("summary") or "")[:500],
                 "priority": str(item.get("priority") or ""),
                 "state": str(item.get("state") or ""),
+                "reason_code": str(item.get("reason_code") or ""),
                 "intended_next_action": str(item.get("intended_next_action") or ""),
                 "evidence_count": len(item.get("evidence_ids") or []),
                 "updated_at": str(item.get("updated_at") or ""),
+                "agent_summary": _agent_item_summary(item),
                 "current_assignment_authority": False,
             }
         )
@@ -321,12 +417,23 @@ def inspect_proactive_agent_item(
     payload["read_only"] = True
     payload["side_effect"] = False
     payload["current_assignment_authority"] = False
+    payload["agent_summary"] = _agent_item_summary(item)
+    payload["outbox_summary"] = _outbox_summary([entry for entry in payload.get("outbox") or [] if isinstance(entry, Mapping)])
     payload["reason_code"] = "PROACTIVE_INSPECT_TOOL_BACKED"
     return payload
 
 
 def _require_explicit_request(args: Mapping[str, Any]) -> dict[str, Any] | None:
-    if bool(args.get("explicit_user_request")):
+    if not str(args.get("_trusted_operator_origin") or "").strip():
+        return {
+            "schema": PROACTIVE_AGENT_CONTROL_SCHEMA,
+            "status": "rejected",
+            "read_only": False,
+            "side_effect": False,
+            "reason_code": "TRUSTED_OPERATOR_APPROVAL_REQUIRED",
+            "error": "Proactive control requires a host-supplied trusted operator approval origin.",
+        }
+    if args.get("explicit_user_request") is True:
         return None
     return {
         "schema": PROACTIVE_AGENT_CONTROL_SCHEMA,
@@ -374,6 +481,44 @@ def _set_kill_switch(
     }
 
 
+def _update_runtime_config(
+    *,
+    config: Mapping[str, Any] | None,
+    action: str,
+    key: str,
+    value: Any,
+    reason_code: str,
+) -> dict[str, Any]:
+    hermes_home = _resolve_hermes_home(config)
+    config_path = _config_path_from_home(hermes_home)
+    data, load_status = _load_yaml(config_path)
+    if str(load_status.get("status") or "") != "loaded" or config_path is None:
+        return {
+            "schema": PROACTIVE_AGENT_CONTROL_SCHEMA,
+            "operation": "control",
+            "action": action,
+            "status": "rejected",
+            "read_only": False,
+            "side_effect": False,
+            "reason_code": str(load_status.get("reason_code") or "CONFIG_UNAVAILABLE"),
+            "config": _runtime_config_summary(data, load_status),
+        }
+    _write_runtime_config_value(data, key, value, reason_code)
+    _write_yaml(config_path, data)
+    return {
+        "schema": PROACTIVE_AGENT_CONTROL_SCHEMA,
+        "operation": "control",
+        "action": action,
+        "status": "committed",
+        "read_only": False,
+        "side_effect": True,
+        "config_path": str(config_path),
+        key: value,
+        "reason_code": "PROACTIVE_RUNTIME_CONFIG_UPDATED",
+        "blocked_actions": list(PROACTIVE_BLOCKED_ACTIONS),
+    }
+
+
 def control_proactive_agent_surface(
     *,
     store: Any,
@@ -392,6 +537,70 @@ def control_proactive_agent_surface(
             kill_switch=bool(args.get("kill_switch")),
             reason_code=reason_code or "EXPLICIT_USER_REQUEST",
         )
+    if action == "pause_proactive":
+        return _update_runtime_config(
+            config=config,
+            action=action,
+            key="proactive_mode",
+            value="disabled",
+            reason_code=reason_code or "EXPLICIT_USER_REQUEST",
+        )
+    if action == "resume_proactive":
+        return _update_runtime_config(
+            config=config,
+            action=action,
+            key="proactive_mode",
+            value="live",
+            reason_code=reason_code or "EXPLICIT_USER_REQUEST",
+        )
+    if action == "set_cooldown_seconds":
+        cooldown = max(0, min(_safe_int(args.get("cooldown_seconds"), 0), 604800))
+        return _update_runtime_config(
+            config=config,
+            action=action,
+            key="proactive_cooldown_seconds",
+            value=cooldown,
+            reason_code=reason_code or "EXPLICIT_USER_REQUEST",
+        )
+    if action in {"snooze_item", "mute_item"}:
+        event_id = str(args.get("event_id") or "").strip()
+        inspected = inspect_proactive_agent_item(store=store, principal_scope_key=principal_scope_key, event_id=event_id)
+        if inspected.get("reason_code") != "PROACTIVE_INSPECT_TOOL_BACKED":
+            inspected["schema"] = PROACTIVE_AGENT_CONTROL_SCHEMA
+            inspected["operation"] = "control"
+            inspected["action"] = action
+            inspected["read_only"] = False
+            inspected["side_effect"] = False
+            return inspected
+        metadata = {"explicit_user_request": True}
+        if action == "snooze_item":
+            metadata["snooze_until"] = str(args.get("snooze_until") or "")
+            metadata["control"] = "snoozed"
+        else:
+            metadata["muted"] = True
+            metadata["control"] = "muted"
+        payload = store.set_proactive_item_state(
+            event_id=event_id,
+            state=ProactiveEventState.SUPPRESSED.value,
+            reason_code=reason_code or (ProactiveReasonCode.SNOOZED.value if action == "snooze_item" else "MUTED"),
+            actor="agent_explicit_user_request",
+            trace_id=str(args.get("trace_id") or ""),
+            metadata=metadata,
+        )
+        return {
+            "schema": PROACTIVE_AGENT_CONTROL_SCHEMA,
+            "operation": "control",
+            "action": action,
+            "status": "committed",
+            "read_only": False,
+            "side_effect": True,
+            "event_id": event_id,
+            "state": ProactiveEventState.SUPPRESSED.value,
+            "result": payload,
+            "reason_code": "PROACTIVE_ITEM_STATE_UPDATED",
+            "blocked_actions": list(PROACTIVE_BLOCKED_ACTIONS),
+            "current_assignment_authority": False,
+        }
     if action != "set_item_state":
         return {
             "schema": PROACTIVE_AGENT_CONTROL_SCHEMA,

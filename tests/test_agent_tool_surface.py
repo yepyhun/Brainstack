@@ -38,8 +38,11 @@ def test_agent_tool_surface_exposes_read_tools_and_schema_gated_capture_tools(tm
             "brainstack_proactive_status",
             "brainstack_proactive_list",
             "brainstack_proactive_inspect",
-            "brainstack_proactive_control",
         }.issubset(names)
+        assert "brainstack_proactive_control" not in names
+        lifecycle = provider.lifecycle_status()
+        operator_names = {schema["name"] for schema in lifecycle["operator_only_tools"]}
+        assert "brainstack_proactive_control" in operator_names
         assert "brainstack_remember" in names
         assert "brainstack_supersede" in names
         assert "brainstack_invalidate" not in names
@@ -58,6 +61,8 @@ def test_agent_tool_surface_exposes_read_tools_and_schema_gated_capture_tools(tm
                 assert schema.get("x_brainstack_tool_class") == "read_only_proactive_items"
             if schema["name"] == "brainstack_proactive_inspect":
                 assert schema.get("x_brainstack_tool_class") == "read_only_proactive_item_diagnostics"
+        operator_schemas = lifecycle["operator_only_tools"]
+        for schema in operator_schemas:
             if schema["name"] == "brainstack_proactive_control":
                 assert schema.get("x_brainstack_tool_class") == "explicit_proactive_control"
     finally:

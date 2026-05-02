@@ -13,6 +13,7 @@ from ..proactive_agent_contract import (
     inspect_proactive_agent_item,
     list_proactive_agent_items,
 )
+from ..tool_schemas import proactive_control_tool_schema
 from .provider_protocol import ProviderRuntimeBase
 from .runtime import (
     ACTIVE_TASK_STATUSES,
@@ -114,7 +115,13 @@ class ProviderToolsMixin(ProviderRuntimeBase):
         if tool_name == "brainstack_proactive_inspect":
             return json.dumps(self._handle_brainstack_proactive_inspect(args), ensure_ascii=False)
         if tool_name == "brainstack_proactive_control":
-            return json.dumps(self._handle_brainstack_proactive_control(args), ensure_ascii=False)
+            return json.dumps(
+                self._handle_brainstack_proactive_control(
+                    args,
+                    trusted_operator_origin=trusted_operator_origin,
+                ),
+                ensure_ascii=False,
+            )
         if tool_name == "brainstack_remember":
             return json.dumps(
                 self._handle_brainstack_explicit_capture(
@@ -532,7 +539,12 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             event_id=_normalize_compact_text(args.get("event_id")),
         )
 
-    def _handle_brainstack_proactive_control(self, args: Mapping[str, Any]) -> Dict[str, Any]:
+    def _handle_brainstack_proactive_control(
+        self,
+        args: Mapping[str, Any],
+        *,
+        trusted_operator_origin: str = "",
+    ) -> Dict[str, Any]:
         if self._store is None:
             return {
                 "schema": "brainstack.tool_error.v1",
@@ -541,10 +553,21 @@ class ProviderToolsMixin(ProviderRuntimeBase):
                 "error": "Brainstack store is not initialized.",
                 "read_only": False,
             }
+        if not trusted_operator_origin:
+            return {
+                "schema": "brainstack.proactive_agent_control.v1",
+                "operation": "control",
+                "status": "rejected",
+                "read_only": False,
+                "side_effect": False,
+                "reason_code": "TRUSTED_OPERATOR_APPROVAL_REQUIRED",
+                "error": "Proactive control is operator-only and requires a host-supplied trusted_write_origin.",
+            }
+        control_args = {**dict(args), "_trusted_operator_origin": trusted_operator_origin}
         return control_proactive_agent_surface(
             store=self._store,
             principal_scope_key=self._principal_scope_key,
-            args=args,
+            args=control_args,
             config=self._config,
         )
 
@@ -582,7 +605,7 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             principal_scope_key=self._principal_scope_key,
             pending_tier2_turns=self._pending_tier2_turns,
             tool_schemas=self.get_tool_schemas(),
-            operator_only_tools=[self._runtime_handoff_update_tool_schema()],
+            operator_only_tools=[self._runtime_handoff_update_tool_schema(), proactive_control_tool_schema()],
             disabled_memory_write_tools=sorted(DISABLED_MEMORY_WRITE_TOOLS),
             last_maintenance_receipt=self._last_maintenance_receipt,
         )

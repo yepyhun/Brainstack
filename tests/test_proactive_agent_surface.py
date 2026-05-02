@@ -6,13 +6,16 @@ from pathlib import Path
 import yaml
 
 from brainstack import BrainstackMemoryProvider
+from brainstack.proactive_agent_contract import PROACTIVE_ALLOWED_CONTROL_ACTIONS
+from brainstack.tool_schemas import proactive_control_tool_schema
 
 
 def _provider(tmp_path: Path) -> BrainstackMemoryProvider:
     hermes_home = tmp_path / "hermes_home"
     hermes_home.mkdir()
     (hermes_home / "config.yaml").write_text(
-        "proactive_mode: automatic\n"
+        "proactive_mode: live\n"
+
         "proactive_cooldown_seconds: 21600\n"
         "proactive_kill_switch: false\n",
         encoding="utf-8",
@@ -42,7 +45,8 @@ def _provider_with_plugin_config(tmp_path: Path) -> BrainstackMemoryProvider:
     (hermes_home / "config.yaml").write_text(
         "plugins:\n"
         "  brainstack:\n"
-        "    proactive_mode: automatic\n"
+        "    proactive_mode: live\n"
+
         "    proactive_cooldown_seconds: 21600\n"
         "    proactive_kill_switch: false\n",
         encoding="utf-8",
@@ -71,7 +75,8 @@ def _provider_with_kernel_memory_config(tmp_path: Path) -> BrainstackMemoryProvi
     hermes_home.mkdir()
     (hermes_home / "config.yaml").write_text(
         "kernel_memory:\n"
-        "  proactive_mode: automatic\n"
+        "  proactive_mode: live\n"
+
         "  proactive_cooldown_seconds: 21600\n"
         "  proactive_kill_switch: false\n",
         encoding="utf-8",
@@ -112,6 +117,39 @@ def _create_item(provider: BrainstackMemoryProvider, *, scope: str | None = None
     return str(item["event_id"])
 
 
+def _operator_control(provider: BrainstackMemoryProvider, args: dict[str, object]) -> dict[str, object]:
+    return json.loads(
+        provider.handle_tool_call(
+            "brainstack_proactive_control",
+            args,
+            trusted_write_origin="test_operator",
+        )
+    )
+
+
+def test_proactive_control_tool_schema_matches_contract() -> None:
+    schema = proactive_control_tool_schema()
+    properties = schema["parameters"]["properties"]
+
+    assert sorted(properties["action"]["enum"]) == sorted(PROACTIVE_ALLOWED_CONTROL_ACTIONS)
+    assert "cooldown_seconds" in properties
+    assert "snooze_until" in properties
+    assert "execute_task" not in properties["action"]["enum"]
+
+
+def test_proactive_control_is_operator_only_not_model_facing(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        model_tool_names = {schema["name"] for schema in provider.get_tool_schemas()}
+        lifecycle = provider.lifecycle_status()
+        operator_tool_names = {schema["name"] for schema in lifecycle["operator_only_tools"]}
+
+        assert "brainstack_proactive_control" not in model_tool_names
+        assert "brainstack_proactive_control" in operator_tool_names
+    finally:
+        provider.shutdown()
+
+
 def test_proactive_status_is_tool_backed_and_read_only(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     try:
@@ -122,7 +160,7 @@ def test_proactive_status_is_tool_backed_and_read_only(tmp_path: Path) -> None:
         assert payload["operation"] == "status"
         assert payload["read_only"] is True
         assert payload["side_effect"] is False
-        assert payload["config"]["mode"] == "automatic"
+        assert payload["config"]["mode"] == "live"
         assert payload["config"]["kill_switch"] is False
         assert payload["counts"]["total_items_sampled"] == 1
         assert payload["current_assignment_authority"] is False
@@ -136,8 +174,8 @@ def test_proactive_status_reads_brainstack_plugin_config(tmp_path: Path) -> None
     try:
         payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
 
-        assert payload["config"]["mode"] == "automatic"
-        assert payload["config"]["brainstack_plugin_mode"] == "automatic"
+        assert payload["config"]["mode"] == "live"
+        assert payload["config"]["brainstack_plugin_mode"] == "live"
         assert payload["config"]["kill_switch"] is False
     finally:
         provider.shutdown()
@@ -148,8 +186,8 @@ def test_proactive_status_reads_kernel_memory_config(tmp_path: Path) -> None:
     try:
         payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
 
-        assert payload["config"]["mode"] == "automatic"
-        assert payload["config"]["kernel_memory_mode"] == "automatic"
+        assert payload["config"]["mode"] == "live"
+        assert payload["config"]["kernel_memory_mode"] == "live"
         assert payload["config"]["kill_switch"] is False
     finally:
         provider.shutdown()
@@ -183,17 +221,24 @@ def test_proactive_control_requires_explicit_user_request(tmp_path: Path) -> Non
     provider = _provider(tmp_path)
     try:
         event_id = _create_item(provider)
-        payload = json.loads(
-            provider.handle_tool_call(
-                "brainstack_proactive_control",
-                {"action": "set_item_state", "event_id": event_id, "state": "accepted"},
-            )
+        payload = _operator_control(
+            provider,
+            {"action": "set_item_state", "event_id": event_id, "state": "accepted"},
         )
 
         assert payload["schema"] == "brainstack.proactive_agent_control.v1"
         assert payload["status"] == "rejected"
         assert payload["reason_code"] == "EXPLICIT_USER_REQUEST_REQUIRED"
         assert payload["side_effect"] is False
+
+        model_supplied = json.loads(
+            provider.handle_tool_call(
+                "brainstack_proactive_control",
+                {"action": "set_item_state", "explicit_user_request": True, "event_id": event_id, "state": "accepted"},
+            )
+        )
+        assert model_supplied["status"] == "rejected"
+        assert model_supplied["reason_code"] == "TRUSTED_OPERATOR_APPROVAL_REQUIRED"
     finally:
         provider.shutdown()
 
@@ -202,18 +247,16 @@ def test_proactive_control_updates_item_state_without_current_assignment_authori
     provider = _provider(tmp_path)
     try:
         event_id = _create_item(provider)
-        payload = json.loads(
-            provider.handle_tool_call(
-                "brainstack_proactive_control",
-                {
-                    "action": "set_item_state",
-                    "explicit_user_request": True,
-                    "event_id": event_id,
-                    "state": "accepted",
-                    "reason_code": "USER_ACCEPTED",
-                    "trace_id": "trace-public",
-                },
-            )
+        payload = _operator_control(
+            provider,
+            {
+                "action": "set_item_state",
+                "explicit_user_request": True,
+                "event_id": event_id,
+                "state": "accepted",
+                "reason_code": "USER_ACCEPTED",
+                "trace_id": "trace-public",
+            },
         )
 
         assert payload["status"] == "committed"
@@ -228,16 +271,14 @@ def test_proactive_control_updates_item_state_without_current_assignment_authori
 def test_proactive_kill_switch_control_updates_only_runtime_config(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     try:
-        payload = json.loads(
-            provider.handle_tool_call(
-                "brainstack_proactive_control",
-                {
-                    "action": "set_kill_switch",
-                    "explicit_user_request": True,
-                    "kill_switch": True,
-                    "reason_code": "USER_DISABLED_PROACTIVE",
-                },
-            )
+        payload = _operator_control(
+            provider,
+            {
+                "action": "set_kill_switch",
+                "explicit_user_request": True,
+                "kill_switch": True,
+                "reason_code": "USER_DISABLED_PROACTIVE",
+            },
         )
 
         assert payload["status"] == "committed"
@@ -254,16 +295,14 @@ def test_proactive_kill_switch_control_updates_only_runtime_config(tmp_path: Pat
 def test_proactive_kill_switch_control_preserves_plugin_config_location(tmp_path: Path) -> None:
     provider = _provider_with_plugin_config(tmp_path)
     try:
-        payload = json.loads(
-            provider.handle_tool_call(
-                "brainstack_proactive_control",
-                {
-                    "action": "set_kill_switch",
-                    "explicit_user_request": True,
-                    "kill_switch": True,
-                    "reason_code": "USER_DISABLED_PROACTIVE",
-                },
-            )
+        payload = _operator_control(
+            provider,
+            {
+                "action": "set_kill_switch",
+                "explicit_user_request": True,
+                "kill_switch": True,
+                "reason_code": "USER_DISABLED_PROACTIVE",
+            },
         )
 
         config_path = Path(payload["config_path"])
@@ -278,16 +317,14 @@ def test_proactive_kill_switch_control_preserves_plugin_config_location(tmp_path
 def test_proactive_kill_switch_control_preserves_kernel_memory_config_location(tmp_path: Path) -> None:
     provider = _provider_with_kernel_memory_config(tmp_path)
     try:
-        payload = json.loads(
-            provider.handle_tool_call(
-                "brainstack_proactive_control",
-                {
-                    "action": "set_kill_switch",
-                    "explicit_user_request": True,
-                    "kill_switch": True,
-                    "reason_code": "USER_DISABLED_PROACTIVE",
-                },
-            )
+        payload = _operator_control(
+            provider,
+            {
+                "action": "set_kill_switch",
+                "explicit_user_request": True,
+                "kill_switch": True,
+                "reason_code": "USER_DISABLED_PROACTIVE",
+            },
         )
 
         config_path = Path(payload["config_path"])
@@ -302,11 +339,9 @@ def test_proactive_kill_switch_control_preserves_kernel_memory_config_location(t
 def test_proactive_control_rejects_unsupported_actions(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     try:
-        payload = json.loads(
-            provider.handle_tool_call(
-                "brainstack_proactive_control",
-                {"action": "send_notification", "explicit_user_request": True},
-            )
+        payload = _operator_control(
+            provider,
+            {"action": "send_notification", "explicit_user_request": True},
         )
 
         assert payload["status"] == "rejected"

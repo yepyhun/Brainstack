@@ -130,22 +130,34 @@ def proactive_inspect_tool_schema() -> Dict[str, Any]:
 
 
 def proactive_control_tool_schema() -> Dict[str, Any]:
+    actions = [
+        "set_item_state",
+        "snooze_item",
+        "mute_item",
+        "set_kill_switch",
+        "pause_proactive",
+        "resume_proactive",
+        "set_cooldown_seconds",
+    ]
     return {
         "name": "brainstack_proactive_control",
         "description": (
             "Apply a limited Brainstack proactive control change only after an explicit user request. "
-            "Allowed actions: set_item_state, set_kill_switch. Does not schedule, notify, execute tasks, "
-            "install Evolver, or create current assignment evidence."
+            "Allowed actions: set_item_state, snooze_item, mute_item, set_kill_switch, "
+            "pause_proactive, resume_proactive, set_cooldown_seconds. Does not schedule, notify, "
+            "execute tasks, install Evolver, or create current assignment evidence."
         ),
         "x_brainstack_tool_class": "explicit_proactive_control",
         "parameters": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["set_item_state", "set_kill_switch"]},
+                "action": {"type": "string", "enum": actions},
                 "explicit_user_request": {"type": "boolean"},
                 "event_id": {"type": "string"},
                 "state": {"type": "string", "enum": [item.value for item in ProactiveEventState]},
                 "kill_switch": {"type": "boolean"},
+                "cooldown_seconds": {"type": "integer", "minimum": 0, "maximum": 604800},
+                "snooze_until": {"type": "string"},
                 "reason_code": {"type": "string"},
                 "trace_id": {"type": "string"},
             },
@@ -312,7 +324,6 @@ def build_tool_schemas(
         proactive_status_tool_schema(),
         proactive_list_tool_schema(),
         proactive_inspect_tool_schema(),
-        proactive_control_tool_schema(),
         explicit_capture_tool_schema(
             name="brainstack_remember",
             operation="remember",

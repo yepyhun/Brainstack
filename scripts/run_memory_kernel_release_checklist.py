@@ -615,6 +615,48 @@ def _check_projection_semantics_runtime_parity(tmp: Path) -> CheckResult:
     )
 
 
+def _check_hermes_proactive_runtime_parity(tmp: Path) -> CheckResult:
+    out = tmp / "hermes_proactive_runtime_parity.json"
+    command = [sys.executable, "scripts/verify_hermes_proactive_runtime_parity.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    scenario_statuses = data.get("scenario_statuses") if isinstance(data.get("scenario_statuses"), dict) else {}
+    payload_files = data.get("payload_files") if isinstance(data.get("payload_files"), dict) else {}
+    expected_statuses = {
+        "idle": "idle",
+        "active": "active",
+        "paused": "paused",
+        "dry_run": "observed",
+        "killed": "killed",
+        "malformed": "degraded",
+    }
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("issues") == []
+        and data.get("public_safe") is True
+        and data.get("zero_runtime_side_effects") is True
+        and scenario_statuses == expected_statuses
+        and payload_files.get("status") == "present"
+        and payload_files.get("missing") == []
+    )
+    return CheckResult(
+        name="hermes_proactive_runtime_parity",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": len(data.get("issues") or []),
+            "scenario_statuses": scenario_statuses,
+            "payload_files_status": payload_files.get("status"),
+            "payload_missing_count": len(payload_files.get("missing") or []),
+            "public_safe": data.get("public_safe"),
+            "zero_runtime_side_effects": data.get("zero_runtime_side_effects"),
+        },
+    )
+
+
 def _tracked_files() -> list[str]:
     proc = _run(["git", "ls-files"])
     if proc.returncode != 0:
@@ -768,6 +810,7 @@ def run_checklist(
             _check_graph_conflict_lifecycle(tmp),
             _check_public_fixtures(),
             _check_projection_semantics_runtime_parity(tmp),
+            _check_hermes_proactive_runtime_parity(tmp),
             _check_public_payload_leaks(),
             _check_git_hygiene(),
         ]

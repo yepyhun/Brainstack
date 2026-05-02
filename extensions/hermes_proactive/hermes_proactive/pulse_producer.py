@@ -15,8 +15,18 @@ from brainstack.sdk.proactive import (
     StoreProactiveProjection,
 )
 
+from .evolver_signal import load_evolver_signal_file
+from .heartbeat_wake import (
+    HEARTBEAT_WAKE_SCHEMA,
+    HeartbeatWakeDecision,
+    HeartbeatWakeRequest,
+    HeartbeatWakeState,
+    classify_heartbeat_wake,
+)
+
 
 PULSE_PRODUCER_SCHEMA = "hermes_proactive.pulse_producer.v1"
+PULSE_WAKE_SCHEMA = "hermes_proactive.pulse_wake.v1"
 
 
 def _utc_now_iso() -> str:
@@ -42,12 +52,49 @@ def _brainstack_home(hermes_home: Path) -> Path:
     return hermes_home / "home" / "brainstack"
 
 
-def _runtime_handoff_summary(hermes_home: Path) -> dict[str, int]:
+def _bounded_json_count(path: Path, *, limit: int = 1000) -> tuple[int, bool]:
+    if not path.exists() or not path.is_dir():
+        return 0, False
+    count = 0
+    try:
+        for item in path.glob("*.json"):
+            if not item.is_file():
+                continue
+            count += 1
+            if count >= limit:
+                return count, True
+    except OSError:
+        return count, True
+    return count, False
+
+
+def _bounded_json_count(path: Path, *, limit: int = 1000) -> tuple[int, bool]:
+    if not path.exists() or not path.is_dir():
+        return 0, False
+    count = 0
+    try:
+        for item in path.glob("*.json"):
+            if not item.is_file():
+                continue
+            count += 1
+            if count >= limit:
+                return count, True
+    except OSError:
+        return count, True
+    return count, False
+
+def _runtime_handoff_summary(hermes_home: Path) -> dict[str, int | bool]:
     base = _brainstack_home(hermes_home)
+    inbox_count, inbox_truncated = _bounded_json_count(base / "inbox")
+    outbox_count, outbox_truncated = _bounded_json_count(base / "outbox")
+    archive_count, archive_truncated = _bounded_json_count(base / "archive")
     return {
-        "inbox_count": len(list((base / "inbox").glob("*.json"))) if (base / "inbox").exists() else 0,
-        "outbox_count": len(list((base / "outbox").glob("*.json"))) if (base / "outbox").exists() else 0,
-        "archive_count": len(list((base / "archive").glob("*.json"))) if (base / "archive").exists() else 0,
+        "inbox_count": inbox_count,
+        "outbox_count": outbox_count,
+        "archive_count": archive_count,
+        "inbox_truncated": inbox_truncated,
+        "outbox_truncated": outbox_truncated,
+        "archive_truncated": archive_truncated,
     }
 
 
@@ -92,20 +139,21 @@ def produce_pulse(
     tasks: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
     handoff = _runtime_handoff_summary(hermes_home)
-    evolver_health = _read_json(evolver_health_file)
+    evolver_signal = load_evolver_signal_file(evolver_health_file) if evolver_health_file is not None else None
 
-    if not bool(evolver_health.get("running", True)):
+    if evolver_signal is not None and evolver_signal.actionable:
+        signal = evolver_signal.to_public_dict()
         tasks.append(
             _candidate(
                 source="evolver",
                 kind=ProactiveEventKind.EVOLVER_CANDIDATE.value,
-                title="Evolver is not running",
-                summary="Evolver health reports stopped or unavailable state.",
-                priority="high",
-                evidence_ids=["evolver:health"],
+                title="Evolver signal needs attention",
+                summary=str(signal.get("safe_summary") or "Evolver emitted an actionable signal."),
+                priority="high" if signal.get("status") in {"stopped", "malformed"} else "normal",
+                evidence_ids=[f"evolver:{signal.get('reason_code') or 'signal'}"],
                 intended_next_action=ProactiveIntendedNextAction.ASK_PERMISSION.value,
                 source_ref=str(evolver_health_file or ""),
-                metadata={"evolver_health": evolver_health},
+                metadata={"evolver_signal": signal},
             )
         )
 
@@ -158,11 +206,98 @@ def produce_pulse(
     }
 
 
-def project_pulse_output(*, db_path: Path, output: Mapping[str, Any], create_outbox: bool) -> dict[str, Any]:
+def _pulse_wake_key(output: Mapping[str, Any]) -> str:
+    task_keys = [str(item.get("candidate_key") or "") for item in output.get("tasks") or [] if isinstance(item, Mapping)]
+    return "pulse:" + _stable_key(
+        {
+            "principal_scope_key": str(output.get("principal_scope_key") or ""),
+            "workspace_scope_key": str(output.get("workspace_scope_key") or ""),
+            "workstream_scope_key": str(output.get("workstream_scope_key") or ""),
+            "task_keys": task_keys,
+        }
+    )
+
+
+def classify_pulse_wake(
+    output: Mapping[str, Any],
+    *,
+    create_outbox: bool,
+    target: str = "proactive_runtime",
+    wake_state: HeartbeatWakeState | None = None,
+) -> dict[str, Any]:
+    """Classify whether a pulse should request Hermes-owned delivery."""
+
+    task_count = len([item for item in output.get("tasks") or [] if isinstance(item, Mapping)])
+    key = _pulse_wake_key(output)
+    base = {
+        "schema": PULSE_WAKE_SCHEMA,
+        "heartbeat_schema": HEARTBEAT_WAKE_SCHEMA,
+        "idempotency_key": key,
+        "target": target,
+        "task_count": task_count,
+        "provider_calls": 0,
+        "transcript_writes": 0,
+    }
+    if bool(output.get("no_op")) or task_count == 0:
+        return {
+            **base,
+            "decision": "no_op",
+            "reason_code": "NO_ACTIONABLE_ITEM",
+            "delivery_requested": False,
+            "retry_after_seconds": None,
+            "stale_lock_cancelled": False,
+        }
+    if not create_outbox:
+        return {
+            **base,
+            "decision": "observed",
+            "reason_code": "WAKE_NOT_REQUESTED",
+            "delivery_requested": False,
+            "retry_after_seconds": None,
+            "stale_lock_cancelled": False,
+        }
+    result = classify_heartbeat_wake(
+        HeartbeatWakeRequest(
+            target=target,
+            source="pulse",
+            run_id=str(output.get("run_id") or ""),
+            idempotency_key=key,
+            metadata={"task_count": str(task_count)},
+        ),
+        wake_state or HeartbeatWakeState(),
+    ).to_dict()
+    decision = str(result.get("decision") or "")
+    delivery_requested = decision in {HeartbeatWakeDecision.READY.value, HeartbeatWakeDecision.STALE_CANCELLED.value}
+    return {
+        **base,
+        **result,
+        "schema": PULSE_WAKE_SCHEMA,
+        "heartbeat_schema": HEARTBEAT_WAKE_SCHEMA,
+        "task_count": task_count,
+        "delivery_requested": delivery_requested,
+        "provider_calls": 0,
+        "transcript_writes": 0,
+    }
+
+
+def project_pulse_output(
+    *,
+    db_path: Path,
+    output: Mapping[str, Any],
+    create_outbox: bool,
+    delivery_target: str = "proactive_runtime",
+    wake_state: HeartbeatWakeState | None = None,
+) -> dict[str, Any]:
     store = BrainstackStore(str(db_path))
     store.open()
     try:
         projection = StoreProactiveProjection(store)
+        wake = classify_pulse_wake(
+            output,
+            create_outbox=create_outbox,
+            target=delivery_target,
+            wake_state=wake_state,
+        )
         written: list[dict[str, Any]] = []
         outbox: list[dict[str, Any]] = []
         for item in [*list(output.get("events") or []), *list(output.get("tasks") or [])]:
@@ -190,14 +325,22 @@ def project_pulse_output(*, db_path: Path, output: Mapping[str, Any], create_out
                 trace_id=str(output.get("run_id") or ""),
             )
             written.append(event)
-            if create_outbox and not output.get("no_op"):
+            if bool(wake.get("delivery_requested")):
                 outbox.append(
                     projection.create_outbox(
                         event_id=str(event["event_id"]),
-                        delivery_target="proactive_runtime",
+                        delivery_target=delivery_target,
+                        idempotency_key=f"{wake.get('idempotency_key')}:{event['event_id']}",
                         intended_next_action=str(event.get("intended_next_action") or ProactiveIntendedNextAction.NONE.value),
                     )
                 )
-        return {"schema": "hermes_proactive.pulse_projection.v1", "written_count": len(written), "outbox_count": len(outbox), "written": written, "outbox": outbox}
+        return {
+            "schema": "hermes_proactive.pulse_projection.v1",
+            "written_count": len(written),
+            "outbox_count": len(outbox),
+            "wake": wake,
+            "written": written,
+            "outbox": outbox,
+        }
     finally:
         store.close()
