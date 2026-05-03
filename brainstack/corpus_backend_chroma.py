@@ -108,7 +108,8 @@ class ChromaCorpusBackend:
         updated_at = str(document.get("updated_at") or "").strip()
         document_id = int(document.get("id") or 0)
         semantic_class = str(document.get("semantic_class") or "corpus").strip() or "corpus"
-        document_metadata = json.dumps(document.get("metadata") or {}, ensure_ascii=True, sort_keys=True)
+        document_metadata_obj = dict(document.get("metadata") or {})
+        document_metadata = json.dumps(document_metadata_obj, ensure_ascii=True, sort_keys=True)
 
         for section in sections:
             section_id = int(section.get("section_id") or 0)
@@ -118,7 +119,9 @@ class ChromaCorpusBackend:
                 continue
             heading = str(section.get("heading") or "").strip()
             token_estimate = int(section.get("token_estimate") or max(1, len(content) // 4))
-            section_metadata = json.dumps(section.get("metadata") or {}, ensure_ascii=True, sort_keys=True)
+            section_metadata_obj = dict(section.get("metadata") or {})
+            section_metadata = json.dumps(section_metadata_obj, ensure_ascii=True, sort_keys=True)
+            filter_metadata = _filter_metadata(document_metadata_obj, section_metadata_obj)
             ids.append(f"{stable_key}:{section_index}")
             documents.append(content)
             metadatas.append(
@@ -136,6 +139,7 @@ class ChromaCorpusBackend:
                     "token_estimate": token_estimate,
                     "document_metadata_json": document_metadata,
                     "section_metadata_json": section_metadata,
+                    **filter_metadata,
                 }
             )
 
@@ -241,6 +245,21 @@ class ChromaCorpusBackend:
             _cosine_similarity(query_embedding, embedding)
             for embedding in embeddings_list[1:]
         ]
+
+
+def _scalar_metadata(value: Any) -> str:
+    text = str(value or "").strip()
+    return text[:512]
+
+
+def _filter_metadata(document_metadata: Dict[str, Any], section_metadata: Dict[str, Any]) -> Dict[str, Any]:
+    merged = {**document_metadata, **section_metadata}
+    output: Dict[str, Any] = {}
+    for key in ("principal_scope_key", "workspace_scope_key", "language", "source_uri", "doc_type"):
+        value = _scalar_metadata(merged.get(key))
+        if value:
+            output[key] = value
+    return output
 
 
 def _decode_json_object(value: Any) -> Dict[str, Any]:

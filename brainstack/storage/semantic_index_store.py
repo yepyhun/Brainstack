@@ -112,14 +112,74 @@ class SemanticIndexStoreMixin(StoreRuntimeBase):
         return output
 
     @_locked
-    def search_corpus_semantic(self, *, query: str, limit: int) -> List[Dict[str, Any]]:
+    def search_corpus_semantic(
+        self,
+        *,
+        query: str,
+        limit: int,
+        principal_scope_key: str = "",
+        doc_kind: str = "",
+        source: str = "",
+        language: str = "",
+    ) -> List[Dict[str, Any]]:
         if self._corpus_backend is None:
             return []
-        return self._search_semantic_backend(
-            query=query,
-            limit=limit,
-            where={"semantic_class": "corpus"},
+        base_where = {"semantic_class": "corpus"}
+        scoped_where = self._corpus_semantic_where(
+            principal_scope_key=principal_scope_key,
+            doc_kind=doc_kind,
+            source=source,
+            language=language,
         )
+        rows = self._search_semantic_backend(query=query, limit=limit, where=scoped_where)
+        if rows or scoped_where == base_where:
+            return self._annotate_semantic_filter(rows, requested_where=scoped_where, fallback_used=False)
+        fallback_rows = self._search_semantic_backend(query=query, limit=limit, where=base_where)
+        return self._annotate_semantic_filter(
+            fallback_rows,
+            requested_where=scoped_where,
+            fallback_used=True,
+        )
+
+    def _corpus_semantic_where(
+        self,
+        *,
+        principal_scope_key: str = "",
+        doc_kind: str = "",
+        source: str = "",
+        language: str = "",
+    ) -> Dict[str, Any]:
+        where: Dict[str, Any] = {"semantic_class": "corpus"}
+        for key, value in (
+            ("principal_scope_key", principal_scope_key),
+            ("doc_kind", doc_kind),
+            ("source", source),
+            ("language", language),
+        ):
+            normalized = str(value or "").strip()
+            if normalized:
+                where[key] = normalized
+        return where
+
+    def _annotate_semantic_filter(
+        self,
+        rows: List[Dict[str, Any]],
+        *,
+        requested_where: Dict[str, Any],
+        fallback_used: bool,
+    ) -> List[Dict[str, Any]]:
+        annotated: List[Dict[str, Any]] = []
+        for row in rows:
+            payload = dict(row)
+            metadata = dict(payload.get("metadata") or {})
+            metadata["semantic_filter"] = {
+                "schema": "brainstack.corpus_semantic_filter.v1",
+                "requested_where": dict(requested_where),
+                "fallback_used": bool(fallback_used),
+            }
+            payload["metadata"] = metadata
+            annotated.append(payload)
+        return annotated
 
     def _search_semantic_backend(
         self,

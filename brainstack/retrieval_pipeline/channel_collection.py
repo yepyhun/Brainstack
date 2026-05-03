@@ -267,7 +267,11 @@ def collect_semantic_rows(
         _collect_query_rows(
             shelf="corpus",
             queries=search_queries,
-            searcher=lambda variant: store.search_corpus_semantic(query=variant, limit=max(corpus_limit * 4, 8)),
+            searcher=lambda variant: store.search_corpus_semantic(
+                query=variant,
+                limit=max(corpus_limit * 4, 8),
+                principal_scope_key=principal_scope_key,
+            ),
         )
         if corpus_limit > 0
         else []
