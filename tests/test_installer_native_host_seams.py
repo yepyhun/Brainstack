@@ -172,3 +172,94 @@ class Agent:
     )
 
     assert installer._patch_run_agent(run_agent, dry_run=False) == []
+
+
+def test_file_search_timeout_patch_caps_search_command_timeouts(tmp_path: Path) -> None:
+    installer = _load_installer()
+    file_operations = tmp_path / "file_operations.py"
+    file_operations.write_text(
+        '''
+import os
+from pathlib import Path
+from typing import Optional
+
+_HOME = str(Path.home())
+WRITE_DENIED_PATHS = build_write_denied_paths(_HOME)
+WRITE_DENIED_PREFIXES = build_write_denied_prefixes(_HOME)
+
+
+def _get_safe_write_root() -> Optional[str]:
+    return None
+
+class ShellFileOperations:
+    def _search_files(self):
+        result = self._exec(cmd, timeout=60)
+        result = self._exec(cmd_simple, timeout=60)
+
+    def _search_files_rg(self):
+        result = self._exec(cmd_sorted, timeout=60)
+        result = self._exec(cmd_plain, timeout=60)
+
+    def _search_with_rg(self):
+        result = self._exec(cmd, timeout=60)
+
+    def _search_with_grep(self):
+        result = self._exec(cmd, timeout=60)
+'''.lstrip(),
+        encoding="utf-8",
+    )
+
+    labels = installer._patch_file_search_timeout_cap(file_operations, dry_run=False)
+
+    patched = file_operations.read_text(encoding="utf-8")
+    assert labels == [
+        "file_operations:search_timeout_constant",
+        "file_operations:search_timeout_cap",
+    ]
+    assert "HERMES_SEARCH_FILES_TIMEOUT" in patched
+    assert "DEFAULT_SEARCH_COMMAND_TIMEOUT" in patched
+    assert "timeout=60)" not in patched
+    assert patched.count("timeout=DEFAULT_SEARCH_COMMAND_TIMEOUT)") == 6
+
+
+def test_file_search_timeout_patch_is_idempotent(tmp_path: Path) -> None:
+    installer = _load_installer()
+    file_operations = tmp_path / "file_operations.py"
+    file_operations.write_text(
+        '''
+import os
+from pathlib import Path
+from typing import Optional
+
+_HOME = str(Path.home())
+WRITE_DENIED_PATHS = build_write_denied_paths(_HOME)
+WRITE_DENIED_PREFIXES = build_write_denied_prefixes(_HOME)
+
+# File search is used in live gateway turns. It must fail fast instead of
+# occupying the agent until the gateway's inactivity watchdog fires.
+# Override for unusual large-repo maintenance: HERMES_SEARCH_FILES_TIMEOUT=15.
+def _brainstack_env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw in (None, ""):
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, value)
+
+
+DEFAULT_SEARCH_COMMAND_TIMEOUT = _brainstack_env_int("HERMES_SEARCH_FILES_TIMEOUT", 8)
+
+
+def _get_safe_write_root() -> Optional[str]:
+    return None
+
+class ShellFileOperations:
+    def _search_with_rg(self):
+        result = self._exec(cmd, timeout=DEFAULT_SEARCH_COMMAND_TIMEOUT)
+'''.lstrip(),
+        encoding="utf-8",
+    )
+
+    assert installer._patch_file_search_timeout_cap(file_operations, dry_run=False) == []

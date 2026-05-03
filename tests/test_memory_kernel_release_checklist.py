@@ -262,6 +262,10 @@ def _passing_crash_guard_summary() -> dict[str, object]:
         terminal_smoke_ok=True,
         venv_import_smoke_ok=True,
         chroma_exception_probe_ok=True,
+        file_search_timeout_ok=True,
+        file_search_probe_ok=True,
+        file_search_timeout_default=8,
+        file_search_probe_seconds=0.8,
     )
 
 
@@ -293,6 +297,10 @@ def test_live_crash_regression_guard_summary_blocks_native_crash_markers() -> No
         terminal_smoke_ok=True,
         venv_import_smoke_ok=True,
         chroma_exception_probe_ok=True,
+        file_search_timeout_ok=True,
+        file_search_probe_ok=True,
+        file_search_timeout_default=8,
+        file_search_probe_seconds=0.8,
     )
 
     assert summary["status"] == "fail"
@@ -321,6 +329,10 @@ def test_live_crash_regression_guard_summary_blocks_smoke_failures() -> None:
         terminal_smoke_ok=False,
         venv_import_smoke_ok=False,
         chroma_exception_probe_ok=False,
+        file_search_timeout_ok=True,
+        file_search_probe_ok=True,
+        file_search_timeout_default=8,
+        file_search_probe_seconds=0.8,
     )
 
     assert summary["status"] == "fail"
@@ -328,6 +340,37 @@ def test_live_crash_regression_guard_summary_blocks_smoke_failures() -> None:
     assert "terminal_smoke_failed" in codes
     assert "venv_import_smoke_failed" in codes
     assert "chroma_exception_probe_failed" in codes
+
+
+def test_live_crash_regression_guard_summary_blocks_file_search_timeout_regression() -> None:
+    summary = _live_crash_regression_summary(
+        container_name="hermes-bestie-live",
+        container_id="container-id",
+        container_state={
+            "status": "running",
+            "health": "healthy",
+            "started_at": "2026-05-03T20:36:07.442503074Z",
+            "restart_count": 0,
+            "oom_killed": False,
+            "exit_code": 0,
+        },
+        coredumpctl_available=True,
+        coredump_count_since_container_start=0,
+        coredump_count_after_probe=0,
+        log_hit_counts={'"exit_code": -11': 0, "SIGSEGV": 0},
+        terminal_smoke_ok=True,
+        venv_import_smoke_ok=True,
+        chroma_exception_probe_ok=True,
+        file_search_timeout_ok=False,
+        file_search_probe_ok=False,
+        file_search_timeout_default=60,
+        file_search_probe_seconds=120.0,
+    )
+
+    assert summary["status"] == "fail"
+    codes = {issue["code"] for issue in summary["issues"]}
+    assert "file_search_timeout_cap_failed" in codes
+    assert "file_search_probe_failed" in codes
 
 
 def test_count_python_hermes_coredumps_only_counts_native_crash_rows() -> None:

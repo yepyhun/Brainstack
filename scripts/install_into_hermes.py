@@ -193,6 +193,11 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "owner": "hermes-tool-safety-seam",
         "removal_condition": "Hermes terminal tool natively mirrors blocked/approval status into model-facing output, not only error fields.",
     },
+    "_patch_file_search_timeout_cap": {
+        "category": "required_seam",
+        "owner": "hermes-tool-safety-seam",
+        "removal_condition": "Hermes file search natively fails fast on gateway-supported live turns instead of relying on the gateway inactivity watchdog.",
+    },
     "_patch_prompt_builder": {
         "category": "legacy_host_patch",
         "owner": "host-prompt-legacy",
@@ -3138,6 +3143,46 @@ def _patch_terminal_tool_result_hygiene(path: Path, dry_run: bool) -> list[str]:
     return applied
 
 
+def _patch_file_search_timeout_cap(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    if "DEFAULT_SEARCH_COMMAND_TIMEOUT" not in text:
+        text = _replace_once(
+            text,
+            "WRITE_DENIED_PREFIXES = build_write_denied_prefixes(_HOME)\n\n\ndef _get_safe_write_root() -> Optional[str]:\n",
+            "WRITE_DENIED_PREFIXES = build_write_denied_prefixes(_HOME)\n\n"
+            "# File search is used in live gateway turns. It must fail fast instead of\n"
+            "# occupying the agent until the gateway's inactivity watchdog fires.\n"
+            "# Override for unusual large-repo maintenance: HERMES_SEARCH_FILES_TIMEOUT=15.\n"
+            "def _brainstack_env_int(name: str, default: int, *, minimum: int = 1) -> int:\n"
+            "    raw = os.getenv(name)\n"
+            "    if raw in (None, \"\"):\n"
+            "        return default\n"
+            "    try:\n"
+            "        value = int(raw)\n"
+            "    except (TypeError, ValueError):\n"
+            "        return default\n"
+            "    return max(minimum, value)\n"
+            "\n\n"
+            "DEFAULT_SEARCH_COMMAND_TIMEOUT = _brainstack_env_int(\"HERMES_SEARCH_FILES_TIMEOUT\", 8)\n\n\n"
+            "def _get_safe_write_root() -> Optional[str]:\n",
+            label="file search timeout constant",
+            path=path,
+        )
+        applied.append("file_operations:search_timeout_constant")
+
+    if "timeout=60)" in text:
+        text = text.replace("timeout=60)", "timeout=DEFAULT_SEARCH_COMMAND_TIMEOUT)")
+        applied.append("file_operations:search_timeout_cap")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
 def _canonicalize_runtime_user_profile(config_path: Path, dry_run: bool) -> dict[str, Any]:
     runtime_root = config_path.parent
     user_path = runtime_root / "memories" / "USER.md"
@@ -5500,6 +5545,7 @@ def main() -> int:
     host_patches.extend(_run_host_patch("_patch_deferred_tool_loader_contract", target / "hermes_deferred_tools.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_memory_answer_renderer_language", target / "gateway" / "memory_answer_renderer.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_terminal_tool_result_hygiene", target / "tools" / "terminal_tool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_file_search_timeout_cap", target / "tools" / "file_operations.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_prompt_builder", target / "agent" / "prompt_builder.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_cron_jobs", target / "cron" / "jobs.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_cron_scheduler", target / "cron" / "scheduler.py", args.dry_run, host_patch_mode=args.host_patch_mode))
