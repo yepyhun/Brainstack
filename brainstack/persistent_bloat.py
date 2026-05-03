@@ -172,6 +172,7 @@ def build_persistent_bloat_report(
     thresholds: Mapping[str, float] | None = None,
     max_projection_events: int = 2000,
     max_active_tokens: int = 120,
+    derived_async_state: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a public-safe, read-only persistent memory bloat report.
 
@@ -311,6 +312,13 @@ def build_persistent_bloat_report(
     support_only_ratio = _ratio(support_pressure, max(canonical_answer, 1))
     stale_prior_total = profile_inactive + graph_prior_states + graph_open_conflicts + canonical_archived_or_prior + proactive_suppressed
     stale_prior_ratio = _ratio(stale_prior_total, answer_denominator)
+    derived_async = dict(derived_async_state or {})
+    derived_counters = dict(derived_async.get("counters") or {}) if isinstance(derived_async, Mapping) else {}
+    derived_queued = _num(derived_counters.get("queued_count"))
+    derived_pending = _num(derived_counters.get("pending_count"))
+    derived_failed = _num(derived_counters.get("failed_count"))
+    derived_retry = _num(derived_counters.get("retry_count"))
+    derived_hidden_readiness = _num(derived_counters.get("hidden_readiness_claim_count"))
 
     metrics = {
         "write_amplification": {
@@ -357,6 +365,10 @@ def build_persistent_bloat_report(
             "sample_truncated": canonical_total > len(events),
             "critical_counters": projection_counters,
         },
+        "derived_async_queued_count": derived_queued,
+        "derived_async_pending_count": derived_pending,
+        "derived_async_failed_count": derived_failed,
+        "derived_async_retry_count": derived_retry,
     }
 
     statuses = {
@@ -567,6 +579,7 @@ def build_persistent_bloat_report(
         "thresholds": {key: float(value) for key, value in sorted(merged_thresholds.items())},
         "lanes": lanes,
         "metrics": metrics,
+        "derived_async_state": derived_async,
         "metric_statuses": {
             key: {"status": value.status, "issue_code": value.issue_code} for key, value in statuses.items()
         },
@@ -578,6 +591,7 @@ def build_persistent_bloat_report(
             "truth_cleanup_apply_supported": 0,
             "receipt_preservation_missing": 0,
             "projection_rebuild_counters_nonzero": 1 if "PROJECTION_REBUILD_COUNTERS_NONZERO" in issues else 0,
+            "derived_async_hidden_readiness": derived_hidden_readiness,
         },
     }
     if _contains_raw_sentinel(report):

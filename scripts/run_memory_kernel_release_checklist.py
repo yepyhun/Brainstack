@@ -632,6 +632,89 @@ def _check_active_packet_budget(tmp: Path) -> CheckResult:
     )
 
 
+def _check_packet_budget_active_default(tmp: Path) -> CheckResult:
+    out = tmp / "packet_budget_active_default.json"
+    command = [
+        sys.executable,
+        "scripts/verify_packet_budget_active_default.py",
+        "--out",
+        str(out),
+    ]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("active_default") is True
+        and data.get("default_off_detected") is False
+        and data.get("shadow_only_detected") is False
+        and data.get("hidden_fallback_count") == 0
+        and data.get("protected_truth_drop_attempts") == 0
+        and data.get("raw_text_trace_count") == 0
+        and data.get("public_safe") is True
+    )
+    return CheckResult(
+        name="packet_budget_active_default",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "active_default": data.get("active_default"),
+            "default_mode_constant": data.get("default_mode_constant"),
+            "resolved_default_mode": data.get("resolved_default_mode"),
+            "default_off_detected": data.get("default_off_detected"),
+            "shadow_only_detected": data.get("shadow_only_detected"),
+            "hidden_fallback_count": data.get("hidden_fallback_count"),
+            "protected_truth_drop_attempts": data.get("protected_truth_drop_attempts"),
+            "raw_text_trace_count": data.get("raw_text_trace_count"),
+            "case_count": data.get("case_count"),
+            "failing_cases": data.get("failing_cases"),
+            "public_safe": data.get("public_safe"),
+        },
+    )
+
+
+def _check_adaptive_evidence_kernel(tmp: Path) -> CheckResult:
+    out = tmp / "adaptive_evidence_kernel.json"
+    command = [
+        sys.executable,
+        "scripts/verify_adaptive_evidence_kernel.py",
+        "--out",
+        str(out),
+    ]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    bad_success = data.get("bad_success_checks") if isinstance(data.get("bad_success_checks"), dict) else {}
+    release_gate = data.get("release_gate") if isinstance(data.get("release_gate"), dict) else {}
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("active_default") is True
+        and data.get("protected_truth_drops") == 0
+        and data.get("tank_false_negative_misses") == 0
+        and bad_success.get("status") == "pass"
+        and release_gate.get("release_allowed") is True
+    )
+    return CheckResult(
+        name="adaptive_evidence_kernel",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "active_default": data.get("active_default"),
+            "protected_truth_drops": data.get("protected_truth_drops"),
+            "tank_false_negative_misses": data.get("tank_false_negative_misses"),
+            "bad_success_status": bad_success.get("status"),
+            "release_allowed": release_gate.get("release_allowed"),
+            "runtime_case_count": len(data.get("runtime_cases") or []),
+        },
+    )
+
+
 def _check_packet_budget_soak(tmp: Path) -> CheckResult:
     out = tmp / "packet_budget_soak.json"
     command = [
@@ -1082,6 +1165,8 @@ def run_checklist(
             _check_benchmark_transparency(tmp),
             _check_packet_budget(tmp),
             _check_active_packet_budget(tmp),
+            _check_packet_budget_active_default(tmp),
+            _check_adaptive_evidence_kernel(tmp),
             _check_packet_budget_soak(tmp),
             _check_write_path(tmp),
             _check_graph_conflict_lifecycle(tmp),

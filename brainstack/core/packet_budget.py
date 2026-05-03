@@ -28,7 +28,7 @@ BUDGET_STATUS_NOT_APPLICABLE = "not_applicable"
 BUDGET_STATUS_WITHIN_LIMIT = "within_limit"
 BUDGET_STATUS_APPLIED = "applied"
 BUDGET_STATUS_INSUFFICIENT_AUTHORITY = "insufficient_for_authority_minimum"
-DEFAULT_PACKET_BUDGET_MODE = "off"
+DEFAULT_PACKET_BUDGET_MODE = "active"
 DEFAULT_PACKET_BUDGET_MAX_CANDIDATE_TOKENS = 120
 
 _DROPPED_DECISIONS = {DECISION_DROPPED, DECISION_DEMOTED}
@@ -381,6 +381,16 @@ def apply_packet_budget(
             )
             continue
         if not _answer_allowed(item):
+            if _token_estimate(item) <= remaining:
+                selected.append(
+                    _copy_with_decision(
+                        item,
+                        decision=DECISION_SELECTED,
+                        reason_code=ReasonCode.SELECTED_BUDGET_WITHIN_LIMIT.value,
+                    )
+                )
+                remaining -= _token_estimate(item)
+                continue
             dropped.append(
                 _copy_with_decision(
                     item,

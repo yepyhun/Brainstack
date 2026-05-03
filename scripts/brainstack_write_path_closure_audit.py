@@ -75,6 +75,12 @@ def _classify(file: str, method: str, caller: str) -> tuple[str, str]:
         return "TEST_OR_CANARY_SEED", "packet-budget active rollout measurement fixture seed"
     if file.startswith("scripts/verify_packet_budget_runtime_parity.py"):
         return "TEST_OR_CANARY_SEED", "packet-budget runtime parity measurement fixture seed"
+    if file.startswith("scripts/verify_packet_budget_active_default.py"):
+        return "TEST_OR_CANARY_SEED", "packet-budget active default verifier fixture seed"
+    if file.startswith("scripts/verify_adaptive_evidence_hotpath.py"):
+        return "TEST_OR_CANARY_SEED", "adaptive evidence hotpath verifier fixture seed"
+    if file.startswith("scripts/verify_adaptive_evidence_kernel.py"):
+        return "TEST_OR_CANARY_SEED", "adaptive evidence kernel verifier fixture seed"
     if file.startswith("scripts/run_packet_budget_soak.py"):
         return "TEST_OR_CANARY_SEED", "packet-budget soak measurement fixture seed"
     if file.startswith("scripts/run_persistent_bloat_soak.py"):

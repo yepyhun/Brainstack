@@ -91,6 +91,12 @@ def test_query_inspect_is_read_only_for_retrieval_telemetry(tmp_path: Path) -> N
         assert report["query"] == "ExampleUser memory kernel proof"
         assert report["routing"]["applied_mode"]
         assert report["selected_evidence"]["profile"]
+        assert report["adaptive_route_plan"]["schema"] == "brainstack.adaptive_route_plan.v1"
+        assert report["adaptive_route_plan"]["guardrails"]["keyword_sprawl_guard"] is True
+        assert report["current_truth_view"]["schema"] == "brainstack.current_truth_view.v1"
+        assert report["current_truth_view"]["status"] == "pass"
+        assert report["current_truth_view"]["rebuild"]["freshness_diagnostics_present"] is True
+        assert report["current_truth_view"]["current_truth_row_count"] == 0
         assert all(
             item["evidence_key"] != "profile:identity:name"
             for item in report["suppressed_evidence"]

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping
 
+from .adaptive_evidence_broker import build_broker_trace
 from .control_plane import build_working_memory_packet
+from .current_truth_view import rebuild_current_truth_view
 from .db import BrainstackStore
 from .db_diagnostics import build_db_substrate_snapshot
 from .graph_lineage import compact_graph_source_lineage
@@ -636,6 +638,7 @@ def build_query_inspect(
         suppressed_rows=suppressed,
         suppressed_limit=40,
     )
+    adaptive_evidence_broker = build_broker_trace(retrieval_trace=candidate_trace)
     policy_snapshot = dict(packet.get("policy") or {})
     capability_health = _query_capability_health(store)
     candidate_answerability = build_memory_answerability(
@@ -650,6 +653,14 @@ def build_query_inspect(
         packet_text=block,
     )
     explicit_truth_parity = _explicit_truth_parity_from_selected(selected_by_shelf)
+    canonical_events = []
+    if hasattr(store, "list_canonical_memory_events"):
+        canonical_events = [
+            row.get("event", {})
+            for row in store.list_canonical_memory_events(limit=100)
+            if isinstance(row.get("event"), Mapping)
+        ]
+    current_truth_view = rebuild_current_truth_view(canonical_events)
     return {
         "schema": "brainstack.query_inspect.v1",
         "query": str(query or ""),
@@ -663,6 +674,20 @@ def build_query_inspect(
         "selected_evidence": selected_by_shelf,
         "suppressed_evidence": suppressed,
         "retrieval_candidates": candidate_trace,
+        "adaptive_evidence_broker": adaptive_evidence_broker,
+        "adaptive_route_plan": dict(packet.get("adaptive_route_plan") or {}),
+        "current_truth_view": {
+            "schema": current_truth_view.get("schema"),
+            "status": current_truth_view.get("status"),
+            "rebuild": dict(current_truth_view.get("rebuild") or {}),
+            "source_event_span": dict(current_truth_view.get("source_event_span") or {}),
+            "receipt_coverage": dict(current_truth_view.get("receipt_coverage") or {}),
+            "counters": dict(current_truth_view.get("counters") or {}),
+            "deep_graph_path": dict(current_truth_view.get("deep_graph_path") or {}),
+            "public_safety": dict(current_truth_view.get("public_safety") or {}),
+            "current_truth_row_count": len(current_truth_view.get("current_truth_rows") or []),
+            "non_answerable_row_count": len(current_truth_view.get("non_answerable_rows") or []),
+        },
         "candidate_answerability": candidate_answerability,
         "packet_answerability": packet_answerability,
         "memory_answerability": packet_answerability,

@@ -8,6 +8,8 @@ from scripts.run_memory_kernel_release_checklist import (
     REQUIRED_OPERATION_CLASSES,
     UNBREAKABLE_TARGET,
     _check_benchmark_transparency,
+    _check_packet_budget_active_default,
+    _check_adaptive_evidence_kernel,
     _check_hermes_proactive_runtime_parity,
     _check_persistent_bloat_rebuild,
     _check_projection_semantics_runtime_parity,
@@ -88,6 +90,60 @@ def _write_contract_and_notes(tmp_path: Path, contract: dict[str, object] | None
         encoding="utf-8",
     )
     return contract_path, notes_path
+
+
+def test_packet_budget_active_default_release_check_passes(tmp_path: Path) -> None:
+    result = _check_packet_budget_active_default(tmp_path)
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["active_default"] is True
+    assert result.summary["default_off_detected"] is False
+    assert result.summary["shadow_only_detected"] is False
+    assert result.summary["hidden_fallback_count"] == 0
+    assert result.summary["protected_truth_drop_attempts"] == 0
+    assert result.summary["public_safe"] is True
+
+
+def test_release_report_fails_packet_budget_active_default_even_in_dev_mode() -> None:
+    checks = [
+        CheckResult("release_claim_contract", "pass", ["contract"], 0, {}),
+        CheckResult("tier2_unbreakable_operation", "pass", ["tier2"], 0, {}),
+        CheckResult("packet_budget_active_default", "fail", ["active-default"], 1, {"status": "fail"}),
+        CheckResult("git_hygiene", "fail", ["git"], 0, {"git_dirty": True}),
+    ]
+
+    report = _report(checks, ignore_git_dirty_for_dev=True)
+
+    assert report["status"] == "fail"
+    assert report["release_allowed"] is False
+    assert report["non_git_failures"] == ["packet_budget_active_default"]
+
+
+def test_adaptive_evidence_kernel_release_check_passes(tmp_path: Path) -> None:
+    result = _check_adaptive_evidence_kernel(tmp_path)
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["active_default"] is True
+    assert result.summary["protected_truth_drops"] == 0
+    assert result.summary["tank_false_negative_misses"] == 0
+    assert result.summary["public_safe"] is True
+
+
+def test_release_report_fails_adaptive_evidence_kernel_even_in_dev_mode() -> None:
+    checks = [
+        CheckResult("release_claim_contract", "pass", ["contract"], 0, {}),
+        CheckResult("packet_budget_active_default", "pass", ["active-default"], 0, {}),
+        CheckResult("adaptive_evidence_kernel", "fail", ["adaptive-kernel"], 1, {"status": "fail"}),
+        CheckResult("git_hygiene", "fail", ["git"], 0, {"git_dirty": True}),
+    ]
+
+    report = _report(checks, ignore_git_dirty_for_dev=True)
+
+    assert report["status"] == "fail"
+    assert report["release_allowed"] is False
+    assert report["non_git_failures"] == ["adaptive_evidence_kernel"]
 
 
 def test_benchmark_transparency_release_check_passes(tmp_path: Path) -> None:

@@ -20,6 +20,7 @@ from .core.trace import (
     AUTHORITY_INSPECT_ONLY,
     AUTHORITY_RECEIPT_BACKED,
     AUTHORITY_SUPPORT_ONLY,
+    DECISION_DROPPED,
     DECISION_SELECTED,
     make_evidence_candidate,
 )
@@ -63,8 +64,8 @@ def _candidate_reason(decision: ProjectionSemanticsDecision) -> str:
     if decision.is_answer_safe:
         return ReasonCode.SELECTED_RECEIPT_BACKED_FACT.value
     if decision.is_support_only:
-        return ReasonCode.ONLY_SUPPORTING_CONTEXT.value
-    return ReasonCode.DROPPED_INSPECT_ONLY.value
+        return ReasonCode.DROPPED_BUDGET_SUPPORT_ONLY.value
+    return ReasonCode.DROPPED_BUDGET_LOW_AUTHORITY.value
 
 
 def _packet_candidate_from_event(event: Mapping[str, Any], decision: ProjectionSemanticsDecision) -> dict[str, Any]:
@@ -77,7 +78,7 @@ def _packet_candidate_from_event(event: Mapping[str, Any], decision: ProjectionS
         target_slot=_text(claim.get("target_slot")),
         source_role=_text(source.get("speaker")) or "user",
         authority=_candidate_authority(decision),
-        decision=DECISION_SELECTED,
+        decision=DECISION_SELECTED if decision.is_answer_safe else DECISION_DROPPED,
         reason_code=_candidate_reason(decision),
         source_event_id=decision.source_event_id,
         source_span_id=decision.source_span_id,

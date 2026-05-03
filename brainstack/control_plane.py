@@ -10,6 +10,8 @@ from .core.packet_budget import (
     resolve_packet_budget_max_candidate_tokens,
     resolve_packet_budget_mode,
 )
+from .adaptive_route_plan import build_adaptive_route_plan, route_plan_limit_overrides, route_plan_resolver_payload
+from .current_truth_view import rebuild_current_truth_view
 from .db import BrainstackStore
 from .executive_retrieval import retrieve_executive_context
 from .local_typed_understanding import analyze_local_query
@@ -606,6 +608,37 @@ def _apply_working_memory_packet_budget(
     }
 
 
+def _store_backend_health(store: BrainstackStore) -> dict[str, str]:
+    graph_requested = str(getattr(store, "_graph_backend_name", "sqlite") or "sqlite").strip().lower()
+    corpus_requested = str(getattr(store, "_corpus_backend_name", "sqlite") or "sqlite").strip().lower()
+    graph_backend = getattr(store, "_graph_backend", None)
+    corpus_backend = getattr(store, "_corpus_backend", None)
+    graph_error = str(getattr(store, "_graph_backend_error", "") or "").strip()
+    corpus_error = str(getattr(store, "_corpus_backend_error", "") or "").strip()
+    return {
+        "graph": "degraded" if graph_requested not in {"", "none", "sqlite"} and (graph_backend is None or graph_error) else "active",
+        "corpus": "degraded" if corpus_requested not in {"", "none", "sqlite"} and (corpus_backend is None or corpus_error) else "active",
+    }
+
+
+def _canonical_events_for_current_truth_view(store: BrainstackStore) -> list[dict[str, Any]]:
+    if not hasattr(store, "list_canonical_memory_events"):
+        return []
+    events: list[dict[str, Any]] = []
+    for row in store.list_canonical_memory_events(limit=100):
+        event = row.get("event") if isinstance(row, Mapping) else None
+        if isinstance(event, Mapping):
+            events.append(dict(event))
+    return events
+
+
+def _apply_adaptive_route_overrides(policy: WorkingMemoryPolicy, plan: Mapping[str, Any]) -> None:
+    overrides = route_plan_limit_overrides(plan)
+    for key, value in overrides.items():
+        if hasattr(policy, key):
+            setattr(policy, key, max(int(value or 0), 0))
+
+
 def build_working_memory_packet(
     store: BrainstackStore,
     *,
@@ -629,6 +662,7 @@ def build_working_memory_packet(
     record_retrievals: bool = True,
     packet_budget_mode: str | None = None,
     packet_budget_max_candidate_tokens: int | None = None,
+    adaptive_route_signals: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     analysis = analyze_query(
         store,
@@ -653,6 +687,33 @@ def build_working_memory_packet(
     )
     policy.render_ordinary_contract = bool(render_ordinary_contract)
 
+    adaptive_understanding: dict[str, Any] = {
+        "profile_slot_targets": list(analysis.profile_slot_targets),
+    }
+    if analysis.route_payload:
+        adaptive_understanding["route_payload"] = dict(analysis.route_payload)
+    if analysis.task_like:
+        adaptive_understanding.setdefault("required_evidence_classes", []).append("continuity")
+    if analysis.operating_like:
+        adaptive_understanding.setdefault("required_evidence_classes", []).append("continuity")
+    if adaptive_route_signals:
+        adaptive_understanding.update(dict(adaptive_route_signals))
+    current_truth_view = rebuild_current_truth_view(_canonical_events_for_current_truth_view(store))
+    adaptive_route_plan = build_adaptive_route_plan(
+        query,
+        query_understanding=adaptive_understanding,
+        current_truth_view=current_truth_view,
+        backend_health=_store_backend_health(store),
+    )
+    _apply_adaptive_route_overrides(policy, adaptive_route_plan)
+
+    effective_route_resolver = route_resolver
+    if effective_route_resolver is None:
+        route_payload = route_plan_resolver_payload(adaptive_route_plan)
+
+        def effective_route_resolver(_query: str, _payload: dict[str, str] = route_payload) -> dict[str, str]:
+            return dict(_payload)
+
     retrieval = retrieve_executive_context(
         store,
         query=query,
@@ -661,7 +722,7 @@ def build_working_memory_packet(
         timezone_name=timezone_name,
         analysis=asdict(analysis),
         policy=asdict(policy),
-        route_resolver=route_resolver,
+        route_resolver=effective_route_resolver,
     )
 
     profile_items = retrieval["profile_items"]
@@ -744,6 +805,19 @@ def build_working_memory_packet(
         compiled_behavior_policy=compiled_behavior_policy,
         retrieval=retrieval,
     )
+    policy_payload["adaptive_route_plan"] = {
+        "schema": adaptive_route_plan.get("schema"),
+        "status": adaptive_route_plan.get("status"),
+        "route_class": adaptive_route_plan.get("route_class"),
+        "requested_route_class": adaptive_route_plan.get("requested_route_class"),
+        "retrieval_mode": adaptive_route_plan.get("retrieval_mode"),
+        "route_decision": dict(adaptive_route_plan.get("route_decision") or {}),
+        "activated_shelves": list(adaptive_route_plan.get("activated_shelves") or []),
+        "skipped_shelves": list(adaptive_route_plan.get("skipped_shelves") or []),
+        "fallback": dict(adaptive_route_plan.get("fallback") or {}),
+        "current_truth_view": dict(adaptive_route_plan.get("current_truth_view") or {}),
+        "guardrails": dict(adaptive_route_plan.get("guardrails") or {}),
+    }
     budgeted = _apply_working_memory_packet_budget(
         mode=packet_budget_mode,
         max_candidate_tokens=packet_budget_max_candidate_tokens,
@@ -806,6 +880,16 @@ def build_working_memory_packet(
         "entity_resolution": retrieval.get("entity_resolution", {}),
         "associative_expansion": retrieval.get("associative_expansion", {}),
         "routing": routing,
+        "adaptive_route_plan": adaptive_route_plan,
+        "current_truth_view": {
+            "schema": current_truth_view.get("schema"),
+            "status": current_truth_view.get("status"),
+            "rebuild": dict(current_truth_view.get("rebuild") or {}),
+            "source_event_span": dict(current_truth_view.get("source_event_span") or {}),
+            "counters": dict(current_truth_view.get("counters") or {}),
+            "current_truth_row_count": len(current_truth_view.get("current_truth_rows") or []),
+            "non_answerable_row_count": len(current_truth_view.get("non_answerable_rows") or []),
+        },
         "system_substrate": dict(system_substrate or {}),
         "packet_budget": packet_budget,
         "block": block,
