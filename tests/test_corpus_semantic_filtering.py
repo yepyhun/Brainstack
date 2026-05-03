@@ -53,10 +53,47 @@ class FakeCollection:
         del kwargs
 
 
+class FakeQueryCollection(FakeCollection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.query_kwargs: dict[str, Any] = {}
+
+    def query(self, **kwargs: Any) -> dict[str, Any]:
+        self.query_kwargs = kwargs
+        return {"documents": [[]], "metadatas": [[]], "distances": [[]]}
+
+
+class FakeEmbeddingClient:
+    def embed_query(self, query: str) -> list[float]:
+        del query
+        return [0.0, 1.0]
+
+
 def _store(tmp_path: Path) -> BrainstackStore:
     store = BrainstackStore(str(tmp_path / "brainstack.sqlite3"), graph_backend="sqlite", corpus_backend="sqlite")
     store.open()
     return store
+
+
+def test_chroma_semantic_search_wraps_multi_key_filters_for_chroma() -> None:
+    backend = ChromaCorpusBackend(db_path=":memory:")
+    collection = FakeQueryCollection()
+    backend._collection = collection
+    backend._embedding_client = FakeEmbeddingClient()  # type: ignore[assignment]
+
+    rows = backend.search_semantic(
+        query="hello",
+        limit=2,
+        where={"semantic_class": "corpus", "principal_scope_key": "principal:m008"},
+    )
+
+    assert rows == []
+    assert collection.query_kwargs["where"] == {
+        "$and": [
+            {"principal_scope_key": "principal:m008"},
+            {"semantic_class": "corpus"},
+        ]
+    }
 
 
 def test_corpus_semantic_filtering_verifier_passes() -> None:

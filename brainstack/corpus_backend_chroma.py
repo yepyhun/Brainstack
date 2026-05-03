@@ -177,7 +177,7 @@ class ChromaCorpusBackend:
         else:
             query_kwargs["query_texts"] = [str(query or "")]
         if where:
-            query_kwargs["where"] = dict(where)
+            query_kwargs["where"] = _chroma_where_filter(where)
         result = self.collection.query(**query_kwargs)
         documents = list((result.get("documents") or [[]])[0] or [])
         metadatas = list((result.get("metadatas") or [[]])[0] or [])
@@ -245,6 +245,19 @@ class ChromaCorpusBackend:
             _cosine_similarity(query_embedding, embedding)
             for embedding in embeddings_list[1:]
         ]
+
+
+def _chroma_where_filter(where: Dict[str, Any]) -> Dict[str, Any]:
+    cleaned = {
+        str(key): value
+        for key, value in dict(where or {}).items()
+        if str(key or "").strip() and value not in (None, "")
+    }
+    if not cleaned or any(key.startswith("$") for key in cleaned):
+        return cleaned
+    if len(cleaned) == 1:
+        return cleaned
+    return {"$and": [{key: cleaned[key]} for key in sorted(cleaned)]}
 
 
 def _scalar_metadata(value: Any) -> str:
