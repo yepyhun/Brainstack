@@ -4935,6 +4935,30 @@ def _run_doctor(
     return code
 
 
+def _resolve_enabled_runtime_contract(args: argparse.Namespace) -> str | None:
+    """Make the default full install self-consistent before planning files.
+
+    The default embedding runtime is local TEI Jina v5. That runtime is managed
+    by the Docker compose installer path, so an enabled install with
+    ``--runtime auto`` must resolve to Docker instead of failing closed. An
+    explicit ``--runtime local`` remains rejected because the installer does not
+    manage a host-native TEI service.
+    """
+    if not args.enable or args.embedding_runtime != "local-tei-jina":
+        return None
+    if args.runtime == "auto":
+        args.runtime = "docker"
+        return "INFO --runtime auto resolved to docker for local TEI Jina v5 embedding runtime."
+    if args.runtime != "docker":
+        raise RuntimeError(
+            "--embedding-runtime local-tei-jina requires Docker runtime. "
+            "Use --runtime auto or --runtime docker so the installer can create/manage the TEI Jina v5 service; "
+            "use --embedding-runtime external only for an operator-managed embedding endpoint, "
+            "or --embedding-runtime none to configure corpus search unavailable instead of broken Chroma."
+        )
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Install Brainstack into a target Hermes checkout.")
     parser.add_argument("target", help="Path to target Hermes checkout")
@@ -4949,7 +4973,8 @@ def main() -> int:
         default="local-tei-jina",
         help=(
             "Embedding runtime contract. "
-            "local-tei-jina requires --runtime docker and adds a local TEI Jina v5 service and cache volume; "
+            "local-tei-jina uses the Docker runtime and adds a local TEI Jina v5 service and cache volume; "
+            "--runtime auto resolves to docker for this default. "
             "external expects operator-provided embedding env; none writes no embedding service."
         ),
     )
@@ -5032,14 +5057,14 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    if args.enable and args.embedding_runtime == "local-tei-jina" and args.runtime != "docker":
-        print(
-            "FAIL --embedding-runtime local-tei-jina requires --runtime docker. "
-            "Use --embedding-runtime external for an operator-managed embedding endpoint, "
-            "or --embedding-runtime none to configure corpus search unavailable instead of broken Chroma.",
-            file=sys.stderr,
-        )
+    runtime_resolution = None
+    try:
+        runtime_resolution = _resolve_enabled_runtime_contract(args)
+    except RuntimeError as exc:
+        print(f"FAIL {exc}", file=sys.stderr)
         return 2
+    if runtime_resolution:
+        print(runtime_resolution)
 
     compose_path: Path | None = None
     if args.runtime == "docker" or args.compose_file:

@@ -109,6 +109,15 @@ def test_config_patch_embedding_none_makes_corpus_explicitly_unavailable(tmp_pat
     assert brainstack["tier2_hindsight_api_command"] == "/opt/hermes/.venv/bin/hindsight-api"
 
 
+def test_enabled_auto_runtime_resolves_to_docker_for_default_local_tei_jina() -> None:
+    args = Namespace(enable=True, embedding_runtime="local-tei-jina", runtime="auto")
+
+    message = install_into_hermes._resolve_enabled_runtime_contract(args)
+
+    assert args.runtime == "docker"
+    assert message == "INFO --runtime auto resolved to docker for local TEI Jina v5 embedding runtime."
+
+
 def test_local_install_rejects_local_tei_runtime_without_docker(monkeypatch, capsys, tmp_path):
     target = tmp_path / "hermes"
     target.mkdir()
@@ -131,7 +140,7 @@ def test_local_install_rejects_local_tei_runtime_without_docker(monkeypatch, cap
     )
 
     assert install_into_hermes.main() == 2
-    assert "local-tei-jina requires --runtime docker" in capsys.readouterr().err
+    assert "local-tei-jina requires Docker runtime" in capsys.readouterr().err
 
 
 def test_existing_docker_compose_is_patched_with_local_tei_runtime(tmp_path):
