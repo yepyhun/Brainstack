@@ -561,7 +561,14 @@ class GatewayRunner:
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
         return enabled_toolsets
 
-    async def _run_agent(self, message: str):
+    async def _run_agent(self, message: str, context_prompt: str):
+        user_config = {}
+        platform_key = "discord"
+        from hermes_cli.tools_config import _get_platform_tools
+        enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        return enabled_toolsets
+
+    async def _run_agent_without_context(self, message: str):
         user_config = {}
         platform_key = "discord"
         from hermes_cli.tools_config import _get_platform_tools
@@ -574,11 +581,42 @@ class GatewayRunner:
     applied = install_into_hermes._patch_gateway_run_turn_profile_resolution(module, dry_run=False)
 
     text = module.read_text(encoding="utf-8")
-    assert applied == ["gateway_run:turn_profile_resolution:2"]
-    assert text.count("from gateway.turn_profiles import resolve_turn_profile") == 2
-    assert "prompt=prompt" in text
-    assert "prompt=message" in text
+    assert applied == ["gateway_run:turn_profile_resolution:3"]
+    assert text.count("from gateway.turn_profiles import resolve_turn_profile") == 3
+    assert text.count("prompt=prompt") == 1
+    assert text.count("prompt=message") == 2
     assert "self._last_turn_profile_resolution = turn_profile_resolution.to_dict()" in text
+
+
+def test_gateway_run_patch_repairs_context_prompt_false_positive(tmp_path):
+    module = tmp_path / "run.py"
+    module.write_text(
+        '''
+class GatewayRunner:
+    async def _run_agent(self, message: str, context_prompt: str):
+        user_config = {}
+        platform_key = "discord"
+        from hermes_cli.tools_config import _get_platform_tools
+        enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        from gateway.turn_profiles import resolve_turn_profile
+        turn_profile_resolution = resolve_turn_profile(
+            platform=platform_key,
+            prompt=prompt,
+            current_enabled_toolsets=enabled_toolsets,
+        )
+        enabled_toolsets = list(turn_profile_resolution.enabled_toolsets)
+        self._last_turn_profile_resolution = turn_profile_resolution.to_dict()
+        return enabled_toolsets
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_gateway_run_turn_profile_resolution(module, dry_run=False)
+
+    text = module.read_text(encoding="utf-8")
+    assert applied == ["gateway_run:turn_profile_resolution_repair:1"]
+    assert "prompt=prompt" not in text
+    assert "prompt=message" in text
 
 
 def test_deferred_tool_loader_contract_patch_preserves_alias_capability(tmp_path):

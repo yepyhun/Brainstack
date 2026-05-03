@@ -3711,10 +3711,60 @@ def _patch_gateway_turn_profiles_capability_preserving_default(path: Path, dry_r
     return ["gateway_turn_profiles:capability_preserving_default"]
 
 
+def _gateway_turn_profile_prompt_expr(text: str, position: int) -> str:
+    local_context = text[max(0, position - 2500) : position]
+    function_start = max(
+        local_context.rfind("\n    async def "),
+        local_context.rfind("\n    def "),
+        local_context.rfind("\nasync def "),
+        local_context.rfind("\ndef "),
+    )
+    function_context = local_context[function_start:] if function_start >= 0 else local_context
+    return "prompt" if re.search(r"[(,]\s*prompt\s*:", function_context) else "message"
+
+
+def _repair_gateway_run_turn_profile_prompt_expr(text: str) -> tuple[str, int]:
+    marker = "        turn_profile_resolution = resolve_turn_profile(\n"
+    rebuilt: list[str] = []
+    last = 0
+    repaired = 0
+    for match in re.finditer(re.escape(marker), text):
+        block_end = text.find("        )\n", match.end())
+        if block_end < 0:
+            continue
+        block_end += len("        )\n")
+        block = text[match.start() : block_end]
+        prompt_line = re.search(r"(?m)^            prompt=(prompt|message),$", block)
+        if not prompt_line:
+            continue
+        expected = _gateway_turn_profile_prompt_expr(text, match.start())
+        current = prompt_line.group(1)
+        if current == expected:
+            continue
+        rebuilt.append(text[last : match.start()])
+        rebuilt.append(
+            block[: prompt_line.start()]
+            + f"            prompt={expected},"
+            + block[prompt_line.end() :]
+        )
+        last = block_end
+        repaired += 1
+    if not repaired:
+        return text, 0
+    rebuilt.append(text[last:])
+    return "".join(rebuilt), repaired
+
+
 def _patch_gateway_run_turn_profile_resolution(path: Path, dry_run: bool) -> list[str]:
     if not path.exists():
         return []
     text = path.read_text(encoding="utf-8")
+    repaired_text, repaired = _repair_gateway_run_turn_profile_prompt_expr(text)
+    if repaired:
+        if not dry_run:
+            path.write_text(repaired_text, encoding="utf-8")
+        return [f"gateway_run:turn_profile_resolution_repair:{repaired}"]
+    text = repaired_text
     if "from gateway.turn_profiles import resolve_turn_profile" in text and "_last_turn_profile_resolution" in text:
         return []
 
@@ -3731,8 +3781,7 @@ def _patch_gateway_run_turn_profile_resolution(path: Path, dry_run: bool) -> lis
     applied = 0
     for index, match in enumerate(matches):
         rebuilt.append(text[last : match.end()])
-        local_context = text[max(0, match.start() - 2500) : match.start()]
-        prompt_expr = "prompt" if index == 0 and "prompt: str" in local_context else "message"
+        prompt_expr = _gateway_turn_profile_prompt_expr(text, match.start())
         rebuilt.append(
             "        from gateway.turn_profiles import resolve_turn_profile\n"
             "        turn_profile_resolution = resolve_turn_profile(\n"
