@@ -12,6 +12,7 @@ from ..proactive_agent_contract import (
     control_proactive_agent_surface,
     inspect_proactive_agent_item,
     list_proactive_agent_items,
+    set_proactive_mode_from_explicit_request,
 )
 from ..tool_schemas import proactive_control_tool_schema
 from .provider_protocol import ProviderRuntimeBase
@@ -123,6 +124,8 @@ class ProviderToolsMixin(ProviderRuntimeBase):
                 ),
                 ensure_ascii=False,
             )
+        if tool_name == "brainstack_proactive_mode":
+            return json.dumps(self._handle_brainstack_proactive_mode(args), ensure_ascii=False)
         if tool_name == "brainstack_remember":
             return json.dumps(
                 self._handle_brainstack_explicit_capture(
@@ -569,6 +572,12 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             store=self._store,
             principal_scope_key=self._principal_scope_key,
             args=control_args,
+            config=self._config,
+        )
+
+    def _handle_brainstack_proactive_mode(self, args: Mapping[str, Any]) -> Dict[str, Any]:
+        return set_proactive_mode_from_explicit_request(
+            args=args,
             config=self._config,
         )
 

@@ -13,6 +13,7 @@ from .core.proactive import ProactiveEventState
 
 
 TASK_STATUS_VALUES = ["pending", "in_progress", "blocked", "completed", "failed", "stale", "cancelled"]
+PROACTIVE_MODE_VALUES = ["disabled", "dry_run", "live"]
 
 
 def recall_tool_schema() -> Dict[str, Any]:
@@ -134,6 +135,7 @@ def proactive_control_tool_schema() -> Dict[str, Any]:
         "set_item_state",
         "snooze_item",
         "mute_item",
+        "set_mode",
         "set_kill_switch",
         "pause_proactive",
         "resume_proactive",
@@ -143,7 +145,7 @@ def proactive_control_tool_schema() -> Dict[str, Any]:
         "name": "brainstack_proactive_control",
         "description": (
             "Apply a limited Brainstack proactive control change only after an explicit user request. "
-            "Allowed actions: set_item_state, snooze_item, mute_item, set_kill_switch, "
+            "Allowed actions: set_item_state, snooze_item, mute_item, set_mode, set_kill_switch, "
             "pause_proactive, resume_proactive, set_cooldown_seconds. Does not schedule, notify, "
             "execute tasks, install Evolver, or create current assignment evidence."
         ),
@@ -155,6 +157,7 @@ def proactive_control_tool_schema() -> Dict[str, Any]:
                 "explicit_user_request": {"type": "boolean"},
                 "event_id": {"type": "string"},
                 "state": {"type": "string", "enum": [item.value for item in ProactiveEventState]},
+                "mode": {"type": "string", "enum": PROACTIVE_MODE_VALUES},
                 "kill_switch": {"type": "boolean"},
                 "cooldown_seconds": {"type": "integer", "minimum": 0, "maximum": 604800},
                 "snooze_until": {"type": "string"},
@@ -162,6 +165,29 @@ def proactive_control_tool_schema() -> Dict[str, Any]:
                 "trace_id": {"type": "string"},
             },
             "required": ["action", "explicit_user_request"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def proactive_mode_tool_schema() -> Dict[str, Any]:
+    return {
+        "name": "brainstack_proactive_mode",
+        "description": (
+            "Set Brainstack proactive runtime mode after an explicit user request. "
+            "Use this when the user asks to switch proactive to live, dry_run, or disabled. "
+            "This only updates the inspected Hermes config; it does not send a notification, "
+            "run the scheduler, execute tasks, or create current assignment evidence."
+        ),
+        "x_brainstack_tool_class": "explicit_proactive_mode_control",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string", "enum": PROACTIVE_MODE_VALUES},
+                "explicit_user_request": {"type": "boolean"},
+                "reason_code": {"type": "string"},
+            },
+            "required": ["mode", "explicit_user_request"],
             "additionalProperties": False,
         },
     }
@@ -324,6 +350,7 @@ def build_tool_schemas(
         proactive_status_tool_schema(),
         proactive_list_tool_schema(),
         proactive_inspect_tool_schema(),
+        proactive_mode_tool_schema(),
         explicit_capture_tool_schema(
             name="brainstack_remember",
             operation="remember",

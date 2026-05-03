@@ -189,6 +189,78 @@ def test_pause_resume_and_cooldown_controls_require_explicit_request(tmp_path: P
         provider.shutdown()
 
 
+def test_model_facing_proactive_mode_tool_requires_explicit_user_request(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        rejected = json.loads(provider.handle_tool_call("brainstack_proactive_mode", {"mode": "live"}))
+        assert rejected["status"] == "rejected"
+        assert rejected["reason_code"] == "EXPLICIT_USER_REQUEST_REQUIRED"
+        for non_literal in [False, "false", "true", 1, 0]:
+            rejected_non_literal = json.loads(
+                provider.handle_tool_call(
+                    "brainstack_proactive_mode",
+                    {"mode": "live", "explicit_user_request": non_literal},
+                )
+            )
+            assert rejected_non_literal["status"] == "rejected"
+            assert rejected_non_literal["reason_code"] == "EXPLICIT_USER_REQUEST_REQUIRED"
+    finally:
+        provider.shutdown()
+
+
+def test_model_facing_proactive_mode_tool_updates_runtime_mode(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        committed = json.loads(
+            provider.handle_tool_call(
+                "brainstack_proactive_mode",
+                {
+                    "mode": "dry_run",
+                    "explicit_user_request": True,
+                    "reason_code": "USER_REQUESTED_SAFE_TEST_MODE",
+                },
+            )
+        )
+        assert committed["status"] == "committed"
+        assert committed["action"] == "set_mode"
+        assert committed["proactive_mode"] == "dry_run"
+        assert committed["current_assignment_authority"] is False
+        assert committed["effective_without_container_restart"] is True
+        assert committed["effective_scope"] == "config_backed_status_and_next_proactive_pulse"
+        config_path = Path(committed["config_path"])
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert data["proactive_mode"] == "dry_run"
+        assert data["proactive_control_last_reason"] == "USER_REQUESTED_SAFE_TEST_MODE"
+
+        live = json.loads(
+            provider.handle_tool_call(
+                "brainstack_proactive_mode",
+                {"mode": "live", "explicit_user_request": True},
+            )
+        )
+        assert live["status"] == "committed"
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert data["proactive_mode"] == "live"
+    finally:
+        provider.shutdown()
+
+
+def test_model_facing_proactive_mode_tool_rejects_unknown_mode(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        rejected = json.loads(
+            provider.handle_tool_call(
+                "brainstack_proactive_mode",
+                {"mode": "automatic", "explicit_user_request": True},
+            )
+        )
+        assert rejected["status"] == "rejected"
+        assert rejected["reason_code"] == "INVALID_PROACTIVE_MODE"
+        assert rejected["allowed_modes"] == ["disabled", "dry_run", "live"]
+    finally:
+        provider.shutdown()
+
+
 def test_snooze_and_mute_item_controls_are_bounded_state_changes(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     try:

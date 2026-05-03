@@ -7,7 +7,7 @@ import yaml
 
 from brainstack import BrainstackMemoryProvider
 from brainstack.proactive_agent_contract import PROACTIVE_ALLOWED_CONTROL_ACTIONS
-from brainstack.tool_schemas import proactive_control_tool_schema
+from brainstack.tool_schemas import proactive_control_tool_schema, proactive_mode_tool_schema
 
 
 def _provider(tmp_path: Path) -> BrainstackMemoryProvider:
@@ -132,9 +132,22 @@ def test_proactive_control_tool_schema_matches_contract() -> None:
     properties = schema["parameters"]["properties"]
 
     assert sorted(properties["action"]["enum"]) == sorted(PROACTIVE_ALLOWED_CONTROL_ACTIONS)
+    assert "mode" in properties
+    assert sorted(properties["mode"]["enum"]) == ["disabled", "dry_run", "live"]
     assert "cooldown_seconds" in properties
     assert "snooze_until" in properties
     assert "execute_task" not in properties["action"]["enum"]
+
+
+def test_proactive_mode_tool_schema_is_model_facing_and_narrow() -> None:
+    schema = proactive_mode_tool_schema()
+    properties = schema["parameters"]["properties"]
+
+    assert schema["name"] == "brainstack_proactive_mode"
+    assert schema["x_brainstack_tool_class"] == "explicit_proactive_mode_control"
+    assert sorted(properties["mode"]["enum"]) == ["disabled", "dry_run", "live"]
+    assert set(properties) == {"mode", "explicit_user_request", "reason_code"}
+    assert schema["parameters"]["required"] == ["mode", "explicit_user_request"]
 
 
 def test_proactive_control_is_operator_only_not_model_facing(tmp_path: Path) -> None:
@@ -145,6 +158,7 @@ def test_proactive_control_is_operator_only_not_model_facing(tmp_path: Path) -> 
         operator_tool_names = {schema["name"] for schema in lifecycle["operator_only_tools"]}
 
         assert "brainstack_proactive_control" not in model_tool_names
+        assert "brainstack_proactive_mode" in model_tool_names
         assert "brainstack_proactive_control" in operator_tool_names
     finally:
         provider.shutdown()

@@ -22,6 +22,7 @@ PROACTIVE_ALLOWED_CONTROL_ACTIONS = (
     "set_item_state",
     "snooze_item",
     "mute_item",
+    "set_mode",
     "set_kill_switch",
     "pause_proactive",
     "resume_proactive",
@@ -516,7 +517,69 @@ def _update_runtime_config(
         key: value,
         "reason_code": "PROACTIVE_RUNTIME_CONFIG_UPDATED",
         "blocked_actions": list(PROACTIVE_BLOCKED_ACTIONS),
+        "current_assignment_authority": False,
+        "effective_without_container_restart": True,
+        "effective_scope": "config_backed_status_and_next_proactive_pulse",
     }
+
+
+def _normalize_proactive_mode(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _set_proactive_mode(
+    *,
+    config: Mapping[str, Any] | None,
+    mode: str,
+    action: str,
+    reason_code: str,
+) -> dict[str, Any]:
+    normalized_mode = _normalize_proactive_mode(mode)
+    if normalized_mode not in PROACTIVE_MODE_VALUES:
+        return {
+            "schema": PROACTIVE_AGENT_CONTROL_SCHEMA,
+            "operation": "control",
+            "action": action,
+            "status": "rejected",
+            "read_only": False,
+            "side_effect": False,
+            "mode": normalized_mode,
+            "allowed_modes": list(PROACTIVE_MODE_VALUES),
+            "reason_code": "INVALID_PROACTIVE_MODE",
+            "current_assignment_authority": False,
+        }
+    return _update_runtime_config(
+        config=config,
+        action=action,
+        key="proactive_mode",
+        value=normalized_mode,
+        reason_code=reason_code or "EXPLICIT_USER_REQUEST",
+    )
+
+
+def set_proactive_mode_from_explicit_request(
+    *,
+    args: Mapping[str, Any],
+    config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if args.get("explicit_user_request") is not True:
+        return {
+            "schema": PROACTIVE_AGENT_CONTROL_SCHEMA,
+            "operation": "control",
+            "action": "set_mode",
+            "status": "rejected",
+            "read_only": False,
+            "side_effect": False,
+            "reason_code": "EXPLICIT_USER_REQUEST_REQUIRED",
+            "error": "Changing proactive mode requires explicit_user_request=true.",
+            "current_assignment_authority": False,
+        }
+    return _set_proactive_mode(
+        config=config,
+        mode=str(args.get("mode") or ""),
+        action="set_mode",
+        reason_code=str(args.get("reason_code") or "EXPLICIT_USER_REQUEST"),
+    )
 
 
 def control_proactive_agent_surface(
@@ -531,6 +594,13 @@ def control_proactive_agent_surface(
         return rejection
     action = str(args.get("action") or "").strip()
     reason_code = str(args.get("reason_code") or ProactiveReasonCode.BLOCKED.value).strip()
+    if action == "set_mode":
+        return _set_proactive_mode(
+            config=config,
+            mode=str(args.get("mode") or ""),
+            action=action,
+            reason_code=reason_code or "EXPLICIT_USER_REQUEST",
+        )
     if action == "set_kill_switch":
         return _set_kill_switch(
             config=config,
