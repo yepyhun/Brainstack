@@ -60,8 +60,8 @@ def stats_tool_schema() -> Dict[str, Any]:
     return {
         "name": "brainstack_stats",
         "description": (
-            "Return scoped Brainstack memory-kernel health, row counts, and capability status. "
-            "Read-only; does not run repair or mutation."
+            "Return scoped Brainstack memory-kernel health, row counts, capability status, "
+            "and persistent-bloat status. Read-only; does not run repair, cleanup, or mutation."
         ),
         "x_brainstack_tool_class": "read_only_memory_health",
         "parameters": {

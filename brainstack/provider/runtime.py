@@ -69,6 +69,7 @@ from ..operating_truth import (
     should_promote_open_decision,
 )
 from ..output_contract import validate_output_against_contract
+from ..persistent_bloat import build_persistent_bloat_report
 from ..provider_diagnostics import (
     build_provider_lifecycle_status,
     build_provider_memory_kernel_doctor,

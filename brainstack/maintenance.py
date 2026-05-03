@@ -2,9 +2,21 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping
 
+from .persistent_bloat import build_persistent_bloat_report
+
 
 MAINTENANCE_SCHEMA_VERSION = "brainstack.maintenance.v1"
 MAINTENANCE_CLASS_SEMANTIC_INDEX = "semantic_index"
+MAINTENANCE_CLASS_PERSISTENT_BLOAT = "persistent_bloat"
+UNSAFE_PERSISTENT_BLOAT_APPLY_CLASSES = {
+    MAINTENANCE_CLASS_PERSISTENT_BLOAT,
+    "profile_duplicate_content",
+    "transcript_archive",
+    "continuity_archive",
+    "graph_conflict_review",
+    "canonical_event_cleanup",
+    "receipt_cleanup",
+}
 SUPPORTED_APPLY_CLASSES = {MAINTENANCE_CLASS_SEMANTIC_INDEX}
 
 
@@ -42,6 +54,9 @@ def build_maintenance_dry_run(store: Any) -> Dict[str, Any]:
     ).fetchone()
     duplicate_profile_count = int(profile_duplicate_rows["count"] if profile_duplicate_rows is not None else 0)
     graph_conflicts = store.list_graph_conflicts(limit=25)
+    persistent_bloat = build_persistent_bloat_report(store)
+    bloat_policy_candidates = list(persistent_bloat.get("policy_preview") or [])
+    bloat_candidate_count = sum(int(item.get("candidate_count") or 0) for item in bloat_policy_candidates)
 
     candidates = [
         _candidate(
@@ -65,6 +80,13 @@ def build_maintenance_dry_run(store: Any) -> Dict[str, Any]:
             apply_supported=False,
             risk="conflict_resolution_requires_authority",
         ),
+        _candidate(
+            maintenance_class=MAINTENANCE_CLASS_PERSISTENT_BLOAT,
+            reason="Persistent bloat policy candidates require review unless the operation is derived-index-only.",
+            count=bloat_candidate_count,
+            apply_supported=False,
+            risk="source_receipt_answerability_preservation_required",
+        ),
     ]
     return {
         "schema": MAINTENANCE_SCHEMA_VERSION,
@@ -75,6 +97,8 @@ def build_maintenance_dry_run(store: Any) -> Dict[str, Any]:
         "appliable_candidate_count": sum(
             item["candidate_count"] for item in candidates if item["apply_supported"]
         ),
+        "persistent_bloat": persistent_bloat,
+        "persistent_bloat_policy": bloat_policy_candidates,
     }
 
 
@@ -100,6 +124,20 @@ def run_bounded_maintenance(
     if maintenance_class not in SUPPORTED_APPLY_CLASSES:
         receipt["status"] = "rejected"
         receipt["no_op_reasons"].append("maintenance_class_apply_not_supported")
+        if maintenance_class in UNSAFE_PERSISTENT_BLOAT_APPLY_CLASSES:
+            receipt["no_op_reasons"].append("persistent_bloat_cleanup_requires_explicit_review")
+            receipt["preservation_contract"] = {
+                "truth_mutation": False,
+                "raw_history_mutation": False,
+                "preserves": [
+                    "source_ref",
+                    "receipt",
+                    "answerability",
+                    "current_prior_truth",
+                    "conflict_audit_trail",
+                    "audit_history",
+                ],
+            }
         return receipt
     if maintenance_class == MAINTENANCE_CLASS_SEMANTIC_INDEX:
         before = store.semantic_evidence_channel_status()
@@ -126,6 +164,8 @@ def normalize_maintenance_args(args: Mapping[str, Any] | None) -> Dict[str, Any]
     payload = dict(args or {}) if isinstance(args, Mapping) else {}
     apply_raw = payload.get("apply", False)
     maintenance_class = str(payload.get("maintenance_class") or MAINTENANCE_CLASS_SEMANTIC_INDEX).strip()
+    if maintenance_class == "persistent_bloat_report":
+        maintenance_class = MAINTENANCE_CLASS_PERSISTENT_BLOAT
     return {
         "apply": apply_raw if isinstance(apply_raw, bool) else str(apply_raw).strip().lower() in {"1", "true", "yes"},
         "maintenance_class": maintenance_class or MAINTENANCE_CLASS_SEMANTIC_INDEX,

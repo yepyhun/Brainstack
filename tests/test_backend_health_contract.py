@@ -101,3 +101,34 @@ def test_query_inspect_and_stats_expose_same_backend_health_contract(tmp_path: P
         assert inspect_health["agent_summary"] == stats_health["agent_summary"]
     finally:
         store.close()
+
+
+def test_brainstack_stats_exposes_bounded_persistent_bloat_failure(tmp_path: Path) -> None:
+    store = _open_store(tmp_path, graph_backend="sqlite", corpus_backend="sqlite")
+
+    def broken_bloat_report() -> dict[str, object]:
+        raise RuntimeError(f"private path should not leak: {PRIVATE_PATH}")
+
+    try:
+        stats = handle_brainstack_stats(
+            args={},
+            principal_scope_key="principal:test",
+            lifecycle_status=lambda: {"schema": "test.lifecycle", "status": "active"},
+            memory_kernel_doctor=lambda strict=False: build_memory_kernel_doctor(
+                store,
+                strict=strict,
+                tier2_state={"enabled": False, "running": False},
+            ),
+            last_maintenance_receipt=None,
+            persistent_bloat_report=broken_bloat_report,
+        )
+        rendered = str(stats)
+
+        assert stats["backend_health"]["schema"] == "brainstack.backend_health_contract.v1"
+        assert stats["persistent_bloat"]["schema"] == "brainstack.persistent_bloat_report.v1"
+        assert stats["persistent_bloat"]["status"] == "fail"
+        assert stats["persistent_bloat"]["public_safe"] is True
+        assert stats["persistent_bloat"]["issues"] == ["PERSISTENT_BLOAT_REPORT_ERROR"]
+        assert PRIVATE_PATH not in rendered
+    finally:
+        store.close()

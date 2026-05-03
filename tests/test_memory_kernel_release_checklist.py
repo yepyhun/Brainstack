@@ -8,12 +8,14 @@ from scripts.run_memory_kernel_release_checklist import (
     REQUIRED_OPERATION_CLASSES,
     UNBREAKABLE_TARGET,
     _check_hermes_proactive_runtime_parity,
+    _check_persistent_bloat_rebuild,
     _check_projection_semantics_runtime_parity,
     _check_release_claim_contract,
     _git_hygiene_from_lists,
     _report,
     CheckResult,
 )
+from scripts.run_persistent_bloat_soak import PRIVATE_SOAK_SENTINEL
 
 
 def _valid_contract() -> dict[str, object]:
@@ -116,6 +118,25 @@ def test_hermes_proactive_runtime_parity_check_passes(tmp_path: Path) -> None:
     }
 
 
+def test_persistent_bloat_rebuild_release_check_passes(tmp_path: Path) -> None:
+    result = _check_persistent_bloat_rebuild(tmp_path)
+    rendered = json.dumps(result.summary, ensure_ascii=False, sort_keys=True)
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["proof_status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["proof_public_safe"] is True
+    assert result.summary["issue_count"] == 0
+    assert result.summary["mismatch_count"] == 0
+    assert result.summary["persistent_bloat_apply_status"] == "rejected"
+    assert result.summary["preservation_contract"]["truth_mutation"] is False
+    assert result.summary["preservation_contract"]["raw_history_mutation"] is False
+    assert result.summary["semantic_index_truth_mutation_unsafe"] is False
+    assert result.summary["critical_counters_zero"] is True
+    assert PRIVATE_SOAK_SENTINEL not in rendered
+
+
 def test_git_hygiene_blocks_dirty_source() -> None:
     summary = _git_hygiene_from_lists([" M brainstack/core/example.py"], [])
 
@@ -191,6 +212,21 @@ def test_release_report_fails_tier2_unbreakable_operation_even_in_dev_mode() -> 
     assert report["status"] == "fail"
     assert report["release_allowed"] is False
     assert report["non_git_failures"] == ["tier2_unbreakable_operation"]
+
+
+def test_release_report_fails_persistent_bloat_rebuild_even_in_dev_mode() -> None:
+    checks = [
+        CheckResult("release_claim_contract", "pass", ["contract"], 0, {}),
+        CheckResult("tier2_unbreakable_operation", "pass", ["tier2"], 0, {}),
+        CheckResult("persistent_bloat_rebuild", "fail", ["bloat"], 1, {"status": "fail"}),
+        CheckResult("git_hygiene", "fail", ["git"], 0, {"git_dirty": True}),
+    ]
+
+    report = _report(checks, ignore_git_dirty_for_dev=True)
+
+    assert report["status"] == "fail"
+    assert report["release_allowed"] is False
+    assert report["non_git_failures"] == ["persistent_bloat_rebuild"]
 
 
 def test_release_report_fails_phase249_ralph_gate_even_in_dev_mode() -> None:

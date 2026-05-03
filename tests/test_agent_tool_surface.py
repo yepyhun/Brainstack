@@ -4,6 +4,18 @@ import json
 from pathlib import Path
 
 from brainstack import BrainstackMemoryProvider
+from scripts.run_persistent_bloat_soak import PRIVATE_SOAK_SENTINEL, seed_persistent_bloat_soak
+
+RAW_TEXT_SENTINEL_KEYS = (
+    "raw_text",
+    "raw_private_text",
+    "full_prompt",
+    "prompt_text",
+    "message_text",
+    "full_text",
+    "raw_output",
+    "private_value",
+)
 
 
 def _provider(tmp_path: Path) -> BrainstackMemoryProvider:
@@ -139,10 +151,49 @@ def test_disabled_memory_write_tools_return_explicit_phase_gate(tmp_path: Path) 
 def test_brainstack_stats_tool_wraps_doctor_report(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     try:
+        assert provider._store is not None
+        seed_persistent_bloat_soak(provider._store, iterations=8)
+        before_counts = {
+            "profile_items": provider._store.conn.execute("SELECT COUNT(*) AS count FROM profile_items").fetchone()["count"],
+            "canonical_memory_events": provider._store.conn.execute(
+                "SELECT COUNT(*) AS count FROM canonical_memory_events"
+            ).fetchone()["count"],
+        }
+
         payload = json.loads(provider.handle_tool_call("brainstack_stats", {"strict": True}))
+
+        after_counts = {
+            "profile_items": provider._store.conn.execute("SELECT COUNT(*) AS count FROM profile_items").fetchone()["count"],
+            "canonical_memory_events": provider._store.conn.execute(
+                "SELECT COUNT(*) AS count FROM canonical_memory_events"
+            ).fetchone()["count"],
+        }
+        rendered = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        bloat = payload["persistent_bloat"]
+        assert before_counts == after_counts
         assert payload["schema"] == "brainstack.tool_stats.v1"
         assert payload["read_only"] is True
+        assert payload["lifecycle"]["schema"] == "brainstack.provider_lifecycle.v1"
+        assert "maintenance" in payload
+        assert payload["backend_health"]["schema"] == "brainstack.backend_health_contract.v1"
         assert payload["report"]["schema"] == "brainstack.memory_kernel_doctor.v1"
         assert payload["report"]["strict"] is True
+        assert bloat["schema"] == "brainstack.persistent_bloat_report.v1"
+        assert bloat["read_only"] is True
+        assert bloat["public_safe"] is True
+        assert isinstance(bloat["issue_count"], int)
+        assert set(bloat["metrics"]) >= {
+            "write_amplification",
+            "duplicate_strength_inflation",
+            "support_only_accumulation",
+            "active_packet_growth",
+            "stale_prior_retention",
+            "projection_rebuild_size",
+        }
+        assert "policy_preview" in bloat
+        assert "critical_counters" in bloat
+        assert PRIVATE_SOAK_SENTINEL not in rendered
+        for forbidden_key in RAW_TEXT_SENTINEL_KEYS:
+            assert f'"{forbidden_key}"' not in rendered
     finally:
         provider.shutdown()

@@ -6,6 +6,7 @@ from typing import Any
 from .answerability import build_memory_answerability
 from .authority_policy import is_current_assignment_authority
 from .diagnostics import build_memory_kernel_doctor, build_query_inspect
+from .persistent_bloat import PERSISTENT_BLOAT_REPORT_SCHEMA
 
 
 def _normalize_compact_text(value: Any) -> str:
@@ -354,6 +355,69 @@ def handle_brainstack_inspect(
     }
 
 
+def _persistent_bloat_unavailable(
+    *,
+    principal_scope_key: str,
+    status: str,
+    issue_code: str,
+) -> dict[str, Any]:
+    return {
+        "schema": PERSISTENT_BLOAT_REPORT_SCHEMA,
+        "status": status,
+        "read_only": True,
+        "public_safe": True,
+        "scope": {
+            "principal_scope_key": principal_scope_key,
+            "scope_filter_applied": bool(principal_scope_key),
+            "scope_note": "Persistent bloat report is unavailable; no storage mutation was attempted.",
+        },
+        "lanes": {},
+        "metrics": {},
+        "metric_statuses": {},
+        "policy_preview": [],
+        "issues": [issue_code],
+        "issue_count": 1,
+        "critical_counters": {
+            "raw_private_text_leak": 0,
+            "truth_cleanup_apply_supported": 0,
+            "receipt_preservation_missing": 0,
+            "projection_rebuild_counters_nonzero": 0,
+        },
+    }
+
+
+def _safe_persistent_bloat_report(
+    *,
+    principal_scope_key: str,
+    persistent_bloat_report: Callable[[], dict[str, Any]] | None,
+) -> dict[str, Any]:
+    if persistent_bloat_report is None:
+        return _persistent_bloat_unavailable(
+            principal_scope_key=principal_scope_key,
+            status="unavailable",
+            issue_code="PERSISTENT_BLOAT_STORE_UNAVAILABLE",
+        )
+    try:
+        raw_report = persistent_bloat_report()
+    except Exception:
+        return _persistent_bloat_unavailable(
+            principal_scope_key=principal_scope_key,
+            status="fail",
+            issue_code="PERSISTENT_BLOAT_REPORT_ERROR",
+        )
+    if not isinstance(raw_report, Mapping):
+        return _persistent_bloat_unavailable(
+            principal_scope_key=principal_scope_key,
+            status="fail",
+            issue_code="PERSISTENT_BLOAT_REPORT_MALFORMED",
+        )
+    report = dict(raw_report)
+    report.setdefault("schema", PERSISTENT_BLOAT_REPORT_SCHEMA)
+    report.setdefault("read_only", True)
+    report.setdefault("public_safe", True)
+    return report
+
+
 def handle_brainstack_stats(
     *,
     args: Mapping[str, Any],
@@ -361,11 +425,16 @@ def handle_brainstack_stats(
     lifecycle_status: Callable[[], dict[str, Any]],
     memory_kernel_doctor: Callable[..., dict[str, Any]],
     last_maintenance_receipt: Mapping[str, Any] | None,
+    persistent_bloat_report: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     strict_value = args.get("strict", False) if isinstance(args, Mapping) else False
     strict = strict_value if isinstance(strict_value, bool) else str(strict_value).strip().lower() in {"1", "true", "yes"}
     report = memory_kernel_doctor(strict=strict)
     raw_backend_health = report.get("backend_health") if isinstance(report, Mapping) else None
+    persistent_bloat = _safe_persistent_bloat_report(
+        principal_scope_key=principal_scope_key,
+        persistent_bloat_report=persistent_bloat_report,
+    )
     return {
         "schema": "brainstack.tool_stats.v1",
         "tool_name": "brainstack_stats",
@@ -374,5 +443,6 @@ def handle_brainstack_stats(
         "lifecycle": lifecycle_status(),
         "maintenance": dict(last_maintenance_receipt or {}),
         "backend_health": dict(raw_backend_health) if isinstance(raw_backend_health, Mapping) else {},
+        "persistent_bloat": persistent_bloat,
         "report": report,
     }

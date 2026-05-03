@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -81,12 +82,19 @@ class CheckResult:
 
 
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    pythonpath_entries = [str(ROOT)]
+    if existing_pythonpath:
+        pythonpath_entries.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
     return subprocess.run(
         command,
         cwd=ROOT,
         text=True,
         capture_output=True,
         check=False,
+        env=env,
     )
 
 
@@ -110,6 +118,15 @@ def _as_string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, str) and item.strip()]
+
+
+def _all_zero_counters(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    try:
+        return all(int(counter or 0) == 0 for counter in value.values())
+    except (TypeError, ValueError):
+        return False
 
 
 def _check_release_claim_contract(
@@ -615,6 +632,67 @@ def _check_projection_semantics_runtime_parity(tmp: Path) -> CheckResult:
     )
 
 
+def _check_persistent_bloat_rebuild(tmp: Path) -> CheckResult:
+    out = tmp / "persistent_bloat_rebuild.json"
+    command = [sys.executable, "scripts/verify_persistent_bloat_rebuild.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), dict) else {}
+    maintenance = proof.get("maintenance") if isinstance(proof.get("maintenance"), dict) else {}
+    preservation = maintenance.get("persistent_bloat_preservation_contract")
+    preservation_contract = preservation if isinstance(preservation, dict) else {}
+    issues = proof.get("issues") if isinstance(proof.get("issues"), list) else []
+    mismatches = proof.get("mismatches") if isinstance(proof.get("mismatches"), list) else []
+    critical_counters = proof.get("critical_counters") if isinstance(proof.get("critical_counters"), dict) else {}
+    semantic_changes = maintenance.get("semantic_index_changes")
+    semantic_index_changes = semantic_changes if isinstance(semantic_changes, list) else []
+    semantic_index_truth_mutation_unsafe = any(
+        isinstance(change, dict) and change.get("truth_mutation") is not False
+        for change in semantic_index_changes
+    )
+    critical_counters_zero = _all_zero_counters(critical_counters)
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and proof.get("status") == "pass"
+        and proof.get("public_safe") is True
+        and issues == []
+        and mismatches == []
+        and critical_counters_zero
+        and maintenance.get("persistent_bloat_apply_status") == "rejected"
+        and preservation_contract.get("truth_mutation") is False
+        and preservation_contract.get("raw_history_mutation") is False
+        and not semantic_index_truth_mutation_unsafe
+    )
+    return CheckResult(
+        name="persistent_bloat_rebuild",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "proof_status": proof.get("status"),
+            "public_safe": data.get("public_safe"),
+            "proof_public_safe": proof.get("public_safe"),
+            "issue_count": len(issues),
+            "mismatch_count": len(mismatches),
+            "persistent_bloat_apply_status": maintenance.get("persistent_bloat_apply_status"),
+            "persistent_bloat_no_op_reasons": list(maintenance.get("persistent_bloat_no_op_reasons") or [])[:8],
+            "preservation_contract": {
+                "truth_mutation": preservation_contract.get("truth_mutation"),
+                "raw_history_mutation": preservation_contract.get("raw_history_mutation"),
+                "preserves": list(preservation_contract.get("preserves") or [])[:8],
+            },
+            "semantic_index_apply_status": maintenance.get("semantic_index_apply_status"),
+            "semantic_index_change_count": len(semantic_index_changes),
+            "semantic_index_truth_mutation_unsafe": semantic_index_truth_mutation_unsafe,
+            "critical_counters": dict(critical_counters),
+            "critical_counters_zero": critical_counters_zero,
+        },
+    )
+
+
 def _check_hermes_proactive_runtime_parity(tmp: Path) -> CheckResult:
     out = tmp / "hermes_proactive_runtime_parity.json"
     command = [sys.executable, "scripts/verify_hermes_proactive_runtime_parity.py", "--out", str(out)]
@@ -811,6 +889,7 @@ def run_checklist(
             _check_public_fixtures(),
             _check_projection_semantics_runtime_parity(tmp),
             _check_hermes_proactive_runtime_parity(tmp),
+            _check_persistent_bloat_rebuild(tmp),
             _check_public_payload_leaks(),
             _check_git_hygiene(),
         ]

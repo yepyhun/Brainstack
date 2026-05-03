@@ -40,6 +40,7 @@ from .runtime import (
     build_provider_lifecycle_status,
     build_provider_memory_kernel_doctor,
     build_provider_query_inspect,
+    build_persistent_bloat_report,
     build_tool_schemas,
     explicit_capture_tool_schema,
     handle_brainstack_inspect,
@@ -587,6 +588,14 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             query_inspect=self.query_inspect,
         )
 
+    def persistent_bloat_report(self) -> Dict[str, Any]:
+        if self._store is None:
+            raise RuntimeError("Brainstack store is not initialized.")
+        return build_persistent_bloat_report(
+            self._store,
+            principal_scope_key=self._principal_scope_key,
+        )
+
     def _handle_brainstack_stats(self, args: Mapping[str, Any]) -> Dict[str, Any]:
         return handle_brainstack_stats(
             args=args,
@@ -594,6 +603,7 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             lifecycle_status=self.lifecycle_status,
             memory_kernel_doctor=self.memory_kernel_doctor,
             last_maintenance_receipt=self._last_maintenance_receipt,
+            persistent_bloat_report=self.persistent_bloat_report if self._store is not None else None,
         )
 
     def lifecycle_status(self) -> Dict[str, Any]:
