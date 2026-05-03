@@ -12,6 +12,7 @@ from .literal_index import detect_literal_tokens, redact_literal_text, semantic_
 from .answerability import build_memory_answerability
 from .backend_health_contract import build_backend_health_contract
 from .retrieval_candidate import build_candidate_trace
+from .trace_tiering import build_compact_query_trace
 from .working_memory_allocator import build_global_allocator_shadow
 
 
@@ -605,6 +606,7 @@ def build_query_inspect(
     operating_match_limit: int = 3,
     system_substrate: Mapping[str, Any] | None = None,
     render_ordinary_contract: bool = False,
+    trace_mode: str = "full",
 ) -> Dict[str, Any]:
     """Inspect one query path without writing retrieval telemetry."""
     packet = build_working_memory_packet(
@@ -661,7 +663,7 @@ def build_query_inspect(
             if isinstance(row.get("event"), Mapping)
         ]
     current_truth_view = rebuild_current_truth_view(canonical_events)
-    return {
+    report = {
         "schema": "brainstack.query_inspect.v1",
         "query": str(query or ""),
         "session_id": str(session_id or ""),
@@ -707,3 +709,8 @@ def build_query_inspect(
             selected_by_shelf=selected_by_shelf,
         ),
     }
+    if str(trace_mode or "full").strip().casefold() == "compact":
+        return build_compact_query_trace(report)
+    report["trace_mode"] = "full"
+    report["compact_trace_available"] = True
+    return report
