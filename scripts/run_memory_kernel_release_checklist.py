@@ -11,9 +11,12 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from brainstack.benchmark_transparency import REQUIRED_BENCHMARK_VARIANTS
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RELEASE_CLAIM_CONTRACT = ROOT / ".planning" / "release" / "RELEASE-CLAIM-CONTRACT.json"
@@ -284,6 +287,90 @@ def _check_release_claim_contract(
     )
 
 
+def _normalize_release_tag(tag: str) -> str:
+    value = str(tag or "").strip()
+    if value.startswith("refs/tags/"):
+        value = value.removeprefix("refs/tags/")
+    if value.startswith("v"):
+        value = value[1:]
+    return value
+
+
+def _current_head_tags() -> list[str]:
+    proc = _run(["git", "tag", "--points-at", "HEAD"])
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _pyproject_version(pyproject_path: Path) -> tuple[str, list[dict[str, Any]]]:
+    issues: list[dict[str, Any]] = []
+    if not pyproject_path.exists():
+        return "", [{"code": "missing_pyproject", "path": str(pyproject_path)}]
+    try:
+        data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return "", [{"code": "invalid_pyproject", "path": str(pyproject_path), "error": str(exc)}]
+    project = data.get("project")
+    if not isinstance(project, dict):
+        issues.append({"code": "missing_project_section", "path": str(pyproject_path)})
+        return "", issues
+    version = str(project.get("version") or "").strip()
+    if not version:
+        issues.append({"code": "missing_project_version", "path": str(pyproject_path)})
+    return version, issues
+
+
+def _version_metadata_parity_summary(
+    *,
+    pyproject_path: Path = ROOT / "pyproject.toml",
+    exact_tags: list[str] | None = None,
+) -> dict[str, Any]:
+    pyproject_version, issues = _pyproject_version(pyproject_path)
+    tag_names = list(exact_tags if exact_tags is not None else _current_head_tags())
+    release_tags = [tag for tag in tag_names if re.fullmatch(r"v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", tag)]
+    tag_versions = sorted({_normalize_release_tag(tag) for tag in release_tags})
+    if len(tag_versions) > 1:
+        issues.append({"code": "multiple_exact_release_tag_versions", "tag_versions": tag_versions})
+    if pyproject_version and tag_versions and pyproject_version not in tag_versions:
+        issues.append(
+            {
+                "code": "version_metadata_mismatch",
+                "pyproject_version": pyproject_version,
+                "tag_versions": tag_versions,
+            }
+        )
+    parity_scope = "exact_release_tag" if tag_versions else "not_tagged_head"
+    status = _status(not issues)
+    return {
+        "schema": "brainstack.version_metadata_parity.v1",
+        "status": status,
+        "parity_scope": parity_scope,
+        "pyproject_path": str(pyproject_path),
+        "pyproject_version": pyproject_version,
+        "exact_release_tags": release_tags,
+        "exact_release_tag_versions": tag_versions,
+        "issue_count": len(issues),
+        "issues": issues[:20],
+    }
+
+
+def _check_version_metadata_parity(
+    *,
+    pyproject_path: Path = ROOT / "pyproject.toml",
+    exact_tags: list[str] | None = None,
+) -> CheckResult:
+    summary = _version_metadata_parity_summary(pyproject_path=pyproject_path, exact_tags=exact_tags)
+    passed = summary.get("status") == "pass"
+    return CheckResult(
+        name="version_metadata_parity",
+        status=_status(passed),
+        command=["pyproject version", "git tag --points-at HEAD"],
+        returncode=0 if passed else 1,
+        summary=summary,
+    )
+
+
 def _check_tier2_unbreakable_operation(tmp: Path) -> CheckResult:
     out = tmp / "tier2_unbreakable_operation_audit.json"
     phase_dir = tmp / "tier2_unbreakable_artifacts"
@@ -396,6 +483,65 @@ def _check_evidence_trace(tmp: Path) -> CheckResult:
             "unknown_reason_code_count": data.get("unknown_reason_code_count"),
             "raw_text_issue_count": data.get("raw_text_issue_count"),
             "issue_count": data.get("issue_count"),
+        },
+    )
+
+
+def _check_benchmark_transparency(tmp: Path) -> CheckResult:
+    out = tmp / "benchmark_transparency.json"
+    command = [
+        sys.executable,
+        "scripts/run_benchmark_transparency.py",
+        "--budget-max-candidate-tokens",
+        "70",
+        "--out",
+        str(out),
+    ]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    variants = data.get("variants") if isinstance(data.get("variants"), dict) else {}
+    off = variants.get("packet_budget_off") if isinstance(variants.get("packet_budget_off"), dict) else {}
+    shadow = variants.get("packet_budget_shadow") if isinstance(variants.get("packet_budget_shadow"), dict) else {}
+    active = variants.get("packet_budget_active") if isinstance(variants.get("packet_budget_active"), dict) else {}
+    off_metrics = off.get("metrics") if isinstance(off.get("metrics"), dict) else {}
+    active_metrics = active.get("metrics") if isinstance(active.get("metrics"), dict) else {}
+    active_budget = active.get("budget_summary") if isinstance(active.get("budget_summary"), dict) else {}
+    shadow_budget = shadow.get("budget_summary") if isinstance(shadow.get("budget_summary"), dict) else {}
+    schema_issues = data.get("schema_issues") if isinstance(data.get("schema_issues"), list) else []
+    off_precision = off_metrics.get("context_precision")
+    active_precision = active_metrics.get("context_precision")
+    active_recall = active_metrics.get("context_recall")
+    active_protected_drops = active.get("protected_truth_drop_attempts")
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and not schema_issues
+        and len(variants) >= len(REQUIRED_BENCHMARK_VARIANTS)
+        and isinstance(off_precision, (int, float))
+        and isinstance(active_precision, (int, float))
+        and active_precision > off_precision
+        and active_recall == 1.0
+        and active_protected_drops == 0
+        and shadow_budget.get("applied_to_output") is False
+        and active_budget.get("applied_to_output") is True
+    )
+    return CheckResult(
+        name="benchmark_transparency",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "schema_issue_count": len(schema_issues),
+            "variant_count": len(variants),
+            "off_context_precision": off_precision,
+            "active_context_precision": active_precision,
+            "active_context_recall": active_recall,
+            "active_protected_truth_drop_attempts": active_protected_drops,
+            "shadow_applied_to_output": shadow_budget.get("applied_to_output"),
+            "active_applied_to_output": active_budget.get("applied_to_output"),
+            "public_safe": data.get("public_safe"),
         },
     )
 
@@ -928,10 +1074,12 @@ def run_checklist(
         tmp = Path(temp)
         checks = [
             _check_release_claim_contract(release_claim_contract, release_notes),
+            _check_version_metadata_parity(),
             _check_tier2_unbreakable_operation(tmp),
             _check_phase249_ralph_gate(tmp),
             _check_public_corpus(tmp),
             _check_evidence_trace(tmp),
+            _check_benchmark_transparency(tmp),
             _check_packet_budget(tmp),
             _check_active_packet_budget(tmp),
             _check_packet_budget_soak(tmp),

@@ -7,13 +7,16 @@ from scripts.run_memory_kernel_release_checklist import (
     GATE_EVASION_PATTERNS,
     REQUIRED_OPERATION_CLASSES,
     UNBREAKABLE_TARGET,
+    _check_benchmark_transparency,
     _check_hermes_proactive_runtime_parity,
     _check_persistent_bloat_rebuild,
     _check_projection_semantics_runtime_parity,
     _check_release_claim_contract,
     _check_tier2_extraction_quality,
+    _check_version_metadata_parity,
     _git_hygiene_from_lists,
     _report,
+    _version_metadata_parity_summary,
     CheckResult,
 )
 from scripts.run_persistent_bloat_soak import PRIVATE_SOAK_SENTINEL
@@ -87,6 +90,33 @@ def _write_contract_and_notes(tmp_path: Path, contract: dict[str, object] | None
     return contract_path, notes_path
 
 
+def test_benchmark_transparency_release_check_passes(tmp_path: Path) -> None:
+    result = _check_benchmark_transparency(tmp_path)
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["schema_issue_count"] == 0
+    assert result.summary["variant_count"] == 5
+    assert result.summary["off_context_precision"] < result.summary["active_context_precision"]
+    assert result.summary["active_context_recall"] == 1.0
+    assert result.summary["active_protected_truth_drop_attempts"] == 0
+
+
+def test_release_report_fails_benchmark_transparency_even_in_dev_mode() -> None:
+    checks = [
+        CheckResult("release_claim_contract", "pass", ["contract"], 0, {}),
+        CheckResult("version_metadata_parity", "pass", ["version"], 0, {}),
+        CheckResult("benchmark_transparency", "fail", ["benchmark"], 1, {"status": "fail"}),
+        CheckResult("git_hygiene", "fail", ["git"], 0, {"git_dirty": True}),
+    ]
+
+    report = _report(checks, ignore_git_dirty_for_dev=True)
+
+    assert report["status"] == "fail"
+    assert report["release_allowed"] is False
+    assert report["non_git_failures"] == ["benchmark_transparency"]
+
+
 def test_projection_semantics_runtime_parity_check_passes(tmp_path: Path) -> None:
     result = _check_projection_semantics_runtime_parity(tmp_path)
 
@@ -153,6 +183,50 @@ def test_tier2_extraction_quality_release_check_passes(tmp_path: Path) -> None:
     assert result.summary["resolved_failure_bundle_count"] >= 3
     assert result.summary["unresolved_failure_bundle_count"] == 0
     assert "fixture proof" in rendered
+
+
+def test_version_metadata_parity_blocks_exact_tag_mismatch(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "brainstack-hermes-plugin"\nversion = "1.0.56"\n',
+        encoding="utf-8",
+    )
+
+    summary = _version_metadata_parity_summary(pyproject_path=pyproject, exact_tags=["v1.0.57"])
+
+    assert summary["status"] == "fail"
+    assert summary["pyproject_version"] == "1.0.56"
+    assert summary["exact_release_tag_versions"] == ["1.0.57"]
+    assert {"code": "version_metadata_mismatch", "pyproject_version": "1.0.56", "tag_versions": ["1.0.57"]} in summary["issues"]
+
+
+def test_version_metadata_parity_passes_matching_exact_tag(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "brainstack-hermes-plugin"\nversion = "1.0.57"\n',
+        encoding="utf-8",
+    )
+
+    result = _check_version_metadata_parity(pyproject_path=pyproject, exact_tags=["v1.0.57"])
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["pyproject_version"] == "1.0.57"
+    assert result.summary["exact_release_tag_versions"] == ["1.0.57"]
+
+
+def test_version_metadata_parity_is_explicit_when_head_has_no_release_tag(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "brainstack-hermes-plugin"\nversion = "1.0.57"\n',
+        encoding="utf-8",
+    )
+
+    summary = _version_metadata_parity_summary(pyproject_path=pyproject, exact_tags=[])
+
+    assert summary["status"] == "pass"
+    assert summary["exact_release_tags"] == []
+    assert summary["parity_scope"] == "not_tagged_head"
 
 
 def test_git_hygiene_blocks_dirty_source() -> None:
