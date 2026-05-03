@@ -81,6 +81,12 @@ def _classify(file: str, method: str, caller: str) -> tuple[str, str]:
         return "TEST_OR_CANARY_SEED", "adaptive evidence hotpath verifier fixture seed"
     if file.startswith("scripts/verify_adaptive_evidence_kernel.py"):
         return "TEST_OR_CANARY_SEED", "adaptive evidence kernel verifier fixture seed"
+    if file.startswith("scripts/verify_fts5_fast_path.py"):
+        return "TEST_OR_CANARY_SEED", "FTS5 fast-path verifier fixture seed"
+    if file.startswith("scripts/verify_trace_tiering.py"):
+        return "TEST_OR_CANARY_SEED", "trace-tiering verifier fixture seed"
+    if file.startswith("scripts/verify_persistent_bloat_policy.py"):
+        return "TEST_OR_CANARY_SEED", "persistent-bloat policy verifier fixture seed"
     if file.startswith("scripts/run_packet_budget_soak.py"):
         return "TEST_OR_CANARY_SEED", "packet-budget soak measurement fixture seed"
     if file.startswith("scripts/run_persistent_bloat_soak.py"):

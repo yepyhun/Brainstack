@@ -715,6 +715,90 @@ def _check_adaptive_evidence_kernel(tmp: Path) -> CheckResult:
     )
 
 
+def _check_adaptive_evidence_performance_completion(tmp: Path) -> CheckResult:
+    source_hermes = os.environ.get("BRAINSTACK_RELEASE_HERMES_SOURCE", "").strip()
+    checks: list[dict[str, Any]] = []
+
+    def run_named(name: str, command: list[str], out: Path) -> dict[str, Any]:
+        proc = _run(command)
+        data = _load_json(out) if out.exists() else {}
+        return {
+            "name": name,
+            "returncode": proc.returncode,
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "summary": data.get("summary") if isinstance(data.get("summary"), dict) else {},
+        }
+
+    if source_hermes:
+        fresh_out = tmp / "fresh_hermes_brainstack_install.json"
+        checks.append(
+            run_named(
+                "fresh_hermes_install",
+                [
+                    sys.executable,
+                    "scripts/verify_fresh_hermes_brainstack_install.py",
+                    "--source-hermes",
+                    source_hermes,
+                    "--out",
+                    str(fresh_out),
+                ],
+                fresh_out,
+            )
+        )
+    else:
+        checks.append(
+            {
+                "name": "fresh_hermes_install",
+                "returncode": 2,
+                "status": "fail",
+                "public_safe": True,
+                "summary": {"missing_env": "BRAINSTACK_RELEASE_HERMES_SOURCE"},
+            }
+        )
+
+    commands = [
+        (
+            "performance_dashboard",
+            [sys.executable, "scripts/measure_adaptive_evidence_performance.py", "--iterations", "5"],
+            tmp / "adaptive_evidence_performance.json",
+        ),
+        ("fts5_fast_path", [sys.executable, "scripts/verify_fts5_fast_path.py"], tmp / "fts5_fast_path.json"),
+        (
+            "corpus_semantic_filtering",
+            [sys.executable, "scripts/verify_corpus_semantic_filtering.py"],
+            tmp / "corpus_semantic_filtering.json",
+        ),
+        ("trace_tiering", [sys.executable, "scripts/verify_trace_tiering.py"], tmp / "trace_tiering.json"),
+        (
+            "persistent_bloat_policy",
+            [sys.executable, "scripts/verify_persistent_bloat_policy.py"],
+            tmp / "persistent_bloat_policy.json",
+        ),
+    ]
+    for name, base_command, out in commands:
+        command = [*base_command, "--out", str(out)]
+        checks.append(run_named(name, command, out))
+
+    failed = [check["name"] for check in checks if check.get("returncode") != 0 or check.get("status") != "pass"]
+    public_safe = all(check.get("public_safe") is not False for check in checks)
+    passed = not failed and public_safe
+    return CheckResult(
+        name="adaptive_evidence_performance_completion",
+        status=_status(passed),
+        command=["M008 performance completion verifier bundle"],
+        returncode=0 if passed else 1,
+        summary={
+            "status": "pass" if passed else "fail",
+            "failed": failed,
+            "public_safe": public_safe,
+            "fresh_hermes_source_configured": bool(source_hermes),
+            "check_count": len(checks),
+            "checks": checks,
+        },
+    )
+
+
 def _check_packet_budget_soak(tmp: Path) -> CheckResult:
     out = tmp / "packet_budget_soak.json"
     command = [
@@ -1167,6 +1251,7 @@ def run_checklist(
             _check_active_packet_budget(tmp),
             _check_packet_budget_active_default(tmp),
             _check_adaptive_evidence_kernel(tmp),
+            _check_adaptive_evidence_performance_completion(tmp),
             _check_packet_budget_soak(tmp),
             _check_write_path(tmp),
             _check_graph_conflict_lifecycle(tmp),

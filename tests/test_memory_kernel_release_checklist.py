@@ -10,6 +10,7 @@ from scripts.run_memory_kernel_release_checklist import (
     _check_benchmark_transparency,
     _check_packet_budget_active_default,
     _check_adaptive_evidence_kernel,
+    _check_adaptive_evidence_performance_completion,
     _check_hermes_proactive_runtime_parity,
     _check_persistent_bloat_rebuild,
     _check_projection_semantics_runtime_parity,
@@ -144,6 +145,37 @@ def test_release_report_fails_adaptive_evidence_kernel_even_in_dev_mode() -> Non
     assert report["status"] == "fail"
     assert report["release_allowed"] is False
     assert report["non_git_failures"] == ["adaptive_evidence_kernel"]
+
+
+def test_adaptive_evidence_performance_completion_requires_fresh_hermes_source_env(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("BRAINSTACK_RELEASE_HERMES_SOURCE", raising=False)
+
+    result = _check_adaptive_evidence_performance_completion(tmp_path)
+
+    assert result.status == "fail"
+    assert result.summary["fresh_hermes_source_configured"] is False
+    assert result.summary["failed"] == ["fresh_hermes_install"]
+
+
+def test_release_report_fails_adaptive_evidence_performance_completion_even_in_dev_mode() -> None:
+    checks = [
+        CheckResult("release_claim_contract", "pass", ["contract"], 0, {}),
+        CheckResult("adaptive_evidence_kernel", "pass", ["adaptive-kernel"], 0, {}),
+        CheckResult(
+            "adaptive_evidence_performance_completion",
+            "fail",
+            ["m008"],
+            1,
+            {"status": "fail"},
+        ),
+        CheckResult("git_hygiene", "fail", ["git"], 0, {"git_dirty": True}),
+    ]
+
+    report = _report(checks, ignore_git_dirty_for_dev=True)
+
+    assert report["status"] == "fail"
+    assert report["release_allowed"] is False
+    assert report["non_git_failures"] == ["adaptive_evidence_performance_completion"]
 
 
 def test_benchmark_transparency_release_check_passes(tmp_path: Path) -> None:
