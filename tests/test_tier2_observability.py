@@ -35,6 +35,31 @@ def _provider(tmp_path: Path, extractor) -> BrainstackMemoryProvider:
     return provider
 
 
+def test_tier2_session_end_flush_defaults_enabled(tmp_path: Path) -> None:
+    provider = BrainstackMemoryProvider(
+        {
+            "db_path": str(tmp_path / "brainstack.sqlite3"),
+            "graph_backend": "sqlite",
+            "corpus_backend": "sqlite",
+        }
+    )
+
+    assert provider._tier2_session_end_flush_enabled is True
+
+
+def test_tier2_session_end_flush_explicit_false_string_stays_disabled(tmp_path: Path) -> None:
+    provider = BrainstackMemoryProvider(
+        {
+            "db_path": str(tmp_path / "brainstack.sqlite3"),
+            "graph_backend": "sqlite",
+            "corpus_backend": "sqlite",
+            "tier2_session_end_flush_enabled": "false",
+        }
+    )
+
+    assert provider._tier2_session_end_flush_enabled is False
+
+
 def test_tier2_run_result_is_persisted_with_counts(tmp_path: Path) -> None:
     def extractor(*args, **kwargs):
         return {

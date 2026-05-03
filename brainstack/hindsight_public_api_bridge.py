@@ -7,8 +7,11 @@ import inspect
 import json
 import os
 from pathlib import Path
+import re
 import shutil
+import socket
 import sys
+import time
 from typing import Any, Mapping, Protocol
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -109,6 +112,106 @@ def _installed_hindsight_api_command() -> str:
     if sibling.exists():
         return str(sibling)
     return shutil.which("hindsight-api") or ""
+
+
+def _sanitize_hindsight_profile_name(profile: str | None) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]", "-", profile or "default")
+
+
+def _hindsight_pg0_instance_name(profile: str | None) -> str:
+    return f"hindsight-embed-{_sanitize_hindsight_profile_name(profile)}"
+
+
+def _localhost_port_accepts_connections(port: int, *, timeout_seconds: float = 0.5) -> bool:
+    if port <= 0:
+        return False
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout_seconds):
+            return True
+    except OSError:
+        return False
+
+
+def _pid_file_state(pid_path: Path) -> tuple[int, str]:
+    try:
+        lines = pid_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return 0, ""
+    pid = 0
+    try:
+        pid = int(str(lines[0]).strip()) if lines else 0
+    except ValueError:
+        pid = 0
+    state = str(lines[7]).strip().lower() if len(lines) >= 8 else ""
+    return pid, state
+
+
+def _process_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _repair_stale_hindsight_pg0_instance(profile: str) -> dict[str, Any]:
+    """Move aside stale pg0 postmaster state before Hindsight's daemon manager starts.
+
+    pg0 can report an embedded PostgreSQL instance as running when a stale
+    postmaster.pid remains after shutdown. If the recorded port refuses
+    connections, Hindsight skips startup and then fails migrations. Do not call
+    ``pg0 stop`` here: a recycled PID can belong to the host runtime, so the
+    safe repair is only to move the stale PostgreSQL pid marker aside.
+    """
+    try:
+        from pg0 import Pg0  # type: ignore[import-not-found]
+    except Exception:
+        return {"status": "skipped", "reason": "pg0_unavailable"}
+    instance_name = _hindsight_pg0_instance_name(profile)
+    try:
+        pg0 = Pg0(name=instance_name, username="hindsight", password="hindsight", database="hindsight")
+        info = pg0.info()
+    except Exception as exc:
+        return {"status": "skipped", "reason": f"pg0_info_failed:{type(exc).__name__}"}
+    if not bool(getattr(info, "running", False)):
+        return {"status": "healthy", "reason": "pg0_not_running"}
+    port = int(getattr(info, "port", 0) or 0)
+    if _localhost_port_accepts_connections(port):
+        return {"status": "healthy", "reason": "pg0_port_accepts_connections", "port": port}
+    data_dir = _text(getattr(info, "data_dir", ""))
+    if not data_dir:
+        return {"status": "suspect", "reason": "pg0_running_without_reachable_port_or_data_dir", "port": port}
+    pid_path = Path(data_dir) / "postmaster.pid"
+    if not pid_path.exists():
+        return {"status": "suspect", "reason": "pg0_running_without_reachable_port_or_pid_file", "port": port}
+    pid, state = _pid_file_state(pid_path)
+    if state not in {"stopping"} and _process_exists(pid):
+        return {
+            "status": "suspect",
+            "reason": "pg0_unreachable_but_recorded_pid_exists",
+            "port": port,
+            "pid": pid,
+            "postmaster_state": state,
+        }
+    stale_path = pid_path.with_name(f"postmaster.pid.stale-{int(time.time())}")
+    try:
+        pid_path.replace(stale_path)
+    except OSError as exc:
+        return {"status": "failed", "reason": f"stale_pid_move_failed:{type(exc).__name__}", "port": port}
+    return {
+        "status": "repaired",
+        "reason": "stale_pg0_postmaster_pid_moved",
+        "port": port,
+        "pid": pid,
+        "postmaster_state": state,
+        "stale_pid_path": str(stale_path),
+    }
 
 
 def _hermes_main_model() -> str:
@@ -613,6 +716,7 @@ class HindsightLocalEmbeddedPublicClient:
         self._manager = get_embed_manager()
         if self.config.api_command:
             self._manager._find_api_command = lambda: [self.config.api_command]
+        _repair_stale_hindsight_pg0_instance(self.config.profile)
         if not self._manager.ensure_running(config, self.config.profile):
             raise RuntimeError(f"Failed to start Hindsight local profile {self.config.profile!r}")
         return Hindsight(

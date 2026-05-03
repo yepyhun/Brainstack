@@ -16,6 +16,13 @@ def test_installer_main_invokes_capability_preserving_patches() -> None:
     assert '_run_host_patch("_patch_compose_remove_discord_forced_heavy_profile"' in source
 
 
+def test_installer_does_not_bake_fixed_tier2_llm_model() -> None:
+    source = Path(install_into_hermes.__file__).read_text(encoding="utf-8")
+
+    assert "qwen3.5:9b" not in source
+    assert 'brainstack.setdefault("tier2_hindsight_llm_provider", "hermes_managed")' in source
+
+
 def test_generated_docker_compose_includes_local_tei_jina_runtime(tmp_path):
     target = tmp_path / "hermes"
     config = target / "hermes-config" / "bestie" / "config.yaml"
@@ -107,6 +114,7 @@ def test_config_patch_embedding_none_makes_corpus_explicitly_unavailable(tmp_pat
     assert brainstack["tier2_hindsight_retain_extraction_mode"] == "chunks"
     assert brainstack["tier2_hindsight_retain_extract_causal_links"] is False
     assert brainstack["tier2_hindsight_api_command"] == "/opt/hermes/.venv/bin/hindsight-api"
+    assert brainstack["tier2_session_end_flush_enabled"] is True
 
 
 def test_enabled_auto_runtime_resolves_to_docker_for_default_local_tei_jina() -> None:

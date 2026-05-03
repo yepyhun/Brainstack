@@ -49,6 +49,9 @@ BACKEND_DEPENDENCIES = {
     "croniter": "croniter",
 }
 
+LOCAL_TIER2_PROVIDER = "ollama"
+LOCAL_TIER2_LOOPBACK_MODEL_URL_MARKERS = ("127.0.0.1:11434", "localhost:11434")
+
 HOST_PATCH_MODE_CATEGORIES: dict[str, set[str]] = {
     "core": {"required_seam", "core_hygiene"},
     "compat": {"required_seam", "core_hygiene", "compat_hotfix"},
@@ -3942,6 +3945,12 @@ def _generated_compose_path(target: Path, config_path: Path) -> Path:
     return target / f"docker-compose.{_sanitize_compose_slug(runtime_home.name)}.yml"
 
 
+def _looks_like_legacy_local_tier2_llm_config(brainstack: dict[str, Any]) -> bool:
+    provider = str(brainstack.get("tier2_hindsight_llm_provider") or "").strip().lower()
+    base_url = str(brainstack.get("tier2_hindsight_llm_base_url") or "").strip().lower()
+    return provider == LOCAL_TIER2_PROVIDER and any(marker in base_url for marker in LOCAL_TIER2_LOOPBACK_MODEL_URL_MARKERS)
+
+
 def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = "external") -> dict[str, Any]:
     config = _load_yaml(config_path)
     config.setdefault("memory", {})
@@ -3982,11 +3991,7 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
     brainstack.setdefault("tier2_hindsight_llm_provider", "hermes_managed")
     brainstack.setdefault("tier2_hindsight_llm_model", "")
     brainstack.setdefault("tier2_hindsight_llm_base_url", "")
-    if (
-        brainstack.get("tier2_hindsight_llm_provider") == "ollama"
-        and brainstack.get("tier2_hindsight_llm_model") == "qwen3.5:9b"
-        and brainstack.get("tier2_hindsight_llm_base_url") == "http://127.0.0.1:11434/v1"
-    ):
+    if _looks_like_legacy_local_tier2_llm_config(brainstack):
         brainstack["tier2_hindsight_llm_provider"] = "hermes_managed"
         brainstack["tier2_hindsight_llm_model"] = ""
         brainstack["tier2_hindsight_llm_base_url"] = ""
@@ -3997,6 +4002,7 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
     brainstack.setdefault("tier2_hindsight_retain_extract_causal_links", False)
     brainstack.setdefault("tier2_hindsight_api_command", "/opt/hermes/.venv/bin/hindsight-api")
     brainstack.setdefault("tier2_hindsight_budget", "low")
+    brainstack.setdefault("tier2_session_end_flush_enabled", True)
     config.setdefault("auxiliary", {})
     if not isinstance(config["auxiliary"], dict):
         raise RuntimeError("config.yaml has non-object `auxiliary` section")
@@ -4512,15 +4518,44 @@ def _patch_compose_hindsight_local_tier2_runtime(path: Path, dry_run: bool) -> l
         return []
     text = path.read_text(encoding="utf-8")
     old_text = text
-    for old, new in (
-        ("      BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER: ollama\n", "      BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER: hermes_managed\n"),
-        ("      BRAINSTACK_TIER2_HINDSIGHT_LLM_MODEL: qwen3.5:9b\n", '      BRAINSTACK_TIER2_HINDSIGHT_LLM_MODEL: ""\n'),
-        ("      BRAINSTACK_TIER2_HINDSIGHT_LLM_BASE_URL: http://127.0.0.1:11434/v1\n", '      BRAINSTACK_TIER2_HINDSIGHT_LLM_BASE_URL: ""\n'),
-        ("      - BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER=ollama\n", "      - BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER=hermes_managed\n"),
-        ("      - BRAINSTACK_TIER2_HINDSIGHT_LLM_MODEL=qwen3.5:9b\n", "      - BRAINSTACK_TIER2_HINDSIGHT_LLM_MODEL=\n"),
-        ("      - BRAINSTACK_TIER2_HINDSIGHT_LLM_BASE_URL=http://127.0.0.1:11434/v1\n", "      - BRAINSTACK_TIER2_HINDSIGHT_LLM_BASE_URL=\n"),
-    ):
-        text = text.replace(old, new)
+    mapping_uses_legacy_local_llm = bool(
+        re.search(r"(?m)^\s+BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER:\s*ollama\s*$", text)
+    )
+    list_uses_legacy_local_llm = bool(
+        re.search(r"(?m)^\s+-\s+BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER=ollama\s*$", text)
+    )
+    if mapping_uses_legacy_local_llm:
+        text = re.sub(
+            r"(?m)^(\s+)BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER:\s*ollama\s*$",
+            r"\1BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER: hermes_managed",
+            text,
+        )
+        text = re.sub(
+            r"(?m)^(\s+)BRAINSTACK_TIER2_HINDSIGHT_LLM_MODEL:\s*.*$",
+            r'\1BRAINSTACK_TIER2_HINDSIGHT_LLM_MODEL: ""',
+            text,
+        )
+        text = re.sub(
+            r"(?m)^(\s+)BRAINSTACK_TIER2_HINDSIGHT_LLM_BASE_URL:\s*.*$",
+            r'\1BRAINSTACK_TIER2_HINDSIGHT_LLM_BASE_URL: ""',
+            text,
+        )
+    if list_uses_legacy_local_llm:
+        text = re.sub(
+            r"(?m)^(\s+-\s+)BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER=ollama\s*$",
+            r"\1BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER=hermes_managed",
+            text,
+        )
+        text = re.sub(
+            r"(?m)^(\s+-\s+)BRAINSTACK_TIER2_HINDSIGHT_LLM_MODEL=.*$",
+            r"\1BRAINSTACK_TIER2_HINDSIGHT_LLM_MODEL=",
+            text,
+        )
+        text = re.sub(
+            r"(?m)^(\s+-\s+)BRAINSTACK_TIER2_HINDSIGHT_LLM_BASE_URL=.*$",
+            r"\1BRAINSTACK_TIER2_HINDSIGHT_LLM_BASE_URL=",
+            text,
+        )
     specs = (
         ("BRAINSTACK_TIER2_MODE", "shadow", "shadow", ("TERMINAL_CWD",)),
         ("BRAINSTACK_TIER2_HINDSIGHT_MODE", "local_embedded", "local_embedded", ("BRAINSTACK_TIER2_MODE",)),

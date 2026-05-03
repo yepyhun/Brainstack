@@ -24,6 +24,21 @@ from .provider.tier2_worker import Tier2WorkerMixin
 __all__ = ["BrainstackMemoryProvider"]
 
 
+def _config_bool(value: Any, *, default: bool) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return bool(value)
+    normalized = str(value).strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 class BrainstackMemoryProvider(
     ConfigLifecycleMixin,
     ExplicitCaptureMixin,
@@ -64,8 +79,9 @@ class BrainstackMemoryProvider(
         self._ordinary_reply_output_validation_enabled = bool(
             self._config.get("ordinary_reply_output_validation_enabled", False)
         )
-        self._tier2_session_end_flush_enabled = bool(
-            self._config.get("tier2_session_end_flush_enabled", False)
+        self._tier2_session_end_flush_enabled = _config_bool(
+            self._config.get("tier2_session_end_flush_enabled"),
+            default=True,
         )
         self._tier2_idle_window_seconds = int(self._config.get("tier2_idle_window_seconds", 30))
         self._tier2_batch_turn_limit = int(self._config.get("tier2_batch_turn_limit", 5))

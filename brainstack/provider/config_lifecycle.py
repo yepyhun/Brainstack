@@ -73,7 +73,7 @@ class ConfigLifecycleMixin(ProviderRuntimeBase):
             {"key": "tier2_idle_window_seconds", "description": "Idle window before the future Tier-2 batch may be queued", "default": "30"},
             {"key": "tier2_batch_turn_limit", "description": "How many turns may accumulate before the future Tier-2 batch is queued", "default": "5"},
             {"key": "tier2_transcript_limit", "description": "How many recent transcript turns Tier-2 may read per batch", "default": "8"},
-            {"key": "tier2_session_end_flush_enabled", "description": "Run synchronous Tier-2 extraction during on_session_end", "default": "false"},
+            {"key": "tier2_session_end_flush_enabled", "description": "Run synchronous Tier-2 extraction during on_session_end", "default": "true"},
             {"key": "tier2_timeout_seconds", "description": "Hard timeout for one Tier-2 background extraction run", "default": "15"},
             {"key": "tier2_max_tokens", "description": "Max output tokens for one Tier-2 extraction response", "default": "900"},
         ]

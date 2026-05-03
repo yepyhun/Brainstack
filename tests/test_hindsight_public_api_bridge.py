@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+import sys
+import types
 from typing import Any, Mapping
 
 import brainstack.hindsight_public_api_bridge as bridge_module
@@ -223,6 +226,44 @@ def test_local_hindsight_client_closes_generated_session_on_own_loop() -> None:
         assert _FakeHindsight._api_client.closed is True
     finally:
         loop.close()
+
+
+def test_local_hindsight_client_repairs_stale_pg0_stopping_pid(monkeypatch, tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    pid_path = data_dir / "postmaster.pid"
+    pid_path.write_text(
+        "999999\n"
+        f"{data_dir}\n"
+        "1777587910\n"
+        "65432\n"
+        "/tmp\n"
+        "localhost\n"
+        "  3185589         0\n"
+        "stopping\n",
+        encoding="utf-8",
+    )
+
+    info = types.SimpleNamespace(running=True, port=65432, data_dir=str(data_dir))
+
+    class _FakePg0:
+        seen: list[dict[str, Any]] = []
+
+        def __init__(self, **kwargs: Any) -> None:
+            self.seen.append(dict(kwargs))
+
+        def info(self) -> Any:
+            return info
+
+    monkeypatch.setitem(sys.modules, "pg0", types.SimpleNamespace(Pg0=_FakePg0))
+
+    report = bridge_module._repair_stale_hindsight_pg0_instance("brainstack-tier2")
+
+    assert report["status"] == "repaired"
+    assert report["reason"] == "stale_pg0_postmaster_pid_moved"
+    assert _FakePg0.seen[0]["name"] == "hindsight-embed-brainstack-tier2"
+    assert not pid_path.exists()
+    assert list(data_dir.glob("postmaster.pid.stale-*"))
 
 
 def test_local_hindsight_client_triggers_consolidation_over_public_http(monkeypatch) -> None:
