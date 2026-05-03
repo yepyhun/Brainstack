@@ -618,6 +618,7 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             operator_only_tools=[self._runtime_handoff_update_tool_schema(), proactive_control_tool_schema()],
             disabled_memory_write_tools=sorted(DISABLED_MEMORY_WRITE_TOOLS),
             last_maintenance_receipt=self._last_maintenance_receipt,
+            config=self._config,
         )
 
     def memory_kernel_doctor(self, *, strict: bool = False) -> Dict[str, Any]:

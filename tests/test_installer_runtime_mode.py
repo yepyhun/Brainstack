@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from argparse import Namespace
 from pathlib import Path
+import json
 import sys
 
 from scripts import brainstack_doctor
@@ -115,6 +116,67 @@ def test_config_patch_embedding_none_makes_corpus_explicitly_unavailable(tmp_pat
     assert brainstack["tier2_hindsight_retain_extract_causal_links"] is False
     assert brainstack["tier2_hindsight_api_command"] == "/opt/hermes/.venv/bin/hindsight-api"
     assert brainstack["tier2_session_end_flush_enabled"] is True
+    assert data["proactive_mode"] == "dry_run"
+    assert data["proactive_kill_switch"] is False
+
+
+def test_config_patch_normalizes_legacy_automatic_proactive_mode_to_dry_run(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("proactive_mode: automatic\nproactive_kill_switch: false\n", encoding="utf-8")
+
+    result = install_into_hermes._patch_config(config, dry_run=False, embedding_runtime="none")
+    data = install_into_hermes._load_yaml(config)
+
+    assert data["proactive_mode"] == "dry_run"
+    assert result["proactive_runtime"]["previous_mode"] == "automatic"
+    assert result["proactive_runtime"]["reason"] == "normalized_invalid_mode"
+
+
+def test_config_patch_preserves_explicit_live_proactive_mode(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("proactive_mode: live\nproactive_kill_switch: false\n", encoding="utf-8")
+
+    result = install_into_hermes._patch_config(config, dry_run=False, embedding_runtime="none")
+    data = install_into_hermes._load_yaml(config)
+
+    assert data["proactive_mode"] == "live"
+    assert result["proactive_runtime"]["reason"] == "preserved_valid_mode"
+
+
+def test_installer_defaults_to_safe_proactive_extension_install() -> None:
+    source = Path(install_into_hermes.__file__).read_text(encoding="utf-8")
+
+    assert "--skip-hermes-proactive-extension" in source
+    assert "not args.skip_hermes_proactive_extension" in source
+    assert '"mode": DEFAULT_PROACTIVE_RUNTIME_MODE' in source
+    assert "_upsert_hermes_proactive_cron_job" in source
+
+
+def test_installer_writes_safe_proactive_cron_runtime(tmp_path):
+    runtime_home = tmp_path / "hermes-config" / "bestie"
+    target = tmp_path / "hermes"
+
+    script_result = install_into_hermes._write_hermes_proactive_cron_gate_script(
+        runtime_home,
+        target,
+        dry_run=False,
+    )
+    job_result = install_into_hermes._upsert_hermes_proactive_cron_job(runtime_home, dry_run=False)
+
+    script_path = runtime_home / "scripts" / "brainstack_proactive_pulse_gate.py"
+    jobs = json.loads((runtime_home / "cron" / "jobs.json").read_text(encoding="utf-8"))["jobs"]
+    job = next(item for item in jobs if item["name"] == "Brainstack Proactive Pulse")
+
+    assert script_result["status"] == "installed"
+    assert script_path.exists()
+    assert "wakeAgent" in script_path.read_text(encoding="utf-8")
+    assert job_result["status"] == "installed"
+    assert job["enabled"] is True
+    assert job["state"] == "scheduled"
+    assert job["script"] == "brainstack_proactive_pulse_gate.py"
+    assert job["deliver"] == "local"
+
+
 
 
 def test_enabled_auto_runtime_resolves_to_docker_for_default_local_tei_jina() -> None:

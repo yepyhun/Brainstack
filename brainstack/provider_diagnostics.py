@@ -88,6 +88,44 @@ def _compact_selected_evidence(selected: Mapping[str, Any], *, per_shelf_limit: 
     return compact
 
 
+def _tier2_runtime_route_status(config: Mapping[str, Any] | None) -> dict[str, Any]:
+    cfg = config if isinstance(config, Mapping) else {}
+    runtime = _normalize_compact_text(cfg.get("tier2_runtime")) or "internal_extractor"
+    mode = _normalize_compact_text(cfg.get("tier2_mode")) or "unknown"
+    hindsight_mode = _normalize_compact_text(cfg.get("tier2_hindsight_mode"))
+    llm_provider = _normalize_compact_text(cfg.get("tier2_hindsight_llm_provider"))
+    configured_model = _normalize_compact_text(cfg.get("tier2_hindsight_llm_model"))
+    configured_base_url = _normalize_compact_text(cfg.get("tier2_hindsight_llm_base_url"))
+    effective_model = configured_model
+    effective_model_source = "brainstack_config"
+    if llm_provider == "hermes_managed" and not effective_model:
+        try:
+            from .hindsight_public_api_bridge import _hermes_main_model
+
+            effective_model = _normalize_compact_text(_hermes_main_model())
+            effective_model_source = "hermes_main_model"
+        except Exception:
+            effective_model = ""
+            effective_model_source = "unavailable"
+    return {
+        "schema": "brainstack.tier2_runtime_route.v1",
+        "runtime": runtime,
+        "mode": mode,
+        "hindsight_mode": hindsight_mode,
+        "llm_provider": llm_provider or "default",
+        "configured_model": configured_model,
+        "effective_model": effective_model,
+        "effective_model_source": effective_model_source,
+        "configured_base_url_present": bool(configured_base_url),
+        "uses_legacy_gpt_5_2_codex": effective_model == "gpt-5.2-codex" or configured_model == "gpt-5.2-codex",
+        "model_answer": (
+            f"Tier2 current route uses {effective_model} via {llm_provider or 'default provider'}."
+            if effective_model
+            else "Tier2 current route model is not resolved in this process."
+        ),
+    }
+
+
 def build_provider_lifecycle_status(
     *,
     store: Any,
@@ -100,6 +138,7 @@ def build_provider_lifecycle_status(
     operator_only_tools: list[dict[str, Any]],
     disabled_memory_write_tools: list[str],
     last_maintenance_receipt: Mapping[str, Any] | None,
+    config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     store_active = store is not None
     explicit_write_barrier = pending_explicit_write_count > 0
@@ -131,6 +170,7 @@ def build_provider_lifecycle_status(
         "store_initialized": store_active,
         "tier2_worker_running": bool(tier2_running),
         "pending_tier2_turns": pending_tier2_turns,
+        "tier2_runtime_route": _tier2_runtime_route_status(config),
         "pending_explicit_write_count": pending_explicit_write_count,
         "hooks": [
             {"name": "initialize", "status": "active" if store_active else "available", "side_effect": "opens Brainstack store"},

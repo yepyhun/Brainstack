@@ -51,6 +51,10 @@ BACKEND_DEPENDENCIES = {
 
 LOCAL_TIER2_PROVIDER = "ollama"
 LOCAL_TIER2_LOOPBACK_MODEL_URL_MARKERS = ("127.0.0.1:11434", "localhost:11434")
+PROACTIVE_RUNTIME_MODES = {"disabled", "dry_run", "live"}
+DEFAULT_PROACTIVE_RUNTIME_MODE = "dry_run"
+PROACTIVE_CRON_JOB_NAME = "Brainstack Proactive Pulse"
+PROACTIVE_CRON_GATE_SCRIPT_NAME = "brainstack_proactive_pulse_gate.py"
 
 HOST_PATCH_MODE_CATEGORIES: dict[str, set[str]] = {
     "core": {"required_seam", "core_hygiene"},
@@ -3945,6 +3949,25 @@ def _generated_compose_path(target: Path, config_path: Path) -> Path:
     return target / f"docker-compose.{_sanitize_compose_slug(runtime_home.name)}.yml"
 
 
+def _normalize_proactive_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
+    raw_mode = str(config.get("proactive_mode") or "").strip().lower()
+    if raw_mode in PROACTIVE_RUNTIME_MODES:
+        mode = raw_mode
+        reason = "preserved_valid_mode"
+    else:
+        mode = DEFAULT_PROACTIVE_RUNTIME_MODE
+        reason = "defaulted" if not raw_mode else "normalized_invalid_mode"
+    config["proactive_mode"] = mode
+    config.setdefault("proactive_kill_switch", False)
+    return {
+        "mode": mode,
+        "previous_mode": raw_mode,
+        "reason": reason,
+        "kill_switch": bool(config.get("proactive_kill_switch")),
+        "delivery_default": "no_delivery_unless_mode_live_and_pulse_create_outbox_requested",
+    }
+
+
 def _looks_like_legacy_local_tier2_llm_config(brainstack: dict[str, Any]) -> bool:
     provider = str(brainstack.get("tier2_hindsight_llm_provider") or "").strip().lower()
     base_url = str(brainstack.get("tier2_hindsight_llm_base_url") or "").strip().lower()
@@ -4030,6 +4053,7 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
         agent["gateway_timeout"] = 120
     if gateway_timeout_warning in {None, 900}:
         agent["gateway_timeout_warning"] = 30
+    proactive_runtime = _normalize_proactive_runtime_config(config)
     if not dry_run:
         _write_yaml(config_path, config)
     return {
@@ -4040,6 +4064,201 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
         "flush_memories_provider": str(flush_memories.get("provider") or ""),
         "gateway_timeout": agent.get("gateway_timeout"),
         "gateway_timeout_warning": agent.get("gateway_timeout_warning"),
+        "proactive_runtime": proactive_runtime,
+    }
+
+
+def _write_hermes_proactive_cron_gate_script(runtime_home: Path, target: Path, dry_run: bool) -> dict[str, Any]:
+    script_path = runtime_home / "scripts" / PROACTIVE_CRON_GATE_SCRIPT_NAME
+    content = f'''#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def _prepend(path: Path) -> None:
+    text = str(path)
+    if path.exists() and text not in sys.path:
+        sys.path.insert(0, text)
+
+
+HERMES_HOME = Path(os.environ.get("HERMES_HOME") or Path(__file__).resolve().parents[1])
+for candidate in (
+    Path("/opt/hermes/extensions/hermes_proactive"),
+    Path("/opt/hermes/plugins/memory"),
+    Path({str(target / "extensions" / "hermes_proactive")!r}),
+    Path({str(target / "plugins" / "memory")!r}),
+):
+    _prepend(candidate)
+
+from hermes_proactive.pulse_producer import classify_pulse_wake, produce_pulse, project_pulse_output  # noqa: E402
+
+
+def _runtime_config() -> dict[str, object]:
+    path = HERMES_HOME / "config.yaml"
+    if not path.exists():
+        return {{"mode": "dry_run", "kill_switch": False}}
+    try:
+        import yaml  # type: ignore[import-untyped]
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {{}}
+    except Exception:
+        return {{"mode": "dry_run", "kill_switch": False}}
+    if not isinstance(data, dict):
+        return {{"mode": "dry_run", "kill_switch": False}}
+    kernel_memory = data.get("kernel_memory") if isinstance(data.get("kernel_memory"), dict) else {{}}
+    plugins = data.get("plugins") if isinstance(data.get("plugins"), dict) else {{}}
+    brainstack = plugins.get("brainstack") if isinstance(plugins.get("brainstack"), dict) else {{}}
+    mode = data.get("proactive_mode") or kernel_memory.get("proactive_mode") or brainstack.get("proactive_mode") or "dry_run"
+    kill_switch = data.get("proactive_kill_switch")
+    if kill_switch is None:
+        kill_switch = kernel_memory.get("proactive_kill_switch")
+    if kill_switch is None:
+        kill_switch = brainstack.get("proactive_kill_switch")
+    return {{"mode": str(mode or "dry_run"), "kill_switch": bool(kill_switch)}}
+
+
+def main() -> int:
+    cfg = _runtime_config()
+    output = produce_pulse(
+        hermes_home=HERMES_HOME,
+        principal_scope_key="runtime:brainstack",
+        workspace_scope_key="workspace:default",
+        stale_inbox_threshold=1,
+    )
+    mode = str(cfg.get("mode") or "dry_run")
+    live_delivery = mode == "live" and not bool(cfg.get("kill_switch"))
+    projection = None
+    wake = classify_pulse_wake(output, create_outbox=False)
+    db_path = HERMES_HOME / "brainstack" / "brainstack.db"
+    if live_delivery and db_path.exists():
+        projection = project_pulse_output(db_path=db_path, output=output, create_outbox=True)
+        wake = projection.get("wake") or wake
+    summary = {{
+        "schema": "brainstack.proactive_cron_gate.v1",
+        "mode": mode,
+        "kill_switch": bool(cfg.get("kill_switch")),
+        "pulse_status": output.get("status"),
+        "task_count": len([item for item in output.get("tasks") or [] if isinstance(item, dict)]),
+        "event_count": len([item for item in output.get("events") or [] if isinstance(item, dict)]),
+        "delivery_requested": bool(wake.get("delivery_requested")),
+        "wake_decision": wake.get("decision"),
+        "wake_reason_code": wake.get("reason_code"),
+        "projection_written_count": int((projection or {{}}).get("written_count") or 0),
+        "projection_outbox_count": int((projection or {{}}).get("outbox_count") or 0),
+        "provider_calls": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+    }}
+    print(json.dumps(summary, ensure_ascii=True, sort_keys=True))
+    print(json.dumps({{"wakeAgent": bool(wake.get("delivery_requested"))}}, ensure_ascii=True, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+    if not dry_run:
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        script_path.write_text(content, encoding="utf-8")
+        try:
+            script_path.chmod(0o700)
+        except OSError:
+            pass
+    return {
+        "status": "planned" if dry_run else "installed",
+        "target": str(script_path),
+        "script": PROACTIVE_CRON_GATE_SCRIPT_NAME,
+        "mode": DEFAULT_PROACTIVE_RUNTIME_MODE,
+    }
+
+
+def _upsert_hermes_proactive_cron_job(runtime_home: Path, dry_run: bool) -> dict[str, Any]:
+    cron_dir = runtime_home / "cron"
+    jobs_path = cron_dir / "jobs.json"
+    if jobs_path.exists():
+        try:
+            data = json.loads(jobs_path.read_text(encoding="utf-8") or "{}")
+        except json.JSONDecodeError:
+            data = {}
+    else:
+        data = {}
+    jobs = data.get("jobs") if isinstance(data.get("jobs"), list) else []
+    now = datetime.now(timezone.utc).isoformat()
+    prompt = (
+        "Review the Brainstack proactive pulse gate output. If wakeAgent is false, "
+        "respond exactly [SILENT]. If wakeAgent is true, summarize the proactive item "
+        "briefly; do not call tools and do not deliver manually."
+    )
+    selected: dict[str, Any] | None = None
+    for job in jobs:
+        if isinstance(job, dict) and str(job.get("name") or "") == PROACTIVE_CRON_JOB_NAME:
+            selected = job
+            break
+    action = "updated" if selected is not None else "created"
+    if selected is None:
+        selected = {"id": hashlib.sha256(PROACTIVE_CRON_JOB_NAME.encode("utf-8")).hexdigest()[:12], "created_at": now}
+        jobs.append(selected)
+    previous = {
+        "enabled": selected.get("enabled"),
+        "state": selected.get("state"),
+        "script": selected.get("script"),
+        "prompt": selected.get("prompt"),
+        "deliver": selected.get("deliver"),
+    }
+    selected.update(
+        {
+            "name": PROACTIVE_CRON_JOB_NAME,
+            "prompt": prompt,
+            "skills": [],
+            "skill": None,
+            "model": None,
+            "provider": None,
+            "base_url": None,
+            "script": PROACTIVE_CRON_GATE_SCRIPT_NAME,
+            "context_from": None,
+            "schedule": {"kind": "cron", "expr": "*/10 * * * *", "display": "*/10 * * * *"},
+            "schedule_display": "*/10 * * * *",
+            "repeat": {"times": None, "completed": int((selected.get("repeat") or {}).get("completed") or 0) if isinstance(selected.get("repeat"), dict) else 0},
+            "enabled": True,
+            "state": "scheduled",
+            "paused_at": None,
+            "paused_reason": None,
+            "next_run_at": selected.get("next_run_at") or now,
+            "last_run_at": selected.get("last_run_at"),
+            "last_status": selected.get("last_status"),
+            "last_error": selected.get("last_error"),
+            "last_delivery_error": selected.get("last_delivery_error"),
+            "deliver": "local",
+            "origin": None,
+            "enabled_toolsets": None,
+            "workdir": None,
+            "updated_by": "brainstack_installer",
+            "updated_at": now,
+        }
+    )
+    data["jobs"] = jobs
+    data["updated_at"] = now
+    if not dry_run:
+        cron_dir.mkdir(parents=True, exist_ok=True)
+        jobs_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        try:
+            jobs_path.chmod(0o600)
+        except OSError:
+            pass
+    return {
+        "status": "planned" if dry_run else "installed",
+        "action": action,
+        "jobs_path": str(jobs_path),
+        "job_id": str(selected.get("id") or ""),
+        "script": PROACTIVE_CRON_GATE_SCRIPT_NAME,
+        "schedule": "*/10 * * * *",
+        "enabled": True,
+        "deliver": "local",
+        "previous": previous,
     }
 
 
@@ -5096,9 +5315,14 @@ def main() -> int:
         help="Deprecated alias for --gateway-patch-mode skip.",
     )
     parser.add_argument(
+        "--skip-hermes-proactive-extension",
+        action="store_true",
+        help="Skip installing the Hermes proactive runtime extension payload. Default is safe dry-run install.",
+    )
+    parser.add_argument(
         "--install-hermes-proactive-extension",
         action="store_true",
-        help="Install the optional Hermes proactive runtime extension in disabled/dry-run form.",
+        help="Deprecated no-op: the Hermes proactive runtime extension is installed by default in safe dry-run form.",
     )
     parser.add_argument(
         "--check-release-hygiene",
@@ -5228,8 +5452,8 @@ def main() -> int:
     deps_result = _ensure_backend_dependencies(selected_python, dry_run=args.dry_run, skip_deps=args.skip_deps)
 
     host_helper_files: list[dict[str, str]] = []
-    hermes_proactive_extension: dict[str, Any] = {"status": "skipped", "reason": "not_requested"}
-    if args.install_hermes_proactive_extension:
+    hermes_proactive_extension: dict[str, Any] = {"status": "skipped", "reason": "explicitly_skipped"}
+    if not args.skip_hermes_proactive_extension:
         extension_target = target / "extensions" / "hermes_proactive"
         extension_files = _copy_tree(SOURCE_HERMES_PROACTIVE_EXTENSION, extension_target, args.dry_run)
         hermes_proactive_extension = {
@@ -5237,9 +5461,24 @@ def main() -> int:
             "source": str(SOURCE_HERMES_PROACTIVE_EXTENSION),
             "target": str(extension_target),
             "files": extension_files,
-            "mode": "dry_run",
+            "mode": DEFAULT_PROACTIVE_RUNTIME_MODE,
+            "delivery_default": "no_delivery_unless_config_mode_live_and_pulse_create_outbox_requested",
             "dependency_policy": "stdlib_plus_brainstack_sdk",
         }
+
+    proactive_runtime: dict[str, Any] = {"status": "skipped", "reason": "no_config_path"}
+    if not args.skip_hermes_proactive_extension and config_path is not None:
+        try:
+            runtime_home = _docker_runtime_home_dir(target, config_path) if args.runtime == "docker" else config_path.parent
+            proactive_runtime = {
+                "status": "planned" if args.dry_run else "installed",
+                "runtime_home": str(runtime_home),
+                "cron_gate_script": _write_hermes_proactive_cron_gate_script(runtime_home, target, args.dry_run),
+                "cron_job": _upsert_hermes_proactive_cron_job(runtime_home, args.dry_run),
+            }
+        except RuntimeError as exc:
+            print(f"FAIL Hermes proactive runtime install: {exc}", file=sys.stderr)
+            return 2
 
     gateway_patch_mode = "skip" if args.skip_hermes_gateway_patches else args.gateway_patch_mode
     try:
@@ -5326,6 +5565,7 @@ def main() -> int:
         "helper_files": helper_files,
         "host_helper_files": host_helper_files,
         "hermes_proactive_extension": hermes_proactive_extension,
+        "hermes_proactive_runtime": proactive_runtime,
         "host_patches": host_patches,
         "host_patch_inventory": _selected_host_patch_inventory(args.runtime, args.host_patch_mode),
         "hermes_gateway_patches": hermes_gateway_patches,
@@ -5344,6 +5584,7 @@ def main() -> int:
     print(f"{action} Brainstack payload files: {len(files)}")
     print(f"{action} helper files: {len(helper_files)}")
     print(f"{action} Hermes proactive extension: {hermes_proactive_extension.get('status')}")
+    print(f"{action} Hermes proactive runtime: {proactive_runtime.get('status')}")
     inventory = _selected_host_patch_inventory(args.runtime, args.host_patch_mode)
     selected_inventory = [item for item in inventory if item.get("selected")]
     skipped_inventory = [item for item in inventory if not item.get("selected")]

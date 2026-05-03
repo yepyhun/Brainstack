@@ -35,6 +35,32 @@ def _provider(tmp_path: Path, extractor) -> BrainstackMemoryProvider:
     return provider
 
 
+def test_tier2_lifecycle_reports_current_llm_route_without_terminal(tmp_path: Path) -> None:
+    provider = BrainstackMemoryProvider(
+        {
+            "db_path": str(tmp_path / "brainstack.sqlite3"),
+            "graph_backend": "sqlite",
+            "corpus_backend": "sqlite",
+            "tier2_mode": "shadow",
+            "tier2_runtime": "hindsight_public_api_bridge",
+            "tier2_hindsight_mode": "local_embedded",
+            "tier2_hindsight_llm_provider": "hermes_managed",
+            "tier2_hindsight_llm_model": "gpt-5.5",
+            "tier2_hindsight_llm_base_url": "",
+        }
+    )
+
+    route = provider.lifecycle_status()["tier2_runtime_route"]
+
+    assert route["schema"] == "brainstack.tier2_runtime_route.v1"
+    assert route["runtime"] == "hindsight_public_api_bridge"
+    assert route["mode"] == "shadow"
+    assert route["llm_provider"] == "hermes_managed"
+    assert route["effective_model"] == "gpt-5.5"
+    assert route["uses_legacy_gpt_5_2_codex"] is False
+    assert "gpt-5.5" in route["model_answer"]
+
+
 def test_tier2_session_end_flush_defaults_enabled(tmp_path: Path) -> None:
     provider = BrainstackMemoryProvider(
         {
