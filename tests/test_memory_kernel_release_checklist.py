@@ -17,7 +17,9 @@ from scripts.run_memory_kernel_release_checklist import (
     _check_release_claim_contract,
     _check_tier2_extraction_quality,
     _check_version_metadata_parity,
+    _count_python_hermes_coredumps,
     _git_hygiene_from_lists,
+    _live_crash_regression_summary,
     _report,
     _version_metadata_parity_summary,
     CheckResult,
@@ -235,6 +237,125 @@ def test_hermes_proactive_runtime_parity_check_passes(tmp_path: Path) -> None:
         "killed": "killed",
         "malformed": "degraded",
     }
+
+
+def _passing_crash_guard_summary() -> dict[str, object]:
+    return _live_crash_regression_summary(
+        container_name="hermes-bestie-live",
+        container_id="container-id",
+        container_state={
+            "status": "running",
+            "health": "healthy",
+            "started_at": "2026-05-03T20:36:07.442503074Z",
+            "restart_count": 0,
+            "oom_killed": False,
+            "exit_code": 0,
+        },
+        coredumpctl_available=True,
+        coredump_count_since_container_start=0,
+        coredump_count_after_probe=0,
+        log_hit_counts={
+            '"exit_code": -11': 0,
+            "SIGSEGV": 0,
+            "Traceback": 0,
+        },
+        terminal_smoke_ok=True,
+        venv_import_smoke_ok=True,
+        chroma_exception_probe_ok=True,
+    )
+
+
+def test_live_crash_regression_guard_summary_passes_clean_runtime() -> None:
+    summary = _passing_crash_guard_summary()
+
+    assert summary["status"] == "pass"
+    assert summary["issue_count"] == 0
+    assert summary["logs_crash_markers_zero"] is True
+    assert summary["public_safe"] is True
+
+
+def test_live_crash_regression_guard_summary_blocks_native_crash_markers() -> None:
+    summary = _live_crash_regression_summary(
+        container_name="hermes-bestie-live",
+        container_id="container-id",
+        container_state={
+            "status": "running",
+            "health": "healthy",
+            "started_at": "2026-05-03T20:36:07.442503074Z",
+            "restart_count": 0,
+            "oom_killed": False,
+            "exit_code": 0,
+        },
+        coredumpctl_available=True,
+        coredump_count_since_container_start=1,
+        coredump_count_after_probe=1,
+        log_hit_counts={'"exit_code": -11': 1, "SIGSEGV": 0},
+        terminal_smoke_ok=True,
+        venv_import_smoke_ok=True,
+        chroma_exception_probe_ok=True,
+    )
+
+    assert summary["status"] == "fail"
+    codes = {issue["code"] for issue in summary["issues"]}
+    assert "live_logs_crash_markers_present" in codes
+    assert "python_hermes_coredumps_since_container_start" in codes
+    assert "python_hermes_coredumps_after_probe" in codes
+
+
+def test_live_crash_regression_guard_summary_blocks_smoke_failures() -> None:
+    summary = _live_crash_regression_summary(
+        container_name="hermes-bestie-live",
+        container_id="container-id",
+        container_state={
+            "status": "running",
+            "health": "healthy",
+            "started_at": "2026-05-03T20:36:07.442503074Z",
+            "restart_count": 0,
+            "oom_killed": False,
+            "exit_code": 0,
+        },
+        coredumpctl_available=True,
+        coredump_count_since_container_start=0,
+        coredump_count_after_probe=0,
+        log_hit_counts={'"exit_code": -11': 0, "SIGSEGV": 0},
+        terminal_smoke_ok=False,
+        venv_import_smoke_ok=False,
+        chroma_exception_probe_ok=False,
+    )
+
+    assert summary["status"] == "fail"
+    codes = {issue["code"] for issue in summary["issues"]}
+    assert "terminal_smoke_failed" in codes
+    assert "venv_import_smoke_failed" in codes
+    assert "chroma_exception_probe_failed" in codes
+
+
+def test_count_python_hermes_coredumps_only_counts_native_crash_rows() -> None:
+    output = "\n".join(
+        [
+            "TIME PID UID GID SIG COREFILE EXE SIZE",
+            "Sun 2026-05-03 21:42:25 CEST 972582 1000 1000 SIGSEGV truncated /usr/bin/python3.13 15.9M",
+            "Sun 2026-05-03 21:43:00 CEST 1 0 0 SIGTERM missing /usr/bin/bash -",
+            "Sun 2026-05-03 21:44:00 CEST 2 1000 1000 SIGABRT present /opt/hermes/.venv/bin/hermes 1M",
+        ]
+    )
+
+    assert _count_python_hermes_coredumps(output) == 2
+
+
+def test_release_report_fails_live_crash_regression_even_in_dev_mode() -> None:
+    checks = [
+        CheckResult("release_claim_contract", "pass", ["contract"], 0, {}),
+        CheckResult("tier2_unbreakable_operation", "pass", ["tier2"], 0, {}),
+        CheckResult("live_crash_regression_guard", "fail", ["crash"], 1, {"status": "fail"}),
+        CheckResult("git_hygiene", "fail", ["git"], 0, {"git_dirty": True}),
+    ]
+
+    report = _report(checks, ignore_git_dirty_for_dev=True)
+
+    assert report["status"] == "fail"
+    assert report["release_allowed"] is False
+    assert report["non_git_failures"] == ["live_crash_regression_guard"]
 
 
 def test_persistent_bloat_rebuild_release_check_passes(tmp_path: Path) -> None:

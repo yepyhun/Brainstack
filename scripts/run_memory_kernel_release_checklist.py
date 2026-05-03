@@ -13,6 +13,7 @@ import sys
 import tempfile
 import tomllib
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,19 @@ SUPERIORITY_PATTERN = re.compile(
     r"\b(SOTA|superior|superiority|best|world[- ]class|state[- ]of[- ]the[- ]art)\b",
     re.IGNORECASE,
 )
+DEFAULT_RELEASE_LIVE_CONTAINER = "hermes-bestie-live"
+CRASH_REGRESSION_LOG_NEEDLES = {
+    '"exit_code": -11',
+    "exit_code=-11",
+    "SIGSEGV",
+    "Segmentation fault",
+    "Traceback",
+    "ERROR",
+    "NameError: name 'prompt'",
+    "Expected where",
+    "ModuleNotFoundError",
+    "gpt-5.2-codex",
+}
 
 
 @dataclass(frozen=True)
@@ -99,6 +113,56 @@ def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
         check=False,
         env=env,
     )
+
+
+def _run_host(command: list[str], *, timeout: int = 90) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            command,
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            command,
+            124,
+            stdout=str(exc.stdout or ""),
+            stderr=f"command timed out after {timeout}s",
+        )
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _local_coredump_since(started_at: str | None) -> str:
+    if not isinstance(started_at, str) or not started_at.strip():
+        return ""
+    try:
+        parsed = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _count_log_needles(text: str, needles: set[str] = CRASH_REGRESSION_LOG_NEEDLES) -> dict[str, int]:
+    return {needle: text.count(needle) for needle in sorted(needles)}
+
+
+def _count_python_hermes_coredumps(coredumpctl_output: str) -> int:
+    count = 0
+    for line in coredumpctl_output.splitlines():
+        if not re.search(r"python|hermes", line, re.IGNORECASE):
+            continue
+        if re.search(r"\b(SIGSEGV|SIGABRT|SIGBUS|SIGILL)\b", line):
+            count += 1
+    return count
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -1099,6 +1163,259 @@ def _check_hermes_proactive_runtime_parity(tmp: Path) -> CheckResult:
     )
 
 
+def _live_crash_regression_summary(
+    *,
+    container_name: str,
+    container_id: str | None,
+    container_state: dict[str, Any],
+    coredumpctl_available: bool,
+    coredump_count_since_container_start: int | None,
+    coredump_count_after_probe: int | None,
+    log_hit_counts: dict[str, int],
+    terminal_smoke_ok: bool,
+    venv_import_smoke_ok: bool,
+    chroma_exception_probe_ok: bool,
+) -> dict[str, Any]:
+    issues: list[dict[str, Any]] = []
+    health = container_state.get("health")
+    restart_count = _safe_int(container_state.get("restart_count"), -1)
+    exit_code = _safe_int(container_state.get("exit_code"), -1)
+
+    if not container_id:
+        issues.append({"code": "live_container_id_missing", "container": container_name})
+    if container_state.get("status") != "running":
+        issues.append({"code": "live_container_not_running", "status": container_state.get("status")})
+    if health != "healthy":
+        issues.append({"code": "live_container_not_healthy", "health": health})
+    if restart_count != 0:
+        issues.append({"code": "live_container_restarted", "restart_count": restart_count})
+    if container_state.get("oom_killed") is True:
+        issues.append({"code": "live_container_oom_killed"})
+    if exit_code not in (0, None):
+        issues.append({"code": "live_container_exit_code_nonzero", "exit_code": exit_code})
+
+    nonzero_log_hits = {key: value for key, value in log_hit_counts.items() if _safe_int(value) != 0}
+    if nonzero_log_hits:
+        issues.append({"code": "live_logs_crash_markers_present", "counts": nonzero_log_hits})
+
+    if not coredumpctl_available:
+        issues.append({"code": "coredumpctl_unavailable"})
+    if coredump_count_since_container_start is None:
+        issues.append({"code": "coredump_count_since_container_start_missing"})
+    elif coredump_count_since_container_start != 0:
+        issues.append(
+            {
+                "code": "python_hermes_coredumps_since_container_start",
+                "count": coredump_count_since_container_start,
+            }
+        )
+    if coredump_count_after_probe is None:
+        issues.append({"code": "coredump_count_after_probe_missing"})
+    elif coredump_count_after_probe != 0:
+        issues.append({"code": "python_hermes_coredumps_after_probe", "count": coredump_count_after_probe})
+
+    if not terminal_smoke_ok:
+        issues.append({"code": "terminal_smoke_failed"})
+    if not venv_import_smoke_ok:
+        issues.append({"code": "venv_import_smoke_failed"})
+    if not chroma_exception_probe_ok:
+        issues.append({"code": "chroma_exception_probe_failed"})
+
+    passed = not issues
+    return {
+        "status": "pass" if passed else "fail",
+        "container": container_name,
+        "container_id_present": bool(container_id),
+        "container_status": container_state.get("status"),
+        "container_health": health,
+        "container_started_at": container_state.get("started_at"),
+        "restart_count": restart_count,
+        "oom_killed": container_state.get("oom_killed"),
+        "exit_code": exit_code,
+        "log_hit_counts": dict(sorted(log_hit_counts.items())),
+        "logs_crash_markers_zero": not nonzero_log_hits,
+        "coredumpctl_available": coredumpctl_available,
+        "coredump_count_since_container_start": coredump_count_since_container_start,
+        "coredump_count_after_probe": coredump_count_after_probe,
+        "terminal_smoke_ok": terminal_smoke_ok,
+        "venv_import_smoke_ok": venv_import_smoke_ok,
+        "chroma_exception_probe_ok": chroma_exception_probe_ok,
+        "public_safe": True,
+        "issue_count": len(issues),
+        "issues": issues,
+    }
+
+
+def _container_state_from_inspect_output(stdout: str) -> tuple[dict[str, Any], str | None]:
+    lines = stdout.splitlines()
+    if len(lines) < 3:
+        return {}, None
+    try:
+        raw_state = json.loads(lines[0])
+    except json.JSONDecodeError:
+        raw_state = {}
+    health = raw_state.get("Health") if isinstance(raw_state.get("Health"), dict) else {}
+    return (
+        {
+            "status": raw_state.get("Status"),
+            "health": health.get("Status"),
+            "started_at": raw_state.get("StartedAt"),
+            "oom_killed": raw_state.get("OOMKilled"),
+            "exit_code": raw_state.get("ExitCode"),
+            "restart_count": _safe_int(lines[1], -1),
+        },
+        lines[2].strip() or None,
+    )
+
+
+def _check_live_crash_regression_guard(tmp: Path) -> CheckResult:
+    container = os.environ.get("BRAINSTACK_RELEASE_LIVE_CONTAINER", DEFAULT_RELEASE_LIVE_CONTAINER).strip()
+    command = ["live crash regression guard", container]
+    inspect_proc = _run_host(
+        [
+            "docker",
+            "inspect",
+            container,
+            "--format",
+            "{{json .State}}\n{{.RestartCount}}\n{{.Id}}",
+        ],
+        timeout=30,
+    )
+    if inspect_proc.returncode != 0:
+        summary = _live_crash_regression_summary(
+            container_name=container,
+            container_id=None,
+            container_state={},
+            coredumpctl_available=False,
+            coredump_count_since_container_start=None,
+            coredump_count_after_probe=None,
+            log_hit_counts={needle: 0 for needle in CRASH_REGRESSION_LOG_NEEDLES},
+            terminal_smoke_ok=False,
+            venv_import_smoke_ok=False,
+            chroma_exception_probe_ok=False,
+        )
+        summary["issues"].append({"code": "docker_inspect_failed", "returncode": inspect_proc.returncode})
+        summary["issue_count"] = len(summary["issues"])
+        summary["status"] = "fail"
+        return CheckResult(
+            name="live_crash_regression_guard",
+            status="fail",
+            command=command,
+            returncode=inspect_proc.returncode,
+            summary=summary,
+        )
+
+    container_state, container_id = _container_state_from_inspect_output(inspect_proc.stdout)
+    started_at = str(container_state.get("started_at") or "")
+    since = _local_coredump_since(started_at)
+
+    logs_proc = _run_host(["docker", "logs", "--since", started_at, container], timeout=60)
+    log_text = (logs_proc.stdout or "") + "\n" + (logs_proc.stderr or "") if logs_proc.returncode == 0 else ""
+    log_hit_counts = _count_log_needles(log_text)
+
+    coredumpctl_available = True
+    coredump_count_since_container_start: int | None = None
+    coredump_count_after_probe: int | None = None
+    coredump_command = ["coredumpctl", "--no-pager", "list", "--since", since] if since else []
+    if not coredump_command:
+        coredumpctl_available = False
+    else:
+        coredump_proc = _run_host(coredump_command, timeout=30)
+        coredumpctl_available = coredump_proc.returncode in (0, 1)
+        if coredumpctl_available:
+            coredump_count_since_container_start = _count_python_hermes_coredumps(coredump_proc.stdout)
+
+    terminal_proc = _run_host(["docker", "exec", "-i", container, "/bin/sh", "-lc", "echo terminal_smoke_ok"], timeout=30)
+    terminal_smoke_ok = terminal_proc.returncode == 0 and "terminal_smoke_ok" in terminal_proc.stdout
+
+    import_script = (
+        "import yaml, chromadb\n"
+        "from brainstack import BrainstackMemoryProvider\n"
+        "print('python_imports_ok')\n"
+    )
+    import_proc = _run_host(
+        ["docker", "exec", "-i", container, "/opt/hermes/.venv/bin/python", "-c", import_script],
+        timeout=60,
+    )
+    venv_import_smoke_ok = import_proc.returncode == 0 and "python_imports_ok" in import_proc.stdout
+
+    probe_root = f"/tmp/brainstack_release_crash_guard_{os.getpid()}"
+    chroma_probe_script = f"""
+from pathlib import Path
+import shutil
+from brainstack.db import BrainstackStore
+root = Path({probe_root!r})
+shutil.rmtree(root, ignore_errors=True)
+store = BrainstackStore(str(root / 'brainstack.db'), graph_backend='none', corpus_backend='chroma', corpus_db_path=str(root / 'brainstack.chroma'))
+store.open()
+try:
+    receipt = store.ingest_corpus_source({{
+        'source_adapter': 'release_crash_guard',
+        'source_id': 'release:crash-guard',
+        'stable_key': 'release:crash-guard',
+        'title': 'Release Crash Guard',
+        'doc_kind': 'diagnostic',
+        'source_uri': 'release://crash-guard',
+        'content': 'Release crash guard Chroma ingest probe.',
+        'metadata': {{'principal_scope_key': 'release:crash-guard'}},
+    }})
+    print('chroma_probe_ingest_status', receipt.get('status'))
+    raise RuntimeError('intentional_release_crash_guard_exception_after_chroma_ingest')
+finally:
+    store.close()
+    shutil.rmtree(root, ignore_errors=True)
+"""
+    chroma_proc = _run_host(
+        [
+            "docker",
+            "exec",
+            "-i",
+            "-u",
+            "hermes",
+            container,
+            "/opt/hermes/.venv/bin/python",
+            "-c",
+            chroma_probe_script,
+        ],
+        timeout=90,
+    )
+    chroma_combined_output = f"{chroma_proc.stdout}\n{chroma_proc.stderr}"
+    chroma_exception_probe_ok = (
+        chroma_proc.returncode == 1
+        and "intentional_release_crash_guard_exception_after_chroma_ingest" in chroma_combined_output
+    )
+
+    if coredump_command and coredumpctl_available:
+        coredump_after_proc = _run_host(coredump_command, timeout=30)
+        if coredump_after_proc.returncode in (0, 1):
+            coredump_count_after_probe = _count_python_hermes_coredumps(coredump_after_proc.stdout)
+
+    summary = _live_crash_regression_summary(
+        container_name=container,
+        container_id=container_id,
+        container_state=container_state,
+        coredumpctl_available=coredumpctl_available,
+        coredump_count_since_container_start=coredump_count_since_container_start,
+        coredump_count_after_probe=coredump_count_after_probe,
+        log_hit_counts=log_hit_counts,
+        terminal_smoke_ok=terminal_smoke_ok,
+        venv_import_smoke_ok=venv_import_smoke_ok,
+        chroma_exception_probe_ok=chroma_exception_probe_ok,
+    )
+    if logs_proc.returncode != 0:
+        summary["issues"].append({"code": "docker_logs_failed", "returncode": logs_proc.returncode})
+    summary["issue_count"] = len(summary["issues"])
+    summary["status"] = "pass" if not summary["issues"] else "fail"
+    passed = summary["status"] == "pass"
+    return CheckResult(
+        name="live_crash_regression_guard",
+        status=_status(passed),
+        command=command,
+        returncode=0 if passed else 1,
+        summary=summary,
+    )
+
+
 def _tracked_files() -> list[str]:
     proc = _run(["git", "ls-files"])
     if proc.returncode != 0:
@@ -1258,6 +1575,7 @@ def run_checklist(
             _check_public_fixtures(),
             _check_projection_semantics_runtime_parity(tmp),
             _check_hermes_proactive_runtime_parity(tmp),
+            _check_live_crash_regression_guard(tmp),
             _check_persistent_bloat_rebuild(tmp),
             _check_tier2_extraction_quality(tmp),
             _check_public_payload_leaks(),
