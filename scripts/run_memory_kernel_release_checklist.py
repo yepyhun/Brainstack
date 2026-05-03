@@ -693,6 +693,57 @@ def _check_persistent_bloat_rebuild(tmp: Path) -> CheckResult:
     )
 
 
+def _check_tier2_extraction_quality(tmp: Path) -> CheckResult:
+    out = tmp / "tier2_extraction_quality.json"
+    command = [sys.executable, "scripts/verify_tier2_extraction_quality.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    metrics = data.get("metrics") if isinstance(data.get("metrics"), dict) else {}
+    harmful_counters = data.get("harmful_counters") if isinstance(data.get("harmful_counters"), dict) else {}
+    bloat_impact = data.get("bloat_impact") if isinstance(data.get("bloat_impact"), dict) else {}
+    failure_bundles = data.get("failure_bundles") if isinstance(data.get("failure_bundles"), dict) else {}
+    unresolved_bundles = failure_bundles.get("unresolved") if isinstance(failure_bundles.get("unresolved"), list) else []
+    resolved_bundles = failure_bundles.get("resolved") if isinstance(failure_bundles.get("resolved"), list) else []
+    donor_drift = data.get("donor_drift") if isinstance(data.get("donor_drift"), dict) else {}
+    quality_class_passes = data.get("quality_class_passes") if isinstance(data.get("quality_class_passes"), dict) else {}
+    metrics_all_one = bool(metrics) and all(float(value or 0) == 1.0 for value in metrics.values())
+    harmful_zero = _all_zero_counters(harmful_counters)
+    public_safe = data.get("public_safe") is True
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and public_safe
+        and harmful_zero
+        and bloat_impact.get("status") == "pass"
+        and donor_drift.get("status") == "pass"
+        and metrics_all_one
+        and bool(quality_class_passes)
+        and all(value is True for value in quality_class_passes.values())
+        and unresolved_bundles == []
+    )
+    return CheckResult(
+        name="tier2_extraction_quality",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": public_safe,
+            "case_count": data.get("case_count"),
+            "metrics": dict(metrics),
+            "metrics_all_one": metrics_all_one,
+            "quality_class_passes": dict(quality_class_passes),
+            "harmful_counters": dict(harmful_counters),
+            "harmful_counters_zero": harmful_zero,
+            "bloat_impact": dict(bloat_impact),
+            "donor_drift": dict(donor_drift),
+            "resolved_failure_bundle_count": len(resolved_bundles),
+            "unresolved_failure_bundle_count": len(unresolved_bundles),
+            "claim_boundary": data.get("claim_boundary"),
+        },
+    )
+
+
 def _check_hermes_proactive_runtime_parity(tmp: Path) -> CheckResult:
     out = tmp / "hermes_proactive_runtime_parity.json"
     command = [sys.executable, "scripts/verify_hermes_proactive_runtime_parity.py", "--out", str(out)]
@@ -890,6 +941,7 @@ def run_checklist(
             _check_projection_semantics_runtime_parity(tmp),
             _check_hermes_proactive_runtime_parity(tmp),
             _check_persistent_bloat_rebuild(tmp),
+            _check_tier2_extraction_quality(tmp),
             _check_public_payload_leaks(),
             _check_git_hygiene(),
         ]

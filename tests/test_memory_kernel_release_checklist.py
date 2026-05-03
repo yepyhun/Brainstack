@@ -11,6 +11,7 @@ from scripts.run_memory_kernel_release_checklist import (
     _check_persistent_bloat_rebuild,
     _check_projection_semantics_runtime_parity,
     _check_release_claim_contract,
+    _check_tier2_extraction_quality,
     _git_hygiene_from_lists,
     _report,
     CheckResult,
@@ -137,6 +138,23 @@ def test_persistent_bloat_rebuild_release_check_passes(tmp_path: Path) -> None:
     assert PRIVATE_SOAK_SENTINEL not in rendered
 
 
+def test_tier2_extraction_quality_release_check_passes(tmp_path: Path) -> None:
+    result = _check_tier2_extraction_quality(tmp_path)
+    rendered = json.dumps(result.summary, ensure_ascii=False, sort_keys=True)
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["case_count"] >= 10
+    assert result.summary["metrics_all_one"] is True
+    assert result.summary["harmful_counters_zero"] is True
+    assert result.summary["bloat_impact"]["status"] == "pass"
+    assert result.summary["donor_drift"]["status"] == "pass"
+    assert result.summary["resolved_failure_bundle_count"] >= 3
+    assert result.summary["unresolved_failure_bundle_count"] == 0
+    assert "fixture proof" in rendered
+
+
 def test_git_hygiene_blocks_dirty_source() -> None:
     summary = _git_hygiene_from_lists([" M brainstack/core/example.py"], [])
 
@@ -227,6 +245,21 @@ def test_release_report_fails_persistent_bloat_rebuild_even_in_dev_mode() -> Non
     assert report["status"] == "fail"
     assert report["release_allowed"] is False
     assert report["non_git_failures"] == ["persistent_bloat_rebuild"]
+
+
+def test_release_report_fails_tier2_extraction_quality_even_in_dev_mode() -> None:
+    checks = [
+        CheckResult("release_claim_contract", "pass", ["contract"], 0, {}),
+        CheckResult("tier2_unbreakable_operation", "pass", ["tier2"], 0, {}),
+        CheckResult("tier2_extraction_quality", "fail", ["tier2-extraction"], 2, {"status": "fail"}),
+        CheckResult("git_hygiene", "fail", ["git"], 0, {"git_dirty": True}),
+    ]
+
+    report = _report(checks, ignore_git_dirty_for_dev=True)
+
+    assert report["status"] == "fail"
+    assert report["release_allowed"] is False
+    assert report["non_git_failures"] == ["tier2_extraction_quality"]
 
 
 def test_release_report_fails_phase249_ralph_gate_even_in_dev_mode() -> None:

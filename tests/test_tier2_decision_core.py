@@ -238,6 +238,29 @@ def test_decision_core_duplicate_create_becomes_noop_inspect_only() -> None:
     assert decision["reason_code"] == "NOOP_DUPLICATE_ALREADY_CURRENT"
 
 
+def test_decision_core_ignore_action_cannot_become_durable_truth() -> None:
+    packet = _input(
+        [
+            {
+                "proposal_id": "proposal-ignore",
+                "action": "ignore",
+                "target_kind": "user_fact",
+                "target_slot": "identity.unwanted_candidate",
+                "stable_key": "identity.unwanted_candidate",
+                "value_fingerprint": "sha256:ignored",
+                "source_span_ids": ["span-user-1"],
+            }
+        ]
+    )
+
+    plan = build_tier2_decision_plan(packet)
+    decision = plan["decisions"][0]
+
+    assert decision["decision_class"] == "inspect_only"
+    assert decision["authority"]["truth_eligible"] is False
+    assert decision["reason_code"] == "INSPECT_ONLY_UNVERIFIED_DONOR_PROPOSAL"
+
+
 def test_decision_core_has_no_forbidden_imports() -> None:
     module_path = Path("brainstack/tier2_decision_core.py")
     tree = ast.parse(module_path.read_text())

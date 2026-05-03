@@ -101,3 +101,36 @@ def test_hindsight_adapter_marks_unsafe_actions_degraded() -> None:
     assert len(batch["actions"]) == 1
     assert batch["actions"][0]["action"] == "failed_batch"
     assert batch["actions"][0]["target_kind"] == "support_context"
+
+
+def test_hindsight_adapter_preserves_lifecycle_actions_for_decision_core() -> None:
+    batch = normalize_proposal_action_batch(
+        {
+            "status": "ok",
+            "operation_id": "op_lifecycle",
+            "actions": [
+                {
+                    "action": "correction",
+                    "target_kind": "user_fact",
+                    "target_slot": "identity.preferred_address_name",
+                    "value_fingerprint": "sha256:corrected",
+                    "source_span_ids": ["span_1"],
+                    "source_event_ids": ["event_1"],
+                    "assertion_speaker": "user",
+                },
+                {
+                    "action": "supersede",
+                    "target_kind": "project_fact",
+                    "target_slot": "project.creator",
+                    "value_fingerprint": "sha256:superseded",
+                    "source_span_ids": ["span_1"],
+                    "source_event_ids": ["event_1"],
+                    "assertion_speaker": "user",
+                },
+            ],
+        }
+    )
+
+    assert batch["status"] == "ok"
+    assert batch["critical_counters"]["unsupported_actions"] == 0
+    assert [action["action"] for action in batch["actions"]] == ["correction", "supersede"]

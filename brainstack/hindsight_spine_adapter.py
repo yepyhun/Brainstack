@@ -7,7 +7,18 @@ from typing import Any, Callable, Mapping, Protocol
 
 HINDSIGHT_SPINE_ADAPTER_VERSION = "brainstack.hindsight_spine_adapter.v1"
 PROPOSAL_ACTION_BATCH_SCHEMA = "brainstack.hindsight_proposal_action_batch.v1"
-SUPPORTED_ACTIONS = {"create", "update", "delete_or_supersede", "ignore", "failed_batch"}
+SUPPORTED_ACTIONS = {
+    "create",
+    "retain",
+    "update",
+    "correct",
+    "correction",
+    "delete",
+    "delete_or_supersede",
+    "supersede",
+    "ignore",
+    "failed_batch",
+}
 SUPPORTED_TARGET_KINDS = {
     "user_fact",
     "project_fact",

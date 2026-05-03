@@ -350,6 +350,8 @@ def _decision_class(
         return "clarification_required"
     if memory_kind == "support_context":
         return "support_event"
+    if raw_action in {"ignore", "failed_batch"}:
+        return "inspect_only"
     if not bool(authority.get("truth_eligible")):
         return "inspect_only"
     if matches and raw_action in {"create", "retain"}:
