@@ -134,3 +134,28 @@ def test_hindsight_adapter_preserves_lifecycle_actions_for_decision_core() -> No
     assert batch["status"] == "ok"
     assert batch["critical_counters"]["unsupported_actions"] == 0
     assert [action["action"] for action in batch["actions"]] == ["correction", "supersede"]
+
+
+def test_hindsight_adapter_preserves_operating_memory_targets_for_decision_core() -> None:
+    batch = normalize_proposal_action_batch(
+        {
+            "status": "ok",
+            "operation_id": "op_operating_memory",
+            "actions": [
+                {
+                    "action": "correction",
+                    "target_kind": "operating_memory",
+                    "target_slot": "operating.brainstack_diagnostics_output_shape",
+                    "stable_key": "operating.brainstack_diagnostics_output_shape",
+                    "value_fingerprint": "sha256:compact-diagnostics",
+                    "source_span_ids": ["span_runtime"],
+                    "source_event_ids": ["event_runtime"],
+                    "assertion_speaker": "runtime",
+                }
+            ],
+        }
+    )
+
+    assert batch["status"] == "ok"
+    assert batch["critical_counters"]["unsupported_actions"] == 0
+    assert batch["actions"][0]["target_kind"] == "operating_memory"

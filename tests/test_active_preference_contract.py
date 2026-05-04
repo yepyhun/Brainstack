@@ -199,6 +199,59 @@ def test_assistant_origin_profile_item_does_not_create_active_contract(tmp_path:
         store.close()
 
 
+def test_explicit_profile_lane_style_contract_projects_active_contract_without_behavior_rows(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        scope = "principal:profile-lane-contract"
+        store.upsert_profile_item(
+            stable_key=STYLE_CONTRACT_SLOT,
+            category="style_contract",
+            content=(
+                "LauraTom Discord Communication Rules\n\n"
+                "Rules\n"
+                "- Válaszolj alapból magyarul.\n"
+                "- Csak akkor válaszolj angolul, ha Laura kifejezetten kéri.\n"
+                "- Magyarázz röviden és közérthetően."
+            ),
+            source="operator_explicit_user_instruction",
+            confidence=0.99,
+            metadata={
+                "principal_scope_key": scope,
+                "source_role": "user",
+                "memory_write_receipt_id": "operator:style-contract:test",
+                "style_contract_title": "LauraTom Discord Communication Rules",
+                "style_contract_sections": [
+                    {
+                        "heading": "Rules",
+                        "lines": [
+                            "Válaszolj alapból magyarul.",
+                            "Csak akkor válaszolj angolul, ha Laura kifejezetten kéri.",
+                            "Magyarázz röviden és közérthetően.",
+                        ],
+                    }
+                ],
+            },
+        )
+
+        projection = build_system_prompt_projection(
+            store,
+            profile_limit=0,
+            principal_scope_key=scope,
+            session_id="session:test",
+        )
+        contract = projection["active_preference_contract"]
+        block = str(projection["block"])
+
+        assert contract["contract_status"] == CONTRACT_STATUS_ACTIVE
+        assert projection["active_preference_delivery_trace"]["active_preference_contract_delivered"] is True
+        assert "Válaszolj alapból magyarul" in block
+        assert "Csak akkor válaszolj angolul" in block
+        assert store.conn.execute("select count(*) from behavior_contracts").fetchone()[0] == 0
+        assert store.conn.execute("select count(*) from compiled_behavior_policies").fetchone()[0] == 0
+    finally:
+        store.close()
+
+
 def test_delivery_trace_has_registered_safe_shape() -> None:
     trace = build_active_preference_delivery_trace(
         {

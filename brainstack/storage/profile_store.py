@@ -30,8 +30,47 @@ from .store_runtime import (
     list_style_contract_rules,
     sqlite3,
     style_contract_cleanliness_issues,
+    style_contract_source_rank,
     utc_now_iso,
 )
+
+
+PROFILE_STYLE_CONTRACT_PROFILE_LANE = "profile_style_contract"
+PROFILE_STYLE_CONTRACT_ALLOWED_SOURCE_PREFIXES = (
+    "operator_explicit",
+    "user_explicit",
+    "memory_write:style_contract",
+    "prefetch:style_contract",
+    "sync_turn:user_style_contract",
+)
+PROFILE_STYLE_CONTRACT_BLOCKED_SOURCE_ROLES = {"assistant", "system", "tool"}
+
+
+def _profile_style_contract_has_user_authority(item: Dict[str, Any]) -> bool:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    source_role = str(metadata.get("source_role") or "").strip().lower()
+    if source_role in PROFILE_STYLE_CONTRACT_BLOCKED_SOURCE_ROLES:
+        return False
+    if source_role == "user":
+        return True
+
+    source = str(item.get("source") or "").strip().lower()
+    if any(source.startswith(prefix) for prefix in PROFILE_STYLE_CONTRACT_ALLOWED_SOURCE_PREFIXES):
+        return True
+
+    provenance = metadata.get("provenance")
+    source_ids = provenance.get("source_ids") if isinstance(provenance, dict) else ()
+    if isinstance(source_ids, (str, bytes, bytearray)):
+        source_ids = (source_ids,)
+    if any(
+        any(str(source_id).strip().lower().startswith(prefix) for prefix in PROFILE_STYLE_CONTRACT_ALLOWED_SOURCE_PREFIXES)
+        for source_id in (source_ids or ())
+    ):
+        return True
+
+    receipt_id = str(metadata.get("memory_write_receipt_id") or metadata.get("receipt_id") or "").strip().lower()
+    return bool(receipt_id and "user" in source and style_contract_source_rank(source) >= 200)
+
 
 class ProfileStoreMixin(StoreRuntimeBase):
     def _get_active_behavior_contract_row(
@@ -309,6 +348,80 @@ class ProfileStoreMixin(StoreRuntimeBase):
         )
         return row_id
 
+    def _profile_style_contract_behavior_projection(
+        self,
+        *,
+        principal_scope_key: str = "",
+    ) -> Dict[str, Any] | None:
+        scope_key = str(principal_scope_key or "").strip()
+        if not scope_key:
+            return None
+        item = self.get_profile_item(
+            stable_key=STYLE_CONTRACT_SLOT,
+            principal_scope_key=scope_key,
+        )
+        if not item or not bool(item.get("active", True)):
+            return None
+        if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT:
+            return None
+        if not _profile_style_contract_has_user_authority(item):
+            return None
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        content = str(item.get("content") or "").strip()
+        if style_contract_cleanliness_issues(raw_text=content, metadata=metadata):
+            return None
+        storage_key = str(item.get("storage_key") or item.get("stable_key") or "").strip()
+        updated_at = str(item.get("updated_at") or "").strip()
+        return {
+            "id": int(item.get("id") or 0),
+            "storage_key": storage_key,
+            "principal_scope_key": scope_key,
+            "stable_key": STYLE_CONTRACT_SLOT,
+            "category": str(item.get("category") or "style_contract").strip() or "style_contract",
+            "content": content,
+            "source": str(item.get("source") or "").strip(),
+            "confidence": float(item.get("confidence") or 0.9),
+            "metadata": metadata,
+            "source_contract_hash": hashlib.sha256(content.encode("utf-8")).hexdigest() if content else "",
+            "revision_number": 1,
+            "parent_revision_id": 0,
+            "status": BEHAVIOR_CONTRACT_ACTIVE_STATUS,
+            "committed_at": updated_at,
+            "updated_at": updated_at,
+            "active": True,
+            "source_lane": PROFILE_STYLE_CONTRACT_PROFILE_LANE,
+            "read_only_projection": True,
+        }
+
+    def _compiled_behavior_policy_record_from_profile_projection(
+        self,
+        item: Dict[str, Any],
+    ) -> Dict[str, Any] | None:
+        compiled = compile_behavior_policy(
+            raw_content=str(item.get("content") or ""),
+            metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else None,
+            source_storage_key=str(item.get("storage_key") or ""),
+            source_updated_at=str(item.get("updated_at") or ""),
+            source_revision_number=int(item.get("revision_number") or 1),
+        )
+        if compiled is None:
+            return None
+        return {
+            "principal_scope_key": str(item.get("principal_scope_key") or "").strip(),
+            "source_storage_key": str(compiled.get("source_storage_key") or "").strip(),
+            "source_contract_hash": str(compiled.get("source_contract_hash") or "").strip(),
+            "source_contract_updated_at": str(compiled.get("source_contract_updated_at") or "").strip(),
+            "schema_version": int(compiled.get("schema_version") or 0),
+            "compiler_version": str(compiled.get("compiler_version") or "").strip(),
+            "title": str(compiled.get("title") or "").strip(),
+            "policy": compiled,
+            "projection_text": str(compiled.get("projection_text") or "").strip(),
+            "status": str(compiled.get("status") or "active").strip() or "active",
+            "updated_at": str(item.get("updated_at") or "").strip(),
+            "source_lane": PROFILE_STYLE_CONTRACT_PROFILE_LANE,
+            "read_only_projection": True,
+        }
+
     @_locked
     def get_compiled_behavior_policy(self, *, principal_scope_key: str = "") -> Dict[str, Any] | None:
         requested_scope_key = str(principal_scope_key or "").strip()
@@ -321,6 +434,8 @@ class ProfileStoreMixin(StoreRuntimeBase):
             self._delete_compiled_behavior_policy_record(principal_scope_key=polluted_scope_key)
             self.conn.commit()
             return None
+        if contract and str(contract.get("source_lane") or "").strip() == PROFILE_STYLE_CONTRACT_PROFILE_LANE:
+            return self._compiled_behavior_policy_record_from_profile_projection(contract)
         row = self._get_compiled_behavior_policy_row(principal_scope_key=requested_scope_key)
         if row:
             compiled_item = _compiled_behavior_policy_row_to_dict(row)

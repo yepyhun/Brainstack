@@ -51,6 +51,17 @@ def test_tier2_extraction_quality_blocks_unsafe_donor_output_from_truth() -> Non
     assert cases["ignored_action_not_truth"]["decisions"][0]["truth_eligible"] is False
 
 
+def test_tier2_extraction_quality_covers_brainstack_stats_diagnostics_correction() -> None:
+    report = build_tier2_extraction_quality_report()
+    cases = {case["id"]: case for case in report["cases"]}
+    diagnostics = cases["brainstack_stats_diagnostics_supersession"]
+
+    assert diagnostics["status"] == "pass"
+    assert diagnostics["decisions"][0]["decision_class"] == "lifecycle_update_candidate"
+    assert diagnostics["decisions"][0]["memory_kind"] == "operating_memory"
+    assert diagnostics["decisions"][0]["truth_eligible"] is True
+
+
 def test_tier2_extraction_quality_bloat_budget_is_enforced() -> None:
     report = build_tier2_extraction_quality_report(bloat_ratio_threshold=0.1)
 

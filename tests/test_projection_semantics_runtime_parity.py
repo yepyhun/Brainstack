@@ -18,11 +18,23 @@ def test_projection_semantics_runtime_parity_report_passes() -> None:
     assert report["inspect_verdict"] == "pass"
     assert report["doctor_status"] == "active"
     assert report["conformance_status"] == "pass"
-    assert report["selected_event_ids"] == ["truth_a", "truth_b"]
+    assert report["selected_event_ids"] == ["brainstack_stats_new_compact_truth", "truth_a", "truth_b"]
     assert report["unsafe_selected_event_ids"] == []
     assert report["critical_counters"]["packet_authority_critical_dropped"] == 0
     assert report["public_safe"] is True
     assert "private source text" not in str(report)
+    assert "old diagnostic output was huge" not in str(report).lower()
+
+    fixture = report["stale_correction_fixture"]
+    assert fixture["old_event_id"] == "brainstack_stats_old_large_support"
+    assert fixture["old_answer_decision"] == "not_answer_safe"
+    assert "support-only" in fixture["old_labels"]
+    assert fixture["old_packet_action"] == "dropped"
+    assert fixture["new_event_id"] == "brainstack_stats_new_compact_truth"
+    assert fixture["new_answer_decision"] == "answer_safe"
+    assert "answer-safe" in fixture["new_labels"]
+    assert "authority-critical" in fixture["new_labels"]
+    assert fixture["new_packet_action"] == "selected"
 
 
 def test_projection_semantics_runtime_parity_cli_outputs_json(tmp_path) -> None:
@@ -46,3 +58,5 @@ def test_projection_semantics_runtime_parity_cli_outputs_json(tmp_path) -> None:
     assert payload == written
     assert payload["status"] == "pass"
     assert payload["public_safe"] is True
+    assert payload["stale_correction_fixture"]["old_answer_decision"] == "not_answer_safe"
+    assert payload["stale_correction_fixture"]["new_answer_decision"] == "answer_safe"

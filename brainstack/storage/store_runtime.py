@@ -122,7 +122,14 @@ def _env_truthy(name: str, *, default: bool = False) -> bool:
 NUMERIC_TOKEN_RE = re.compile(r"\d+(?::\d+)?(?:\.\d+)?")
 QUERY_TOKEN_RE = re.compile(r"[^\W_]+(?:[-_][^\W_]+)*", re.UNICODE)
 PROFILE_SCOPE_DELIMITER = "::principal_scope::"
-PRINCIPAL_SCOPED_PROFILE_CATEGORIES = {"identity", "preference"}
+PRINCIPAL_SCOPED_PROFILE_CATEGORIES = {
+    "identity",
+    "native_profile_mirror",
+    "operating_preference",
+    "preference",
+    "style_preference",
+    "work_context",
+}
 VOLATILE_OPERATING_RECORD_TYPES = {"session_state"}
 VOLATILE_OPERATING_MIN_SEMANTIC_SCORE = 0.5
 TRANSCRIPT_HYGIENE_MARKERS = (

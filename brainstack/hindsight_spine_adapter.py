@@ -23,6 +23,7 @@ SUPPORTED_TARGET_KINDS = {
     "user_fact",
     "project_fact",
     "style_rule",
+    "operating_memory",
     "graph_relation",
     "temporal_event",
     "support_context",

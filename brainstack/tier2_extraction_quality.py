@@ -193,6 +193,45 @@ def public_safe_fixtures() -> list[dict[str, Any]]:
             ],
         },
         {
+            "id": "brainstack_stats_diagnostics_supersession",
+            "quality_class": "update_supersession_correctness",
+            "raw_batch": _raw_batch(
+                "op-brainstack-diagnostics-correction",
+                [
+                    {
+                        "action": "correction",
+                        "target_kind": "operating_memory",
+                        "target_slot": "operating.brainstack_diagnostics_output_shape",
+                        "stable_key": "operating.brainstack_diagnostics_output_shape",
+                        "value_fingerprint": "sha256:brainstack-diagnostics-compact-2026-05-03",
+                        "confidence": 0.98,
+                        "reason_code": "RECEIPT_BACKED_DIAGNOSTICS_CORRECTION",
+                        "source_span_ids": ["span-runtime-diagnostics"],
+                        "source_event_ids": ["event-runtime-diagnostics"],
+                        "assertion_speaker": "runtime",
+                    }
+                ],
+            ),
+            "spans": [
+                _span("span-runtime-diagnostics", speaker="runtime")
+            ],
+            "existing": [
+                {
+                    "memory_ref": "operating-record-old-large-diagnostics",
+                    "stable_key": "operating.brainstack_diagnostics_output_shape",
+                    "value_fingerprint": "sha256:brainstack-diagnostics-old-large",
+                }
+            ],
+            "expected_decisions": [
+                {
+                    "decision_class": "lifecycle_update_candidate",
+                    "lifecycle_action": "correction",
+                    "memory_kind": "operating_memory",
+                    "truth_eligible": True,
+                }
+            ],
+        },
+        {
             "id": "conflict_review_not_answer_truth",
             "quality_class": "conflict_precision",
             "raw_batch": _raw_batch(

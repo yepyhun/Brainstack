@@ -15,7 +15,6 @@ from .store_runtime import (
     _attach_keyword_scores,
     _behavior_contract_row_to_dict,
     _decode_json_object,
-    _is_principal_scoped_profile,
     _locked,
     _profile_row_to_dict,
     _profile_storage_key,
@@ -141,7 +140,7 @@ class ProfileReadStoreMixin(StoreRuntimeBase):
         ).fetchone()
         if row:
             return _profile_row_to_dict(row)
-        if not principal_scope_key or not _is_principal_scoped_profile(stable_key=stable_key):
+        if not principal_scope_key:
             return None
         like_pattern = f"{str(stable_key or '').strip()}{PROFILE_SCOPE_DELIMITER}%"
         candidate_rows = self.conn.execute(
@@ -204,7 +203,10 @@ class ProfileReadStoreMixin(StoreRuntimeBase):
             if _annotate_principal_scope(item, principal_scope_key=requested_scope_key):
                 candidates.append(item)
         if not candidates:
-            return None
+            projection = self._profile_style_contract_behavior_projection(  # type: ignore[attr-defined]
+                principal_scope_key=requested_scope_key,
+            )
+            return projection
         candidates.sort(
             key=lambda item: _scoped_row_priority(item, principal_scope_key=requested_scope_key),
             reverse=True,
