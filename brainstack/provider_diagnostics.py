@@ -458,6 +458,134 @@ def _safe_persistent_bloat_report(
     return report
 
 
+def _bool_arg(args: Mapping[str, Any], name: str, default: bool = False) -> bool:
+    value = args.get(name, default) if isinstance(args, Mapping) else default
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _compact_tier2_route(route: Any) -> dict[str, Any]:
+    if not isinstance(route, Mapping):
+        return {}
+    return {
+        "runtime": _normalize_compact_text(route.get("runtime")),
+        "mode": _normalize_compact_text(route.get("mode")),
+        "hindsight_mode": _normalize_compact_text(route.get("hindsight_mode")),
+        "llm_provider": _normalize_compact_text(route.get("llm_provider")),
+        "effective_model": _normalize_compact_text(route.get("effective_model")),
+        "model_source": _normalize_compact_text(route.get("model_source")),
+        "uses_legacy_gpt_5_2_codex": bool(route.get("uses_legacy_gpt_5_2_codex")),
+    }
+
+
+def _compact_lifecycle_status(lifecycle: Any) -> dict[str, Any]:
+    if not isinstance(lifecycle, Mapping):
+        return {"status": "unknown"}
+    return {
+        "schema": _normalize_compact_text(lifecycle.get("schema")),
+        "status": _normalize_compact_text(lifecycle.get("status")),
+        "reason": _trim_compact_text(lifecycle.get("reason"), limit=180),
+        "store_initialized": bool(lifecycle.get("store_initialized")),
+        "tier2_worker_running": bool(lifecycle.get("tier2_worker_running")),
+        "pending_tier2_turns": int(lifecycle.get("pending_tier2_turns") or 0),
+        "tier2_runtime_route": _compact_tier2_route(lifecycle.get("tier2_runtime_route")),
+    }
+
+
+def _compact_backend_health(raw_backend_health: Any) -> dict[str, Any]:
+    if not isinstance(raw_backend_health, Mapping):
+        return {}
+    backends: dict[str, Any] = {}
+    raw_backends = raw_backend_health.get("backends")
+    if isinstance(raw_backends, Mapping):
+        for name, raw in raw_backends.items():
+            if not isinstance(raw, Mapping):
+                continue
+            backends[str(name)] = {
+                "kind": _normalize_compact_text(raw.get("kind") or name),
+                "status": _normalize_compact_text(raw.get("status")),
+                "active": bool(raw.get("active")),
+                "requested": bool(raw.get("requested")),
+                "reason": _trim_compact_text(raw.get("reason"), limit=160),
+            }
+    return {
+        "schema": _normalize_compact_text(raw_backend_health.get("schema")),
+        "status": _normalize_compact_text(raw_backend_health.get("status")),
+        "issue_count": int(raw_backend_health.get("issue_count") or 0),
+        "backends": backends,
+    }
+
+
+def _compact_doctor_report(report: Any, *, strict_requested: bool) -> dict[str, Any]:
+    if not isinstance(report, Mapping):
+        return {"schema": "brainstack.memory_kernel_doctor.v1", "verdict": "unknown"}
+    issues = report.get("issues") if isinstance(report.get("issues"), list) else []
+    capabilities: dict[str, Any] = {}
+    raw_capabilities = report.get("capabilities")
+    if isinstance(raw_capabilities, Mapping):
+        for name, raw in raw_capabilities.items():
+            if not isinstance(raw, Mapping):
+                continue
+            capabilities[str(name)] = {
+                "status": _normalize_compact_text(raw.get("status")),
+                "active": bool(raw.get("active")),
+                "requested": bool(raw.get("requested")),
+                "reason": _trim_compact_text(raw.get("reason"), limit=140),
+            }
+    return {
+        "schema": _normalize_compact_text(report.get("schema")),
+        "strict": bool(report.get("strict")),
+        "strict_requested": bool(strict_requested),
+        "verdict": _normalize_compact_text(report.get("verdict")),
+        "issue_count": len(issues),
+        "issues": [
+            {
+                "capability": _normalize_compact_text(issue.get("capability")) if isinstance(issue, Mapping) else "",
+                "status": _normalize_compact_text(issue.get("status")) if isinstance(issue, Mapping) else "",
+                "severity": _normalize_compact_text(issue.get("severity")) if isinstance(issue, Mapping) else "",
+                "reason": _trim_compact_text(issue.get("reason"), limit=160) if isinstance(issue, Mapping) else "",
+            }
+            for issue in issues[:5]
+        ],
+        "row_counts": dict(report.get("row_counts") or {}) if isinstance(report.get("row_counts"), Mapping) else {},
+        "capabilities": capabilities,
+    }
+
+
+def _compact_persistent_bloat(report: Any) -> dict[str, Any]:
+    if not isinstance(report, Mapping):
+        return {"schema": PERSISTENT_BLOAT_REPORT_SCHEMA, "status": "unknown", "issue_count": 1}
+    metrics = report.get("metrics") if isinstance(report.get("metrics"), Mapping) else {}
+    return {
+        "schema": _normalize_compact_text(report.get("schema") or PERSISTENT_BLOAT_REPORT_SCHEMA),
+        "status": _normalize_compact_text(report.get("status")),
+        "read_only": bool(report.get("read_only", True)),
+        "public_safe": bool(report.get("public_safe", True)),
+        "issue_count": int(report.get("issue_count") or 0),
+        "metric_statuses": dict(report.get("metric_statuses") or {})
+        if isinstance(report.get("metric_statuses"), Mapping)
+        else {},
+        "critical_counters": dict(report.get("critical_counters") or {})
+        if isinstance(report.get("critical_counters"), Mapping)
+        else {},
+        "metric_names": sorted(str(name) for name in metrics.keys()),
+        "policy_preview_count": len(report.get("policy_preview") or []),
+    }
+
+
+def _compact_maintenance_receipt(receipt: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(receipt, Mapping) or not receipt:
+        return {}
+    return {
+        "schema": _normalize_compact_text(receipt.get("schema")),
+        "status": _normalize_compact_text(receipt.get("status")),
+        "maintenance_class": _normalize_compact_text(receipt.get("maintenance_class")),
+        "change_count": int(receipt.get("change_count") or 0),
+        "issue_count": int(receipt.get("issue_count") or 0),
+    }
+
+
 def handle_brainstack_stats(
     *,
     args: Mapping[str, Any],
@@ -467,22 +595,81 @@ def handle_brainstack_stats(
     last_maintenance_receipt: Mapping[str, Any] | None,
     persistent_bloat_report: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    strict_value = args.get("strict", False) if isinstance(args, Mapping) else False
-    strict = strict_value if isinstance(strict_value, bool) else str(strict_value).strip().lower() in {"1", "true", "yes"}
+    strict = _bool_arg(args, "strict") if isinstance(args, Mapping) else False
     report = memory_kernel_doctor(strict=strict)
     raw_backend_health = report.get("backend_health") if isinstance(report, Mapping) else None
     persistent_bloat = _safe_persistent_bloat_report(
         principal_scope_key=principal_scope_key,
         persistent_bloat_report=persistent_bloat_report,
     )
+    lifecycle = _compact_lifecycle_status(lifecycle_status())
+    doctor = _compact_doctor_report(report, strict_requested=strict)
     return {
         "schema": "brainstack.tool_stats.v1",
         "tool_name": "brainstack_stats",
         "read_only": True,
+        "bounded_model_facing": True,
         "principal_scope_key": principal_scope_key,
-        "lifecycle": lifecycle_status(),
-        "maintenance": dict(last_maintenance_receipt or {}),
-        "backend_health": dict(raw_backend_health) if isinstance(raw_backend_health, Mapping) else {},
-        "persistent_bloat": persistent_bloat,
-        "report": report,
+        "status": doctor.get("verdict") or lifecycle.get("status") or "unknown",
+        "strict_requested": strict,
+        "model_use_contract": {
+            "answer_source": "this_compact_summary",
+            "full_internal_report_omitted": True,
+            "do_not_call_search_files_for_brainstack_config": True,
+            "detail_route": "Use brainstack_inspect for query-specific retrieval traces; operator/release diagnostics own full doctor reports.",
+        },
+        "lifecycle": lifecycle,
+        "maintenance": _compact_maintenance_receipt(last_maintenance_receipt),
+        "backend_health": _compact_backend_health(raw_backend_health),
+        "persistent_bloat": _compact_persistent_bloat(persistent_bloat),
+        "doctor": doctor,
+        "omitted_fields": ["report.capabilities.raw", "report.backend_health.raw", "persistent_bloat.metrics.raw", "persistent_bloat.policy_preview.raw"],
+        "reason_code": "MODEL_FACING_STATS_COMPACT",
+    }
+
+
+def handle_brainstack_latency_status(
+    *,
+    args: Mapping[str, Any],
+    principal_scope_key: str,
+    lifecycle_status: Callable[[], dict[str, Any]],
+    memory_kernel_doctor: Callable[..., dict[str, Any]],
+    last_maintenance_receipt: Mapping[str, Any] | None,
+    persistent_bloat_report: Callable[[], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    stats = handle_brainstack_stats(
+        args={"strict": False},
+        principal_scope_key=principal_scope_key,
+        lifecycle_status=lifecycle_status,
+        memory_kernel_doctor=memory_kernel_doctor,
+        last_maintenance_receipt=last_maintenance_receipt,
+        persistent_bloat_report=persistent_bloat_report,
+    )
+    return {
+        "schema": "brainstack.tool_latency_status.v1",
+        "tool_name": "brainstack_latency_status",
+        "read_only": True,
+        "bounded_model_facing": True,
+        "status": stats.get("status"),
+        "brainstack_summary": {
+            "lifecycle_status": stats.get("lifecycle", {}).get("status"),
+            "tier2_route": stats.get("lifecycle", {}).get("tier2_runtime_route", {}),
+            "backend_health_status": stats.get("backend_health", {}).get("status"),
+            "doctor_verdict": stats.get("doctor", {}).get("verdict"),
+            "persistent_bloat_status": stats.get("persistent_bloat", {}).get("status"),
+        },
+        "latency_contract": {
+            "hotpath_target_seconds": 5,
+            "heavy_path_target_seconds": 10,
+            "brainstack_tool_output": "compact_bounded_summary",
+            "does_not_benchmark_provider_api": True,
+            "does_not_require_file_search": True,
+        },
+        "likely_slow_component_if_turn_exceeds_target": "provider_or_gateway_or_unbounded_non_brainstack_tool; verify with gateway timing logs before blaming Brainstack memory.",
+        "model_use_contract": {
+            "answer_source": "this_compact_latency_summary",
+            "do_not_call_search_files_for_brainstack_config": True,
+            "if_more_detail_needed": "Ask for explicit deep diagnostics or use operator/release tooling, not normal chat file search.",
+        },
+        "reason_code": "MODEL_FACING_LATENCY_STATUS_COMPACT",
     }

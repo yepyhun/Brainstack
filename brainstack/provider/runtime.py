@@ -75,6 +75,7 @@ from ..provider_diagnostics import (
     build_provider_memory_kernel_doctor,
     build_provider_query_inspect,
     handle_brainstack_inspect,
+    handle_brainstack_latency_status,
     handle_brainstack_recall,
     handle_brainstack_stats,
 )

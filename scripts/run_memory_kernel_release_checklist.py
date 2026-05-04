@@ -1175,10 +1175,9 @@ def _live_crash_regression_summary(
     terminal_smoke_ok: bool,
     venv_import_smoke_ok: bool,
     chroma_exception_probe_ok: bool,
-    file_search_timeout_ok: bool,
-    file_search_probe_ok: bool,
-    file_search_timeout_default: int | None = None,
-    file_search_probe_seconds: float | None = None,
+    brainstack_model_tool_surface_ok: bool,
+    brainstack_model_tool_bytes: dict[str, int] | None = None,
+    brainstack_model_tool_surface_issues: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     health = container_state.get("health")
@@ -1224,18 +1223,12 @@ def _live_crash_regression_summary(
         issues.append({"code": "venv_import_smoke_failed"})
     if not chroma_exception_probe_ok:
         issues.append({"code": "chroma_exception_probe_failed"})
-    if not file_search_timeout_ok:
+    if not brainstack_model_tool_surface_ok:
         issues.append(
             {
-                "code": "file_search_timeout_cap_failed",
-                "default_timeout": file_search_timeout_default,
-            }
-        )
-    if not file_search_probe_ok:
-        issues.append(
-            {
-                "code": "file_search_probe_failed",
-                "probe_seconds": file_search_probe_seconds,
+                "code": "brainstack_model_tool_surface_unbounded",
+                "tool_bytes": dict(brainstack_model_tool_bytes or {}),
+                "surface_issues": list(brainstack_model_tool_surface_issues or []),
             }
         )
 
@@ -1258,10 +1251,9 @@ def _live_crash_regression_summary(
         "terminal_smoke_ok": terminal_smoke_ok,
         "venv_import_smoke_ok": venv_import_smoke_ok,
         "chroma_exception_probe_ok": chroma_exception_probe_ok,
-        "file_search_timeout_ok": file_search_timeout_ok,
-        "file_search_timeout_default": file_search_timeout_default,
-        "file_search_probe_ok": file_search_probe_ok,
-        "file_search_probe_seconds": file_search_probe_seconds,
+        "brainstack_model_tool_surface_ok": brainstack_model_tool_surface_ok,
+        "brainstack_model_tool_bytes": dict(brainstack_model_tool_bytes or {}),
+        "brainstack_model_tool_surface_issues": list(brainstack_model_tool_surface_issues or []),
         "public_safe": True,
         "issue_count": len(issues),
         "issues": issues,
@@ -1315,10 +1307,9 @@ def _check_live_crash_regression_guard(tmp: Path) -> CheckResult:
             terminal_smoke_ok=False,
             venv_import_smoke_ok=False,
             chroma_exception_probe_ok=False,
-            file_search_timeout_ok=False,
-            file_search_probe_ok=False,
-            file_search_timeout_default=None,
-            file_search_probe_seconds=None,
+            brainstack_model_tool_surface_ok=False,
+            brainstack_model_tool_bytes={},
+            brainstack_model_tool_surface_issues=[{"code": "docker_inspect_failed"}],
         )
         summary["issues"].append({"code": "docker_inspect_failed", "returncode": inspect_proc.returncode})
         summary["issue_count"] = len(summary["issues"])
@@ -1411,33 +1402,57 @@ finally:
         and "intentional_release_crash_guard_exception_after_chroma_ingest" in chroma_combined_output
     )
 
-    file_search_timeout_default: int | None = None
-    file_search_probe_seconds: float | None = None
-    file_search_timeout_ok = False
-    file_search_probe_ok = False
-    file_search_probe_script = r'''
+    brainstack_model_tool_bytes: dict[str, int] = {}
+    brainstack_model_tool_surface_issues: list[dict[str, Any]] = []
+    brainstack_model_tool_surface_ok = False
+    brainstack_tool_surface_script = r'''
 import json
-import time
-from tools.file_operations import DEFAULT_SEARCH_COMMAND_TIMEOUT
-from model_tools import handle_function_call
-args = {
-    "limit": 30,
-    "path": "/opt/data/config.yaml",
-    "pattern": "brainstack|graph|corpus|semantic|tier2|chroma|kuzu|proactive",
-    "target": "content",
-    "context": 1,
-}
-started = time.perf_counter()
-raw = handle_function_call("search_files", args, task_id="release-file-search-timeout-guard")
-elapsed = time.perf_counter() - started
-parsed, _ = json.JSONDecoder().raw_decode(raw.strip())
-print(json.dumps({
-    "default_timeout": DEFAULT_SEARCH_COMMAND_TIMEOUT,
-    "search_seconds": elapsed,
-    "has_total_count": "total_count" in parsed,
-}, sort_keys=True))
+import tempfile
+from pathlib import Path
+from brainstack import BrainstackMemoryProvider
+root = Path(tempfile.mkdtemp(prefix="brainstack-release-tool-surface-"))
+provider = BrainstackMemoryProvider({
+    "db_path": str(root / "brainstack.sqlite3"),
+    "graph_backend": "sqlite",
+    "corpus_backend": "sqlite",
+})
+try:
+    provider.initialize(
+        "release-tool-surface",
+        platform="release",
+        user_id="release-user",
+        agent_identity="release-agent",
+        agent_workspace="release-workspace",
+    )
+    checks = {
+        "brainstack_stats": ({"strict": True}, 6000),
+        "brainstack_latency_status": ({}, 4000),
+        "brainstack_proactive_status": ({}, 3000),
+    }
+    tool_bytes = {}
+    issues = []
+    for name, (args, limit) in checks.items():
+        raw = provider.handle_tool_call(name, args)
+        tool_bytes[name] = len(raw)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            issues.append({"code": "tool_output_not_json", "tool": name})
+            continue
+        if tool_bytes[name] > limit:
+            issues.append({"code": "tool_output_too_large", "tool": name, "bytes": tool_bytes[name], "limit": limit})
+        if payload.get("bounded_model_facing") is not True:
+            issues.append({"code": "tool_not_bounded_model_facing", "tool": name})
+        rendered = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        if name == "brainstack_stats" and '"report"' in rendered:
+            issues.append({"code": "stats_full_report_exposed", "tool": name})
+        if "search_files" in rendered and "do_not_call_search_files" not in rendered:
+            issues.append({"code": "tool_surface_encourages_file_search", "tool": name})
+    print(json.dumps({"tool_bytes": tool_bytes, "issues": issues}, sort_keys=True))
+finally:
+    provider.shutdown()
 '''
-    file_search_proc = _run_host(
+    brainstack_tool_surface_proc = _run_host(
         [
             "docker",
             "exec",
@@ -1445,24 +1460,26 @@ print(json.dumps({
             container,
             "/opt/hermes/.venv/bin/python",
             "-c",
-            file_search_probe_script,
+            brainstack_tool_surface_script,
         ],
-        timeout=30,
+        timeout=60,
     )
-    if file_search_proc.returncode == 0:
+    if brainstack_tool_surface_proc.returncode == 0:
         try:
-            file_search_data = json.loads(file_search_proc.stdout.strip().splitlines()[-1])
+            brainstack_tool_surface_data = json.loads(brainstack_tool_surface_proc.stdout.strip().splitlines()[-1])
         except (IndexError, json.JSONDecodeError):
-            file_search_data = {}
-        file_search_timeout_default = _safe_int(file_search_data.get("default_timeout"), -1)
-        try:
-            file_search_probe_seconds = float(file_search_data.get("search_seconds"))
-        except (TypeError, ValueError):
-            file_search_probe_seconds = None
-        file_search_timeout_ok = 1 <= file_search_timeout_default <= 10
-        file_search_probe_ok = file_search_data.get("has_total_count") is True and (
-            file_search_probe_seconds is not None and file_search_probe_seconds <= 10.0
-        )
+            brainstack_tool_surface_data = {"issues": [{"code": "tool_surface_probe_output_malformed"}]}
+        brainstack_model_tool_bytes = {
+            str(name): _safe_int(value, -1)
+            for name, value in (brainstack_tool_surface_data.get("tool_bytes") or {}).items()
+        }
+        raw_issues = brainstack_tool_surface_data.get("issues") or []
+        brainstack_model_tool_surface_issues = [dict(issue) for issue in raw_issues if isinstance(issue, Mapping)]
+        brainstack_model_tool_surface_ok = not brainstack_model_tool_surface_issues and bool(brainstack_model_tool_bytes)
+    else:
+        brainstack_model_tool_surface_issues = [
+            {"code": "tool_surface_probe_failed", "returncode": brainstack_tool_surface_proc.returncode}
+        ]
 
     if coredump_command and coredumpctl_available:
         coredump_after_proc = _run_host(coredump_command, timeout=30)
@@ -1480,10 +1497,9 @@ print(json.dumps({
         terminal_smoke_ok=terminal_smoke_ok,
         venv_import_smoke_ok=venv_import_smoke_ok,
         chroma_exception_probe_ok=chroma_exception_probe_ok,
-        file_search_timeout_ok=file_search_timeout_ok,
-        file_search_probe_ok=file_search_probe_ok,
-        file_search_timeout_default=file_search_timeout_default,
-        file_search_probe_seconds=file_search_probe_seconds,
+        brainstack_model_tool_surface_ok=brainstack_model_tool_surface_ok,
+        brainstack_model_tool_bytes=brainstack_model_tool_bytes,
+        brainstack_model_tool_surface_issues=brainstack_model_tool_surface_issues,
     )
     if logs_proc.returncode != 0:
         summary["issues"].append({"code": "docker_logs_failed", "returncode": logs_proc.returncode})

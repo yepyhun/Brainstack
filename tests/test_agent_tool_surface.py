@@ -47,6 +47,7 @@ def test_agent_tool_surface_exposes_read_tools_and_schema_gated_capture_tools(tm
             "brainstack_recall",
             "brainstack_inspect",
             "brainstack_stats",
+            "brainstack_latency_status",
             "brainstack_proactive_status",
             "brainstack_proactive_list",
             "brainstack_proactive_inspect",
@@ -62,7 +63,7 @@ def test_agent_tool_surface_exposes_read_tools_and_schema_gated_capture_tools(tm
         assert "brainstack_consolidate" in names
         assert "runtime_handoff_update" not in names
         for schema in schemas:
-            if schema["name"] in {"brainstack_recall", "brainstack_inspect", "brainstack_stats"}:
+            if schema["name"] in {"brainstack_recall", "brainstack_inspect", "brainstack_stats", "brainstack_latency_status"}:
                 assert str(schema.get("x_brainstack_tool_class", "")).startswith("read_only_memory")
             if schema["name"] in {"brainstack_remember", "brainstack_supersede"}:
                 assert schema.get("x_brainstack_tool_class") == "explicit_memory_write"
@@ -151,7 +152,7 @@ def test_disabled_memory_write_tools_return_explicit_phase_gate(tmp_path: Path) 
         provider.shutdown()
 
 
-def test_brainstack_stats_tool_wraps_doctor_report(tmp_path: Path) -> None:
+def test_brainstack_stats_tool_returns_bounded_compact_summary(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     try:
         assert provider._store is not None
@@ -176,16 +177,19 @@ def test_brainstack_stats_tool_wraps_doctor_report(tmp_path: Path) -> None:
         assert before_counts == after_counts
         assert payload["schema"] == "brainstack.tool_stats.v1"
         assert payload["read_only"] is True
+        assert payload["bounded_model_facing"] is True
+        assert payload["strict_requested"] is True
         assert payload["lifecycle"]["schema"] == "brainstack.provider_lifecycle.v1"
         assert "maintenance" in payload
         assert payload["backend_health"]["schema"] == "brainstack.backend_health_contract.v1"
-        assert payload["report"]["schema"] == "brainstack.memory_kernel_doctor.v1"
-        assert payload["report"]["strict"] is True
+        assert payload["doctor"]["schema"] == "brainstack.memory_kernel_doctor.v1"
+        assert payload["doctor"]["strict"] is True
+        assert "report" not in payload
         assert bloat["schema"] == "brainstack.persistent_bloat_report.v1"
         assert bloat["read_only"] is True
         assert bloat["public_safe"] is True
         assert isinstance(bloat["issue_count"], int)
-        assert set(bloat["metrics"]) >= {
+        assert set(bloat["metric_names"]) >= {
             "write_amplification",
             "duplicate_strength_inflation",
             "support_only_accumulation",
@@ -193,10 +197,28 @@ def test_brainstack_stats_tool_wraps_doctor_report(tmp_path: Path) -> None:
             "stale_prior_retention",
             "projection_rebuild_size",
         }
-        assert "policy_preview" in bloat
+        assert "policy_preview" not in bloat
         assert "critical_counters" in bloat
+        assert len(rendered) < 6000
         assert PRIVATE_SOAK_SENTINEL not in rendered
         for forbidden_key in RAW_TEXT_SENTINEL_KEYS:
             assert f'"{forbidden_key}"' not in rendered
+    finally:
+        provider.shutdown()
+
+
+def test_brainstack_latency_status_tool_is_bounded_and_discourages_file_search(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        payload = json.loads(provider.handle_tool_call("brainstack_latency_status", {}))
+        rendered = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+        assert payload["schema"] == "brainstack.tool_latency_status.v1"
+        assert payload["read_only"] is True
+        assert payload["bounded_model_facing"] is True
+        assert payload["latency_contract"]["does_not_require_file_search"] is True
+        assert payload["model_use_contract"]["do_not_call_search_files_for_brainstack_config"] is True
+        assert "brainstack_summary" in payload
+        assert len(rendered) < 4000
     finally:
         provider.shutdown()

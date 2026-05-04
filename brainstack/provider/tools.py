@@ -45,6 +45,7 @@ from .runtime import (
     build_tool_schemas,
     explicit_capture_tool_schema,
     handle_brainstack_inspect,
+    handle_brainstack_latency_status,
     handle_brainstack_recall,
     handle_brainstack_stats,
     json,
@@ -110,6 +111,8 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             return json.dumps(self._handle_brainstack_inspect(args), ensure_ascii=False)
         if tool_name == "brainstack_stats":
             return json.dumps(self._handle_brainstack_stats(args), ensure_ascii=False)
+        if tool_name == "brainstack_latency_status":
+            return json.dumps(self._handle_brainstack_latency_status(args), ensure_ascii=False)
         if tool_name == "brainstack_proactive_status":
             return json.dumps(self._handle_brainstack_proactive_status(args), ensure_ascii=False)
         if tool_name == "brainstack_proactive_list":
@@ -607,6 +610,16 @@ class ProviderToolsMixin(ProviderRuntimeBase):
 
     def _handle_brainstack_stats(self, args: Mapping[str, Any]) -> Dict[str, Any]:
         return handle_brainstack_stats(
+            args=args,
+            principal_scope_key=self._principal_scope_key,
+            lifecycle_status=self.lifecycle_status,
+            memory_kernel_doctor=self.memory_kernel_doctor,
+            last_maintenance_receipt=self._last_maintenance_receipt,
+            persistent_bloat_report=self.persistent_bloat_report if self._store is not None else None,
+        )
+
+    def _handle_brainstack_latency_status(self, args: Mapping[str, Any]) -> Dict[str, Any]:
+        return handle_brainstack_latency_status(
             args=args,
             principal_scope_key=self._principal_scope_key,
             lifecycle_status=self.lifecycle_status,

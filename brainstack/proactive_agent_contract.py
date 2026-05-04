@@ -314,26 +314,30 @@ def build_proactive_status(
 ) -> dict[str, Any]:
     hermes_home = _resolve_hermes_home(config)
     config_data, load_status = _load_yaml(_config_path_from_home(hermes_home))
+    runtime_config = _runtime_config_summary(config_data, load_status)
+    counts = _store_counts(store, principal_scope_key)
     return {
         "schema": PROACTIVE_AGENT_CONTRACT_SCHEMA,
         "operation": "status",
         "read_only": True,
         "side_effect": False,
+        "bounded_model_facing": True,
         "status_source": "brainstack_store_and_hermes_config",
         "principal_scope_key": str(principal_scope_key or ""),
-        "capability_card": proactive_capability_card(),
+        "capability_summary": "Inspectable proactive state; control is limited to explicit user-requested mode/item changes.",
         "extension": _extension_status(),
-        "config": _runtime_config_summary(config_data, load_status),
-        "counts": _store_counts(store, principal_scope_key),
+        "config": runtime_config,
+        "counts": counts,
         "allowed_actions": list(PROACTIVE_ALLOWED_READ_ACTIONS + PROACTIVE_ALLOWED_CONTROL_ACTIONS),
         "blocked_actions": list(PROACTIVE_BLOCKED_ACTIONS),
         "current_assignment_authority": False,
         "model_use_contract": {
-            "answer_source": "this_tool_result",
+            "answer_source": "this_compact_status",
             "do_not_infer_current_assignment": True,
             "do_not_claim_notifications_are_enabled_from_memory": True,
+            "do_not_call_search_files_for_proactive_config": True,
         },
-        "reason_code": "PROACTIVE_STATUS_TOOL_BACKED",
+        "reason_code": "PROACTIVE_STATUS_TOOL_BACKED_COMPACT",
     }
 
 

@@ -61,15 +61,35 @@ def stats_tool_schema() -> Dict[str, Any]:
     return {
         "name": "brainstack_stats",
         "description": (
-            "Return scoped Brainstack memory-kernel health, row counts, capability status, "
-            "and persistent-bloat status. Read-only; does not run repair, cleanup, or mutation."
+            "Return a compact bounded Brainstack memory-kernel health summary. "
+            "Use for normal model-facing health/status questions; it omits full doctor and bloat reports. "
+            "Do not inspect config files for Brainstack status unless the user explicitly asks for file-level debugging."
         ),
-        "x_brainstack_tool_class": "read_only_memory_health",
+        "x_brainstack_tool_class": "read_only_memory_health_compact",
         "parameters": {
             "type": "object",
             "properties": {
-                "strict": {"type": "boolean"},
+                "strict": {
+                    "type": "boolean",
+                    "description": "Request strict verdict semantics while keeping the response compact and model-facing.",
+                },
             },
+            "additionalProperties": False,
+        },
+    }
+
+
+def latency_status_tool_schema() -> Dict[str, Any]:
+    return {
+        "name": "brainstack_latency_status",
+        "description": (
+            "Answer why Brainstack/Hermes may feel slow using a compact bounded Brainstack route/health summary. "
+            "Use this before broad diagnostics for latency questions. It does not read config files or benchmark provider APIs."
+        ),
+        "x_brainstack_tool_class": "read_only_memory_latency_compact",
+        "parameters": {
+            "type": "object",
+            "properties": {},
             "additionalProperties": False,
         },
     }
@@ -347,6 +367,7 @@ def build_tool_schemas(
         recall_tool_schema(),
         inspect_tool_schema(),
         stats_tool_schema(),
+        latency_status_tool_schema(),
         proactive_status_tool_schema(),
         proactive_list_tool_schema(),
         proactive_inspect_tool_schema(),

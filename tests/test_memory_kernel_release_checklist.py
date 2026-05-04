@@ -262,10 +262,9 @@ def _passing_crash_guard_summary() -> dict[str, object]:
         terminal_smoke_ok=True,
         venv_import_smoke_ok=True,
         chroma_exception_probe_ok=True,
-        file_search_timeout_ok=True,
-        file_search_probe_ok=True,
-        file_search_timeout_default=8,
-        file_search_probe_seconds=0.8,
+        brainstack_model_tool_surface_ok=True,
+        brainstack_model_tool_bytes={"brainstack_stats": 3200, "brainstack_latency_status": 1800},
+        brainstack_model_tool_surface_issues=[],
     )
 
 
@@ -297,10 +296,9 @@ def test_live_crash_regression_guard_summary_blocks_native_crash_markers() -> No
         terminal_smoke_ok=True,
         venv_import_smoke_ok=True,
         chroma_exception_probe_ok=True,
-        file_search_timeout_ok=True,
-        file_search_probe_ok=True,
-        file_search_timeout_default=8,
-        file_search_probe_seconds=0.8,
+        brainstack_model_tool_surface_ok=True,
+        brainstack_model_tool_bytes={"brainstack_stats": 3200, "brainstack_latency_status": 1800},
+        brainstack_model_tool_surface_issues=[],
     )
 
     assert summary["status"] == "fail"
@@ -329,10 +327,9 @@ def test_live_crash_regression_guard_summary_blocks_smoke_failures() -> None:
         terminal_smoke_ok=False,
         venv_import_smoke_ok=False,
         chroma_exception_probe_ok=False,
-        file_search_timeout_ok=True,
-        file_search_probe_ok=True,
-        file_search_timeout_default=8,
-        file_search_probe_seconds=0.8,
+        brainstack_model_tool_surface_ok=True,
+        brainstack_model_tool_bytes={"brainstack_stats": 3200, "brainstack_latency_status": 1800},
+        brainstack_model_tool_surface_issues=[],
     )
 
     assert summary["status"] == "fail"
@@ -342,7 +339,7 @@ def test_live_crash_regression_guard_summary_blocks_smoke_failures() -> None:
     assert "chroma_exception_probe_failed" in codes
 
 
-def test_live_crash_regression_guard_summary_blocks_file_search_timeout_regression() -> None:
+def test_live_crash_regression_guard_summary_blocks_unbounded_brainstack_model_tools() -> None:
     summary = _live_crash_regression_summary(
         container_name="hermes-bestie-live",
         container_id="container-id",
@@ -361,16 +358,16 @@ def test_live_crash_regression_guard_summary_blocks_file_search_timeout_regressi
         terminal_smoke_ok=True,
         venv_import_smoke_ok=True,
         chroma_exception_probe_ok=True,
-        file_search_timeout_ok=False,
-        file_search_probe_ok=False,
-        file_search_timeout_default=60,
-        file_search_probe_seconds=120.0,
+        brainstack_model_tool_surface_ok=False,
+        brainstack_model_tool_bytes={"brainstack_stats": 21793},
+        brainstack_model_tool_surface_issues=[
+            {"code": "tool_output_too_large", "tool": "brainstack_stats", "bytes": 21793, "limit": 6000}
+        ],
     )
 
     assert summary["status"] == "fail"
     codes = {issue["code"] for issue in summary["issues"]}
-    assert "file_search_timeout_cap_failed" in codes
-    assert "file_search_probe_failed" in codes
+    assert "brainstack_model_tool_surface_unbounded" in codes
 
 
 def test_count_python_hermes_coredumps_only_counts_native_crash_rows() -> None:
