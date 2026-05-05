@@ -264,6 +264,8 @@ class ExplicitCaptureMixin(ProviderRuntimeBase):
         confidence: float,
         metadata: Dict[str, Any] | None,
         require_explicit_signal: bool,
+        style_contract_capture_authorized: bool = False,
+        style_contract_patch_authorized: bool = False,
     ) -> Dict[str, Any] | None:
         scoped_metadata = self._scoped_metadata(metadata)
         raw_contract = self._store.get_behavior_contract(principal_scope_key=self._principal_scope_key) if self._store else None
@@ -282,8 +284,14 @@ class ExplicitCaptureMixin(ProviderRuntimeBase):
         for raw_text, fragment_count in self._iter_style_contract_candidate_texts(content):
             if fragment_count > 1 and not allow_fragment_merge:
                 continue
-            if require_explicit_signal and not looks_like_style_contract_teaching(raw_text):
-                continue
+            if require_explicit_signal:
+                if not looks_like_style_contract_teaching(raw_text):
+                    continue
+                if (
+                    not style_contract_capture_authorized
+                    and not has_explicit_style_authority_signal(raw_text)
+                ):
+                    continue
             candidate = build_style_contract_from_text(
                 raw_text=raw_text,
                 source=source,
@@ -309,6 +317,8 @@ class ExplicitCaptureMixin(ProviderRuntimeBase):
             return best_candidate
 
         if not self._store or raw_contract is None:
+            return None
+        if not style_contract_patch_authorized:
             return None
 
         patch_source = source.replace(":style_contract", ":style_contract_patch")

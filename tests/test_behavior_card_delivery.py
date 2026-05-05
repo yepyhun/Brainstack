@@ -47,6 +47,16 @@ def _long_rules(count: int = 80) -> list[str]:
     ]
 
 
+def _realistic_style_rules(count: int = 25) -> list[str]:
+    return [
+        (
+            f"Rule {index:02d} keeps a concrete user-facing communication preference with examples, "
+            "negative guidance, and delivery expectations so the card resembles a real explicit rule pack."
+        )
+        for index in range(1, count + 1)
+    ]
+
+
 def _contract_text(lines: list[str]) -> str:
     return "Public fixture behavior card\n\nRules:\n" + "\n".join(f"- {line}" for line in lines)
 
@@ -128,6 +138,31 @@ def test_compression_rebuild_delivers_same_full_active_behavior_card(tmp_path: P
         assert trace["compiled_rule_count"] == 25
         assert trace["prompt_rebuild_id"]
         assert trace["compaction_event_id"]
+    finally:
+        provider.shutdown()
+
+
+def test_default_budget_delivers_realistic_twenty_five_rule_card(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        lines = _realistic_style_rules()
+        receipt = _write_style_rules(provider, lines)
+        assert receipt["style_contract_materialization"]["status"] == "materialized"
+        assert receipt["style_contract_materialization"]["rule_count"] == 25
+
+        block = provider.system_prompt_block()
+        trace = provider.behavior_policy_trace()["system_prompt_block"]["active_preference_contract_delivery"]
+
+        _assert_full_card(block, lines)
+        assert trace["delivery_status"] == "delivered_full"
+        assert trace["compiled_rule_count"] == 25
+        assert trace["source_rule_count"] == 25
+        assert trace["omitted_or_compacted_rule_count"] == 0
+        warning = provider.behavior_policy_trace()["system_prompt_block"]["projection"][
+            "active_preference_delivery_inspect"
+        ]["active_card_size_warning"]
+        assert warning["status"] == "ok"
+        assert warning["should_warn_user"] is False
     finally:
         provider.shutdown()
 
@@ -357,6 +392,9 @@ def test_communication_style_profile_write_materializes_canonical_card_for_agent
 
         assert receipt["status"] == "committed"
         assert receipt["style_contract_materialization"]["status"] == "materialized"
+        assert receipt["style_contract_materialization"]["active_card_mutated"] is True
+        assert receipt["style_contract_materialization"]["agent_safe_status"] == "canonical_active_card_materialized"
+        assert receipt["style_contract_materialization"]["agent_safe_repair_action"] == "none"
         assert receipt["style_contract_materialization"]["rule_count"] == 25
         block = provider.system_prompt_block()
         trace = provider.behavior_policy_trace()["system_prompt_block"]["active_preference_contract_delivery"]
@@ -364,6 +402,241 @@ def test_communication_style_profile_write_materializes_canonical_card_for_agent
         _assert_full_card(block, lines)
         assert trace["source_profile_stable_key"] == "preference.public_fixture_communication_style"
         assert trace["delivery_status"] == "delivered_full"
+    finally:
+        provider.shutdown()
+
+
+def test_non_behavior_profile_write_with_rule_like_markdown_does_not_materialize_card(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        lines = _rules()
+        receipt = json.loads(
+            provider.handle_tool_call(
+                "brainstack_remember",
+                {
+                    "shelf": "profile",
+                    "stable_key": "work_context.public_fixture_release_plan",
+                    "category": "work_context",
+                    "content": _contract_text(lines),
+                    "source_role": "user",
+                    "authority_class": "profile",
+                    "confidence": 0.99,
+                    "metadata": {"target_slot": "work_context.public_fixture_release_plan"},
+                },
+            )
+        )
+
+        assert receipt["status"] == "committed"
+        assert receipt["style_contract_materialization"]["status"] == "skipped"
+        assert receipt["style_contract_materialization"]["reason_code"] == "not_behavior_style_profile_capture"
+        assert receipt["style_contract_materialization"]["active_card_mutated"] is False
+        assert receipt["style_contract_materialization"]["agent_safe_status"] == "source_profile_only_not_behavior_card"
+        assert (
+            receipt["style_contract_materialization"]["agent_safe_repair_action"]
+            == "write_exact_structured_style_rule_pack_if_user_wants_behavior_card"
+        )
+        assert provider._store is not None
+        assert provider._store.get_profile_item(
+            stable_key=STYLE_CONTRACT_SLOT,
+            principal_scope_key=provider._principal_scope_key,
+        ) is None
+        block = provider.system_prompt_block()
+        assert "# Brainstack Active User Preference Contract" not in block
+        assert "# Brainstack Profile" in block
+    finally:
+        provider.shutdown()
+
+
+def test_native_rule_like_memory_write_without_style_authority_does_not_materialize_card(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        lines = _rules()
+        provider.on_memory_write(
+            "add",
+            "user",
+            _contract_text(lines),
+            metadata={"host_receipt_id": "host:public_fixture_rule_like_context"},
+        )
+
+        assert provider._store is not None
+        assert provider._store.get_profile_item(
+            stable_key=STYLE_CONTRACT_SLOT,
+            principal_scope_key=provider._principal_scope_key,
+        ) is None
+        assert "# Brainstack Active User Preference Contract" not in provider.system_prompt_block()
+    finally:
+        provider.shutdown()
+
+
+def test_collapsed_style_summary_does_not_patch_existing_active_card(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        old_lines = [
+            "Keep replies concise.",
+            "Use plain language.",
+            "Report tool-backed certainty.",
+        ]
+        _write_style_rules(provider, old_lines)
+        collapsed_summary = (
+            "User response style rules: start directly without polite openers; answer yes or no first; "
+            "avoid excessive formatting; avoid decorative symbols; avoid vague authority claims; "
+            "do not inflate significance; keep terms stable; use simple verbs; avoid passive voice; "
+            "do not close with generic positive lines; keep short chat rhythm; be specific; avoid formal phrasing; "
+            "answer in a casual direct style; state confidence for tool output; avoid too many headings; "
+            "write content bullets, not label templates; apply a final internal filter before replying; "
+            "also preserve many additional user wording constraints that must not be merged into one rule."
+        )
+
+        receipt = json.loads(
+            provider.handle_tool_call(
+                "brainstack_remember",
+                {
+                    "shelf": "profile",
+                    "stable_key": "preference.public_fixture_collapsed_style_summary",
+                    "category": "style_preference",
+                    "content": collapsed_summary,
+                    "source_role": "user",
+                    "authority_class": "profile",
+                    "confidence": 0.99,
+                    "metadata": {"target_slot": "preference.public_fixture_collapsed_style_summary"},
+                },
+            )
+        )
+
+        assert receipt["status"] == "committed"
+        assert receipt["style_contract_materialization"]["status"] == "skipped"
+        assert receipt["style_contract_materialization"]["reason_code"] == "not_explicit_style_contract"
+        assert receipt["style_contract_materialization"]["active_card_mutated"] is False
+        assert receipt["style_contract_materialization"]["agent_safe_status"] == "source_profile_only_not_rule_pack"
+        assert (
+            receipt["style_contract_materialization"]["agent_safe_repair_action"]
+            == "ask_user_for_exact_structured_rule_pack_or_use_rule_id_correction_surface"
+        )
+        assert provider._store is not None
+        canonical = provider._store.get_profile_item(
+            stable_key=STYLE_CONTRACT_SLOT,
+            principal_scope_key=provider._principal_scope_key,
+        )
+        assert canonical is not None
+        assert collapsed_summary not in canonical["content"]
+        for line in old_lines:
+            assert line in canonical["content"]
+    finally:
+        provider.shutdown()
+
+
+def test_single_style_preference_does_not_patch_existing_card_without_correction_surface(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        old_lines = [
+            "Use formal wording.",
+            "Keep replies concise.",
+            "Report tool-backed certainty.",
+        ]
+        _write_style_rules(provider, old_lines)
+        receipt = json.loads(
+            provider.handle_tool_call(
+                "brainstack_remember",
+                {
+                    "shelf": "profile",
+                    "stable_key": "preference.public_fixture_single_style_preference",
+                    "category": "style_preference",
+                    "content": "Use plain language.",
+                    "source_role": "user",
+                    "authority_class": "profile",
+                    "confidence": 0.99,
+                    "metadata": {"target_slot": "preference.public_fixture_single_style_preference"},
+                },
+            )
+        )
+
+        assert receipt["status"] == "committed"
+        assert receipt["style_contract_materialization"]["status"] == "skipped"
+        assert receipt["style_contract_materialization"]["reason_code"] == "not_explicit_style_contract"
+        assert receipt["style_contract_materialization"]["active_card_mutated"] is False
+        assert receipt["style_contract_materialization"]["agent_safe_status"] == "source_profile_only_not_rule_pack"
+        assert provider._store is not None
+        canonical = provider._store.get_profile_item(
+            stable_key=STYLE_CONTRACT_SLOT,
+            principal_scope_key=provider._principal_scope_key,
+        )
+        assert canonical is not None
+        assert "Use formal wording." in canonical["content"]
+        assert "Use plain language." not in canonical["content"]
+    finally:
+        provider.shutdown()
+
+
+def test_user_supplied_patch_authorization_metadata_cannot_patch_active_card(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        old_lines = [
+            "Use formal wording.",
+            "Keep replies concise.",
+            "Report tool-backed certainty.",
+        ]
+        _write_style_rules(provider, old_lines)
+        receipt = json.loads(
+            provider.handle_tool_call(
+                "brainstack_remember",
+                {
+                    "shelf": "profile",
+                    "stable_key": "preference.public_fixture_untrusted_patch_auth",
+                    "category": "style_preference",
+                    "content": "Use plain language.",
+                    "source_role": "user",
+                    "authority_class": "profile",
+                    "confidence": 0.99,
+                    "metadata": {
+                        "target_slot": "preference.public_fixture_untrusted_patch_auth",
+                        "style_contract_patch_authorized": True,
+                    },
+                },
+            )
+        )
+
+        assert receipt["status"] == "committed"
+        assert receipt["style_contract_materialization"]["status"] == "skipped"
+        assert receipt["style_contract_materialization"]["reason_code"] == "not_explicit_style_contract"
+        assert receipt["style_contract_materialization"]["active_card_mutated"] is False
+        assert provider._store is not None
+        canonical = provider._store.get_profile_item(
+            stable_key=STYLE_CONTRACT_SLOT,
+            principal_scope_key=provider._principal_scope_key,
+        )
+        assert canonical is not None
+        assert "Use formal wording." in canonical["content"]
+        assert "Use plain language." not in canonical["content"]
+        assert "style_contract_patch_authorized" not in str(canonical.get("metadata") or {})
+    finally:
+        provider.shutdown()
+
+
+def test_rule_id_behavior_policy_correction_updates_active_card(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        old_lines = [
+            "Use formal wording.",
+            "Keep replies concise.",
+            "Report tool-backed certainty.",
+        ]
+        _write_style_rules(provider, old_lines)
+        snapshot = provider.apply_behavior_policy_correction(
+            rule_id="rules-01",
+            replacement_text="Use plain language.",
+        )
+
+        assert snapshot is not None
+        assert provider._store is not None
+        canonical = provider._store.get_profile_item(
+            stable_key=STYLE_CONTRACT_SLOT,
+            principal_scope_key=provider._principal_scope_key,
+        )
+        assert canonical is not None
+        assert "Use formal wording." not in canonical["content"]
+        assert "Use plain language." in canonical["content"]
+        block = provider.system_prompt_block()
+        assert "Use plain language." in block
     finally:
         provider.shutdown()
 

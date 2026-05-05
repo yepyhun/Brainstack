@@ -706,6 +706,21 @@ class ProfileStoreMixin(StoreRuntimeBase):
             "rule_count": len(list_style_contract_rules(raw_text=corrected["content"], metadata=metadata)),
             "content_hash": hashlib.sha256(str(corrected["content"]).encode("utf-8")).hexdigest(),
         }
+        if (
+            bool(raw_contract.get("read_only_projection"))
+            and str(raw_contract.get("source_lane") or "").strip() == PROFILE_STYLE_CONTRACT_PROFILE_LANE
+        ):
+            metadata["source_role"] = str(metadata.get("source_role") or "user").strip() or "user"
+            metadata["style_contract_correction_surface"] = "profile_lane_rule_id"
+            self.upsert_profile_item(
+                stable_key=STYLE_CONTRACT_SLOT,
+                category=str(raw_contract.get("category") or "style_contract"),
+                content=str(corrected["content"]),
+                source=str(source or "").strip() or "behavior_policy_correction",
+                confidence=float(raw_contract.get("confidence") or 0.9),
+                metadata=metadata,
+            )
+            return self.get_behavior_policy_snapshot(principal_scope_key=principal_scope_key)
         self.upsert_behavior_contract(
             stable_key=STYLE_CONTRACT_SLOT,
             category=str(raw_contract.get("category") or "preference"),

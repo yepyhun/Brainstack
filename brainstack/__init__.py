@@ -12,6 +12,7 @@ from .provider.runtime import (
     resolve_user_timezone,
     threading,
 )
+from .behavior_policy import DEFAULT_BEHAVIOR_POLICY_CHAR_BUDGET
 from .core.packet_budget import DEFAULT_PACKET_BUDGET_MAX_CANDIDATE_TOKENS
 from .provider.config_lifecycle import ConfigLifecycleMixin
 from .provider.explicit_capture import ExplicitCaptureMixin
@@ -74,7 +75,7 @@ class BrainstackMemoryProvider(
             self._config.get("system_prompt_behavior_contract_enabled", self._active_preference_contract_enabled)
         )
         self._system_prompt_behavior_contract_char_budget = int(
-            self._config.get("system_prompt_behavior_contract_char_budget", 2400)
+            self._config.get("system_prompt_behavior_contract_char_budget", DEFAULT_BEHAVIOR_POLICY_CHAR_BUDGET)
         )
         self._ordinary_packet_behavior_contract_enabled = bool(
             self._config.get("ordinary_packet_behavior_contract_enabled", False)

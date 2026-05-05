@@ -27,6 +27,8 @@ _STYLE_CONTRACT_SOURCE_RANKS = (
     ("tier2_llm", 100),
 )
 _PATCH_TOKEN_RE = re.compile(r"[0-9A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű]{2,}", re.UNICODE)
+_PATCH_LINE_MAX_CHARS = 360
+_PATCH_LINE_MAX_TOKENS = 56
 
 
 def _normalize_text(value: Any) -> str:
@@ -361,7 +363,10 @@ def parse_style_contract_patch_text(raw_text: Any) -> List[str]:
         bullet = _extract_rule_bullet(line)
         inline_rule = _extract_inline_rule(line)
         candidate = bullet or inline_rule or line
-        if len(_tokenize_patch_text(candidate)) < 3:
+        candidate_tokens = _tokenize_patch_text(candidate)
+        if len(candidate) > _PATCH_LINE_MAX_CHARS or len(candidate_tokens) > _PATCH_LINE_MAX_TOKENS:
+            return []
+        if len(candidate_tokens) < 3:
             return []
         patch_lines.append(candidate)
     return patch_lines

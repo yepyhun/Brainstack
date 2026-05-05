@@ -376,6 +376,7 @@ class ProviderInspectionMixin(ProviderRuntimeBase):
         contract = build_active_preference_contract(
             snapshot,
             principal_scope_key=self._principal_scope_key,
+            char_budget=self._system_prompt_behavior_contract_char_budget,
         )
         return json.loads(json.dumps(contract, ensure_ascii=True))
 

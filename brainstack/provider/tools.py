@@ -8,6 +8,7 @@ from ..memory_write_receipts import (
     commitment_guard_trace,
     compute_receipt_coverage,
 )
+from ..profile_contract import normalize_profile_slot
 from ..proactive_agent_contract import (
     build_proactive_status,
     control_proactive_agent_surface,
@@ -65,6 +66,95 @@ from .runtime import (
     workstream_recap_tool_schema,
     write_task_record,
 )
+
+
+_STYLE_CONTRACT_PROFILE_CAPTURE_CATEGORIES = frozenset(
+    {
+        "communication_style",
+        "style_contract",
+        "style_preference",
+    }
+)
+_STYLE_CONTRACT_PROFILE_CAPTURE_SLOTS = frozenset(
+    {
+        STYLE_CONTRACT_SLOT,
+        "preference:communication_style",
+        "preference:response_style",
+    }
+)
+
+
+def _profile_capture_allows_style_contract_materialization(capture: Mapping[str, Any]) -> bool:
+    metadata = capture.get("metadata") if isinstance(capture.get("metadata"), Mapping) else {}
+    admission = metadata.get("admission") if isinstance(metadata.get("admission"), Mapping) else {}
+    category = normalize_profile_slot(capture.get("category"))
+    stable_key = normalize_profile_slot(capture.get("stable_key"))
+    target_slot = normalize_profile_slot(metadata.get("target_slot") or admission.get("target_slot"))
+    return (
+        category in _STYLE_CONTRACT_PROFILE_CAPTURE_CATEGORIES
+        or stable_key in _STYLE_CONTRACT_PROFILE_CAPTURE_SLOTS
+        or target_slot in _STYLE_CONTRACT_PROFILE_CAPTURE_SLOTS
+    )
+
+
+def _style_contract_materialization_metadata(capture: Mapping[str, Any]) -> Dict[str, Any]:
+    raw_metadata = capture.get("metadata")
+    metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+    metadata.pop("style_contract_capture_authorized", None)
+    metadata.pop("style_contract_patch_authorized", None)
+    return metadata
+
+
+def _style_contract_materialization_receipt(
+    *,
+    status: str,
+    reason_code: str = "",
+    source_profile_stable_key: str = "",
+    source_profile_category: str = "",
+    stable_key: str = STYLE_CONTRACT_SLOT,
+    source_lane: str = "profile_style_contract",
+    rule_count: int = 0,
+    memory_write_receipt_id: str = "",
+) -> Dict[str, Any]:
+    active_card_mutated = status == "materialized"
+    if active_card_mutated:
+        agent_safe_status = "canonical_active_card_materialized"
+        agent_safe_repair_action = "none"
+    elif reason_code == "not_behavior_style_profile_capture":
+        agent_safe_status = "source_profile_only_not_behavior_card"
+        agent_safe_repair_action = "write_exact_structured_style_rule_pack_if_user_wants_behavior_card"
+    elif reason_code == "not_explicit_style_contract":
+        agent_safe_status = "source_profile_only_not_rule_pack"
+        agent_safe_repair_action = "ask_user_for_exact_structured_rule_pack_or_use_rule_id_correction_surface"
+    elif reason_code == "source_role_not_user_authority":
+        agent_safe_status = "blocked_non_user_authority"
+        agent_safe_repair_action = "ask_user_to_confirm_exact_rules_before_materializing"
+    else:
+        agent_safe_status = "not_materialized"
+        agent_safe_repair_action = "inspect_active_behavior_card_before_claiming_rule_delivery"
+    payload: Dict[str, Any] = {
+        "status": status,
+        "active_card_mutated": active_card_mutated,
+        "source_lane": source_lane,
+        "agent_safe_status": agent_safe_status,
+        "agent_safe_repair_action": agent_safe_repair_action,
+        "source_profile_stable_key": str(source_profile_stable_key or ""),
+        "source_profile_category": str(source_profile_category or ""),
+        "trace_safe": True,
+        "raw_private_text_in_trace": False,
+    }
+    if reason_code:
+        payload["reason_code"] = reason_code
+    if active_card_mutated:
+        payload.update(
+            {
+                "stable_key": stable_key,
+                "rule_count": int(rule_count or 0),
+                "memory_write_receipt_id": str(memory_write_receipt_id or ""),
+            }
+        )
+    return payload
+
 
 class ProviderToolsMixin(ProviderRuntimeBase):
     def _runtime_handoff_update_tool_schema(self) -> Dict[str, Any]:
@@ -505,12 +595,22 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             return
         source_role = str(capture.get("source_role") or "").strip().lower()
         if source_role != "user" and not (source_role == "operator" and trusted_operator_origin):
-            receipt["style_contract_materialization"] = {
-                "status": "skipped",
-                "reason_code": "source_role_not_user_authority",
-            }
+            receipt["style_contract_materialization"] = _style_contract_materialization_receipt(
+                status="skipped",
+                reason_code="source_role_not_user_authority",
+                source_profile_stable_key=str(capture.get("stable_key") or ""),
+                source_profile_category=str(capture.get("category") or ""),
+            )
             return
-        metadata = dict(capture.get("metadata") or {})
+        if not _profile_capture_allows_style_contract_materialization(capture):
+            receipt["style_contract_materialization"] = _style_contract_materialization_receipt(
+                status="skipped",
+                reason_code="not_behavior_style_profile_capture",
+                source_profile_stable_key=str(capture.get("stable_key") or ""),
+                source_profile_category=str(capture.get("category") or ""),
+            )
+            return
+        metadata = _style_contract_materialization_metadata(capture)
         memory_write_receipt = receipt.get("memory_write_receipt") if isinstance(receipt.get("memory_write_receipt"), Mapping) else {}
         metadata.update(
             {
@@ -522,6 +622,8 @@ class ProviderToolsMixin(ProviderRuntimeBase):
                 "explicit_capture_receipt_id": str(receipt.get("receipt_id") or ""),
                 "memory_write_receipt_id": str(memory_write_receipt.get("receipt_id") or ""),
                 "style_contract_materialized_from_profile_write": True,
+                "style_contract_capture_authorized": True,
+                "style_contract_capture_authorization_source": "profile_category_or_slot",
             }
         )
         candidate = self._resolve_style_contract_candidate(
@@ -530,12 +632,16 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             confidence=float(capture.get("confidence") or 0.95),
             metadata=metadata,
             require_explicit_signal=True,
+            style_contract_capture_authorized=True,
+            style_contract_patch_authorized=False,
         )
         if candidate is None:
-            receipt["style_contract_materialization"] = {
-                "status": "skipped",
-                "reason_code": "not_explicit_style_contract",
-            }
+            receipt["style_contract_materialization"] = _style_contract_materialization_receipt(
+                status="skipped",
+                reason_code="not_explicit_style_contract",
+                source_profile_stable_key=str(capture.get("stable_key") or ""),
+                source_profile_category=str(capture.get("category") or ""),
+            )
             return
         candidate_metadata = dict(candidate.get("metadata") or {})
         candidate_metadata.update(metadata)
@@ -552,14 +658,14 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             principal_scope_key=self._principal_scope_key,
         )
         canonical_metadata = canonical_row.get("metadata") if isinstance(canonical_row, Mapping) else {}
-        receipt["style_contract_materialization"] = {
-            "status": "materialized",
-            "stable_key": STYLE_CONTRACT_SLOT,
-            "source_lane": "profile_style_contract",
-            "rule_count": int((canonical_metadata or {}).get("style_contract_rule_count") or 0),
-            "source_profile_stable_key": str(capture.get("stable_key") or ""),
-            "memory_write_receipt_id": str(memory_write_receipt.get("receipt_id") or ""),
-        }
+        receipt["style_contract_materialization"] = _style_contract_materialization_receipt(
+            status="materialized",
+            stable_key=STYLE_CONTRACT_SLOT,
+            rule_count=int((canonical_metadata or {}).get("style_contract_rule_count") or 0),
+            source_profile_stable_key=str(capture.get("stable_key") or ""),
+            source_profile_category=str(capture.get("category") or ""),
+            memory_write_receipt_id=str(memory_write_receipt.get("receipt_id") or ""),
+        )
 
     def _handle_brainstack_consolidate(self, args: Mapping[str, Any]) -> Dict[str, Any]:
         if self._store is None:
