@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from brainstack.background_task_binding import REQUIRED_BACKGROUND_TASK_BINDINGS
+
 try:
     from hermes_gateway_patch_support import inspect_gateway_patch_support
 except ModuleNotFoundError:  # pytest imports scripts as a namespace package
@@ -818,14 +820,16 @@ def _check_config(
         checks.append(Check("cron_dependency", "fail", "Python croniter package is missing for cron-expression scheduling in the active runtime"))
 
     auxiliary = config.get("auxiliary", {}) if isinstance(config.get("auxiliary", {}), dict) else {}
-    flush_memories = auxiliary.get("flush_memories", {}) if isinstance(auxiliary.get("flush_memories", {}), dict) else {}
-    flush_provider = str(flush_memories.get("provider") or "").strip().lower()
-    if flush_provider == "main":
-        checks.append(Check("flush_memories_provider", "pass", "auxiliary.flush_memories.provider uses the main agent provider"))
-    elif planned_install:
-        checks.append(Check("flush_memories_provider", "pass", "auxiliary.flush_memories.provider is not 'main' yet, but installer will patch it"))
-    else:
-        checks.append(Check("flush_memories_provider", "fail", "auxiliary.flush_memories.provider must be 'main' for reliable Brainstack Tier-2 writes"))
+    for binding in REQUIRED_BACKGROUND_TASK_BINDINGS:
+        slot = binding["hermes_task_slot"]
+        task_config = auxiliary.get(slot, {}) if isinstance(auxiliary.get(slot, {}), dict) else {}
+        provider = str(task_config.get("provider") or "").strip().lower()
+        if provider and provider != "auto":
+            checks.append(Check(f"{slot}_provider", "pass", f"auxiliary.{slot}.provider is explicitly configured"))
+        elif planned_install:
+            checks.append(Check(f"{slot}_provider", "pass", f"auxiliary.{slot}.provider is not explicit yet, but installer will patch it"))
+        else:
+            checks.append(Check(f"{slot}_provider", "fail", f"auxiliary.{slot}.provider must be explicit for Brainstack background tasks"))
 
     checks.extend(runtime_db_hygiene_checks())
     return checks

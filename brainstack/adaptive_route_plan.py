@@ -7,6 +7,7 @@ ADAPTIVE_ROUTE_PLAN_SCHEMA_VERSION = "brainstack.adaptive_route_plan.v1"
 ROUTE_NO_MEMORY_MINIMAL = "no_memory_minimal"
 ROUTE_PROFILE = "profile"
 ROUTE_CURRENT_TRUTH = "current_truth"
+ROUTE_OPERATING_STATUS = "operating_status"
 ROUTE_TEMPORAL_GRAPH = "temporal_graph"
 ROUTE_AGGREGATE = "aggregate"
 ROUTE_CORPUS = "corpus"
@@ -17,6 +18,7 @@ ROUTE_CLASSES = (
     ROUTE_NO_MEMORY_MINIMAL,
     ROUTE_PROFILE,
     ROUTE_CURRENT_TRUTH,
+    ROUTE_OPERATING_STATUS,
     ROUTE_TEMPORAL_GRAPH,
     ROUTE_AGGREGATE,
     ROUTE_CORPUS,
@@ -40,6 +42,7 @@ ROUTE_ALLOWED_SHELVES: dict[str, tuple[str, ...]] = {
     ROUTE_NO_MEMORY_MINIMAL: (),
     ROUTE_PROFILE: ("profile",),
     ROUTE_CURRENT_TRUTH: ("current_truth", "profile"),
+    ROUTE_OPERATING_STATUS: ("operating",),
     ROUTE_TEMPORAL_GRAPH: ("graph", "continuity", "transcript"),
     ROUTE_AGGREGATE: ("aggregate", "graph", "corpus", "continuity", "transcript"),
     ROUTE_CORPUS: ("corpus", "current_truth"),
@@ -51,11 +54,20 @@ ROUTE_TO_RETRIEVAL_MODE: dict[str, str] = {
     ROUTE_NO_MEMORY_MINIMAL: "fact",
     ROUTE_PROFILE: "fact",
     ROUTE_CURRENT_TRUTH: "fact",
+    ROUTE_OPERATING_STATUS: "fact",
     ROUTE_TEMPORAL_GRAPH: "temporal",
     ROUTE_AGGREGATE: "aggregate",
     ROUTE_CORPUS: "aggregate",
     ROUTE_CONTINUITY: "temporal",
     ROUTE_DEEP_MIXED: "fact",
+}
+
+SEMANTIC_EVIDENCE_ENABLED_ROUTES = {
+    ROUTE_TEMPORAL_GRAPH,
+    ROUTE_AGGREGATE,
+    ROUTE_CORPUS,
+    ROUTE_CONTINUITY,
+    ROUTE_DEEP_MIXED,
 }
 
 EVIDENCE_CLASS_TO_SHELF: dict[str, str] = {
@@ -70,6 +82,8 @@ EVIDENCE_CLASS_TO_SHELF: dict[str, str] = {
     "continuity": "continuity",
     "transcript": "transcript",
     "operating": "operating",
+    "operating_status": "operating",
+    "operating_memory": "operating",
     "deep_mixed": "tank",
 }
 
@@ -210,7 +224,6 @@ def _choose_route(
     required: tuple[str, ...],
     current_truth_available: bool,
 ) -> tuple[str, list[str]]:
-    reasons: list[str] = []
     memory_intent = _normalize_evidence_class(query_understanding.get("memory_intent"))
     if memory_intent in {"none", "no_memory", "minimal"} or (not _text(query) and not required):
         return ROUTE_NO_MEMORY_MINIMAL, ["structured_memory_intent:none"]
@@ -229,6 +242,8 @@ def _choose_route(
         return ROUTE_CORPUS, ["structured_corpus_need"]
     if "continuity" in required or "transcript" in required:
         return ROUTE_CONTINUITY, ["structured_continuity_need"]
+    if "operating" in required or "operating_status" in required or "operating_memory" in required:
+        return ROUTE_OPERATING_STATUS, ["structured_operating_status_need"]
     if "current_truth" in required and current_truth_available:
         return ROUTE_CURRENT_TRUTH, ["fresh_current_truth_view_available"]
     if query_understanding.get("profile_slot_targets") or "profile" in required:
@@ -333,6 +348,29 @@ def build_adaptive_route_plan(
         )
         for shelf in SHELVES
     ]
+    semantic_enabled = effective_route_class in SEMANTIC_EVIDENCE_ENABLED_ROUTES
+    limit_overrides = route_plan_limit_overrides({"route_class": effective_route_class})
+    semantic_limit = max(int(limit_overrides.get("evidence_item_budget") or 0) * 4, 16) if semantic_enabled else 0
+    shelf_limits = {
+        "profile": int(limit_overrides.get("profile_limit") or 0),
+        "current_truth": 0,
+        "continuity_match": int(limit_overrides.get("continuity_match_limit") or 0),
+        "continuity_recent": int(limit_overrides.get("continuity_recent_limit") or 0),
+        "transcript": int(limit_overrides.get("transcript_limit") or 0),
+        "operating": int(limit_overrides.get("operating_limit") or 0),
+        "graph": int(limit_overrides.get("graph_limit") or 0),
+        "corpus": int(limit_overrides.get("corpus_limit") or 0),
+        "semantic_evidence": semantic_limit,
+    }
+    backend_call_budget = {
+        "profile": 1 if shelf_limits["profile"] > 0 else 0,
+        "continuity": 2 if shelf_limits["continuity_match"] > 0 or shelf_limits["continuity_recent"] > 0 else 0,
+        "transcript": 2 if shelf_limits["transcript"] > 0 else 0,
+        "operating": 1 if shelf_limits["operating"] > 0 else 0,
+        "graph": 2 if shelf_limits["graph"] > 0 else 0,
+        "corpus": 2 if shelf_limits["corpus"] > 0 else 0,
+        "semantic_evidence": 1 if semantic_enabled else 0,
+    }
     plan: dict[str, Any] = {
         "schema": ADAPTIVE_ROUTE_PLAN_SCHEMA_VERSION,
         "status": "pass",
@@ -368,6 +406,29 @@ def build_adaptive_route_plan(
         "activated_shelves": activated,
         "skipped_shelves": skipped,
         "shelf_decisions": shelf_decisions,
+        "semantic_retrieval": {
+            "enabled": semantic_enabled,
+            "reason": f"route_class:{effective_route_class}"
+            if semantic_enabled
+            else "not_required_by_structured_route_signal",
+            "allowed_shelves": [
+                shelf
+                for shelf in activated
+                if shelf in {"graph", "corpus", "continuity", "transcript", "operating", "tank"}
+            ]
+            if semantic_enabled
+            else [],
+            "backend_call_policy": "route_gated",
+        },
+        "shelf_budget": {
+            "applied_before_packet_render_budget": True,
+            "shelf_limits": shelf_limits,
+            "backend_call_budget": backend_call_budget,
+            "backend_call_budget_total": sum(backend_call_budget.values()),
+            "latency_budget_ms": 5000 if effective_route_class in {ROUTE_NO_MEMORY_MINIMAL, ROUTE_PROFILE, ROUTE_CURRENT_TRUTH, ROUTE_OPERATING_STATUS} else 10000,
+            "protected_truth_policy": "PacketRenderBudget preserves authority-critical selected truth after pre-retrieval limits.",
+            "skipped_shelves": skipped,
+        },
         "fallback": {
             "fallback_used": bool(escalation_reasons),
             "fallback_mode": "tank" if escalated else "none",
@@ -410,10 +471,10 @@ def route_plan_limit_overrides(plan: Mapping[str, Any]) -> dict[str, int]:
     if route_class == ROUTE_PROFILE:
         return {
             "profile_limit": 4,
-            "continuity_recent_limit": 1,
-            "continuity_match_limit": 1,
-            "transcript_limit": 1,
-            "transcript_char_budget": 240,
+            "continuity_recent_limit": 0,
+            "continuity_match_limit": 0,
+            "transcript_limit": 0,
+            "transcript_char_budget": 0,
             "operating_limit": 0,
             "graph_limit": 0,
             "corpus_limit": 0,
@@ -428,6 +489,19 @@ def route_plan_limit_overrides(plan: Mapping[str, Any]) -> dict[str, int]:
             "transcript_limit": 0,
             "transcript_char_budget": 0,
             "operating_limit": 0,
+            "graph_limit": 0,
+            "corpus_limit": 0,
+            "corpus_char_budget": 0,
+            "evidence_item_budget": 3,
+        }
+    if route_class == ROUTE_OPERATING_STATUS:
+        return {
+            "profile_limit": 0,
+            "continuity_recent_limit": 0,
+            "continuity_match_limit": 0,
+            "transcript_limit": 0,
+            "transcript_char_budget": 0,
+            "operating_limit": 3,
             "graph_limit": 0,
             "corpus_limit": 0,
             "corpus_char_budget": 0,

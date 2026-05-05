@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from brainstack.background_task_binding import install_default_background_task_bindings
+
 try:
     from hermes_gateway_patch_support import (
         apply_gateway_patch_bundle,
@@ -4026,16 +4028,7 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
     brainstack.setdefault("tier2_hindsight_api_command", "/opt/hermes/.venv/bin/hindsight-api")
     brainstack.setdefault("tier2_hindsight_budget", "low")
     brainstack.setdefault("tier2_session_end_flush_enabled", True)
-    config.setdefault("auxiliary", {})
-    if not isinstance(config["auxiliary"], dict):
-        raise RuntimeError("config.yaml has non-object `auxiliary` section")
-    flush_memories = config["auxiliary"].setdefault("flush_memories", {})
-    if not isinstance(flush_memories, dict):
-        flush_memories = {}
-        config["auxiliary"]["flush_memories"] = flush_memories
-    flush_provider = str(flush_memories.get("provider") or "").strip().lower()
-    if not flush_provider or flush_provider == "auto":
-        flush_memories["provider"] = "main"
+    background_task_status = install_default_background_task_bindings(config)
     config.setdefault("agent", {})
     if not isinstance(config["agent"], dict):
         raise RuntimeError("config.yaml has non-object `agent` section")
@@ -4061,7 +4054,7 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
         "memory_provider": "brainstack",
         "memory_enabled": True,
         "user_profile_enabled": True,
-        "flush_memories_provider": str(flush_memories.get("provider") or ""),
+        "background_task_status": background_task_status,
         "gateway_timeout": agent.get("gateway_timeout"),
         "gateway_timeout_warning": agent.get("gateway_timeout_warning"),
         "proactive_runtime": proactive_runtime,
@@ -4525,7 +4518,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: hermes-{service_slug}
+    container_name: hermes-{service_slug}-live
     working_dir: /opt/data
     restart: unless-stopped
     network_mode: host

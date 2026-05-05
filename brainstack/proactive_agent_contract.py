@@ -16,6 +16,7 @@ from .core.proactive import ProactiveEventState, ProactiveReasonCode
 
 PROACTIVE_AGENT_CONTRACT_SCHEMA = "brainstack.proactive_agent_surface.v1"
 PROACTIVE_AGENT_CONTROL_SCHEMA = "brainstack.proactive_agent_control.v1"
+ACTIONABLE_SUBSTRATE_SCHEMA = "brainstack.actionable_substrate.v1"
 
 PROACTIVE_ALLOWED_READ_ACTIONS = ("status", "doctor", "list", "inspect")
 PROACTIVE_ALLOWED_CONTROL_ACTIONS = (
@@ -58,6 +59,10 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
 
 
 def _resolve_hermes_home(config: Mapping[str, Any] | None = None) -> Path | None:
@@ -285,16 +290,111 @@ def _outbox_summary(items: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _canonical_receipts_by_task_source(store: Any, principal_scope_key: str) -> dict[tuple[str, str], str]:
+    if not hasattr(store, "list_canonical_memory_events"):
+        return {}
+    receipts: dict[tuple[str, str], str] = {}
+    for row in store.list_canonical_memory_events(limit=500):
+        event = _mapping(row.get("event"))
+        scope = _mapping(event.get("scope"))
+        claim = _mapping(event.get("claim"))
+        authority = _mapping(event.get("authority"))
+        source = _mapping(event.get("source"))
+        if str(scope.get("principal_scope_key") or "") != str(principal_scope_key or ""):
+            continue
+        if str(claim.get("target_slot") or "") != "task.actionable":
+            continue
+        stable_fact_id = str(claim.get("stable_fact_id") or "")
+        source_event_id = str(source.get("source_event_id") or "")
+        receipt_id = str(authority.get("receipt_id") or "")
+        if stable_fact_id and source_event_id and receipt_id:
+            receipts[(stable_fact_id, source_event_id)] = receipt_id
+    return receipts
+
+
+def _actionable_substrate_summary(store: Any, principal_scope_key: str) -> dict[str, Any]:
+    if not hasattr(store, "list_task_items"):
+        return {
+            "schema": ACTIONABLE_SUBSTRATE_SCHEMA,
+            "source": "task_items",
+            "available": False,
+            "reason_code": "TASK_STORE_UNAVAILABLE",
+            "pending_count": 0,
+            "sampled_items": [],
+        }
+    receipt_index = _canonical_receipts_by_task_source(store, principal_scope_key)
+    rows = store.list_task_items(
+        principal_scope_key=principal_scope_key,
+        item_type="task",
+        statuses=("open",),
+        limit=50,
+    )
+    sampled: list[dict[str, Any]] = []
+    rejected_or_degraded = 0
+    for row in rows:
+        metadata = _mapping(row.get("metadata"))
+        admission = _mapping(metadata.get("admission"))
+        source_event_id = str(metadata.get("source_event_id") or admission.get("source_event_id") or "")
+        source_span_id = str(metadata.get("source_span_id") or admission.get("source_span_id") or "")
+        stable_key = str(row.get("stable_key") or admission.get("stable_key") or "")
+        receipt_id = receipt_index.get((stable_key, source_event_id), "")
+        is_actionable = (
+            str(admission.get("target_slot") or "") == "task.actionable"
+            and str(admission.get("decision") or "") in {"ACCEPT_DURABLE", "ACCEPT_WITH_SUPERSESSION"}
+            and bool(metadata.get("truth_eligible"))
+            and str(metadata.get("support_visibility") or "") == "answer_evidence"
+            and bool(source_event_id and source_span_id and receipt_id)
+        )
+        if not is_actionable:
+            rejected_or_degraded += 1
+            continue
+        sampled.append(
+            {
+                "stable_key": stable_key,
+                "status": str(row.get("status") or ""),
+                "title": str(row.get("title") or "")[:160],
+                "source_event_id": source_event_id,
+                "source_span_id": source_span_id,
+                "receipt_id": receipt_id,
+                "admission_reason_code": str(metadata.get("admission_reason_code") or admission.get("reason_code") or ""),
+                "actionable_reason_code": "SOURCE_BACKED_ACTIONABLE_ADMITTED",
+                "intended_next_action": "agent_may_consider_when_user_context_requires",
+                "execution_payload_present": False,
+                "current_assignment_authority": False,
+            }
+        )
+    return {
+        "schema": ACTIONABLE_SUBSTRATE_SCHEMA,
+        "source": "task_items",
+        "available": True,
+        "read_only": True,
+        "side_effect": False,
+        "pending_count": len(sampled),
+        "rejected_or_degraded_count": rejected_or_degraded,
+        "sampled_items": sampled[:5],
+        "model_use_contract": {
+            "may_surface_as_pending_work": True,
+            "must_not_send_notification": True,
+            "must_not_execute_task": True,
+            "must_not_schedule_task": True,
+        },
+        "reason_code": "SOURCE_BACKED_ACTIONABLE_SUBSTRATE_COMPACT",
+    }
+
+
 def _store_counts(store: Any, principal_scope_key: str) -> dict[str, Any]:
     items = store.list_proactive_items(principal_scope_key=principal_scope_key, limit=200)
     state_counts = Counter(str(item.get("state") or "") for item in items)
     pending_outbox = store.list_pending_proactive_outbox(limit=200)
     latest = items[0] if items else {}
+    actionable_substrate = _actionable_substrate_summary(store, principal_scope_key)
     return {
         "total_items_sampled": len(items),
         "state_counts": dict(sorted(state_counts.items())),
         "pending_outbox_count": len(pending_outbox),
         "pending_outbox_sample": _outbox_summary(pending_outbox[:5]),
+        "actionable_substrate": actionable_substrate,
+        "pending_actionable_substrate_count": actionable_substrate.get("pending_count", 0),
         "latest_item_summary": {
             "event_id": str(latest.get("event_id") or ""),
             "updated_at": str(latest.get("updated_at") or ""),

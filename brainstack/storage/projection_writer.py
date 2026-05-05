@@ -163,3 +163,81 @@ class ProjectionWriter:
             metadata=dict(metadata or {}),
         )
         return dict(outcome)
+
+    def write_operating(
+        self,
+        *,
+        decision: AdmissionDecision,
+        principal_scope_key: str,
+        record_type: str,
+        content: str,
+        owner: str,
+        source: str,
+        source_session_id: str = "",
+        source_turn_number: int = 0,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> int:
+        permit = TruthWritePermit.from_admission(
+            decision,
+            shelf=TruthShelf.OPERATING,
+            slot=decision.target_slot or decision.storage_key or decision.stable_key,
+        )
+        row_id = int(
+            self.port.write_operating(
+                stable_key=decision.stable_key,
+                principal_scope_key=principal_scope_key,
+                record_type=record_type,
+                content=content,
+                owner=owner,
+                source=source,
+                permit=permit,
+                source_session_id=source_session_id,
+                source_turn_number=source_turn_number,
+                metadata=merge_admission_metadata(metadata, decision=decision),
+            )
+        )
+        self._record_receipt_and_event(decision=decision, durable_row_id=row_id, metadata=dict(metadata or {}))
+        return row_id
+
+    def write_task(
+        self,
+        *,
+        decision: AdmissionDecision,
+        principal_scope_key: str,
+        item_type: str,
+        title: str,
+        due_date: str,
+        date_scope: str,
+        optional: bool,
+        status: str,
+        owner: str,
+        source: str,
+        source_session_id: str = "",
+        source_turn_number: int = 0,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> int:
+        permit = TruthWritePermit.from_admission(
+            decision,
+            shelf=TruthShelf.TASK,
+            slot=decision.target_slot or decision.storage_key or decision.stable_key,
+        )
+        row_id = int(
+            self.port.write_task(
+                stable_key=decision.stable_key,
+                principal_scope_key=principal_scope_key,
+                item_type=item_type,
+                title=title,
+                due_date=due_date,
+                date_scope=date_scope,
+                optional=optional,
+                status=status,
+                owner=owner,
+                source=source,
+                permit=permit,
+                source_session_id=source_session_id,
+                source_turn_number=source_turn_number,
+                metadata=merge_admission_metadata(metadata, decision=decision),
+            )
+        )
+        self._record_receipt_and_event(decision=decision, durable_row_id=row_id, metadata=dict(metadata or {}))
+        return row_id

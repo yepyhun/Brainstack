@@ -25,6 +25,7 @@ from .storage.graph_state_store import GraphStateStoreMixin
 from .storage.proactive_store import ProactiveStoreMixin
 from .storage.telemetry_store import TelemetryStoreMixin
 from .storage.admission_receipts import AdmissionReceiptStoreMixin
+from .storage.current_truth_l0_store import CurrentTruthL0StoreMixin
 from .storage.canonical_memory_events import CanonicalMemoryEventStoreMixin
 
 __all__ = ["BrainstackStore", "utc_now_iso"]
@@ -44,6 +45,7 @@ class BrainstackStore(
     ProactiveStoreMixin,
     TelemetryStoreMixin,
     AdmissionReceiptStoreMixin,
+    CurrentTruthL0StoreMixin,
     CanonicalMemoryEventStoreMixin,
 ):
     def __init__(
@@ -86,6 +88,7 @@ class BrainstackStore(
         self._init_proactive_schema_if_needed()
         self._backfill_legacy_principal_scoped_profiles_if_needed()
         self._run_compatibility_migrations_if_needed()
+        self._bootstrap_current_truth_l0_if_needed()
         try:
             self._graph_backend = create_graph_backend(self._graph_backend_name, db_path=self._graph_db_path)
             if self._graph_backend is None and self._graph_backend_name not in {"", "none", "sqlite"}:

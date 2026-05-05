@@ -36,6 +36,7 @@ from ..db_migrations import (
     MIGRATION_EXPLICIT_IDENTITY_BACKFILL_V1,
     MIGRATION_GRAPH_CONFLICT_LIFECYCLE_V1,
     MIGRATION_GRAPH_SOURCE_LINEAGE_V1,
+    MIGRATION_PROFILE_SCOPE_INDEX_V1,
     MIGRATION_RECENT_WORK_AUTHORITY_V1,
     MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V1,
     MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V2,
@@ -448,9 +449,11 @@ def _profile_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     item = _row_to_dict(row)
     storage_key = str(item.get("stable_key") or "").strip()
     logical_key, embedded_scope_key = _split_profile_storage_key(storage_key)
+    indexed_logical_key = str(item.get("logical_stable_key") or "").strip()
+    indexed_scope_key = str(item.get("principal_scope_key") or "").strip()
     item["storage_key"] = storage_key
-    item["stable_key"] = logical_key
-    item["principal_scope_key"] = _principal_scope_key_from_metadata(item.get("metadata")) or embedded_scope_key
+    item["stable_key"] = indexed_logical_key or logical_key
+    item["principal_scope_key"] = indexed_scope_key or _principal_scope_key_from_metadata(item.get("metadata")) or embedded_scope_key
     return item
 
 

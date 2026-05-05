@@ -7,9 +7,11 @@ from .db import BrainstackStore
 from .active_preference_contract import (
     DELIVERY_REASON_SESSION_SUBSTRATE_REBUILT,
     build_active_preference_contract,
+    build_active_preference_delivery_inspect_payload,
     build_active_preference_delivery_trace,
     render_active_preference_contract_section,
 )
+from .behavior_policy import DEFAULT_BEHAVIOR_POLICY_CHAR_BUDGET
 from .graph_lineage import compact_graph_source_lineage
 from .literal_index import redact_literal_text
 from .operating_context import render_operating_context_section
@@ -209,6 +211,7 @@ def build_system_prompt_projection(
     delivery_reason: str = DELIVERY_REASON_SESSION_SUBSTRATE_REBUILT,
     prompt_rebuild_id: str | None = None,
     compaction_event_id: str | None = None,
+    behavior_contract_char_budget: int = DEFAULT_BEHAVIOR_POLICY_CHAR_BUDGET,
 ) -> Dict[str, Any]:
     fetch_limit = max(profile_limit * 3, 10)
     items = store.list_profile_items(limit=fetch_limit, principal_scope_key=principal_scope_key)
@@ -216,18 +219,12 @@ def build_system_prompt_projection(
     active_preference_contract = build_active_preference_contract(
         behavior_snapshot,
         principal_scope_key=principal_scope_key,
+        char_budget=behavior_contract_char_budget,
     )
     active_preference_section = (
         render_active_preference_contract_section(active_preference_contract)
         if include_behavior_contract
         else ""
-    )
-    active_preference_delivery_trace = build_active_preference_delivery_trace(
-        active_preference_contract,
-        delivered=bool(active_preference_section),
-        delivery_reason=delivery_reason,
-        prompt_rebuild_id=prompt_rebuild_id,
-        compaction_event_id=compaction_event_id,
     )
     canonical_style_present = bool(
         isinstance(behavior_snapshot, Mapping)
@@ -235,6 +232,27 @@ def build_system_prompt_projection(
         and bool(behavior_snapshot.get("raw_contract", {}).get("present"))
     )
     native_explicit_style_present = _has_native_explicit_style_generation(items)
+    source_profile_stable_key = ""
+    if active_preference_contract.get("source_preference_refs"):
+        source_profile_stable_key = str(
+            active_preference_contract.get("source_preference_refs", [{}])[0].get("source_profile_stable_key") or ""
+        ).strip()
+    generic_profile_fallback_status = (
+        "supplemental_source_profile_present"
+        if source_profile_stable_key
+        and any(str(item.get("stable_key") or "").strip() == source_profile_stable_key for item in items)
+        else "not_required"
+        if active_preference_section
+        else "no_active_card"
+    )
+    active_preference_delivery_trace = build_active_preference_delivery_trace(
+        active_preference_contract,
+        delivered=bool(active_preference_section),
+        delivery_reason=delivery_reason,
+        prompt_rebuild_id=prompt_rebuild_id,
+        compaction_event_id=compaction_event_id,
+        generic_profile_fallback_status=generic_profile_fallback_status,
+    )
     operating_context_snapshot = store.get_operating_context_snapshot(
         principal_scope_key=principal_scope_key,
         session_id=session_id,
@@ -303,6 +321,10 @@ def build_system_prompt_projection(
         "native_preferences_present": False,
         "active_preference_contract": active_preference_contract,
         "active_preference_delivery_trace": active_preference_delivery_trace,
+        "active_preference_delivery_inspect": build_active_preference_delivery_inspect_payload(
+            active_preference_contract,
+            active_preference_delivery_trace,
+        ),
         "operating_context_present": bool(operating_context_section),
         "truthful_memory_operations_present": bool(
             operating_context_section or profile_lines
@@ -804,6 +826,7 @@ def build_system_prompt_block(
     delivery_reason: str = DELIVERY_REASON_SESSION_SUBSTRATE_REBUILT,
     prompt_rebuild_id: str | None = None,
     compaction_event_id: str | None = None,
+    behavior_contract_char_budget: int = DEFAULT_BEHAVIOR_POLICY_CHAR_BUDGET,
 ) -> str:
     return str(
         build_system_prompt_projection(
@@ -815,6 +838,7 @@ def build_system_prompt_block(
             delivery_reason=delivery_reason,
             prompt_rebuild_id=prompt_rebuild_id,
             compaction_event_id=compaction_event_id,
+            behavior_contract_char_budget=behavior_contract_char_budget,
         ).get("block")
         or ""
     )

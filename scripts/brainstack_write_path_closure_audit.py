@@ -87,12 +87,24 @@ def _classify(file: str, method: str, caller: str) -> tuple[str, str]:
         return "TEST_OR_CANARY_SEED", "trace-tiering verifier fixture seed"
     if file.startswith("scripts/verify_persistent_bloat_policy.py"):
         return "TEST_OR_CANARY_SEED", "persistent-bloat policy verifier fixture seed"
+    if file.startswith("scripts/verify_profile_scope_index.py"):
+        return "TEST_OR_CANARY_SEED", "profile-scope index verifier fixture seed"
     if file.startswith("scripts/run_packet_budget_soak.py"):
         return "TEST_OR_CANARY_SEED", "packet-budget soak measurement fixture seed"
     if file.startswith("scripts/run_persistent_bloat_soak.py"):
         return "TEST_OR_CANARY_SEED", "persistent-bloat soak measurement fixture seed"
     if file.startswith("scripts/run_active_preference_contract_gauntlet.py"):
         return "TEST_OR_CANARY_SEED", "active preference contract gauntlet fixture seed"
+    if file.startswith("scripts/run_agent_facing_memory_behavior_gauntlet.py"):
+        return "TEST_OR_CANARY_SEED", "agent-facing memory behavior gauntlet fixture seed"
+    if file.startswith("scripts/run_local_workload_performance_replay.py"):
+        return "TEST_OR_CANARY_SEED", "local workload performance replay fixture seed"
+    if file.startswith("scripts/run_canonical_truth_admission_coverage.py"):
+        return "TEST_OR_CANARY_SEED", "canonical truth admission coverage fixture seed"
+    if file.startswith("scripts/run_graph_supersession_runtime_population.py"):
+        return "TEST_OR_CANARY_SEED", "graph supersession runtime population fixture seed"
+    if file.startswith("scripts/run_source_backed_actionable_queue_substrate.py"):
+        return "TEST_OR_CANARY_SEED", "source-backed actionable queue substrate fixture seed"
     if file.startswith("scripts/run_backend_lifecycle_gauntlet.py"):
         return "TEST_OR_CANARY_SEED", "backend lifecycle gauntlet fixture seed"
     if file.startswith("scripts/audit_graph_conflict_lifecycle.py"):

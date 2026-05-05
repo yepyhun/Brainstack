@@ -17,6 +17,7 @@ from .store_runtime import (
     MIGRATION_EXPLICIT_IDENTITY_BACKFILL_V1,
     MIGRATION_GRAPH_CONFLICT_LIFECYCLE_V1,
     MIGRATION_GRAPH_SOURCE_LINEAGE_V1,
+    MIGRATION_PROFILE_SCOPE_INDEX_V1,
     MIGRATION_RECENT_WORK_AUTHORITY_V1,
     MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V1,
     MIGRATION_STABLE_LOGISTICS_TYPED_ENTITIES_V2,
@@ -1021,6 +1022,33 @@ class SchemaMigrationMixin(StoreRuntimeBase):
             logger.info("Rebuilt %s compiled behavior policies for compiler v2", rebuilt)
         else:
             logger.info("Applied compiled behavior policy v2 migration with no eligible style-contract rows")
+
+    @_locked
+    def _apply_profile_scope_index_migration_v1(self) -> None:
+        columns = {
+            str(row["name"] or "")
+            for row in self.conn.execute("PRAGMA table_info(profile_items)").fetchall()
+        }
+        if "logical_stable_key" not in columns:
+            self.conn.execute("ALTER TABLE profile_items ADD COLUMN logical_stable_key TEXT NOT NULL DEFAULT ''")
+        if "principal_scope_key" not in columns:
+            self.conn.execute("ALTER TABLE profile_items ADD COLUMN principal_scope_key TEXT NOT NULL DEFAULT ''")
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_profile_scope_lookup
+            ON profile_items(logical_stable_key, principal_scope_key, category, active, updated_at DESC, id DESC)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_profile_scope_list
+            ON profile_items(principal_scope_key, category, active, confidence DESC, updated_at DESC, id DESC)
+            """
+        )
+        backfilled = self._backfill_profile_scope_index_columns()
+        self._mark_migration_applied(MIGRATION_PROFILE_SCOPE_INDEX_V1)
+        self.conn.commit()
+        logger.info("Applied profile scope index migration; backfilled %s profile rows", backfilled)
 
     def _init_schema(self) -> None:
         initialize_schema(self.conn)

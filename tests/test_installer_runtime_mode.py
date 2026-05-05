@@ -41,6 +41,7 @@ def test_generated_docker_compose_includes_local_tei_jina_runtime(tmp_path):
 
     text = compose.read_text(encoding="utf-8")
     assert "tei-jina:" in text
+    assert "container_name: hermes-bestie-live" in text
     assert "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9" in text
     assert "jinaai/jina-embeddings-v5-text-small-retrieval" in text
     assert "network_mode: host" in text
@@ -116,6 +117,10 @@ def test_config_patch_embedding_none_makes_corpus_explicitly_unavailable(tmp_pat
     assert brainstack["tier2_hindsight_retain_extract_causal_links"] is False
     assert brainstack["tier2_hindsight_api_command"] == "/opt/hermes/.venv/bin/hindsight-api"
     assert brainstack["tier2_session_end_flush_enabled"] is True
+    assert brainstack["background_tasks"]["brainstack.background_consolidation"]["status"] == "configured_unavailable"
+    assert brainstack["background_tasks"]["brainstack.capture_understanding"]["status"] == "configured_unavailable"
+    assert brainstack["background_tasks"]["brainstack.query_understanding"]["status"] == "configured_unavailable"
+    assert brainstack["background_tasks"]["brainstack.background_consolidation"]["fallback_policy"] == "none"
     assert data["proactive_mode"] == "dry_run"
     assert data["proactive_kill_switch"] is False
 

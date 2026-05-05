@@ -248,7 +248,20 @@ def collect_semantic_rows(
     corpus_limit: int,
     evidence_item_budget: int,
     entity_resolution: Mapping[str, Any],
+    semantic_evidence_enabled: bool = True,
 ) -> dict[str, List[Dict[str, Any]]]:
+    if not semantic_evidence_enabled:
+        return {
+            "conversation": [],
+            "corpus": [],
+            "evidence": [],
+            "profile": [],
+            "task": [],
+            "operating": [],
+            "continuity": [],
+            "graph": [],
+            "index_corpus": [],
+        }
     conversation_rows = (
         _collect_query_rows(
             shelf="transcript",
@@ -541,6 +554,7 @@ def collect_semantic_and_task_rows(
         corpus_limit=limits["corpus_limit"],
         evidence_item_budget=context["evidence_item_budget"],
         entity_resolution=context["entity_resolution"],
+        semantic_evidence_enabled=bool(context.get("semantic_evidence_enabled", True)),
     )
     task_rows = list(context["task_rows"])
     if semantic_channels["task"]:

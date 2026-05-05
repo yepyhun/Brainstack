@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..active_preference_contract import DELIVERY_REASON_SESSION_SUBSTRATE_REBUILT
 from .provider_protocol import ProviderRuntimeBase
 from .runtime import (
     Any,
@@ -68,13 +69,26 @@ class PrefetchSyncMixin(ProviderRuntimeBase):
         if not self._store:
             return ""
         self._ensure_behavior_authority_ready(surface="system_prompt_block")
+        delivery_reason = (
+            str(getattr(self, "_next_behavior_card_delivery_reason", "") or "").strip()
+            or DELIVERY_REASON_SESSION_SUBSTRATE_REBUILT
+        )
+        prompt_rebuild_id = getattr(self, "_next_behavior_card_prompt_rebuild_id", None)
+        compaction_event_id = getattr(self, "_next_behavior_card_compaction_event_id", None)
         projection = build_system_prompt_projection(
             self._store,
             profile_limit=self._profile_prompt_limit,
             principal_scope_key=self._principal_scope_key,
             session_id=self._session_id,
             include_behavior_contract=self._system_prompt_behavior_contract_enabled,
+            delivery_reason=delivery_reason,
+            prompt_rebuild_id=prompt_rebuild_id,
+            compaction_event_id=compaction_event_id,
+            behavior_contract_char_budget=self._system_prompt_behavior_contract_char_budget,
         )
+        self._next_behavior_card_delivery_reason = DELIVERY_REASON_SESSION_SUBSTRATE_REBUILT
+        self._next_behavior_card_prompt_rebuild_id = None
+        self._next_behavior_card_compaction_event_id = None
         block = str(projection.get("block") or "")
         snapshot = self._store.get_behavior_policy_snapshot(principal_scope_key=self._principal_scope_key)
         trace = dict(self._last_behavior_policy_trace or {})
@@ -126,6 +140,7 @@ class PrefetchSyncMixin(ProviderRuntimeBase):
             principal_scope_key=self._principal_scope_key,
             session_id=sid,
             include_behavior_contract=self._system_prompt_behavior_contract_enabled,
+            behavior_contract_char_budget=self._system_prompt_behavior_contract_char_budget,
         )
         packet = build_working_memory_packet(
             self._store,

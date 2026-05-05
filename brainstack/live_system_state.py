@@ -200,8 +200,12 @@ def search_live_system_state_rows(
         return rows[: max(int(limit or 0), 1)]
     ranked: List[Dict[str, Any]] = []
     for row in rows:
-        haystack = _normalize_text(row.get("content")).casefold()
-        overlap = sum(1 for token in query_terms if token in haystack)
+        haystack_terms = {
+            token
+            for token in re.findall(QUERY_TOKEN_RE, _normalize_text(row.get("content")).casefold())
+            if len(token) >= 3
+        }
+        overlap = len(query_terms.intersection(haystack_terms))
         if overlap <= 0:
             continue
         payload = dict(row)

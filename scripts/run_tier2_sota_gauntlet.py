@@ -366,34 +366,6 @@ def _adapter_cases() -> dict[str, Any]:
 def _donor_rehearsal(donor_dir: Path) -> dict[str, Any]:
     if not donor_dir.exists():
         return {"status": "blocked", "reason": "hindsight_donor_clone_missing"}
-    openapi = donor_dir / "hindsight-docs/static/openapi.json"
-    api = json.loads(openapi.read_text(encoding="utf-8")) if openapi.exists() else {}
-    operations = []
-    for path, methods in (api.get("paths") or {}).items():
-        for method, spec in methods.items():
-            operations.append(
-                {
-                    "method": method,
-                    "path": path,
-                    "operation_id": spec.get("operationId"),
-                    "summary": spec.get("summary"),
-                }
-            )
-    direct_proposal_surface = [
-        item
-        for item in operations
-        if any(token in f"{item.get('operation_id')} {item.get('summary')} {item.get('path')}".lower() for token in ("proposal", "action_batch", "candidate"))
-    ]
-    required_public_bridge_ops = {
-        "retain_memories",
-        "recall_memories",
-        "trigger_consolidation",
-        "get_observation_history",
-        "get_graph",
-    }
-    operation_ids = {str(item.get("operation_id") or "") for item in operations}
-    public_bridge_surface = sorted(required_public_bridge_ops & operation_ids)
-    missing_public_bridge_ops = sorted(required_public_bridge_ops - operation_ids)
     head = subprocess.run(
         ["git", "rev-parse", "--short", "HEAD"],
         cwd=donor_dir,
@@ -416,7 +388,54 @@ def _donor_rehearsal(donor_dir: Path) -> dict[str, Any]:
         capture_output=True,
         check=False,
     ).stdout.strip()
-    status = "pass" if fetch.returncode == 0 and behind in {"", "0"} else "blocked"
+    openapi_source = "worktree"
+    openapi_text = ""
+    if fetch.returncode == 0:
+        origin_openapi = subprocess.run(
+            ["git", "show", "origin/main:hindsight-docs/static/openapi.json"],
+            cwd=donor_dir,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        if origin_openapi.returncode == 0 and origin_openapi.stdout.strip():
+            openapi_text = origin_openapi.stdout
+            openapi_source = "origin/main"
+    if not openapi_text:
+        openapi = donor_dir / "hindsight-docs/static/openapi.json"
+        openapi_text = openapi.read_text(encoding="utf-8") if openapi.exists() else "{}"
+    api = json.loads(openapi_text)
+    operations = []
+    for path, methods in (api.get("paths") or {}).items():
+        for method, spec in methods.items():
+            operations.append(
+                {
+                    "method": method,
+                    "path": path,
+                    "operation_id": spec.get("operationId"),
+                    "summary": spec.get("summary"),
+                }
+            )
+    direct_proposal_surface = [
+        item
+        for item in operations
+        if any(
+            token in f"{item.get('operation_id')} {item.get('summary')} {item.get('path')}".lower()
+            for token in ("proposal", "action_batch", "candidate")
+        )
+    ]
+    required_public_bridge_ops = {
+        "retain_memories",
+        "recall_memories",
+        "trigger_consolidation",
+        "get_observation_history",
+        "get_graph",
+    }
+    operation_ids = {str(item.get("operation_id") or "") for item in operations}
+    public_bridge_surface = sorted(required_public_bridge_ops & operation_ids)
+    missing_public_bridge_ops = sorted(required_public_bridge_ops - operation_ids)
+    status = "pass" if fetch.returncode == 0 and openapi_source == "origin/main" else "blocked"
     proposal_surface = bool(direct_proposal_surface) or not missing_public_bridge_ops
     if not proposal_surface:
         status = "blocked"
@@ -425,6 +444,7 @@ def _donor_rehearsal(donor_dir: Path) -> dict[str, Any]:
         "head": head,
         "fetch_returncode": fetch.returncode,
         "behind_origin_main": behind,
+        "openapi_source": openapi_source,
         "memory_operations": [
             item
             for item in operations

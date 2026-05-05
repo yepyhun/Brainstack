@@ -5,7 +5,7 @@ import json
 from typing import Any, Iterable, Mapping
 
 from .canonical_memory_event import CANONICAL_MEMORY_EVENT_CORE_GROUPS, validate_canonical_memory_event
-from .projection_semantics import classify_projection_semantics
+from .projection_semantics import apply_read_model_supersession, classify_projection_semantics
 
 GRAPHITI_PROJECTION_SCHEMA_VERSION = "brainstack.graphiti_projection.v1"
 GRAPH_MEMORY_KINDS = {"graph_relation", "graph_state", "temporal_event"}
@@ -82,6 +82,7 @@ def project_canonical_events_to_graphiti(events: Iterable[Mapping[str, Any]]) ->
 
     normalized_events = [_canonical_event(event) for event in events]
     normalized_events = [event for event in normalized_events if event]
+    normalized_events = apply_read_model_supersession(normalized_events)
 
     episodes: dict[str, dict[str, Any]] = {}
     entities: dict[str, dict[str, Any]] = {}
@@ -156,8 +157,9 @@ def project_canonical_events_to_graphiti(events: Iterable[Mapping[str, Any]]) ->
         semantics = classify_projection_semantics(event)
         truth_eligible = bool(authority.get("truth_eligible"))
         support_visibility = _text(authority.get("support_visibility"))
-        event_type = _text(event_group.get("event_type"))
         valid_to = _text(temporal.get("valid_to"))
+        supersedes = [_text(item) for item in _list(temporal.get("supersedes")) if _text(item)]
+        superseded_by = _text(temporal.get("superseded_by"))
         answerable = semantics.is_answer_safe
         current = semantics.is_current
         conflicted = semantics.is_conflicted
@@ -174,6 +176,8 @@ def project_canonical_events_to_graphiti(events: Iterable[Mapping[str, Any]]) ->
             "scope": dict(_mapping(event.get("scope"))),
             "valid_from": _text(temporal.get("valid_from")),
             "valid_to": valid_to,
+            "supersedes": supersedes,
+            "superseded_by": superseded_by,
             "transaction_time": _text(temporal.get("transaction_time")),
             "truth_eligible": truth_eligible,
             "support_visibility": support_visibility,
@@ -194,7 +198,7 @@ def project_canonical_events_to_graphiti(events: Iterable[Mapping[str, Any]]) ->
 
         if answerable:
             current_edges.append(edge)
-        elif valid_to:
+        elif semantics.is_prior:
             prior_edges.append(edge)
         else:
             inspect_only_edges.append(edge)

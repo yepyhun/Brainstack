@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping
 
 from .adaptive_evidence_broker import build_broker_trace
+from .active_preference_contract import build_active_preference_delivery_inspect_payload
 from .control_plane import build_working_memory_packet
 from .current_truth_view import rebuild_current_truth_view
 from .db import BrainstackStore
@@ -654,6 +655,10 @@ def build_query_inspect(
         selected_by_shelf=selected_by_shelf,
         packet_text=block,
     )
+    active_preference_delivery = build_active_preference_delivery_inspect_payload(
+        system_substrate.get("active_preference_contract") if isinstance(system_substrate, Mapping) else None,
+        system_substrate.get("active_preference_delivery_trace") if isinstance(system_substrate, Mapping) else None,
+    )
     explicit_truth_parity = _explicit_truth_parity_from_selected(selected_by_shelf)
     canonical_events = []
     if hasattr(store, "list_canonical_memory_events"):
@@ -693,6 +698,7 @@ def build_query_inspect(
         "candidate_answerability": candidate_answerability,
         "packet_answerability": packet_answerability,
         "memory_answerability": packet_answerability,
+        "active_preference_delivery": active_preference_delivery,
         "explicit_truth_parity": explicit_truth_parity,
         "global_allocator_shadow": build_global_allocator_shadow(
             candidate_trace,

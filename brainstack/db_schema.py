@@ -68,6 +68,8 @@ ON continuity_lifecycle_state(updated_at DESC);
 CREATE TABLE IF NOT EXISTS profile_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     stable_key TEXT NOT NULL UNIQUE,
+    logical_stable_key TEXT NOT NULL DEFAULT '',
+    principal_scope_key TEXT NOT NULL DEFAULT '',
     category TEXT NOT NULL,
     content TEXT NOT NULL,
     source TEXT NOT NULL,
@@ -140,6 +142,53 @@ ON canonical_memory_events(principal_scope_key, event_type, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_canonical_memory_events_receipt
 ON canonical_memory_events(receipt_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS current_truth_l0_rows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    view_id TEXT NOT NULL UNIQUE,
+    event_id TEXT NOT NULL,
+    stable_fact_id TEXT NOT NULL DEFAULT '',
+    target_slot TEXT NOT NULL DEFAULT '',
+    principal_scope_key TEXT NOT NULL DEFAULT '',
+    workspace_scope_key TEXT NOT NULL DEFAULT '',
+    session_id TEXT NOT NULL DEFAULT '',
+    memory_kind TEXT NOT NULL DEFAULT '',
+    row_type TEXT NOT NULL,
+    answerable_current_truth INTEGER NOT NULL DEFAULT 0,
+    is_current INTEGER NOT NULL DEFAULT 0,
+    is_prior INTEGER NOT NULL DEFAULT 0,
+    is_conflicted INTEGER NOT NULL DEFAULT 0,
+    is_support_only INTEGER NOT NULL DEFAULT 0,
+    is_retrieval_only INTEGER NOT NULL DEFAULT 0,
+    is_hidden INTEGER NOT NULL DEFAULT 0,
+    is_authority_critical INTEGER NOT NULL DEFAULT 0,
+    graph_ready INTEGER NOT NULL DEFAULT 0,
+    source_event_id TEXT NOT NULL DEFAULT '',
+    source_span_id TEXT NOT NULL DEFAULT '',
+    source_quote_hash TEXT NOT NULL DEFAULT '',
+    receipt_id TEXT NOT NULL DEFAULT '',
+    authority_class TEXT NOT NULL DEFAULT '',
+    truth_eligible INTEGER NOT NULL DEFAULT 0,
+    support_visibility TEXT NOT NULL DEFAULT '',
+    valid_from TEXT NOT NULL DEFAULT '',
+    valid_to TEXT NOT NULL DEFAULT '',
+    transaction_time TEXT NOT NULL DEFAULT '',
+    superseded_by TEXT NOT NULL DEFAULT '',
+    projection_version TEXT NOT NULL DEFAULT '',
+    row_json TEXT NOT NULL DEFAULT '{}',
+    issue_json TEXT NOT NULL DEFAULT '[]',
+    counter_json TEXT NOT NULL DEFAULT '{}',
+    projected_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_current_truth_l0_scope_answerable
+ON current_truth_l0_rows(principal_scope_key, answerable_current_truth, stable_fact_id, event_id);
+
+CREATE INDEX IF NOT EXISTS idx_current_truth_l0_event
+ON current_truth_l0_rows(event_id);
+
+CREATE INDEX IF NOT EXISTS idx_current_truth_l0_receipt
+ON current_truth_l0_rows(receipt_id);
 
 CREATE TABLE IF NOT EXISTS behavior_contracts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -484,8 +533,29 @@ CREATE TABLE IF NOT EXISTS applied_migrations (
 """
 
 
+def _ensure_profile_scope_columns_and_indexes(conn: sqlite3.Connection) -> None:
+    columns = {str(row["name"] if isinstance(row, sqlite3.Row) else row[1]) for row in conn.execute("PRAGMA table_info(profile_items)").fetchall()}
+    if "logical_stable_key" not in columns:
+        conn.execute("ALTER TABLE profile_items ADD COLUMN logical_stable_key TEXT NOT NULL DEFAULT ''")
+    if "principal_scope_key" not in columns:
+        conn.execute("ALTER TABLE profile_items ADD COLUMN principal_scope_key TEXT NOT NULL DEFAULT ''")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_profile_scope_lookup
+        ON profile_items(logical_stable_key, principal_scope_key, category, active, updated_at DESC, id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_profile_scope_list
+        ON profile_items(principal_scope_key, category, active, confidence DESC, updated_at DESC, id DESC)
+        """
+    )
+
+
 def initialize_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
+    _ensure_profile_scope_columns_and_indexes(conn)
     conn.commit()
 
 

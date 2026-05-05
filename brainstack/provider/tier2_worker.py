@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .provider_protocol import ProviderRuntimeBase
+from ..background_task_binding import build_background_task_status
 from ..tier2_consolidation import (
     attach_consolidation_plan_metadata,
     bound_tier2_extracted_payload,
@@ -309,6 +310,13 @@ class Tier2WorkerMixin(ProviderRuntimeBase):
             result["request_status"] = "skipped"
             result["no_op_reasons"] = ["store_unavailable"]
             return self._tier2_finish_result(result, started_monotonic=started_monotonic, record=False)
+        background_task_status = build_background_task_status(self._config)
+        result["background_task_status"] = background_task_status
+        if not background_task_status.get("tier2_write_allowed") and not callable(self._config.get("_tier2_extractor")):
+            result["status"] = "skipped_background_task_unavailable"
+            result["request_status"] = "skipped"
+            result["no_op_reasons"] = ["background_consolidation_route_unavailable"]
+            return self._tier2_finish_result(result, started_monotonic=started_monotonic, record=True)
         transcript_rows = self._tier2_transcript_rows(session_id=session_id)
         result["transcript_turn_numbers"] = [int(row.get("turn_number") or 0) for row in transcript_rows]
         result["transcript_ids"] = [int(row["id"]) for row in transcript_rows if row.get("id") is not None]

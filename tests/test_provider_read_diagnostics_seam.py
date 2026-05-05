@@ -52,7 +52,8 @@ def test_read_diagnostics_seam_keeps_recall_inspect_stats_stable(tmp_path: Path)
         assert inspect["report"]["schema"] == "brainstack.query_inspect.v1"
         assert stats["schema"] == "brainstack.tool_stats.v1"
         assert stats["read_only"] is True
-        assert stats["report"]["schema"] == "brainstack.memory_kernel_doctor.v1"
+        assert stats["bounded_model_facing"] is True
+        assert stats["doctor"]["schema"] == "brainstack.memory_kernel_doctor.v1"
         assert stats["lifecycle"]["schema"] == "brainstack.provider_lifecycle.v1"
     finally:
         provider.shutdown()
@@ -72,5 +73,6 @@ def test_read_diagnostics_seam_reports_uninitialized_store_without_mutation(tmp_
 
     assert inspect["schema"] == "brainstack.tool_inspect.v1"
     assert inspect["report"]["error"] == "Brainstack store is not initialized."
-    assert stats["report"]["verdict"] == "fail"
+    assert stats["bounded_model_facing"] is True
+    assert stats["doctor"]["verdict"] == "fail"
     assert stats["lifecycle"]["status"] == "unavailable"

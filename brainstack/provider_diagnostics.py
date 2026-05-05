@@ -5,6 +5,7 @@ from typing import Any
 
 from .answerability import build_memory_answerability
 from .authority_policy import is_current_assignment_authority
+from .background_task_binding import build_background_task_status
 from .diagnostics import build_memory_kernel_doctor, build_query_inspect
 from .persistent_bloat import PERSISTENT_BLOAT_REPORT_SCHEMA
 
@@ -118,6 +119,7 @@ def _tier2_runtime_route_status(config: Mapping[str, Any] | None) -> dict[str, A
         "effective_model_source": effective_model_source,
         "configured_base_url_present": bool(configured_base_url),
         "uses_legacy_gpt_5_2_codex": effective_model == "gpt-5.2-codex" or configured_model == "gpt-5.2-codex",
+        "background_task_status": build_background_task_status(cfg),
         "model_answer": (
             f"Tier2 current route uses {effective_model} via {llm_provider or 'default provider'}."
             if effective_model
@@ -253,6 +255,7 @@ def build_provider_query_inspect(
     corpus_char_budget: int,
     operating_match_limit: int,
     render_ordinary_contract: bool,
+    system_substrate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if store is None:
         return {
@@ -277,6 +280,7 @@ def build_provider_query_inspect(
         corpus_char_budget=corpus_char_budget,
         operating_match_limit=operating_match_limit,
         render_ordinary_contract=render_ordinary_contract,
+        system_substrate=system_substrate,
     )
 
 
@@ -468,6 +472,15 @@ def _bool_arg(args: Mapping[str, Any], name: str, default: bool = False) -> bool
 def _compact_tier2_route(route: Any) -> dict[str, Any]:
     if not isinstance(route, Mapping):
         return {}
+    background_task_status = route.get("background_task_status")
+    compact_background_tasks: dict[str, Any] = {}
+    if isinstance(background_task_status, Mapping):
+        summary = background_task_status.get("summary")
+        compact_background_tasks = {
+            "schema": _normalize_compact_text(background_task_status.get("schema")),
+            "tier2_write_allowed": bool(background_task_status.get("tier2_write_allowed")),
+            "summary": dict(summary) if isinstance(summary, Mapping) else {},
+        }
     return {
         "runtime": _normalize_compact_text(route.get("runtime")),
         "mode": _normalize_compact_text(route.get("mode")),
@@ -476,12 +489,14 @@ def _compact_tier2_route(route: Any) -> dict[str, Any]:
         "effective_model": _normalize_compact_text(route.get("effective_model")),
         "model_source": _normalize_compact_text(route.get("model_source")),
         "uses_legacy_gpt_5_2_codex": bool(route.get("uses_legacy_gpt_5_2_codex")),
+        "background_task_status": compact_background_tasks,
     }
 
 
 def _compact_lifecycle_status(lifecycle: Any) -> dict[str, Any]:
     if not isinstance(lifecycle, Mapping):
         return {"status": "unknown"}
+    exported_tools = lifecycle.get("exported_tools") if isinstance(lifecycle.get("exported_tools"), list) else []
     return {
         "schema": _normalize_compact_text(lifecycle.get("schema")),
         "status": _normalize_compact_text(lifecycle.get("status")),
@@ -490,6 +505,11 @@ def _compact_lifecycle_status(lifecycle: Any) -> dict[str, Any]:
         "tier2_worker_running": bool(lifecycle.get("tier2_worker_running")),
         "pending_tier2_turns": int(lifecycle.get("pending_tier2_turns") or 0),
         "tier2_runtime_route": _compact_tier2_route(lifecycle.get("tier2_runtime_route")),
+        "exported_tools": [
+            {"name": _normalize_compact_text(tool.get("name")) if isinstance(tool, Mapping) else ""}
+            for tool in exported_tools[:20]
+            if isinstance(tool, Mapping)
+        ],
     }
 
 
@@ -508,11 +528,14 @@ def _compact_backend_health(raw_backend_health: Any) -> dict[str, Any]:
                 "active": bool(raw.get("active")),
                 "requested": bool(raw.get("requested")),
                 "reason": _trim_compact_text(raw.get("reason"), limit=160),
+                "reason_code": _normalize_compact_text(raw.get("reason_code")),
+                "safe_reason": _trim_compact_text(raw.get("safe_reason"), limit=160),
             }
     return {
         "schema": _normalize_compact_text(raw_backend_health.get("schema")),
         "status": _normalize_compact_text(raw_backend_health.get("status")),
         "issue_count": int(raw_backend_health.get("issue_count") or 0),
+        "agent_summary": _trim_compact_text(raw_backend_health.get("agent_summary"), limit=240),
         "backends": backends,
     }
 
@@ -557,12 +580,14 @@ def _compact_persistent_bloat(report: Any) -> dict[str, Any]:
     if not isinstance(report, Mapping):
         return {"schema": PERSISTENT_BLOAT_REPORT_SCHEMA, "status": "unknown", "issue_count": 1}
     metrics = report.get("metrics") if isinstance(report.get("metrics"), Mapping) else {}
+    issues = report.get("issues") if isinstance(report.get("issues"), list) else []
     return {
         "schema": _normalize_compact_text(report.get("schema") or PERSISTENT_BLOAT_REPORT_SCHEMA),
         "status": _normalize_compact_text(report.get("status")),
         "read_only": bool(report.get("read_only", True)),
         "public_safe": bool(report.get("public_safe", True)),
         "issue_count": int(report.get("issue_count") or 0),
+        "issues": [_normalize_compact_text(issue) for issue in issues[:8] if _normalize_compact_text(issue)],
         "metric_statuses": dict(report.get("metric_statuses") or {})
         if isinstance(report.get("metric_statuses"), Mapping)
         else {},

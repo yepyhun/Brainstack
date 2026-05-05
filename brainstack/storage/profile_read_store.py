@@ -31,6 +31,37 @@ from .store_runtime import (
 )
 
 class ProfileReadStoreMixin(StoreRuntimeBase):
+    def _record_profile_scope_lookup(self, *, path: str, degraded_reason: str = "") -> None:
+        counters = getattr(self, "_profile_scope_lookup_counters", None)
+        if not isinstance(counters, dict):
+            counters = {}
+            self._profile_scope_lookup_counters = counters
+        key = str(path or "unknown").strip() or "unknown"
+        counters[key] = int(counters.get(key) or 0) + 1
+        if degraded_reason:
+            counters[f"degraded:{degraded_reason}"] = int(counters.get(f"degraded:{degraded_reason}") or 0) + 1
+
+    def reset_profile_scope_lookup_diagnostics(self) -> None:
+        self._profile_scope_lookup_counters = {}
+
+    def profile_scope_lookup_diagnostics(self) -> Dict[str, Any]:
+        counters = getattr(self, "_profile_scope_lookup_counters", None)
+        counters = counters if isinstance(counters, dict) else {}
+        return {
+            "schema": "brainstack.profile_scope_lookup_diagnostics.v1",
+            "indexed_lookup_count": int(counters.get("indexed") or 0),
+            "exact_storage_fallback_count": int(counters.get("compat_exact_storage_key") or 0),
+            "like_fallback_count": int(counters.get("compat_like_fallback") or 0),
+            "degraded_reasons": {
+                key.removeprefix("degraded:"): value
+                for key, value in sorted(counters.items())
+                if str(key).startswith("degraded:")
+            },
+        }
+
+    def _profile_select_columns(self) -> str:
+        return "id, stable_key, logical_stable_key, principal_scope_key, category, content, source, confidence, metadata_json, updated_at, active"
+
     @_locked
     def list_profile_items(
         self,
@@ -41,11 +72,16 @@ class ProfileReadStoreMixin(StoreRuntimeBase):
     ) -> List[Dict[str, Any]]:
         params: list[Any] = []
         fetch_limit = max(limit * 4, 16) if principal_scope_key else limit
-        sql = """
-            SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at
+        select_columns = self._profile_select_columns()
+        sql = f"""
+            SELECT {select_columns}
             FROM profile_items
             WHERE active = 1
         """
+        if principal_scope_key:
+            sql += " AND principal_scope_key IN (?, '')"
+            params.append(str(principal_scope_key or "").strip())
+            self._record_profile_scope_lookup(path="indexed")
         if categories:
             cats = list(categories)
             sql += f" AND category IN ({','.join('?' for _ in cats)})"
@@ -125,13 +161,36 @@ class ProfileReadStoreMixin(StoreRuntimeBase):
 
     @_locked
     def get_profile_item(self, *, stable_key: str, principal_scope_key: str = "") -> Dict[str, Any] | None:
+        logical_key = str(stable_key or "").strip()
+        requested_scope_key = str(principal_scope_key or "").strip()
+        select_columns = self._profile_select_columns()
+        if requested_scope_key and logical_key:
+            row = self.conn.execute(
+                f"""
+                SELECT {select_columns}
+                FROM profile_items
+                WHERE active = 1 AND logical_stable_key = ? AND principal_scope_key = ?
+                ORDER BY confidence DESC, updated_at DESC, id DESC
+                LIMIT 1
+                """,
+                (logical_key, requested_scope_key),
+            ).fetchone()
+            self._record_profile_scope_lookup(path="indexed")
+            if row:
+                item = _profile_row_to_dict(row)
+                item["profile_scope_lookup"] = {
+                    "schema": "brainstack.profile_scope_lookup.v1",
+                    "path": "indexed",
+                    "degraded": False,
+                }
+                return item
         storage_key = _profile_storage_key(
             stable_key=stable_key,
             principal_scope_key=principal_scope_key,
         )
         row = self.conn.execute(
-            """
-            SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at, active
+            f"""
+            SELECT {select_columns}
             FROM profile_items
             WHERE stable_key = ?
             LIMIT 1
@@ -139,13 +198,22 @@ class ProfileReadStoreMixin(StoreRuntimeBase):
             (storage_key,),
         ).fetchone()
         if row:
-            return _profile_row_to_dict(row)
+            item = _profile_row_to_dict(row)
+            if requested_scope_key:
+                self._record_profile_scope_lookup(path="compat_exact_storage_key", degraded_reason="legacy_storage_key_exact")
+                item["profile_scope_lookup"] = {
+                    "schema": "brainstack.profile_scope_lookup.v1",
+                    "path": "compat_exact_storage_key",
+                    "degraded": True,
+                    "reason": "legacy_storage_key_exact",
+                }
+            return item
         if not principal_scope_key:
             return None
         like_pattern = f"{str(stable_key or '').strip()}{PROFILE_SCOPE_DELIMITER}%"
         candidate_rows = self.conn.execute(
-            """
-            SELECT id, stable_key, category, content, source, confidence, metadata_json, updated_at, active
+            f"""
+            SELECT {select_columns}
             FROM profile_items
             WHERE active = 1 AND stable_key LIKE ?
             ORDER BY confidence DESC, updated_at DESC, id DESC
@@ -160,10 +228,17 @@ class ProfileReadStoreMixin(StoreRuntimeBase):
                 candidates.append(item)
         if not candidates:
             return None
+        self._record_profile_scope_lookup(path="compat_like_fallback", degraded_reason="legacy_like_scan")
         candidates.sort(
             key=lambda item: _scoped_row_priority(item, principal_scope_key=principal_scope_key),
             reverse=True,
         )
+        candidates[0]["profile_scope_lookup"] = {
+            "schema": "brainstack.profile_scope_lookup.v1",
+            "path": "compat_like_fallback",
+            "degraded": True,
+            "reason": "legacy_like_scan",
+        }
         return candidates[0]
 
     @_locked

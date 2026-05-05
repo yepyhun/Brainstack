@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+from brainstack import BrainstackMemoryProvider
 from brainstack.active_preference_contract import (
     CONTRACT_STATUS_ACTIVE,
     CONTRACT_STATUS_DEGRADED,
@@ -13,7 +15,7 @@ from brainstack.active_preference_contract import (
 )
 from brainstack.db import BrainstackStore
 from brainstack.retrieval import build_system_prompt_projection
-from brainstack.style_contract import STYLE_CONTRACT_SLOT
+from brainstack.style_contract import STYLE_CONTRACT_SLOT, list_style_contract_rules
 
 
 def _open_store(tmp_path: Path) -> BrainstackStore:
@@ -24,6 +26,33 @@ def _open_store(tmp_path: Path) -> BrainstackStore:
     )
     store.open()
     return store
+
+
+def _provider(tmp_path: Path) -> BrainstackMemoryProvider:
+    provider = BrainstackMemoryProvider(
+        {
+            "db_path": str(tmp_path / "brainstack.sqlite3"),
+            "graph_backend": "sqlite",
+            "corpus_backend": "sqlite",
+        }
+    )
+    provider.initialize(
+        "active-contract-session",
+        platform="test",
+        user_id="user",
+        agent_identity="agent-active-contract",
+        agent_workspace="workspace",
+    )
+    assert provider._store is not None
+    return provider
+
+
+def _rule_lines(count: int) -> list[str]:
+    return [f"Rule {index:02d} must be preserved in the active behavior card." for index in range(1, count + 1)]
+
+
+def _style_contract_text(lines: list[str], *, title: str = "LauraTom style contract") -> str:
+    return f"{title}\n\nRules:\n" + "\n".join(f"- {line}" for line in lines)
 
 
 def _commit_style_contract(store: BrainstackStore, *, scope: str, lines: list[str], source: str = "user_explicit") -> None:
@@ -250,6 +279,134 @@ def test_explicit_profile_lane_style_contract_projects_active_contract_without_b
         assert store.conn.execute("select count(*) from compiled_behavior_policies").fetchone()[0] == 0
     finally:
         store.close()
+
+
+def test_brainstack_remember_user_style_rules_materializes_canonical_active_card(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        store = provider._store
+        assert store is not None
+        scope = provider._principal_scope_key
+        old_lines = ["Old short rule one.", "Old short rule two.", "Old short rule three."]
+        new_lines = _rule_lines(25)
+        store.upsert_profile_item(
+            stable_key=STYLE_CONTRACT_SLOT,
+            category="style_contract",
+            content=_style_contract_text(old_lines, title="Old style contract"),
+            source="operator_explicit",
+            confidence=0.95,
+            metadata={
+                "principal_scope_key": scope,
+                "source_role": "user",
+                "memory_write_receipt_id": "old-style-receipt",
+                "style_contract_title": "Old style contract",
+                "style_contract_sections": [{"heading": "Rules", "lines": old_lines}],
+            },
+        )
+
+        receipt = json.loads(
+            provider.handle_tool_call(
+                "brainstack_remember",
+                {
+                    "shelf": "profile",
+                    "stable_key": "preference.discord_response_style_plain_hungarian_2026_05_04",
+                    "category": "style_preference",
+                    "content": _style_contract_text(new_lines),
+                    "source_role": "user",
+                    "authority_class": "profile",
+                    "confidence": 0.99,
+                    "metadata": {"target_slot": "preference.discord_response_style"},
+                },
+            )
+        )
+
+        assert receipt["status"] == "committed"
+        assert receipt["style_contract_materialization"]["status"] == "materialized"
+        assert receipt["style_contract_materialization"]["rule_count"] == 25
+        generic = store.get_profile_item(
+            stable_key="preference.discord_response_style_plain_hungarian_2026_05_04",
+            principal_scope_key=scope,
+        )
+        canonical = store.get_profile_item(stable_key=STYLE_CONTRACT_SLOT, principal_scope_key=scope)
+        assert generic is not None
+        assert canonical is not None
+        canonical_metadata = canonical["metadata"]
+        assert canonical_metadata["source_profile_stable_key"] == "preference.discord_response_style_plain_hungarian_2026_05_04"
+        assert canonical_metadata["memory_write_receipt_id"] == receipt["memory_write_receipt"]["receipt_id"]
+        assert len(list_style_contract_rules(raw_text=canonical["content"], metadata=canonical_metadata)) == 25
+        assert new_lines[-1] in canonical["content"]
+        assert old_lines[0] not in canonical["content"]
+
+        snapshot = store.get_behavior_policy_snapshot(principal_scope_key=scope)
+        contract = build_active_preference_contract(snapshot, principal_scope_key=scope, char_budget=10000)
+        assert contract["contract_status"] == CONTRACT_STATUS_ACTIVE
+        assert len(contract["compiled_rules"]) == 25
+        assert receipt["memory_write_receipt"]["receipt_id"] in contract["source_receipt_ids"]
+        projection = build_system_prompt_projection(
+            store,
+            profile_limit=0,
+            principal_scope_key=scope,
+            session_id="session:test",
+        )
+        assert projection["active_preference_delivery_trace"]["active_preference_contract_delivered"] is True
+        assert store.conn.execute("select count(*) from behavior_contracts").fetchone()[0] == 0
+        assert store.conn.execute("select count(*) from compiled_behavior_policies").fetchone()[0] == 0
+    finally:
+        provider.shutdown()
+
+
+def test_generic_profile_style_text_alone_is_not_active_card_authority(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        scope = "principal:generic-style-only"
+        store.upsert_profile_item(
+            stable_key="preference.generic_style_memory",
+            category="style_preference",
+            content=_style_contract_text(_rule_lines(4)),
+            source="user_explicit",
+            confidence=0.95,
+            metadata={"principal_scope_key": scope, "source_role": "user"},
+        )
+
+        projection = build_system_prompt_projection(
+            store,
+            profile_limit=8,
+            principal_scope_key=scope,
+            session_id="session:test",
+        )
+
+        assert projection["active_preference_contract"]["contract_status"] == CONTRACT_STATUS_EMPTY
+        assert "# Brainstack Active User Preference Contract" not in str(projection["block"])
+        assert store.get_profile_item(stable_key=STYLE_CONTRACT_SLOT, principal_scope_key=scope) is None
+    finally:
+        store.close()
+
+
+def test_non_style_brainstack_remember_profile_write_does_not_activate_card(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        store = provider._store
+        assert store is not None
+        receipt = json.loads(
+            provider.handle_tool_call(
+                "brainstack_remember",
+                {
+                    "shelf": "profile",
+                    "stable_key": "identity:display_name",
+                    "category": "identity",
+                    "content": "Laura",
+                    "source_role": "user",
+                    "authority_class": "profile",
+                    "confidence": 0.99,
+                },
+            )
+        )
+
+        assert receipt["status"] == "committed"
+        assert receipt["style_contract_materialization"]["status"] == "skipped"
+        assert store.get_profile_item(stable_key=STYLE_CONTRACT_SLOT, principal_scope_key=provider._principal_scope_key) is None
+    finally:
+        provider.shutdown()
 
 
 def test_delivery_trace_has_registered_safe_shape() -> None:

@@ -7,7 +7,7 @@ from typing import Any, Iterable, Mapping, NoReturn
 
 from .canonical_memory_event import CANONICAL_MEMORY_EVENT_CORE_GROUPS, validate_canonical_memory_event
 from .graphiti_projection import project_canonical_events_to_graphiti
-from .projection_semantics import classify_projection_semantics
+from .projection_semantics import apply_read_model_supersession, classify_projection_semantics
 
 CURRENT_TRUTH_VIEW_SCHEMA_VERSION = "brainstack.current_truth_view.v1"
 CURRENT_TRUTH_VIEW_PROJECTION_VERSION = "brainstack.current_truth_view.rebuild.v1"
@@ -340,6 +340,7 @@ def rebuild_current_truth_view(
 
     normalized_events = [_canonical_event(event) for event in events]
     normalized_events = [event for event in normalized_events if event]
+    normalized_events = apply_read_model_supersession(normalized_events)
     normalized_events = sorted(normalized_events, key=_event_sort_key)
 
     current_rows: list[dict[str, Any]] = []

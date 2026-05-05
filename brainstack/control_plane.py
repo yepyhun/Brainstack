@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import re
 from typing import Any, Callable, Dict, Mapping
 
 from .core.packet_budget import (
@@ -40,6 +41,35 @@ def _has_current_and_prior_graph_states(graph_rows: list[dict[str, Any]]) -> boo
     return has_current and has_prior
 
 
+_EXPLICIT_EVIDENCE_CLASS_TERMS = {
+    "profile": "profile",
+    "continuity": "continuity",
+    "transcript": "transcript",
+    "operating": "operating",
+    "graph": "graph",
+    "corpus": "corpus",
+    "citation": "corpus",
+    "citations": "corpus",
+    "task": "task",
+    "tasks": "task",
+}
+
+
+def _explicit_evidence_classes_from_query(query: str) -> list[str]:
+    lowered = str(query or "").casefold()
+    tokens = set(re.findall(r"[^\W_]+(?:[-_][^\W_]+)*", lowered, re.UNICODE))
+    classes = [
+        evidence_class
+        for token, evidence_class in _EXPLICIT_EVIDENCE_CLASS_TERMS.items()
+        if token in tokens
+    ]
+    if "current truth" in lowered or "current-truth" in lowered or "current_truth" in lowered:
+        classes.append("current_truth")
+    if "memory" in tokens and "proof" in tokens:
+        classes.append("deep_mixed")
+    return list(dict.fromkeys(classes))
+
+
 @dataclass
 class QueryAnalysis:
     operating_like: bool
@@ -76,6 +106,8 @@ class WorkingMemoryPolicy:
     show_authoritative_contract: bool
     suppress_contract_if_in_system_substrate: bool
     render_ordinary_contract: bool
+    semantic_evidence_enabled: bool
+    semantic_evidence_reason: str
 
 
 def analyze_query(
@@ -144,6 +176,8 @@ def _initial_policy(
         show_authoritative_contract=False,
         suppress_contract_if_in_system_substrate=True,
         render_ordinary_contract=False,
+        semantic_evidence_enabled=True,
+        semantic_evidence_reason="default_enabled_before_route_plan",
     )
 
     if analysis.profile_slot_targets:
@@ -632,11 +666,26 @@ def _canonical_events_for_current_truth_view(store: BrainstackStore) -> list[dic
     return events
 
 
-def _apply_adaptive_route_overrides(policy: WorkingMemoryPolicy, plan: Mapping[str, Any]) -> None:
+def _current_truth_l0_view(store: BrainstackStore, *, principal_scope_key: str) -> dict[str, Any]:
+    if hasattr(store, "get_current_truth_l0_snapshot"):
+        return store.get_current_truth_l0_snapshot(principal_scope_key=principal_scope_key, limit=5000)
+    return rebuild_current_truth_view(_canonical_events_for_current_truth_view(store))
+
+
+def _apply_adaptive_route_overrides(
+    policy: WorkingMemoryPolicy,
+    plan: Mapping[str, Any],
+    *,
+    limit_caps: Mapping[str, int],
+) -> None:
     overrides = route_plan_limit_overrides(plan)
     for key, value in overrides.items():
         if hasattr(policy, key):
-            setattr(policy, key, max(int(value or 0), 0))
+            cap = int(limit_caps.get(key, value) or 0)
+            setattr(policy, key, max(min(int(value or 0), cap), 0))
+    semantic = plan.get("semantic_retrieval") if isinstance(plan.get("semantic_retrieval"), Mapping) else {}
+    policy.semantic_evidence_enabled = bool(semantic.get("enabled"))
+    policy.semantic_evidence_reason = str(semantic.get("reason") or "").strip() or "route_gated"
 
 
 def build_working_memory_packet(
@@ -690,22 +739,40 @@ def build_working_memory_packet(
     adaptive_understanding: dict[str, Any] = {
         "profile_slot_targets": list(analysis.profile_slot_targets),
     }
+    explicit_evidence_classes = _explicit_evidence_classes_from_query(query)
+    if explicit_evidence_classes:
+        adaptive_understanding.setdefault("required_evidence_classes", []).extend(explicit_evidence_classes)
     if analysis.route_payload:
         adaptive_understanding["route_payload"] = dict(analysis.route_payload)
     if analysis.task_like:
         adaptive_understanding.setdefault("required_evidence_classes", []).append("continuity")
     if analysis.operating_like:
-        adaptive_understanding.setdefault("required_evidence_classes", []).append("continuity")
+        adaptive_understanding.setdefault("required_evidence_classes", []).append("operating")
     if adaptive_route_signals:
         adaptive_understanding.update(dict(adaptive_route_signals))
-    current_truth_view = rebuild_current_truth_view(_canonical_events_for_current_truth_view(store))
+    current_truth_view = _current_truth_l0_view(store, principal_scope_key=principal_scope_key)
     adaptive_route_plan = build_adaptive_route_plan(
         query,
         query_understanding=adaptive_understanding,
         current_truth_view=current_truth_view,
         backend_health=_store_backend_health(store),
     )
-    _apply_adaptive_route_overrides(policy, adaptive_route_plan)
+    _apply_adaptive_route_overrides(
+        policy,
+        adaptive_route_plan,
+        limit_caps={
+            "profile_limit": profile_match_limit,
+            "continuity_recent_limit": continuity_recent_limit,
+            "continuity_match_limit": continuity_match_limit,
+            "transcript_limit": transcript_match_limit,
+            "transcript_char_budget": transcript_char_budget,
+            "operating_limit": operating_match_limit,
+            "graph_limit": graph_limit,
+            "corpus_limit": corpus_limit,
+            "corpus_char_budget": corpus_char_budget,
+            "evidence_item_budget": evidence_item_budget,
+        },
+    )
 
     effective_route_resolver = route_resolver
     if effective_route_resolver is None:
@@ -817,6 +884,8 @@ def build_working_memory_packet(
         "fallback": dict(adaptive_route_plan.get("fallback") or {}),
         "current_truth_view": dict(adaptive_route_plan.get("current_truth_view") or {}),
         "guardrails": dict(adaptive_route_plan.get("guardrails") or {}),
+        "semantic_retrieval": dict(adaptive_route_plan.get("semantic_retrieval") or {}),
+        "shelf_budget": dict(adaptive_route_plan.get("shelf_budget") or {}),
     }
     budgeted = _apply_working_memory_packet_budget(
         mode=packet_budget_mode,

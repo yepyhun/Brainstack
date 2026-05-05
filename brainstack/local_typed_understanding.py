@@ -389,12 +389,49 @@ def _rank_operating_rows_locally(rows: list[Mapping[str, Any]], *, query: str, l
     return [row for _, row in ranked[: max(int(limit or 0), 1)]]
 
 
+def _operating_lookup_intent_present(query: str) -> bool:
+    """Bound local fallback to operating-state grammar instead of topical overlap."""
+    terms = set(normalize_semantic_terms(query))
+    if not terms:
+        return False
+    if any("_" in term and term in _operating_record_types() for term in terms):
+        return True
+    if {"active", "work"} <= terms or {"current", "work"} <= terms:
+        return True
+    if {"active", "phase"} <= terms or {"current", "phase"} <= terms:
+        return True
+    if "runtime" in terms and terms.intersection({"health", "status", "pulse", "state"}):
+        return True
+    if terms.intersection({"scheduler", "cron", "job"}) and terms.intersection({"status", "state", "health"}):
+        return True
+    record_type_phrases = (
+        ("recent", "work"),
+        ("work", "summary"),
+        ("completed", "outcome"),
+        ("discarded", "work"),
+        ("open", "decision"),
+        ("current", "commitment"),
+        ("next", "step"),
+        ("external", "owner"),
+        ("runtime", "approval"),
+        ("canonical", "policy"),
+        ("procedure", "memory"),
+        ("session", "state"),
+        ("live", "system"),
+    )
+    if any(set(phrase) <= terms for phrase in record_type_phrases):
+        return True
+    return bool(terms & {"assignment", "handoff", "commitment"})
+
+
 def _probe_operating_lookup(
     store: Any,
     *,
     query: str,
     principal_scope_key: str,
 ) -> Dict[str, Any] | None:
+    if not _operating_lookup_intent_present(query):
+        return None
     rows = list(
         store.search_operating_records(
             query=query,

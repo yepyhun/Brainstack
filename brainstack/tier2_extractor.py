@@ -6,6 +6,10 @@ import logging
 import re
 from typing import Any, Callable, Dict, Iterable, List, Mapping
 
+from .background_task_binding import (
+    BACKGROUND_CONSOLIDATION_HERMES_TASK_SLOT,
+    require_explicit_hermes_auxiliary_route,
+)
 from .profile_contract import (
     derive_transcript_identity_profile_items,
     normalize_profile_slot,
@@ -584,6 +588,7 @@ def _normalize_typed_entities(
 
 
 def _default_llm_caller(*, task: str, messages: list, timeout: float, max_tokens: int) -> Any:
+    require_explicit_hermes_auxiliary_route(task)
     from agent.auxiliary_client import call_llm  # type: ignore[import-not-found,import-untyped]
 
     return call_llm(
@@ -602,7 +607,7 @@ def extract_tier2_candidates(
     transcript_limit: int = 8,
     timeout_seconds: float = 15.0,
     max_tokens: int = 900,
-    task: str = "flush_memories",
+    task: str = BACKGROUND_CONSOLIDATION_HERMES_TASK_SLOT,
 ) -> Dict[str, Any]:
     entries = list(transcript_entries)
     batch = _format_transcript_batch(entries, limit=transcript_limit)

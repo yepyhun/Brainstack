@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..active_preference_contract import DELIVERY_REASON_EXPLICIT_MEMORY_INSPECTION
 from ..memory_write_receipts import (
     build_ack_plan,
     build_memory_write_receipt,
@@ -14,6 +15,7 @@ from ..proactive_agent_contract import (
     list_proactive_agent_items,
     set_proactive_mode_from_explicit_request,
 )
+from ..style_contract import STYLE_CONTRACT_SLOT
 from ..tool_schemas import proactive_control_tool_schema
 from .provider_protocol import ProviderRuntimeBase
 from .runtime import (
@@ -41,6 +43,7 @@ from .runtime import (
     build_provider_lifecycle_status,
     build_provider_memory_kernel_doctor,
     build_provider_query_inspect,
+    build_system_prompt_projection,
     build_persistent_bloat_report,
     build_tool_schemas,
     explicit_capture_tool_schema,
@@ -359,6 +362,7 @@ class ProviderToolsMixin(ProviderRuntimeBase):
         stable_key = str(capture.get("stable_key") or "")
         source = f"{tool_name}:{shelf}"
         content = str(capture.get("content") or capture.get("title") or "")
+        raw_profile_content = str(args.get("content") or "") if shelf == "profile" else content
         turn_id = f"{self._session_id}:{int(self._turn_counter)}"
         source_event_id = str(metadata.get("source_event_id") or metadata.get("event_id") or turn_id)
         source_span_id = str(metadata.get("source_span_id") or metadata.get("span_id") or "")
@@ -477,7 +481,85 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             commitment_claim_present=True,
         )["memory_commitment_guard"]
         receipt["read_only"] = False
+        if shelf == "profile":
+            self._materialize_style_contract_from_profile_capture(
+                capture=capture,
+                source=source,
+                content=raw_profile_content or content,
+                receipt=receipt,
+                trusted_operator_origin=trusted_operator_origin,
+            )
         return receipt
+
+    def _materialize_style_contract_from_profile_capture(
+        self,
+        *,
+        capture: Mapping[str, Any],
+        source: str,
+        content: str,
+        receipt: Dict[str, Any],
+        trusted_operator_origin: str = "",
+    ) -> None:
+        store = self._store
+        if store is None:
+            return
+        source_role = str(capture.get("source_role") or "").strip().lower()
+        if source_role != "user" and not (source_role == "operator" and trusted_operator_origin):
+            receipt["style_contract_materialization"] = {
+                "status": "skipped",
+                "reason_code": "source_role_not_user_authority",
+            }
+            return
+        metadata = dict(capture.get("metadata") or {})
+        memory_write_receipt = receipt.get("memory_write_receipt") if isinstance(receipt.get("memory_write_receipt"), Mapping) else {}
+        metadata.update(
+            {
+                "source_role": source_role,
+                "authority_class": str(capture.get("authority_class") or ""),
+                "source_profile_stable_key": str(capture.get("stable_key") or ""),
+                "source_profile_category": str(capture.get("category") or ""),
+                "source_profile_content_hash": str(capture.get("content_hash") or receipt.get("content_hash") or ""),
+                "explicit_capture_receipt_id": str(receipt.get("receipt_id") or ""),
+                "memory_write_receipt_id": str(memory_write_receipt.get("receipt_id") or ""),
+                "style_contract_materialized_from_profile_write": True,
+            }
+        )
+        candidate = self._resolve_style_contract_candidate(
+            content=content,
+            source="memory_write:style_contract",
+            confidence=float(capture.get("confidence") or 0.95),
+            metadata=metadata,
+            require_explicit_signal=True,
+        )
+        if candidate is None:
+            receipt["style_contract_materialization"] = {
+                "status": "skipped",
+                "reason_code": "not_explicit_style_contract",
+            }
+            return
+        candidate_metadata = dict(candidate.get("metadata") or {})
+        candidate_metadata.update(metadata)
+        store.upsert_profile_item(
+            stable_key=STYLE_CONTRACT_SLOT,
+            category=str(candidate.get("category") or "style_contract"),
+            content=str(candidate.get("content") or ""),
+            source=str(candidate.get("source") or "memory_write:style_contract"),
+            confidence=float(candidate.get("confidence") or capture.get("confidence") or 0.95),
+            metadata=candidate_metadata,
+        )
+        canonical_row = store.get_profile_item(
+            stable_key=STYLE_CONTRACT_SLOT,
+            principal_scope_key=self._principal_scope_key,
+        )
+        canonical_metadata = canonical_row.get("metadata") if isinstance(canonical_row, Mapping) else {}
+        receipt["style_contract_materialization"] = {
+            "status": "materialized",
+            "stable_key": STYLE_CONTRACT_SLOT,
+            "source_lane": "profile_style_contract",
+            "rule_count": int((canonical_metadata or {}).get("style_contract_rule_count") or 0),
+            "source_profile_stable_key": str(capture.get("stable_key") or ""),
+            "memory_write_receipt_id": str(memory_write_receipt.get("receipt_id") or ""),
+        }
 
     def _handle_brainstack_consolidate(self, args: Mapping[str, Any]) -> Dict[str, Any]:
         if self._store is None:
@@ -656,6 +738,16 @@ class ProviderToolsMixin(ProviderRuntimeBase):
         )
 
     def query_inspect(self, *, query: str, session_id: str | None = None) -> Dict[str, Any]:
+        system_substrate = build_system_prompt_projection(
+            self._store,
+            profile_limit=0,
+            principal_scope_key=self._principal_scope_key,
+            session_id=session_id or self._session_id,
+            include_behavior_contract=self._system_prompt_behavior_contract_enabled,
+            delivery_reason=DELIVERY_REASON_EXPLICIT_MEMORY_INSPECTION,
+            prompt_rebuild_id=f"inspect:{self._session_id}" if self._session_id else None,
+            behavior_contract_char_budget=self._system_prompt_behavior_contract_char_budget,
+        ) if self._store is not None else {}
         return build_provider_query_inspect(
             store=self._store,
             query=query,
@@ -674,6 +766,7 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             corpus_char_budget=self._corpus_char_budget,
             operating_match_limit=self._operating_match_limit,
             render_ordinary_contract=self._ordinary_packet_behavior_contract_enabled,
+            system_substrate=system_substrate,
         )
 
     def _resolve_runtime_handoff_task(self, *, task_id: str) -> Dict[str, Any] | None:

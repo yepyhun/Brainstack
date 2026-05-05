@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..entity_resolver import ENTITY_RESOLUTION_SCHEMA
 from .runtime import (
     Any,
     BrainstackStore,
@@ -114,18 +115,37 @@ def build_route_context(
         "graph_limit": policy_limit(policy, "graph_limit"),
         "corpus_limit": policy_limit(policy, "corpus_limit"),
     }
-    native_explicit_style_rows = [
-        row
-        for row in store.list_profile_items(limit=24, principal_scope_key=principal_scope_key)
-        if is_native_explicit_style_item(row)
-    ]
     route = _resolve_route(query, route_resolver=effective_route_resolver(route_resolver, analysis))
+    limits = _route_limits(route=route, **base_limits)
+    native_explicit_style_rows = (
+        [
+            row
+            for row in store.list_profile_items(limit=24, principal_scope_key=principal_scope_key)
+            if is_native_explicit_style_item(row)
+        ]
+        if route.applied_mode == ROUTE_STYLE_CONTRACT or bool(policy.get("show_authoritative_contract"))
+        else []
+    )
     search_queries = [_normalize_text(query)]
-    entity_resolution = resolve_entity_candidates(
-        store,
-        query=query,
-        principal_scope_key=principal_scope_key,
-        limit=4,
+    semantic_evidence_enabled = bool(policy.get("semantic_evidence_enabled", True))
+    entity_resolution = (
+        resolve_entity_candidates(
+            store,
+            query=query,
+            principal_scope_key=principal_scope_key,
+            limit=4,
+        )
+        if semantic_evidence_enabled or limits["graph_limit"] > 0
+        else {
+            "schema": ENTITY_RESOLUTION_SCHEMA,
+            "status": "idle",
+            "mode": "shadow_read_only",
+            "authoritative_switch": False,
+            "query": str(query or ""),
+            "principal_scope_key": str(principal_scope_key or ""),
+            "candidates": [],
+            "no_merge_reasons": ["entity_resolution_not_required_by_route"],
+        }
     )
     resolver_query_variants = [
         _normalize_text(f"{candidate.get('canonical_name', '')} {query}")
@@ -140,8 +160,10 @@ def build_route_context(
     )
     return {
         "route": route,
-        "limits": _route_limits(route=route, **base_limits),
+        "limits": limits,
         "evidence_item_budget": policy_limit(policy, "evidence_item_budget"),
+        "semantic_evidence_enabled": semantic_evidence_enabled,
+        "semantic_evidence_reason": str(policy.get("semantic_evidence_reason") or "route_gated"),
         "search_queries": search_queries,
         "graph_search_queries": list(dict.fromkeys(search_queries + resolver_query_variants)),
         "continuity_queries": _build_cross_session_search_queries(query),

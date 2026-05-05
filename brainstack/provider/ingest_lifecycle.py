@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..active_preference_contract import DELIVERY_REASON_PROMPT_REBUILD_AFTER_COMPACTION
 from .provider_protocol import ProviderRuntimeBase
 from .runtime import (
     Any,
@@ -193,6 +194,14 @@ class IngestLifecycleMixin(ProviderRuntimeBase):
             source="on_pre_compress",
             max_items=self._compression_snapshot_limit,
             metadata=self._scoped_metadata(),
+        )
+        compaction_event_id = str(snapshot_window.get("window_digest") or "").strip()
+        self._next_behavior_card_delivery_reason = DELIVERY_REASON_PROMPT_REBUILD_AFTER_COMPACTION
+        self._next_behavior_card_prompt_rebuild_id = (
+            f"prompt_rebuild_after_compaction:{self._session_id}:{self._turn_counter}"
+        )
+        self._next_behavior_card_compaction_event_id = compaction_event_id or (
+            f"compaction:{self._session_id}:{self._turn_counter}"
         )
         if not summary:
             return ""

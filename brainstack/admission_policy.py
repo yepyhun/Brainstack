@@ -11,6 +11,7 @@ from .core.admission import (
     AdmissionDecisionType,
     AssertionSpeaker,
     ClaimProposal,
+    CURRENT_ASSIGNMENT_AUTHORITIES,
     SLOT_REGISTRY_VERSION,
     SlotSpec,
     SourceAuthority,
@@ -188,6 +189,38 @@ SLOT_REGISTRY: dict[str, SlotSpec] = {
         allowed_authorities=frozenset({SourceAuthority.TRUSTED_RUNTIME}),
         supporting_authorities=frozenset({SourceAuthority.RUNTIME_DIAGNOSTIC}),
         default_support_visibility=SupportVisibility.INSPECT_ONLY,
+    ),
+    "operating.live_system_state": SlotSpec(
+        slot_id="operating.live_system_state",
+        shelf="operating",
+        storage_key="operating:live_system_state",
+        exclusive_current=True,
+        allowed_authorities=TRUSTED_AUTHORITIES
+        | frozenset(
+            {
+                SourceAuthority.TRUSTED_RUNTIME,
+                SourceAuthority.OPERATOR_REPAIR,
+            }
+        ),
+    ),
+    "operating.current_commitment": SlotSpec(
+        slot_id="operating.current_commitment",
+        shelf="operating",
+        storage_key="operating:current_commitment",
+        exclusive_current=True,
+        allowed_authorities=CURRENT_ASSIGNMENT_AUTHORITIES,
+    ),
+    "operating.next_step": SlotSpec(
+        slot_id="operating.next_step",
+        shelf="operating",
+        storage_key="operating:next_step",
+        allowed_authorities=CURRENT_ASSIGNMENT_AUTHORITIES,
+    ),
+    "task.actionable": SlotSpec(
+        slot_id="task.actionable",
+        shelf="task",
+        storage_key="task:actionable",
+        allowed_authorities=CURRENT_ASSIGNMENT_AUTHORITIES,
     ),
 }
 
@@ -496,13 +529,17 @@ def _decision(
     supersede: bool = False,
     notes: str = "",
 ) -> AdmissionDecision:
+    storage_key = spec.storage_key if spec else proposal.storage_key
+    stable_key = storage_key
+    if spec and spec.shelf in {"operating", "task"} and _text(proposal.storage_key):
+        stable_key = _text(proposal.storage_key)
     return AdmissionDecision(
         decision=decision,
         reason_code=reason_code,
         proposal=proposal,
         target_slot=spec.slot_id if spec else proposal.target_slot,
-        storage_key=spec.storage_key if spec else proposal.storage_key,
-        stable_key=spec.storage_key if spec else proposal.storage_key,
+        storage_key=storage_key,
+        stable_key=stable_key,
         truth_eligible=truth_eligible,
         support_visibility=support_visibility,
         supersede=supersede,

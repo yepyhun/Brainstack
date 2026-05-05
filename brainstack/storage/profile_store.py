@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+
 from .durable_write_guard import guard_and_normalize_durable_truth_metadata
 from .store_protocol import StoreRuntimeBase
 from .store_runtime import (
@@ -17,7 +19,9 @@ from .store_runtime import (
     _locked,
     _merge_record_metadata,
     _principal_scope_key_from_metadata,
+    _is_principal_scoped_profile,
     _profile_storage_key,
+    _split_profile_storage_key,
     _scoped_row_priority,
     _should_preserve_existing_style_contract,
     apply_style_contract_rule_correction,
@@ -36,6 +40,7 @@ from .store_runtime import (
 
 
 PROFILE_STYLE_CONTRACT_PROFILE_LANE = "profile_style_contract"
+PROFILE_STYLE_CONTRACT_PROJECTION_CACHE_LIMIT = 64
 PROFILE_STYLE_CONTRACT_ALLOWED_SOURCE_PREFIXES = (
     "operator_explicit",
     "user_explicit",
@@ -73,6 +78,111 @@ def _profile_style_contract_has_user_authority(item: Dict[str, Any]) -> bool:
 
 
 class ProfileStoreMixin(StoreRuntimeBase):
+    def _profile_scope_index_values(
+        self,
+        *,
+        storage_key: str,
+        category: str,
+        metadata: Dict[str, Any] | None,
+    ) -> tuple[str, str]:
+        logical_key, embedded_scope_key = _split_profile_storage_key(storage_key)
+        scope_key = _principal_scope_key_from_metadata(metadata) or embedded_scope_key
+        if not _is_principal_scoped_profile(stable_key=logical_key, category=category) and not scope_key:
+            scope_key = ""
+        return logical_key, scope_key
+
+    def _backfill_profile_scope_index_columns(self) -> int:
+        rows = self.conn.execute(
+            """
+            SELECT id, stable_key, logical_stable_key, principal_scope_key, category, metadata_json
+            FROM profile_items
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            try:
+                metadata = json.loads(str(row["metadata_json"] or "{}"))
+            except (TypeError, ValueError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            logical_key, scope_key = self._profile_scope_index_values(
+                storage_key=str(row["stable_key"] or ""),
+                category=str(row["category"] or ""),
+                metadata=metadata,
+            )
+            metadata_changed = False
+            if scope_key and not str(metadata.get("principal_scope_key") or "").strip():
+                metadata = dict(metadata)
+                metadata["principal_scope_key"] = scope_key
+                metadata_changed = True
+            if (
+                str(row["logical_stable_key"] or "") == logical_key
+                and str(row["principal_scope_key"] or "") == scope_key
+                and not metadata_changed
+            ):
+                continue
+            self.conn.execute(
+                """
+                UPDATE profile_items
+                SET logical_stable_key = ?, principal_scope_key = ?, metadata_json = ?
+                WHERE id = ?
+                """,
+                (
+                    logical_key,
+                    scope_key,
+                    json.dumps(metadata, ensure_ascii=True, sort_keys=True),
+                    int(row["id"]),
+                ),
+            )
+            updated += 1
+        return updated
+
+    def _profile_lane_projection_cache_store(self) -> OrderedDict[tuple[Any, ...], Dict[str, Any]]:
+        cache = getattr(self, "_profile_lane_projection_cache", None)
+        if not isinstance(cache, OrderedDict):
+            cache = OrderedDict()
+            self._profile_lane_projection_cache = cache
+        return cache
+
+    def _profile_lane_projection_cache_key(self, item: Dict[str, Any]) -> tuple[Any, ...]:
+        raw_content = str(item.get("content") or "")
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        source_hash = hashlib.sha256(raw_content.encode("utf-8")).hexdigest() if raw_content else ""
+        rule_count = len(list_style_contract_rules(raw_text=raw_content, metadata=metadata))
+        return (
+            str(item.get("principal_scope_key") or "").strip(),
+            str(item.get("storage_key") or "").strip(),
+            source_hash,
+            int(item.get("revision_number") or 0),
+            str(item.get("updated_at") or "").strip(),
+            PROFILE_STYLE_CONTRACT_PROFILE_LANE,
+            rule_count,
+        )
+
+    def _profile_lane_projection_cache_trace(
+        self,
+        *,
+        status: str,
+        key: tuple[Any, ...],
+    ) -> Dict[str, Any]:
+        cache = self._profile_lane_projection_cache_store()
+        return {
+            "schema": "brainstack.profile_lane_projection_cache_trace.v1",
+            "status": status,
+            "cache_durable": False,
+            "cache_size": len(cache),
+            "cache_limit": PROFILE_STYLE_CONTRACT_PROJECTION_CACHE_LIMIT,
+            "principal_scope_key": str(key[0] or ""),
+            "source_storage_key": str(key[1] or ""),
+            "source_contract_hash": str(key[2] or ""),
+            "source_revision_number": int(key[3] or 0),
+            "source_updated_at": str(key[4] or ""),
+            "source_lane": str(key[5] or ""),
+            "source_rule_count": int(key[6] or 0),
+        }
+
     def _get_active_behavior_contract_row(
         self,
         *,
@@ -276,6 +386,11 @@ class ProfileStoreMixin(StoreRuntimeBase):
             category=category,
             principal_scope_key=principal_scope_key,
         )
+        logical_stable_key, indexed_principal_scope_key = self._profile_scope_index_values(
+            storage_key=storage_key,
+            category=category,
+            metadata=metadata,
+        )
         existing = self.conn.execute(
             "SELECT id, content, source, metadata_json FROM profile_items WHERE stable_key = ?",
             (storage_key,),
@@ -298,11 +413,13 @@ class ProfileStoreMixin(StoreRuntimeBase):
             self.conn.execute(
                 """
                 UPDATE profile_items
-                SET category = ?, content = ?, source = ?, confidence = ?, metadata_json = ?,
+                SET logical_stable_key = ?, principal_scope_key = ?, category = ?, content = ?, source = ?, confidence = ?, metadata_json = ?,
                     updated_at = ?, active = ?
                 WHERE id = ?
                 """,
                 (
+                    logical_stable_key,
+                    indexed_principal_scope_key,
                     category,
                     content,
                     source,
@@ -318,12 +435,14 @@ class ProfileStoreMixin(StoreRuntimeBase):
             cur = self.conn.execute(
                 """
                 INSERT INTO profile_items (
-                    stable_key, category, content, source, confidence,
+                    stable_key, logical_stable_key, principal_scope_key, category, content, source, confidence,
                     metadata_json, first_seen_at, updated_at, active
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     storage_key,
+                    logical_stable_key,
+                    indexed_principal_scope_key,
                     category,
                     content,
                     source,
@@ -389,6 +508,8 @@ class ProfileStoreMixin(StoreRuntimeBase):
             "committed_at": updated_at,
             "updated_at": updated_at,
             "active": True,
+            "receipt_id": str(metadata.get("receipt_id") or metadata.get("explicit_capture_receipt_id") or "").strip(),
+            "memory_write_receipt_id": str(metadata.get("memory_write_receipt_id") or "").strip(),
             "source_lane": PROFILE_STYLE_CONTRACT_PROFILE_LANE,
             "read_only_projection": True,
         }
@@ -397,6 +518,14 @@ class ProfileStoreMixin(StoreRuntimeBase):
         self,
         item: Dict[str, Any],
     ) -> Dict[str, Any] | None:
+        key = self._profile_lane_projection_cache_key(item)
+        cache = self._profile_lane_projection_cache_store()
+        if key in cache:
+            cached = dict(cache.pop(key))
+            cache[key] = cached
+            result = dict(cached)
+            result["profile_lane_projection_cache"] = self._profile_lane_projection_cache_trace(status="hit", key=key)
+            return result
         compiled = compile_behavior_policy(
             raw_content=str(item.get("content") or ""),
             metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else None,
@@ -406,7 +535,7 @@ class ProfileStoreMixin(StoreRuntimeBase):
         )
         if compiled is None:
             return None
-        return {
+        result = {
             "principal_scope_key": str(item.get("principal_scope_key") or "").strip(),
             "source_storage_key": str(compiled.get("source_storage_key") or "").strip(),
             "source_contract_hash": str(compiled.get("source_contract_hash") or "").strip(),
@@ -421,6 +550,11 @@ class ProfileStoreMixin(StoreRuntimeBase):
             "source_lane": PROFILE_STYLE_CONTRACT_PROFILE_LANE,
             "read_only_projection": True,
         }
+        cache[key] = dict(result)
+        while len(cache) > PROFILE_STYLE_CONTRACT_PROJECTION_CACHE_LIMIT:
+            cache.popitem(last=False)
+        result["profile_lane_projection_cache"] = self._profile_lane_projection_cache_trace(status="miss", key=key)
+        return result
 
     @_locked
     def get_compiled_behavior_policy(self, *, principal_scope_key: str = "") -> Dict[str, Any] | None:

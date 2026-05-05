@@ -202,11 +202,13 @@ def build_candidate_trace(
     suppressed_limit: int = 40,
 ) -> dict[str, Any]:
     selected: list[dict[str, Any]] = []
+    selected_keys: set[str] = set()
     for shelf, rows in selected_by_shelf.items():
         for row in rows:
             evidence_key = _text(row.get("evidence_key"))
             if not evidence_key:
                 continue
+            selected_keys.add(evidence_key)
             selected.append(
                 project_retrieval_candidate(
                     row,
@@ -223,6 +225,21 @@ def build_candidate_trace(
         shelf = _text(row.get("shelf"))
         evidence_key = _text(row.get("evidence_key"))
         if not shelf or not evidence_key:
+            continue
+        # Candidate trace is retrieval/fusion diagnostics, not final answer authority.
+        # Rows selected by fusion can still be absent from selected_evidence after render budget.
+        if _text(row.get("selection_status")) == "selected":
+            if evidence_key not in selected_keys:
+                selected_keys.add(evidence_key)
+                selected.append(
+                    project_retrieval_candidate(
+                        row,
+                        shelf=shelf,
+                        evidence_key=evidence_key,
+                        selection_status="selected",
+                        selection_reason=_text(row.get("selection_reason")) or "selected_by_fusion",
+                    )
+                )
             continue
         suppressed.append(
             project_retrieval_candidate(

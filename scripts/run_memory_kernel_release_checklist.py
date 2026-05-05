@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1595,8 +1596,18 @@ def _visible_untracked() -> list[str]:
     return [line for line in proc.stdout.splitlines() if line.strip()]
 
 
+def _private_live_untracked_files(visible_untracked: list[str]) -> list[str]:
+    private_tokens = {"live", "discord", "bestie"}
+    private_files: list[str] = []
+    for path in visible_untracked:
+        tokens = {token for token in re.split(r"[^a-z0-9]+", path.lower()) if token}
+        if tokens & private_tokens:
+            private_files.append(path)
+    return private_files
+
+
 def _git_hygiene_from_lists(porcelain: list[str], visible_untracked: list[str]) -> dict[str, Any]:
-    private_live = [path for path in visible_untracked if "live" in path.lower() or "discord" in path.lower()]
+    private_live = _private_live_untracked_files(visible_untracked)
     return {
         "git_dirty": bool(porcelain),
         "dirty_entry_count": len(porcelain),

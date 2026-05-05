@@ -12,6 +12,7 @@ BASELINE_FANOUT = {
     "no_memory_minimal": 8,
     "profile": 8,
     "current_truth": 8,
+    "operating_status": 8,
     "temporal_graph": 8,
     "aggregate": 10,
     "corpus": 8,
@@ -81,6 +82,14 @@ def _cases() -> list[dict[str, Any]]:
             "expected_route": "current_truth",
             "expected_reduced": True,
             "required_shelves": ["current_truth"],
+        },
+        {
+            "case_id": "operating_status_simple",
+            "query": "structured operating status request",
+            "query_understanding": {"required_evidence_classes": ["operating"]},
+            "expected_route": "operating_status",
+            "expected_reduced": True,
+            "required_shelves": ["operating"],
         },
         {
             "case_id": "temporal_graph_deep",
@@ -154,12 +163,21 @@ def build_report(*, baseline_path: str | None = None) -> dict[str, Any]:
         reduced = fanout < baseline_fanout
         activated = set(plan.get("activated_shelves") or [])
         required = set(case.get("required_shelves") or [])
+        semantic = plan.get("semantic_retrieval") if isinstance(plan.get("semantic_retrieval"), Mapping) else {}
+        semantic_enabled = bool(semantic.get("enabled"))
+        shelf_budget = plan.get("shelf_budget") if isinstance(plan.get("shelf_budget"), Mapping) else {}
+        if not shelf_budget.get("applied_before_packet_render_budget"):
+            failures.append(f"{case['case_id']}:shelf_budget_not_pre_retrieval")
         missing_required = sorted(required - activated)
         if case["expected_reduced"] and reduced:
             simple_reduced += 1
         if case["expected_reduced"] and not reduced:
             over_fanout_regressions += 1
             failures.append(f"{case['case_id']}:simple_route_not_reduced")
+        if case["expected_reduced"] and semantic_enabled:
+            failures.append(f"{case['case_id']}:semantic_not_hard_gated")
+        if not case["expected_reduced"] and not semantic_enabled:
+            failures.append(f"{case['case_id']}:semantic_unexpectedly_disabled")
         if missing_required:
             deep_loss_count += 1
             failures.append(f"{case['case_id']}:missing_required:{','.join(missing_required)}")
@@ -178,6 +196,16 @@ def build_report(*, baseline_path: str | None = None) -> dict[str, Any]:
                 "required_shelves": sorted(required),
                 "activated_shelves": sorted(activated),
                 "missing_required_shelves": missing_required,
+                "semantic_retrieval": {
+                    "enabled": semantic_enabled,
+                    "reason": str(semantic.get("reason") or ""),
+                    "backend_call_policy": str(semantic.get("backend_call_policy") or ""),
+                },
+                "shelf_budget": {
+                    "applied_before_packet_render_budget": bool(shelf_budget.get("applied_before_packet_render_budget")),
+                    "backend_call_budget_total": int(shelf_budget.get("backend_call_budget_total") or 0),
+                    "shelf_limits": dict(shelf_budget.get("shelf_limits") or {}),
+                },
                 "escalated_to_tank": plan["route_decision"]["escalated_to_tank"],
                 "escalation_reasons": list(plan["route_decision"]["escalation_reasons"]),
                 "public_safe": not public_issues,

@@ -24,6 +24,9 @@ class ProviderRuntimeBase:
     _last_tier2_schedule: Any
     _last_turn_monotonic: Any
     _last_write_receipt: Any
+    _next_behavior_card_compaction_event_id: Any
+    _next_behavior_card_delivery_reason: str
+    _next_behavior_card_prompt_rebuild_id: Any
     _pending_explicit_write_count: int
     _pending_tier2_turns: int
     _packet_budget_max_candidate_tokens: int

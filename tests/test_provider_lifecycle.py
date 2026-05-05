@@ -69,7 +69,7 @@ def test_brainstack_stats_includes_lifecycle_snapshot(tmp_path: Path) -> None:
         lifecycle = payload["lifecycle"]
         assert lifecycle["schema"] == "brainstack.provider_lifecycle.v1"
         assert lifecycle["status"] == "active"
-        assert payload["report"]["schema"] == "brainstack.memory_kernel_doctor.v1"
+        assert payload["doctor"]["schema"] == "brainstack.memory_kernel_doctor.v1"
         assert "brainstack_recall" in {tool["name"] for tool in lifecycle["exported_tools"]}
     finally:
         provider.shutdown()

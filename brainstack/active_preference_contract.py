@@ -73,7 +73,10 @@ def _receipt_ids(raw_contract: Mapping[str, Any], compiled_policy: Mapping[str, 
 
     storage_key = _text(raw_contract.get("storage_key") or compiled_policy.get("source_storage_key"))
     revision = int(raw_contract.get("revision_number") or compiled_policy.get("source_revision_number") or 0)
-    if storage_key:
+    read_only_profile_lane = bool(raw_contract.get("read_only_projection") or compiled_policy.get("read_only_projection")) or (
+        _text(raw_contract.get("source_lane") or compiled_policy.get("source_lane")) == "profile_style_contract"
+    )
+    if storage_key and not read_only_profile_lane:
         ids.append(f"behavior_contract_commit:{storage_key}:r{max(revision, 1)}")
 
     deduped: List[str] = []
@@ -84,6 +87,21 @@ def _receipt_ids(raw_contract: Mapping[str, Any], compiled_policy: Mapping[str, 
         seen.add(receipt_id)
         deduped.append(receipt_id)
     return deduped
+
+
+def _source_ref(raw_contract: Mapping[str, Any], compiled_policy: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "storage_key": _text(raw_contract.get("storage_key") or compiled_policy.get("source_storage_key")),
+        "stable_key": _text(raw_contract.get("stable_key")),
+        "revision_number": int(raw_contract.get("revision_number") or compiled_policy.get("source_revision_number") or 0),
+        "content_hash": _text(raw_contract.get("content_hash") or compiled_policy.get("source_contract_hash")),
+        "source_lane": _text(raw_contract.get("source_lane") or compiled_policy.get("source_lane")),
+        "read_only_projection": bool(
+            raw_contract.get("read_only_projection", compiled_policy.get("read_only_projection", False))
+        ),
+        "source_profile_stable_key": _text(raw_contract.get("source_profile_stable_key")),
+        "source_rule_count": int(raw_contract.get("rule_count") or compiled_policy.get("raw_rule_count") or 0),
+    }
 
 
 def _compiled_rules(compiled_policy: Mapping[str, Any], included_rule_ids: set[str]) -> List[Dict[str, Any]]:
@@ -226,12 +244,7 @@ def build_active_preference_contract(
             )
             omitted_count = max(0, total_rules - len(included_ids))
             status = CONTRACT_STATUS_DEGRADED if truncated or omitted_count else CONTRACT_STATUS_ACTIVE
-            source_ref = {
-                "storage_key": _text(raw_contract.get("storage_key") or compiled_policy.get("source_storage_key")),
-                "stable_key": _text(raw_contract.get("stable_key")),
-                "revision_number": int(raw_contract.get("revision_number") or compiled_policy.get("source_revision_number") or 0),
-                "content_hash": _text(raw_contract.get("content_hash") or compiled_policy.get("source_contract_hash")),
-            }
+            source_ref = _source_ref(raw_contract, compiled_policy)
             return {
                 "schema": ACTIVE_PREFERENCE_CONTRACT_SCHEMA,
                 "principal_scope_key": _text(principal_scope_key or snapshot.get("principal_scope_key")),
@@ -290,12 +303,7 @@ def build_active_preference_contract(
     rules = _compiled_rules(compiled_policy, included_ids)
     omitted_count = int(pinned_view.get("omitted_rule_count") or 0)
     status = CONTRACT_STATUS_DEGRADED if bool(pinned_view.get("truncated")) or omitted_count > 0 else CONTRACT_STATUS_ACTIVE
-    source_ref = {
-        "storage_key": _text(raw_contract.get("storage_key") or compiled_policy.get("source_storage_key")),
-        "stable_key": _text(raw_contract.get("stable_key")),
-        "revision_number": int(raw_contract.get("revision_number") or compiled_policy.get("source_revision_number") or 0),
-        "content_hash": _text(raw_contract.get("content_hash") or compiled_policy.get("source_contract_hash")),
-    }
+    source_ref = _source_ref(raw_contract, compiled_policy)
     return {
         "schema": ACTIVE_PREFERENCE_CONTRACT_SCHEMA,
         "principal_scope_key": _text(principal_scope_key or snapshot.get("principal_scope_key")),
@@ -349,22 +357,41 @@ def build_active_preference_delivery_trace(
     delivery_reason: str,
     prompt_rebuild_id: str | None = None,
     compaction_event_id: str | None = None,
+    generic_profile_fallback_status: str = "",
 ) -> Dict[str, Any]:
     payload = contract if isinstance(contract, Mapping) else {}
     status = str(payload.get("contract_status") or CONTRACT_STATUS_EMPTY).strip() or CONTRACT_STATUS_EMPTY
     reason = delivery_reason if delivery_reason in DELIVERY_REASON_CODES else DELIVERY_REASON_SESSION_SUBSTRATE_REBUILT
     available = status in {CONTRACT_STATUS_ACTIVE, CONTRACT_STATUS_DEGRADED}
+    source_refs = [dict(ref) for ref in list(payload.get("source_preference_refs") or []) if isinstance(ref, Mapping)]
+    first_source = source_refs[0] if source_refs else {}
+    compiled_rule_count = len(list(payload.get("compiled_rules") or []))
+    source_rule_count = int(first_source.get("source_rule_count") or compiled_rule_count or 0)
+    delivered_full = bool(delivered and available and compiled_rule_count > 0 and compiled_rule_count >= source_rule_count)
     return {
         "schema": ACTIVE_PREFERENCE_DELIVERY_TRACE_SCHEMA,
         "active_preference_contract_available": available,
         "active_preference_contract_delivered": bool(delivered and available),
+        "active_preference_contract_delivered_full": delivered_full,
         "delivery_reason": reason,
+        "delivery_status": "delivered_full"
+        if delivered_full
+        else "delivered_partial"
+        if bool(delivered and available)
+        else "not_delivered",
         "prompt_rebuild_id": prompt_rebuild_id,
         "compaction_event_id": compaction_event_id,
         "contract_version": str(payload.get("contract_version") or ""),
         "contract_status": status,
         "source_receipt_count": len(list(payload.get("source_receipt_ids") or [])),
-        "compiled_rule_count": len(list(payload.get("compiled_rules") or [])),
+        "compiled_rule_count": compiled_rule_count,
+        "source_rule_count": source_rule_count,
+        "source_storage_key": _text(first_source.get("storage_key")),
+        "source_stable_key": _text(first_source.get("stable_key")),
+        "source_lane": _text(first_source.get("source_lane")),
+        "read_only_projection": bool(first_source.get("read_only_projection")),
+        "source_profile_stable_key": _text(first_source.get("source_profile_stable_key")),
+        "generic_profile_fallback_status": _text(generic_profile_fallback_status),
         "omitted_or_compacted_rule_count": len(list(payload.get("omitted_or_compacted_rules") or [])),
         "raw_private_text_in_trace": False,
         "drop_or_skip_reason_code": None
@@ -394,5 +421,39 @@ def build_active_preference_inspect_payload(contract: Mapping[str, Any] | None) 
         "overflow_or_compacted": status == CONTRACT_STATUS_DEGRADED,
         "omitted_or_compacted_rules": list(payload.get("omitted_or_compacted_rules") or []),
         "source_preference_refs": list(payload.get("source_preference_refs") or []),
+        "trace_safe": True,
+    }
+
+
+def build_active_preference_delivery_inspect_payload(
+    contract: Mapping[str, Any] | None,
+    delivery_trace: Mapping[str, Any] | None,
+) -> Dict[str, Any]:
+    payload = contract if isinstance(contract, Mapping) else {}
+    trace = delivery_trace if isinstance(delivery_trace, Mapping) else {}
+    source_refs = [dict(ref) for ref in list(payload.get("source_preference_refs") or []) if isinstance(ref, Mapping)]
+    first_source = source_refs[0] if source_refs else {}
+    status = str(payload.get("contract_status") or trace.get("contract_status") or CONTRACT_STATUS_EMPTY).strip() or CONTRACT_STATUS_EMPTY
+    return {
+        "schema": "brainstack.active_preference_delivery_inspect.v1",
+        "contract_status": status,
+        "delivery_reason": str(trace.get("delivery_reason") or ""),
+        "delivery_status": str(trace.get("delivery_status") or "not_delivered"),
+        "delivered": bool(trace.get("active_preference_contract_delivered")),
+        "delivered_full": bool(trace.get("active_preference_contract_delivered_full")),
+        "active_rule_count": int(trace.get("compiled_rule_count") or len(list(payload.get("compiled_rules") or []))),
+        "source_rule_count": int(trace.get("source_rule_count") or first_source.get("source_rule_count") or 0),
+        "source_storage_key": str(trace.get("source_storage_key") or first_source.get("storage_key") or ""),
+        "source_stable_key": str(trace.get("source_stable_key") or first_source.get("stable_key") or ""),
+        "source_lane": str(trace.get("source_lane") or first_source.get("source_lane") or ""),
+        "read_only_projection": bool(trace.get("read_only_projection", first_source.get("read_only_projection", False))),
+        "source_profile_stable_key": str(
+            trace.get("source_profile_stable_key") or first_source.get("source_profile_stable_key") or ""
+        ),
+        "source_receipt_count": int(trace.get("source_receipt_count") or 0),
+        "prompt_rebuild_id_present": bool(trace.get("prompt_rebuild_id")),
+        "compaction_event_id_present": bool(trace.get("compaction_event_id")),
+        "generic_profile_fallback_status": str(trace.get("generic_profile_fallback_status") or ""),
+        "raw_private_text_in_trace": bool(trace.get("raw_private_text_in_trace")),
         "trace_safe": True,
     }

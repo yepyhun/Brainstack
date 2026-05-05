@@ -59,6 +59,8 @@ def test_tier2_lifecycle_reports_current_llm_route_without_terminal(tmp_path: Pa
     assert route["effective_model"] == "gpt-5.5"
     assert route["uses_legacy_gpt_5_2_codex"] is False
     assert "gpt-5.5" in route["model_answer"]
+    assert route["background_task_status"]["schema"] == "brainstack.background_task_status.v1"
+    assert route["background_task_status"]["tier2_write_allowed"] is False
 
 
 def test_tier2_session_end_flush_defaults_enabled(tmp_path: Path) -> None:

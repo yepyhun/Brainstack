@@ -73,6 +73,9 @@ class BrainstackMemoryProvider(
         self._system_prompt_behavior_contract_enabled = bool(
             self._config.get("system_prompt_behavior_contract_enabled", self._active_preference_contract_enabled)
         )
+        self._system_prompt_behavior_contract_char_budget = int(
+            self._config.get("system_prompt_behavior_contract_char_budget", 2400)
+        )
         self._ordinary_packet_behavior_contract_enabled = bool(
             self._config.get("ordinary_packet_behavior_contract_enabled", False)
         )

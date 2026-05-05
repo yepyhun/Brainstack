@@ -8,7 +8,7 @@ budget placement, or assemble model-facing packets.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from .core.admission import SupportVisibility
 from .core.reason_codes import ReasonCode
@@ -39,6 +39,56 @@ def _flag(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().casefold() in {"1", "true", "yes", "on", "hidden"}
     return bool(value)
+
+
+def _list(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, list) else []
+
+
+def _event_id(event: Mapping[str, Any]) -> str:
+    return _text(_mapping(event.get("event")).get("event_id"))
+
+
+def _event_sort_key(event: Mapping[str, Any]) -> tuple[str, str]:
+    event_group = _mapping(event.get("event"))
+    temporal = _mapping(event.get("temporal"))
+    return (_text(temporal.get("transaction_time")), _text(event_group.get("event_id")))
+
+
+def apply_read_model_supersession(events: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """Annotate read-model events superseded by newer canonical events.
+
+    This is projection-only. It does not write storage and does not decide truth.
+    It only preserves the donor temporal invariant when a newer canonical event
+    already names older event ids in `temporal.supersedes`.
+    """
+
+    event_list = list(events)
+    superseded_by_by_event_id: dict[str, str] = {}
+    for event in sorted(event_list, key=_event_sort_key):
+        event_id = _event_id(event)
+        if not event_id:
+            continue
+        for prior_event_id in _list(_mapping(event.get("temporal")).get("supersedes")):
+            prior_id = _text(prior_event_id)
+            if prior_id:
+                superseded_by_by_event_id[prior_id] = event_id
+
+    projected_events: list[Mapping[str, Any]] = []
+    for event in event_list:
+        superseded_by = superseded_by_by_event_id.get(_event_id(event), "")
+        if not superseded_by:
+            projected_events.append(event)
+            continue
+        temporal = dict(_mapping(event.get("temporal")))
+        if _text(temporal.get("superseded_by")):
+            projected_events.append(event)
+            continue
+        projected = dict(event)
+        temporal["superseded_by"] = superseded_by
+        projected["temporal"] = temporal
+        projected_events.append(projected)
+    return projected_events
 
 
 @dataclass(frozen=True)

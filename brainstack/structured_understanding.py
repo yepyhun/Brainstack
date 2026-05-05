@@ -9,6 +9,11 @@ from functools import lru_cache
 from typing import Any, Dict, List, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .background_task_binding import (
+    CAPTURE_UNDERSTANDING_HERMES_TASK_SLOT,
+    QUERY_UNDERSTANDING_HERMES_TASK_SLOT,
+    require_explicit_hermes_auxiliary_route,
+)
 from .tier2_extractor import _extract_json_object, _extract_text_content
 
 
@@ -82,6 +87,7 @@ _AVAILABILITY_STATE: Dict[str, Dict[str, Any]] = {
 
 
 def _structured_llm_caller(*, task: str, messages: list, timeout: float, max_tokens: int) -> Any:
+    require_explicit_hermes_auxiliary_route(task)
     from agent.auxiliary_client import call_llm  # type: ignore[import-not-found,import-untyped]
 
     return call_llm(
@@ -433,7 +439,7 @@ def _infer_lookup_payload_success_cached(query: str, timezone_name: str, referen
         {"role": "user", "content": normalized_query},
     ]
     response = _structured_llm_caller(
-        task="brainstack_query_understanding",
+        task=QUERY_UNDERSTANDING_HERMES_TASK_SLOT,
         messages=messages,
         timeout=4.5,
         max_tokens=260,
@@ -476,7 +482,7 @@ def _infer_capture_payload_success_cached(content: str, timezone_name: str, refe
         {"role": "user", "content": str(content or "")},
     ]
     response = _structured_llm_caller(
-        task="brainstack_capture_understanding",
+        task=CAPTURE_UNDERSTANDING_HERMES_TASK_SLOT,
         messages=messages,
         timeout=5.5,
         max_tokens=360,

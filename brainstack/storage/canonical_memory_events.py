@@ -19,7 +19,7 @@ class CanonicalMemoryEventStoreMixin:
         authority = event["authority"]
         now = utc_now_iso()
         payload = json.dumps(event, ensure_ascii=True, sort_keys=True)
-        self.conn.execute(
+        cur = self.conn.execute(
             """
             INSERT OR IGNORE INTO canonical_memory_events (
                 event_id, idempotency_key, schema_version, event_type,
@@ -48,12 +48,15 @@ class CanonicalMemoryEventStoreMixin:
                 now,
             ),
         )
+        inserted = cur.rowcount > 0
         row = self.conn.execute(
             "SELECT id FROM canonical_memory_events WHERE idempotency_key = ?",
             (str(event_group.get("idempotency_key") or ""),),
         ).fetchone()
-        self.conn.commit()
         if row is not None:
+            if inserted and hasattr(self, "_upsert_current_truth_l0_from_event"):
+                self._upsert_current_truth_l0_from_event(event, projected_at=now)
+            self.conn.commit()
             return int(row["id"])
         cur = self.conn.execute(
             """
@@ -71,6 +74,8 @@ class CanonicalMemoryEventStoreMixin:
                 now,
             ),
         )
+        if hasattr(self, "_upsert_current_truth_l0_from_event"):
+            self._upsert_current_truth_l0_from_event(event, projected_at=now)
         self.conn.commit()
         return _cursor_lastrowid(cur)
 

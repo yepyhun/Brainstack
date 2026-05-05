@@ -497,6 +497,26 @@ def test_git_hygiene_blocks_visible_private_live_files() -> None:
     assert summary["private_live_untracked_visible"] is True
 
 
+def test_git_hygiene_does_not_treat_delivery_as_live_file() -> None:
+    summary = _git_hygiene_from_lists(
+        ["?? scripts/verify_behavior_card_delivery.py"],
+        ["scripts/verify_behavior_card_delivery.py"],
+    )
+
+    assert summary["untracked_private_files_count"] == 0
+    assert summary["private_live_untracked_visible"] is False
+
+
+def test_git_hygiene_blocks_bestie_runtime_files() -> None:
+    summary = _git_hygiene_from_lists(
+        ["?? docker-compose.bestie.yml"],
+        ["docker-compose.bestie.yml"],
+    )
+
+    assert summary["untracked_private_files_count"] == 1
+    assert summary["private_live_untracked_visible"] is True
+
+
 def test_release_report_allows_dev_dirty_without_release_allowed() -> None:
     checks = [
         CheckResult("release_claim_contract", "pass", ["ok"], 0, {}),

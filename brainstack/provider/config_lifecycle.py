@@ -13,6 +13,7 @@ from .runtime import (
     logger,
     resolve_user_timezone,
 )
+from ..active_preference_contract import DELIVERY_REASON_SESSION_START
 
 class ConfigLifecycleMixin(ProviderRuntimeBase):
     @property
@@ -122,6 +123,9 @@ class ConfigLifecycleMixin(ProviderRuntimeBase):
         self._principal_scope_key = ""
         self._recent_user_messages = []
         self._hermes_home = ""
+        self._next_behavior_card_delivery_reason = ""
+        self._next_behavior_card_prompt_rebuild_id = None
+        self._next_behavior_card_compaction_event_id = None
 
     def initialize(self, session_id: str, **kwargs) -> None:
         hermes_home = str(kwargs.get("hermes_home") or "")
@@ -141,6 +145,8 @@ class ConfigLifecycleMixin(ProviderRuntimeBase):
             self._store = None
         self._reset_session_runtime_state()
         self._session_id = session_id
+        self._next_behavior_card_delivery_reason = DELIVERY_REASON_SESSION_START
+        self._next_behavior_card_prompt_rebuild_id = f"session_start:{session_id}" if session_id else None
         self._hermes_home = hermes_home
         self._principal_scope = _build_principal_scope(**kwargs)
         self._principal_scope_key = str(self._principal_scope.get("principal_scope_key") or "").strip()
