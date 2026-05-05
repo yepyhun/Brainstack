@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any, Mapping
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from brainstack.adaptive_route_plan import build_adaptive_route_plan, route_plan_limit_overrides, validate_route_plan_public_safety
 
