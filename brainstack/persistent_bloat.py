@@ -305,11 +305,32 @@ def build_persistent_bloat_report(
             compiled_behavior,
         ]
     )
+    active_storage_rows = sum(
+        [
+            profile_active,
+            canonical_answer,
+            receipt_count,
+            corpus_documents,
+            corpus_sections,
+            semantic_rows,
+            graph_current_states,
+            graph_relations,
+            graph_inferred_relations,
+            proactive_pending,
+            operating_records,
+            task_items,
+            behavior_contracts,
+            compiled_behavior,
+        ]
+    )
     answer_denominator = max(canonical_answer + profile_active + graph_current_states, 1)
-    write_amplification_ratio = _ratio(storage_rows, answer_denominator)
+    write_amplification_ratio = _ratio(active_storage_rows, answer_denominator)
+    historical_write_amplification_ratio = _ratio(storage_rows, answer_denominator)
     duplicate_strength_total = profile_duplicate_groups + canonical_duplicate_truth_groups
-    support_pressure = canonical_support + transcript_count + continuity_count + support_card_count
-    support_only_ratio = _ratio(support_pressure, max(canonical_answer, 1))
+    historical_support_rows = transcript_count + continuity_count
+    active_support_pressure = canonical_support + continuity_frontier_count + support_card_count
+    support_only_ratio = _ratio(active_support_pressure, answer_denominator)
+    historical_support_ratio = _ratio(historical_support_rows, answer_denominator)
     stale_prior_total = profile_inactive + graph_prior_states + graph_open_conflicts + canonical_archived_or_prior + proactive_suppressed
     stale_prior_ratio = _ratio(stale_prior_total, answer_denominator)
     derived_async = dict(derived_async_state or {})
@@ -323,8 +344,11 @@ def build_persistent_bloat_report(
     metrics = {
         "write_amplification": {
             "storage_rows": storage_rows,
+            "active_storage_rows": active_storage_rows,
             "answer_authority_rows": answer_denominator,
             "ratio": write_amplification_ratio,
+            "historical_ratio": historical_write_amplification_ratio,
+            "status_basis": "active_storage_rows",
         },
         "duplicate_strength_inflation": {
             "profile_duplicate_groups": profile_duplicate_groups,
@@ -336,8 +360,13 @@ def build_persistent_bloat_report(
             "canonical_support_events": canonical_support,
             "transcript_rows": transcript_count,
             "continuity_rows": continuity_count,
+            "historical_support_rows": historical_support_rows,
+            "active_support_pressure": active_support_pressure,
+            "answer_authority_rows": answer_denominator,
             "support_projection_cards": support_card_count,
             "ratio_to_answer_events": support_only_ratio,
+            "historical_ratio_to_answer_authority": historical_support_ratio,
+            "status_basis": "active_support_pressure",
         },
         "active_packet_growth": {
             "baseline_tokens": baseline_tokens,

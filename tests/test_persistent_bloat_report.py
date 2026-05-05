@@ -265,7 +265,10 @@ def test_noisy_store_report_is_public_safe_and_exposes_bloat_pressure(tmp_path: 
     store = _store(tmp_path)
     try:
         _seed_noisy_store(store)
-        report = build_persistent_bloat_report(store, thresholds={"support_only_ratio_warn": 1, "duplicate_strength_warn": 1})
+        report = build_persistent_bloat_report(
+            store,
+            thresholds={"support_only_ratio_warn": 0.1, "duplicate_strength_warn": 1},
+        )
     finally:
         store.close()
 
@@ -274,8 +277,13 @@ def test_noisy_store_report_is_public_safe_and_exposes_bloat_pressure(tmp_path: 
     assert report["public_safe"] is True
     assert report["metrics"]["duplicate_strength_inflation"]["profile_duplicate_groups"] >= 1
     assert report["metrics"]["duplicate_strength_inflation"]["canonical_duplicate_truth_groups"] >= 1
+    assert report["metrics"]["write_amplification"]["active_storage_rows"] <= report["metrics"]["write_amplification"]["storage_rows"]
+    assert report["metrics"]["write_amplification"]["status_basis"] == "active_storage_rows"
     assert report["metrics"]["support_only_accumulation"]["transcript_rows"] == 5
     assert report["metrics"]["support_only_accumulation"]["continuity_rows"] == 5
+    assert report["metrics"]["support_only_accumulation"]["historical_support_rows"] == 10
+    assert report["metrics"]["support_only_accumulation"]["active_support_pressure"] == 3
+    assert report["metrics"]["support_only_accumulation"]["status_basis"] == "active_support_pressure"
     assert report["metrics"]["stale_prior_retention"]["open_graph_conflicts"] == 1
     assert report["metrics"]["projection_rebuild_size"]["canonical_event_count"] == 4
     assert "DUPLICATE_STRENGTH_INFLATION_WARN" in report["issues"]
@@ -286,6 +294,37 @@ def test_noisy_store_report_is_public_safe_and_exposes_bloat_pressure(tmp_path: 
     truth_policy = next(item for item in report["policy_preview"] if item["lane"] == "durable_truth")
     assert truth_policy["action"] == "keep"
     assert truth_policy["apply_supported"] is False
+
+
+def test_historical_support_retention_does_not_fail_when_not_active_prompt_pressure(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        store.upsert_profile_item(
+            stable_key="identity:name",
+            category="identity",
+            content="User name source-backed profile truth.",
+            source="test",
+            confidence=0.9,
+            metadata={},
+        )
+        for index in range(40):
+            store.conn.execute(
+                "INSERT INTO transcript_entries (session_id, turn_number, kind, content, source, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("session", index, "user", f"{PRIVATE_TEXT} transcript {index}", "test", "{}", "2026-01-01T00:00:00Z"),
+            )
+            store.conn.execute(
+                "INSERT INTO continuity_events (session_id, turn_number, kind, content, source, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("session", index, "summary", f"{PRIVATE_TEXT} continuity {index}", "test", "{}", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+            )
+        store.conn.commit()
+        report = build_persistent_bloat_report(store)
+    finally:
+        store.close()
+
+    assert report["metrics"]["support_only_accumulation"]["historical_support_rows"] == 80
+    assert report["metrics"]["support_only_accumulation"]["active_support_pressure"] == 0
+    assert report["metric_statuses"]["support_only_accumulation"]["status"] == "pass"
+    assert "SUPPORT_ONLY_ACCUMULATION_FAIL" not in report["issues"]
 
 
 def test_report_is_deterministic_for_same_store(tmp_path: Path) -> None:

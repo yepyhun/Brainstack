@@ -4,12 +4,17 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
-from brainstack.db import BrainstackStore
-from brainstack.persistent_bloat import build_persistent_bloat_report
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from brainstack.db import BrainstackStore  # noqa: E402
+from brainstack.persistent_bloat import build_persistent_bloat_report  # noqa: E402
 
 PRIVATE_SOAK_SENTINEL = "PRIVATE_PERSISTENT_BLOAT_SOAK_TEXT_MUST_NOT_LEAK"
 DEFAULT_SOAK_ITERATIONS = 24
