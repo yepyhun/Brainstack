@@ -18,9 +18,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from brainstack.benchmark_transparency import REQUIRED_BENCHMARK_VARIANTS
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from brainstack.benchmark_transparency import REQUIRED_BENCHMARK_VARIANTS  # noqa: E402
+
 DEFAULT_RELEASE_CLAIM_CONTRACT = ROOT / ".planning" / "release" / "RELEASE-CLAIM-CONTRACT.json"
 DEFAULT_RELEASE_NOTES = ROOT / ".planning" / "release" / "RELEASE-NOTES.md"
 UNBREAKABLE_TARGET = (
