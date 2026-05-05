@@ -3,21 +3,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from brainstack.admission_policy import admit_claim
-from brainstack.core.admission import AssertionSpeaker, ClaimProposal, SourceAuthority, SpanKind
-from brainstack.db import BrainstackStore
-from brainstack.operating_truth import (
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from brainstack.admission_policy import admit_claim  # noqa: E402
+from brainstack.core.admission import AssertionSpeaker, ClaimProposal, SourceAuthority, SpanKind  # noqa: E402
+from brainstack.db import BrainstackStore  # noqa: E402
+from brainstack.operating_truth import (  # noqa: E402
     CURRENT_ASSIGNMENT_AUTHORITY_SCHEMA,
     OPERATING_OWNER,
     OPERATING_RECORD_CURRENT_COMMITMENT,
     OPERATING_RECORD_LIVE_SYSTEM_STATE,
 )
-from brainstack.storage.projection_writer import ProjectionWriter
-from brainstack.task_memory import ITEM_TYPE_TASK, STATUS_OPEN
+from brainstack.storage.projection_writer import ProjectionWriter  # noqa: E402
+from brainstack.task_memory import ITEM_TYPE_TASK, STATUS_OPEN  # noqa: E402
 
 REPORT_SCHEMA = "brainstack.canonical_truth_admission_coverage.v1"
 PRINCIPAL_SCOPE_KEY = "principal:phase267"

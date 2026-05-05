@@ -6,14 +6,17 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 from pathlib import Path
 
-from brainstack.benchmark_transparency import (
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from brainstack.benchmark_transparency import (  # noqa: E402
     build_deterministic_benchmark_report,
     validate_benchmark_report,
 )
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def _head_commit() -> str:

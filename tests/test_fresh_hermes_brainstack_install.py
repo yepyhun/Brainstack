@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from scripts import hermes_gateway_patch_support
 from scripts.verify_fresh_hermes_brainstack_install import evaluate_installed_target
 
 
@@ -60,6 +61,10 @@ services:
         encoding="utf-8",
     )
     (target / "Dockerfile").write_text("RUN pip install kuzu chromadb openai croniter\n", encoding="utf-8")
+    for relative, markers in hermes_gateway_patch_support.REQUIRED_GATEWAY_PROBES.items():
+        probe_file = target / relative
+        probe_file.parent.mkdir(parents=True, exist_ok=True)
+        probe_file.write_text("\n".join(markers), encoding="utf-8")
 
     report = evaluate_installed_target(target)
 
@@ -68,6 +73,7 @@ services:
     assert report["missing_plugin_files"] == []
     assert report["compose"]["status"] == "pass"
     assert report["dockerfile"]["status"] == "pass"
+    assert report["gateway_patch_status"] == "pass"
 
 
 def test_evaluate_installed_target_fails_when_adaptive_payload_missing(tmp_path: Path) -> None:
@@ -84,4 +90,5 @@ def test_evaluate_installed_target_fails_when_adaptive_payload_missing(tmp_path:
 
     assert report["status"] == "fail"
     assert report["payload_status"] == "fail"
+    assert report["gateway_patch_status"] == "fail"
     assert "plugins/memory/brainstack/adaptive_route_plan.py" in report["missing_plugin_files"]

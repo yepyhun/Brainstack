@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,8 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from scripts.hermes_gateway_patch_support import inspect_gateway_patch_support
 
 SCHEMA = "brainstack.fresh_hermes_brainstack_install_proof.v1"
 
@@ -32,7 +35,13 @@ REQUIRED_PLUGIN_FILES = {
 REQUIRED_DOCKERFILE_DEPENDENCIES = {"kuzu", "chromadb", "openai", "croniter"}
 
 
-def _run(command: list[str], *, cwd: Path | None = None, timeout: int = 300) -> dict[str, Any]:
+def _run(
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout: int = 300,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
     proc = subprocess.run(
         command,
         cwd=str(cwd) if cwd else None,
@@ -40,6 +49,7 @@ def _run(command: list[str], *, cwd: Path | None = None, timeout: int = 300) -> 
         capture_output=True,
         check=False,
         timeout=timeout,
+        env=env,
     )
     return {
         "command": [Path(command[0]).name, *command[1:]],
@@ -130,11 +140,19 @@ def evaluate_installed_target(target: Path) -> dict[str, Any]:
     missing_plugin_files = sorted(REQUIRED_PLUGIN_FILES - installed_files)
     compose = _compose_checks(target)
     dockerfile = _dockerfile_checks(target)
+    gateway_patch = inspect_gateway_patch_support(target)
     manifest_status = "pass" if manifest.get("status") == "present" and manifest.get("secrets_included") is False else "fail"
     payload_status = "pass" if not missing_plugin_files else "fail"
+    gateway_patch_status = "pass" if gateway_patch.get("status") == "upstream_gateway_supported" else "fail"
     status = "pass" if all(
         item == "pass"
-        for item in (manifest_status, payload_status, compose.get("status"), dockerfile.get("status"))
+        for item in (
+            manifest_status,
+            payload_status,
+            compose.get("status"),
+            dockerfile.get("status"),
+            gateway_patch_status,
+        )
     ) else "fail"
     return {
         "schema": "brainstack.fresh_hermes_brainstack_install_evaluation.v1",
@@ -153,6 +171,11 @@ def evaluate_installed_target(target: Path) -> dict[str, Any]:
         "missing_plugin_files": missing_plugin_files,
         "compose": compose,
         "dockerfile": dockerfile,
+        "gateway_patch_status": gateway_patch_status,
+        "gateway_patch": {
+            "status": gateway_patch.get("status"),
+            "missing_files": gateway_patch.get("missing_files"),
+        },
     }
 
 
@@ -200,7 +223,12 @@ def build_report(
                 str(config),
                 "--skip-deps",
             ]
-            install = _run(install_command, timeout=300)
+            install_env = dict(os.environ)
+            existing_pythonpath = install_env.get("PYTHONPATH")
+            install_env["PYTHONPATH"] = (
+                str(ROOT) if not existing_pythonpath else f"{ROOT}{os.pathsep}{existing_pythonpath}"
+            )
+            install = _run(install_command, timeout=300, env=install_env)
             evaluation = evaluate_installed_target(target)
             if docker_build and evaluation.get("status") == "pass":
                 runtime = _build_runtime_proof(target, timeout=docker_build_timeout)

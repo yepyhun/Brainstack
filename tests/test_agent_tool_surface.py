@@ -48,6 +48,7 @@ def test_agent_tool_surface_exposes_read_tools_and_schema_gated_capture_tools(tm
             "brainstack_inspect",
             "brainstack_stats",
             "brainstack_latency_status",
+            "brainstack_candidate_review",
             "brainstack_proactive_status",
             "brainstack_proactive_list",
             "brainstack_proactive_inspect",
@@ -65,6 +66,8 @@ def test_agent_tool_surface_exposes_read_tools_and_schema_gated_capture_tools(tm
         for schema in schemas:
             if schema["name"] in {"brainstack_recall", "brainstack_inspect", "brainstack_stats", "brainstack_latency_status"}:
                 assert str(schema.get("x_brainstack_tool_class", "")).startswith("read_only_memory")
+            if schema["name"] == "brainstack_candidate_review":
+                assert schema.get("x_brainstack_tool_class") == "read_only_admission_candidate_review"
             if schema["name"] in {"brainstack_remember", "brainstack_supersede"}:
                 assert schema.get("x_brainstack_tool_class") == "explicit_memory_write"
             if schema["name"] == "brainstack_consolidate":

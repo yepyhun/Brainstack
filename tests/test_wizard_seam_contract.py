@@ -264,6 +264,7 @@ def test_gateway_patch_bundle_contains_capability_preserving_toolloader_patch() 
     payload_paths = {entry["path"] for entry in manifest["payloads"]}
 
     assert "002-capability-preserving-deferred-tool-schema.patch" in patch_names
+    assert "003-tool-runtime-spawn-hardening.patch" in patch_names
     assert "gateway/turn_profiles.py" in payload_paths
     assert "gateway/memory_answer_renderer.py" in payload_paths
 
@@ -279,6 +280,27 @@ def test_gateway_patch_bundle_contains_capability_preserving_toolloader_patch() 
     assert "TOOL_NOT_LOADED_OR_NOT_CONFIGURED" in patch_text
 
 
+def test_gateway_patch_bundle_installs_tool_runtime_spawn_hardening() -> None:
+    source_patch_names = {path.name for path in hermes_gateway_patch_support.source_patch_files()}
+    assert source_patch_names == {"003-tool-runtime-spawn-hardening.patch"}
+
+    patch_text = (
+        Path(__file__).resolve().parents[1]
+        / "patches"
+        / "hermes_gateway"
+        / "003-tool-runtime-spawn-hardening.patch"
+    ).read_text(encoding="utf-8")
+
+    assert "tools/environments/base.py" in patch_text
+    assert "tools/environments/local.py" in patch_text
+    assert "tools/code_execution_tool.py" in patch_text
+    assert "tools/process_registry.py" in patch_text
+    assert "gateway/platforms/whatsapp.py" in patch_text
+    assert "_execute_lock = threading.RLock()" in patch_text
+    assert "with self._execute_lock" in patch_text
+    assert "start_new_session=False if _IS_WINDOWS else True" in patch_text
+
+
 def test_gateway_patch_probes_enforce_boost_only_toolloader_contract() -> None:
     probes = hermes_gateway_patch_support.REQUIRED_GATEWAY_PROBES
 
@@ -287,3 +309,8 @@ def test_gateway_patch_probes_enforce_boost_only_toolloader_contract() -> None:
     assert "validate_assistant_output_all" in probes["agent/memory_manager.py"]
     assert "capability_preserving_default" in probes["gateway/turn_profiles.py"]
     assert "render_memory_answer" in probes["gateway/memory_answer_renderer.py"]
+    assert "_execute_lock" in probes["tools/environments/base.py"]
+    assert "start_new_session=False if _IS_WINDOWS else True" in probes["tools/environments/local.py"]
+    assert "start_new_session=False if _IS_WINDOWS else True" in probes["tools/code_execution_tool.py"]
+    assert "start_new_session=False if _IS_WINDOWS else True" in probes["tools/process_registry.py"]
+    assert "start_new_session=False if _IS_WINDOWS else True" in probes["gateway/platforms/whatsapp.py"]

@@ -21,6 +21,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PATCH_DIR = REPO_ROOT / "patches" / "hermes_gateway"
 PATCH_PAYLOAD_DIR = PATCH_DIR / "files"
 PATCH_SCHEMA = "brainstack.hermes_gateway_patch_bundle.v1"
+SOURCE_PATCH_NAMES = (
+    "003-tool-runtime-spawn-hardening.patch",
+)
 
 UPSTREAM_TRACKING = [
     {
@@ -117,6 +120,22 @@ REQUIRED_GATEWAY_PROBES: dict[str, tuple[str, ...]] = {
         "validate_assistant_output_all",
         "validate_assistant_output",
     ),
+    "tools/environments/base.py": (
+        "_execute_lock",
+        "with self._execute_lock",
+    ),
+    "tools/environments/local.py": (
+        "start_new_session=False if _IS_WINDOWS else True",
+    ),
+    "tools/code_execution_tool.py": (
+        "start_new_session=False if _IS_WINDOWS else True",
+    ),
+    "tools/process_registry.py": (
+        "start_new_session=False if _IS_WINDOWS else True",
+    ),
+    "gateway/platforms/whatsapp.py": (
+        "start_new_session=False if _IS_WINDOWS else True",
+    ),
 }
 
 
@@ -141,6 +160,10 @@ def patch_files() -> list[Path]:
         for path in sorted(PATCH_DIR.glob("*.patch"))
         if not path.name.startswith("002-hermes-heartbeat-wake-lane")
     ]
+
+
+def source_patch_files() -> list[Path]:
+    return [PATCH_DIR / name for name in SOURCE_PATCH_NAMES]
 
 
 def payload_files() -> list[Path]:
@@ -262,6 +285,39 @@ def _git_apply(target: Path, patch: Path) -> None:
         raise RuntimeError(f"Failed to apply {patch.name}: {detail}")
 
 
+def _plan_source_patch_application(target: Path) -> list[dict[str, Any]]:
+    plans: list[dict[str, Any]] = []
+    for patch in source_patch_files():
+        if not patch.exists():
+            raise RuntimeError(f"Hermes Gateway source patch is missing: {patch}")
+        applies, apply_detail = _git_apply_check(target, patch)
+        if applies:
+            plans.append({"name": patch.name, "status": "apply", "detail": apply_detail})
+            continue
+        reversed_ok, reverse_detail = _git_apply_reverse_check(target, patch)
+        if reversed_ok:
+            plans.append({"name": patch.name, "status": "already_applied", "detail": reverse_detail})
+            continue
+        detail = apply_detail or reverse_detail or "patch neither applies nor reverses cleanly"
+        raise RuntimeError(f"Hermes Gateway source patch {patch.name} is not compatible: {detail}")
+    return plans
+
+
+def _apply_source_patches(target: Path, plans: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    applied: list[str] = []
+    already_applied: list[str] = []
+    by_name = {patch.name: patch for patch in source_patch_files()}
+    for plan in plans:
+        name = str(plan["name"])
+        status = str(plan["status"])
+        if status == "already_applied":
+            already_applied.append(name)
+            continue
+        _git_apply(target, by_name[name])
+        applied.append(name)
+    return applied, already_applied
+
+
 def _copy_payload_files(target: Path, *, dry_run: bool) -> list[dict[str, Any]]:
     copied: list[dict[str, Any]] = []
     for source in payload_files():
@@ -333,6 +389,8 @@ def apply_gateway_patch_bundle(target: Path, *, dry_run: bool) -> dict[str, Any]
 
     if not payload_files():
         raise RuntimeError(f"Hermes Gateway patch payload is empty: {PATCH_PAYLOAD_DIR}")
+    source_patch_plan = _plan_source_patch_application(target)
+    applied_patches, already_applied_patches = _apply_source_patches(target, source_patch_plan)
     copied_payloads = _copy_payload_files(target, dry_run=False)
     after = inspect_gateway_patch_support(target)
 
@@ -342,9 +400,9 @@ def apply_gateway_patch_bundle(target: Path, *, dry_run: bool) -> dict[str, Any]
         "dry_run": dry_run,
         "before": before,
         "after": after,
-        "apply_checks": [],
-        "applied_patches": [],
-        "already_applied_patches": [],
+        "apply_checks": source_patch_plan,
+        "applied_patches": applied_patches,
+        "already_applied_patches": already_applied_patches,
         "copied_payloads": copied_payloads,
         "rollback": "git checkout -- <patched files> or reset target checkout before reinstall",
     }

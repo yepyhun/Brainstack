@@ -98,6 +98,73 @@ def latency_status_tool_schema() -> Dict[str, Any]:
     }
 
 
+def admission_candidate_review_tool_schema() -> Dict[str, Any]:
+    return {
+        "name": "brainstack_candidate_review",
+        "description": (
+            "Review structured memory candidates before any write. Read-only. "
+            "Use when deciding whether a user-backed candidate should become profile, task, or operating truth. "
+            "The result is not durable truth; a candidate becomes truth only after an explicit brainstack_remember "
+            "write returns a committed receipt. Does not execute, schedule, notify, or approve anything."
+        ),
+        "x_brainstack_tool_class": "read_only_admission_candidate_review",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "proposal_id": {"type": "string"},
+                            "action": {"type": "string"},
+                            "target_kind": {
+                                "type": "string",
+                                "enum": [
+                                    "profile_fact",
+                                    "style_rule",
+                                    "project_fact",
+                                    "task_memory",
+                                    "operating_memory",
+                                    "support_context",
+                                    "graph_relation",
+                                ],
+                            },
+                            "target_slot": {"type": "string"},
+                            "stable_key": {"type": "string"},
+                            "content": {"type": "string"},
+                            "title": {"type": "string"},
+                            "normalized_value": {"type": "string"},
+                            "value_fingerprint": {"type": "string"},
+                            "normalized_value_hash": {"type": "string"},
+                            "source_role": {
+                                "type": "string",
+                                "enum": ["user", "assistant", "tool", "runtime", "unknown"],
+                            },
+                            "source_event_id": {"type": "string"},
+                            "source_span_id": {"type": "string"},
+                            "relation_shape": {
+                                "type": "object",
+                                "properties": {
+                                    "subject_ref": {"type": "string"},
+                                    "predicate": {"type": "string"},
+                                    "object_ref": {"type": "string"},
+                                    "direction": {"type": "string"},
+                                },
+                                "additionalProperties": False,
+                            },
+                        },
+                        "required": ["proposal_id", "target_kind", "target_slot", "source_role"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["actions"],
+            "additionalProperties": False,
+        },
+    }
+
+
 def proactive_status_tool_schema() -> Dict[str, Any]:
     return {
         "name": "brainstack_proactive_status",
@@ -381,6 +448,7 @@ def build_tool_schemas(
         inspect_tool_schema(),
         stats_tool_schema(),
         latency_status_tool_schema(),
+        admission_candidate_review_tool_schema(),
         proactive_status_tool_schema(),
         proactive_list_tool_schema(),
         proactive_inspect_tool_schema(),

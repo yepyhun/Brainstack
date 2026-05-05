@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ..active_preference_contract import DELIVERY_REASON_EXPLICIT_MEMORY_INSPECTION
+from ..admission_candidate_review import build_admission_candidate_review
 from ..memory_write_receipts import (
     build_ack_plan,
     build_memory_write_receipt,
@@ -206,6 +207,8 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             return json.dumps(self._handle_brainstack_stats(args), ensure_ascii=False)
         if tool_name == "brainstack_latency_status":
             return json.dumps(self._handle_brainstack_latency_status(args), ensure_ascii=False)
+        if tool_name == "brainstack_candidate_review":
+            return json.dumps(self._handle_brainstack_candidate_review(args), ensure_ascii=False)
         if tool_name == "brainstack_proactive_status":
             return json.dumps(self._handle_brainstack_proactive_status(args), ensure_ascii=False)
         if tool_name == "brainstack_proactive_list":
@@ -814,6 +817,13 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             memory_kernel_doctor=self.memory_kernel_doctor,
             last_maintenance_receipt=self._last_maintenance_receipt,
             persistent_bloat_report=self.persistent_bloat_report if self._store is not None else None,
+        )
+
+    def _handle_brainstack_candidate_review(self, args: Mapping[str, Any]) -> Dict[str, Any]:
+        return build_admission_candidate_review(
+            actions=list(args.get("actions") or []),
+            principal_scope_key=self._principal_scope_key,
+            session_id=self._session_id,
         )
 
     def lifecycle_status(self) -> Dict[str, Any]:

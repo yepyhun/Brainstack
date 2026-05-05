@@ -3,16 +3,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
-from brainstack.admission_policy import admit_claim
-from brainstack.core.admission import AssertionSpeaker, ClaimProposal, SourceAuthority, SpanKind
-from brainstack.db import BrainstackStore
-from brainstack.proactive_agent_contract import build_proactive_status
-from brainstack.storage.projection_writer import ProjectionWriter
-from brainstack.task_memory import ITEM_TYPE_TASK, STATUS_OPEN
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from brainstack.admission_policy import admit_claim  # noqa: E402
+from brainstack.core.admission import AssertionSpeaker, ClaimProposal, SourceAuthority, SpanKind  # noqa: E402
+from brainstack.db import BrainstackStore  # noqa: E402
+from brainstack.proactive_agent_contract import build_proactive_status  # noqa: E402
+from brainstack.storage.projection_writer import ProjectionWriter  # noqa: E402
+from brainstack.task_memory import ITEM_TYPE_TASK, STATUS_OPEN  # noqa: E402
 
 REPORT_SCHEMA = "brainstack.source_backed_actionable_queue_substrate.v1"
 PRINCIPAL_SCOPE_KEY = "principal:phase269"
