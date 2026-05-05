@@ -52,7 +52,7 @@ _SECRET_VALUE_MARKERS = (
     "sk-",
     "ghp_",
     "github_pat_",
-    "Laura private raw memory text must never appear",
+    "Example private raw memory text must never appear",
 )
 
 _PROTECTED_PACKET_BUDGET_FLAGS = (

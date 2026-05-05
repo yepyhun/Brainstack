@@ -108,7 +108,7 @@ def test_admitted_graph_supersession_marks_prior_current_and_supersession_rows(t
         old = _proposal(claim_id="phase268-old-creator", value="Old support owner")
         new = _proposal(
             claim_id="phase268-new-creator",
-            value="Laura",
+            value="ExampleOwner",
             authority=SourceAuthority.USER_CORRECTION,
             span_kind=SpanKind.CORRECTION,
         )

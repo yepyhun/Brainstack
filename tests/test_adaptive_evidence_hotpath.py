@@ -16,7 +16,7 @@ from brainstack.adaptive_evidence_hotpath import (
 from scripts.verify_adaptive_evidence_hotpath import run_hotpath_baseline
 
 
-PRIVATE_TEXT = "Laura private raw memory text must never appear"
+PRIVATE_TEXT = "Example private raw memory text must never appear"
 
 
 def _sample_packet() -> dict[str, Any]:

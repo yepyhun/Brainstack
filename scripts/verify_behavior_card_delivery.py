@@ -14,10 +14,12 @@ if str(ROOT) not in sys.path:
 
 from brainstack import BrainstackMemoryProvider  # noqa: E402
 from brainstack.active_preference_contract import (  # noqa: E402
+    ACTIVE_PREFERENCE_CARD_SIZE_WARNING_ACK_SLOT,
     DELIVERY_REASON_PROMPT_REBUILD_AFTER_COMPACTION,
     DELIVERY_REASON_SESSION_START,
 )
 from brainstack.style_contract import STYLE_CONTRACT_SLOT  # noqa: E402
+from brainstack.retrieval import build_system_prompt_projection  # noqa: E402
 
 
 DEFAULT_HERMES_SOURCE = Path("/home/lauratom/Asztal/ai/atado/hermes-latest-source-clean-20260504-003042")
@@ -27,8 +29,18 @@ def _rules(count: int = 25) -> list[str]:
     return [f"Rule {index:02d} must survive the Hermes behavior-card seam." for index in range(1, count + 1)]
 
 
+def _long_rules(count: int = 80) -> list[str]:
+    return [
+        (
+            f"Rule {index:02d} must stay explicit in the active behavior card while preserving "
+            "public-safe wording, source authority, compression delivery, and concise agent-facing inspection."
+        )
+        for index in range(1, count + 1)
+    ]
+
+
 def _contract_text(lines: list[str]) -> str:
-    return "LauraTom behavior card\n\nRules:\n" + "\n".join(f"- {line}" for line in lines)
+    return "Public fixture behavior card\n\nRules:\n" + "\n".join(f"- {line}" for line in lines)
 
 
 def _write_style_rules(provider: BrainstackMemoryProvider, lines: list[str]) -> dict[str, Any]:
@@ -36,13 +48,13 @@ def _write_style_rules(provider: BrainstackMemoryProvider, lines: list[str]) -> 
         "brainstack_remember",
         {
             "shelf": "profile",
-            "stable_key": "preference.discord_response_style_plain_hungarian_2026_05_04",
+            "stable_key": "preference.public_fixture_response_style",
             "category": "style_preference",
             "content": _contract_text(lines),
             "source_role": "user",
             "authority_class": "profile",
             "confidence": 0.99,
-            "metadata": {"target_slot": "preference.discord_response_style"},
+            "metadata": {"target_slot": "preference.public_fixture_response_style"},
         },
     )
     return json.loads(payload)
@@ -185,6 +197,118 @@ def run(*, hermes_source: Path, out: Path | None = None) -> dict[str, Any]:
                     }
                 )
 
+            legacy_suppression: dict[str, Any] = {}
+            size_warning: dict[str, Any] = {}
+            if provider._store is None:
+                issues.append({"stage": "legacy_profile_sources", "code": "store_unavailable"})
+            else:
+                scope = provider._principal_scope_key
+                provider._store.upsert_profile_item(
+                    stable_key="identity:public_fixture_name",
+                    category="identity",
+                    content="The public fixture user's handle is ExampleUser.",
+                    source="user_explicit",
+                    confidence=0.99,
+                    metadata={"principal_scope_key": scope},
+                )
+                legacy_sources = [
+                    (
+                        "style_no_decorative_symbols",
+                        "style_preference",
+                        "Never render decorative symbols from a legacy profile row.",
+                    ),
+                    (
+                        "preference.public_fixture_legacy_communication_style",
+                        "communication_style",
+                        "Use direct public fixture communication style from legacy profile.",
+                    ),
+                    (
+                        "preference:communication_style",
+                        "preference",
+                        "Answer in the public fixture language from legacy profile.",
+                    ),
+                ]
+                for stable_key, category, content in legacy_sources:
+                    provider._store.upsert_profile_item(
+                        stable_key=stable_key,
+                        category=category,
+                        content=content,
+                        source="brainstack_remember:profile",
+                        confidence=0.98,
+                        metadata={"principal_scope_key": scope},
+                    )
+                projection = build_system_prompt_projection(
+                    provider._store,
+                    profile_limit=8,
+                    principal_scope_key=scope,
+                    session_id="behavior-card-session",
+                )
+                prompt_block = str(projection.get("block") or "")
+                trace = dict(projection.get("active_preference_delivery_trace") or {})
+                leaked_sources = [
+                    content
+                    for _stable_key, _category, content in legacy_sources
+                    if content in prompt_block
+                ]
+                if leaked_sources:
+                    issues.append(
+                        {
+                            "stage": "legacy_profile_sources",
+                            "code": "suppressed_behavior_source_rendered",
+                            "leak_count": len(leaked_sources),
+                        }
+                    )
+                if "The public fixture user's handle is ExampleUser." not in prompt_block:
+                    issues.append({"stage": "legacy_profile_sources", "code": "non_behavior_profile_not_rendered"})
+                if trace.get("supplemental_profile_behavior_source_suppressed") is not True:
+                    issues.append({"stage": "legacy_profile_sources", "code": "suppression_not_reported"})
+                if int(trace.get("suppressed_behavior_profile_source_count") or 0) < len(legacy_sources):
+                    issues.append(
+                        {
+                            "stage": "legacy_profile_sources",
+                            "code": "suppression_count_too_low",
+                            "observed": trace.get("suppressed_behavior_profile_source_count"),
+                        }
+                    )
+                legacy_suppression = {
+                    "non_behavior_profile_rendered": "The public fixture user's handle is ExampleUser." in prompt_block,
+                    "suppressed_behavior_source_count": int(trace.get("suppressed_behavior_profile_source_count") or 0),
+                    "extra_suppressed_behavior_source_count": int(
+                        trace.get("extra_suppressed_behavior_profile_source_count") or 0
+                    ),
+                    "suppressed_sources_rendered": len(leaked_sources),
+                    "agent_safe_repair_action": dict(projection.get("active_preference_delivery_inspect") or {}).get(
+                        "agent_safe_repair_action"
+                    ),
+                }
+
+                _write_style_rules(provider, _long_rules())
+                large_projection = build_system_prompt_projection(
+                    provider._store,
+                    profile_limit=8,
+                    principal_scope_key=scope,
+                    session_id="behavior-card-session",
+                    behavior_contract_char_budget=20000,
+                )
+                size_warning = dict(
+                    dict(large_projection.get("active_preference_delivery_inspect") or {}).get(
+                        "active_card_size_warning"
+                    )
+                    or {}
+                )
+                if size_warning.get("status") != "warn":
+                    issues.append(
+                        {
+                            "stage": "size_warning",
+                            "code": "large_card_warning_not_emitted",
+                            "observed": size_warning,
+                        }
+                    )
+                if size_warning.get("agent_safe_ack_write", {}).get("stable_key") != ACTIVE_PREFERENCE_CARD_SIZE_WARNING_ACK_SLOT:
+                    issues.append({"stage": "size_warning", "code": "ack_write_not_reported"})
+                if str(size_warning.get("agent_safe_warning") or "") in str(large_projection.get("block") or ""):
+                    issues.append({"stage": "size_warning", "code": "warning_prompt_spam"})
+
             report = {
                 "schema": "brainstack.behavior_card_delivery_verifier.v1",
                 "status": "pass" if not issues else "fail",
@@ -214,6 +338,15 @@ def run(*, hermes_source: Path, out: Path | None = None) -> dict[str, Any]:
                 "durable_behavior_rows": {
                     "behavior_contracts": behavior_rows,
                     "compiled_behavior_policies": compiled_rows,
+                },
+                "legacy_profile_source_suppression": legacy_suppression,
+                "active_card_size_warning": {
+                    "status": size_warning.get("status"),
+                    "severity": size_warning.get("severity"),
+                    "should_warn_user": size_warning.get("should_warn_user"),
+                    "estimated_token_count": size_warning.get("estimated_token_count"),
+                    "warning_token_threshold": size_warning.get("warning_token_threshold"),
+                    "ack_stable_key": dict(size_warning.get("agent_safe_ack_write") or {}).get("stable_key"),
                 },
             }
         finally:

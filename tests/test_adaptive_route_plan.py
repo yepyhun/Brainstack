@@ -197,7 +197,7 @@ def test_build_working_memory_packet_uses_adaptive_route_plan_to_reduce_simple_p
         store.upsert_profile_item(
             stable_key="identity:name",
             category="identity",
-            content="ExampleUser is Laura for structured profile request.",
+            content="ExampleUser has a structured profile request.",
             source="test",
             confidence=0.99,
             metadata={"principal_scope_key": "principal:test"},

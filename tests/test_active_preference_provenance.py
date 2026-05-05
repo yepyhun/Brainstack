@@ -39,7 +39,7 @@ def _provider(tmp_path: Path) -> BrainstackMemoryProvider:
 
 
 def _contract_text() -> str:
-    return "LauraTom style contract\n\nRules:\n- Keep provenance labels honest.\n- Do not imply a durable behavior commit."
+    return "Public fixture style contract\n\nRules:\n- Keep provenance labels honest.\n- Do not imply a durable behavior commit."
 
 
 def test_profile_lane_read_only_projection_does_not_emit_behavior_commit_receipt_label(tmp_path: Path) -> None:

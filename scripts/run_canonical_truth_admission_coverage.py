@@ -318,7 +318,7 @@ def build_report(db_path: Path) -> dict[str, Any]:
                     target_shelf="graph",
                     target_slot="project.created_by",
                     storage_key="project:created_by",
-                    normalized_value="Laura",
+                    normalized_value="ExampleOwner",
                     authority=SourceAuthority.USER_EXPLICIT_ASSERTION,
                     speaker=AssertionSpeaker.USER,
                     span_kind=SpanKind.ASSERTION,

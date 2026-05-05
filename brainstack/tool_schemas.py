@@ -42,7 +42,10 @@ def inspect_tool_schema() -> Dict[str, Any]:
         "name": "brainstack_inspect",
         "description": (
             "Inspect Brainstack retrieval for a query with channels, routing, selected evidence, "
-            "suppressed evidence, and final packet metadata. Read-only."
+            "suppressed evidence, final packet metadata, and active behavior-card delivery health. "
+            "Read-only; it can explain when behavior/profile source rows are suppressed and whether "
+            "an explicit user style contract must be saved before claiming the behavior card is fixed. "
+            "It also reports a non-spamming behavior-card size warning when the active card becomes large."
         ),
         "x_brainstack_tool_class": "read_only_memory_diagnostics",
         "parameters": {
@@ -312,7 +315,14 @@ def explicit_capture_tool_schema(*, name: str, operation: str, capture_schema_ve
         "name": name,
         "description": (
             "Commit explicit typed Brainstack memory through the durable capture contract. "
-            "This tool requires schema fields and does not infer memory intent from prose."
+            "This tool requires schema fields and does not infer memory intent from prose. "
+            "For explicit behavior/style/communication rules supplied by the user, write shelf=profile "
+            "with category=style_preference and structured rule-pack content; Brainstack may then "
+            "materialize the canonical preference:style_contract active card. Do not repair old profile "
+            "rows or claim a full behavior card without an explicit current user rule pack or receipt. "
+            "If brainstack_inspect reports an active behavior-card size warning and the user explicitly "
+            "accepts the current size, store a profile operating_preference acknowledgement using the "
+            "inspect-provided stable_key and acknowledged_token_estimate."
         ),
         "x_brainstack_tool_class": "explicit_memory_write",
         "x_brainstack_capture_schema": capture_schema_version,

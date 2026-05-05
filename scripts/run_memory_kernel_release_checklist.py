@@ -1164,6 +1164,51 @@ def _check_hermes_proactive_runtime_parity(tmp: Path) -> CheckResult:
     )
 
 
+def _check_behavior_card_delivery(tmp: Path) -> CheckResult:
+    out = tmp / "behavior_card_delivery.json"
+    command = [sys.executable, "scripts/verify_behavior_card_delivery.py", "--out", str(out)]
+    source_hermes = os.environ.get("BRAINSTACK_RELEASE_HERMES_SOURCE", "").strip()
+    if source_hermes:
+        command.extend(["--hermes-source", source_hermes])
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    legacy_suppression = data.get("legacy_profile_source_suppression")
+    legacy_suppression = legacy_suppression if isinstance(legacy_suppression, Mapping) else {}
+    size_warning = data.get("active_card_size_warning")
+    size_warning = size_warning if isinstance(size_warning, Mapping) else {}
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("issues") == []
+        and (data.get("session_start") or {}).get("delivery_status") == "delivered_full"
+        and (data.get("post_compression") or {}).get("delivery_status") == "delivered_full"
+        and (data.get("inspect") or {}).get("active_rule_count") == 25
+        and (data.get("durable_behavior_rows") or {}).get("behavior_contracts") == 0
+        and (data.get("durable_behavior_rows") or {}).get("compiled_behavior_policies") == 0
+        and legacy_suppression.get("suppressed_sources_rendered") == 0
+        and legacy_suppression.get("non_behavior_profile_rendered") is True
+        and size_warning.get("status") == "warn"
+        and size_warning.get("should_warn_user") is True
+        and size_warning.get("ack_stable_key") == "brainstack.active_preference_card_size_warning_ack"
+    )
+    return CheckResult(
+        name="behavior_card_delivery",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": len(data.get("issues") or []),
+            "session_start": data.get("session_start"),
+            "post_compression": data.get("post_compression"),
+            "inspect": data.get("inspect"),
+            "durable_behavior_rows": data.get("durable_behavior_rows"),
+            "legacy_profile_source_suppression": legacy_suppression,
+            "active_card_size_warning": size_warning,
+        },
+    )
+
+
 def _live_crash_regression_summary(
     *,
     container_name: str,
@@ -1685,6 +1730,7 @@ def run_checklist(
             _check_public_fixtures(),
             _check_projection_semantics_runtime_parity(tmp),
             _check_hermes_proactive_runtime_parity(tmp),
+            _check_behavior_card_delivery(tmp),
             _check_live_crash_regression_guard(tmp),
             _check_persistent_bloat_rebuild(tmp),
             _check_tier2_extraction_quality(tmp),

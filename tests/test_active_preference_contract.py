@@ -51,7 +51,7 @@ def _rule_lines(count: int) -> list[str]:
     return [f"Rule {index:02d} must be preserved in the active behavior card." for index in range(1, count + 1)]
 
 
-def _style_contract_text(lines: list[str], *, title: str = "LauraTom style contract") -> str:
+def _style_contract_text(lines: list[str], *, title: str = "Public fixture style contract") -> str:
     return f"{title}\n\nRules:\n" + "\n".join(f"- {line}" for line in lines)
 
 
@@ -236,10 +236,10 @@ def test_explicit_profile_lane_style_contract_projects_active_contract_without_b
             stable_key=STYLE_CONTRACT_SLOT,
             category="style_contract",
             content=(
-                "LauraTom Discord Communication Rules\n\n"
+                "Public fixture communication rules\n\n"
                 "Rules\n"
                 "- Válaszolj alapból magyarul.\n"
-                "- Csak akkor válaszolj angolul, ha Laura kifejezetten kéri.\n"
+                "- Csak akkor válaszolj angolul, ha a user kifejezetten kéri.\n"
                 "- Magyarázz röviden és közérthetően."
             ),
             source="operator_explicit_user_instruction",
@@ -248,13 +248,13 @@ def test_explicit_profile_lane_style_contract_projects_active_contract_without_b
                 "principal_scope_key": scope,
                 "source_role": "user",
                 "memory_write_receipt_id": "operator:style-contract:test",
-                "style_contract_title": "LauraTom Discord Communication Rules",
+                "style_contract_title": "Public fixture communication rules",
                 "style_contract_sections": [
                     {
                         "heading": "Rules",
                         "lines": [
                             "Válaszolj alapból magyarul.",
-                            "Csak akkor válaszolj angolul, ha Laura kifejezetten kéri.",
+                            "Csak akkor válaszolj angolul, ha a user kifejezetten kéri.",
                             "Magyarázz röviden és közérthetően.",
                         ],
                     }
@@ -309,13 +309,13 @@ def test_brainstack_remember_user_style_rules_materializes_canonical_active_card
                 "brainstack_remember",
                 {
                     "shelf": "profile",
-                    "stable_key": "preference.discord_response_style_plain_hungarian_2026_05_04",
+                    "stable_key": "preference.public_fixture_response_style",
                     "category": "style_preference",
                     "content": _style_contract_text(new_lines),
                     "source_role": "user",
                     "authority_class": "profile",
                     "confidence": 0.99,
-                    "metadata": {"target_slot": "preference.discord_response_style"},
+                    "metadata": {"target_slot": "preference.public_fixture_response_style"},
                 },
             )
         )
@@ -324,14 +324,14 @@ def test_brainstack_remember_user_style_rules_materializes_canonical_active_card
         assert receipt["style_contract_materialization"]["status"] == "materialized"
         assert receipt["style_contract_materialization"]["rule_count"] == 25
         generic = store.get_profile_item(
-            stable_key="preference.discord_response_style_plain_hungarian_2026_05_04",
+            stable_key="preference.public_fixture_response_style",
             principal_scope_key=scope,
         )
         canonical = store.get_profile_item(stable_key=STYLE_CONTRACT_SLOT, principal_scope_key=scope)
         assert generic is not None
         assert canonical is not None
         canonical_metadata = canonical["metadata"]
-        assert canonical_metadata["source_profile_stable_key"] == "preference.discord_response_style_plain_hungarian_2026_05_04"
+        assert canonical_metadata["source_profile_stable_key"] == "preference.public_fixture_response_style"
         assert canonical_metadata["memory_write_receipt_id"] == receipt["memory_write_receipt"]["receipt_id"]
         assert len(list_style_contract_rules(raw_text=canonical["content"], metadata=canonical_metadata)) == 25
         assert new_lines[-1] in canonical["content"]
@@ -394,7 +394,7 @@ def test_non_style_brainstack_remember_profile_write_does_not_activate_card(tmp_
                     "shelf": "profile",
                     "stable_key": "identity:display_name",
                     "category": "identity",
-                    "content": "Laura",
+                    "content": "ExampleUser",
                     "source_role": "user",
                     "authority_class": "profile",
                     "confidence": 0.99,
@@ -425,3 +425,23 @@ def test_delivery_trace_has_registered_safe_shape() -> None:
     assert trace["delivery_reason"] == "session_substrate_rebuilt"
     assert trace["raw_private_text_in_trace"] is False
     assert "private text" not in str(trace)
+    assert trace["extra_suppressed_behavior_profile_source_count"] == 0
+
+
+def test_delivery_inspect_tells_agent_safe_repair_requires_explicit_rules(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        projection = build_system_prompt_projection(
+            store,
+            profile_limit=4,
+            principal_scope_key="principal:agent-facing-repair",
+            session_id="session:test",
+        )
+        delivery = projection["active_preference_delivery_inspect"]
+
+        assert delivery["behavior_card_authority_status"] == "no_active_behavior_card"
+        assert delivery["agent_safe_repair_action"] == "ask_user_for_explicit_style_contract_if_behavior_preferences_are_needed"
+        assert delivery["agent_safe_repair_requires_explicit_user_rules"] is True
+        assert delivery["suppressed_behavior_sources_prompt_rendered"] is False
+    finally:
+        store.close()

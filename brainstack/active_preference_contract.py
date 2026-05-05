@@ -42,6 +42,12 @@ DELIVERY_REASON_CODES = {
 DROP_REASON_NO_ACTIVE_USER_PREFERENCES = "no_active_user_preferences"
 DROP_REASON_DELIVERY_DISABLED = "delivery_disabled"
 
+ACTIVE_PREFERENCE_CARD_SIZE_WARNING_ACK_SLOT = "brainstack.active_preference_card_size_warning_ack"
+ACTIVE_PREFERENCE_CARD_SIZE_WARNING_TOKEN_THRESHOLD = 800
+ACTIVE_PREFERENCE_CARD_SIZE_WARNING_HIGH_TOKEN_THRESHOLD = 5000
+ACTIVE_PREFERENCE_CARD_SIZE_WARNING_REWARN_MULTIPLIER = 2.0
+ACTIVE_PREFERENCE_CARD_SIZE_WARNING_TOKEN_CHAR_RATIO = 4
+
 
 def _text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
@@ -56,6 +62,104 @@ def _list_text(values: Any) -> List[str]:
         if text:
             output.append(text)
     return output
+
+
+def _int_value(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _estimated_tokens_from_chars(char_count: Any) -> int:
+    count = max(0, _int_value(char_count))
+    if count <= 0:
+        return 0
+    ratio = max(1, ACTIVE_PREFERENCE_CARD_SIZE_WARNING_TOKEN_CHAR_RATIO)
+    return max(1, (count + ratio - 1) // ratio)
+
+
+def _size_warning_acknowledged_token_estimate(ack_payload: Mapping[str, Any] | None) -> int:
+    if not isinstance(ack_payload, Mapping):
+        return 0
+    for key in (
+        "acknowledged_token_estimate",
+        "active_preference_card_token_estimate",
+        "card_token_estimate",
+        "token_estimate",
+    ):
+        value = _int_value(ack_payload.get(key))
+        if value > 0:
+            return value
+    metadata = ack_payload.get("metadata")
+    if isinstance(metadata, Mapping):
+        return _size_warning_acknowledged_token_estimate(metadata)
+    return 0
+
+
+def _active_card_size_warning(
+    *,
+    compiled_char_count: int,
+    size_warning_ack: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    token_estimate = _estimated_tokens_from_chars(compiled_char_count)
+    warn_threshold = ACTIVE_PREFERENCE_CARD_SIZE_WARNING_TOKEN_THRESHOLD
+    high_threshold = ACTIVE_PREFERENCE_CARD_SIZE_WARNING_HIGH_TOKEN_THRESHOLD
+    acknowledged_tokens = _size_warning_acknowledged_token_estimate(size_warning_ack)
+    rewarn_threshold = int(max(acknowledged_tokens + 1, acknowledged_tokens * ACTIVE_PREFERENCE_CARD_SIZE_WARNING_REWARN_MULTIPLIER))
+    acknowledged = acknowledged_tokens > 0 and token_estimate < rewarn_threshold
+    should_warn = token_estimate >= warn_threshold and not acknowledged
+    if token_estimate >= high_threshold and should_warn:
+        severity = "high"
+    elif should_warn:
+        severity = "medium"
+    else:
+        severity = "none"
+    if should_warn and acknowledged_tokens > 0:
+        status = "warn_growth_since_user_ack"
+    elif should_warn:
+        status = "warn"
+    elif acknowledged:
+        status = "acknowledged_until_growth_doubles"
+    else:
+        status = "ok"
+    return {
+        "schema": "brainstack.active_preference_card_size_warning.v1",
+        "status": status,
+        "severity": severity,
+        "should_warn_user": should_warn,
+        "card_char_count": max(0, int(compiled_char_count or 0)),
+        "estimated_token_count": token_estimate,
+        "warning_token_threshold": warn_threshold,
+        "high_warning_token_threshold": high_threshold,
+        "user_acknowledged_token_estimate": acknowledged_tokens,
+        "rewarn_token_threshold": rewarn_threshold if acknowledged_tokens else 0,
+        "rewarn_multiplier": ACTIVE_PREFERENCE_CARD_SIZE_WARNING_REWARN_MULTIPLIER,
+        "agent_safe_warning": (
+            "The active behavior card is large and is injected at session start and after context compaction. "
+            "Ask whether the user wants to keep it as-is or reduce it; if the user says it is fine, store a "
+            "user-authorized size-warning acknowledgement and do not warn again until the card roughly doubles."
+        )
+        if should_warn
+        else "",
+        "agent_safe_ack_write": {
+            "tool_name": "brainstack_remember",
+            "requires_explicit_user_confirmation": True,
+            "shelf": "profile",
+            "stable_key": ACTIVE_PREFERENCE_CARD_SIZE_WARNING_ACK_SLOT,
+            "category": "operating_preference",
+            "content": "The user accepted the current active behavior-card size warning cadence.",
+            "source_role": "user",
+            "authority_class": "profile",
+            "confidence": 0.99,
+            "metadata": {
+                "acknowledged_token_estimate": token_estimate,
+                "acknowledgement_scope": "active_preference_card_size_warning",
+            },
+        }
+        if should_warn
+        else {},
+    }
 
 
 def _receipt_ids(raw_contract: Mapping[str, Any], compiled_policy: Mapping[str, Any]) -> List[str]:
@@ -211,9 +315,13 @@ def build_active_preference_contract(
     workspace_scope_key: str = "",
     char_budget: int = DEFAULT_PINNED_BEHAVIOR_POLICY_CHAR_BUDGET,
 ) -> Dict[str, Any]:
-    snapshot = behavior_snapshot if isinstance(behavior_snapshot, Mapping) else {}
-    raw_contract = snapshot.get("raw_contract") if isinstance(snapshot.get("raw_contract"), Mapping) else {}
-    compiled_policy = snapshot.get("compiled_policy") if isinstance(snapshot.get("compiled_policy"), Mapping) else {}
+    snapshot: Mapping[str, Any] = behavior_snapshot if isinstance(behavior_snapshot, Mapping) else {}
+    raw_contract_payload = snapshot.get("raw_contract")
+    compiled_policy_payload = snapshot.get("compiled_policy")
+    raw_contract: Mapping[str, Any] = raw_contract_payload if isinstance(raw_contract_payload, Mapping) else {}
+    compiled_policy: Mapping[str, Any] = (
+        compiled_policy_payload if isinstance(compiled_policy_payload, Mapping) else {}
+    )
     if not bool(compiled_policy.get("active")):
         return {
             "schema": ACTIVE_PREFERENCE_CONTRACT_SCHEMA,
@@ -358,6 +466,9 @@ def build_active_preference_delivery_trace(
     prompt_rebuild_id: str | None = None,
     compaction_event_id: str | None = None,
     generic_profile_fallback_status: str = "",
+    suppressed_behavior_profile_source_count: int = 0,
+    source_profile_suppressed: bool = False,
+    size_warning_ack: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     payload = contract if isinstance(contract, Mapping) else {}
     status = str(payload.get("contract_status") or CONTRACT_STATUS_EMPTY).strip() or CONTRACT_STATUS_EMPTY
@@ -368,6 +479,15 @@ def build_active_preference_delivery_trace(
     compiled_rule_count = len(list(payload.get("compiled_rules") or []))
     source_rule_count = int(first_source.get("source_rule_count") or compiled_rule_count or 0)
     delivered_full = bool(delivered and available and compiled_rule_count > 0 and compiled_rule_count >= source_rule_count)
+    extra_suppressed_source_count = max(
+        0,
+        int(suppressed_behavior_profile_source_count or 0) - (1 if source_profile_suppressed else 0),
+    )
+    compiled_char_count = int(payload.get("compiled_char_count") or 0)
+    size_warning = _active_card_size_warning(
+        compiled_char_count=compiled_char_count,
+        size_warning_ack=size_warning_ack,
+    )
     return {
         "schema": ACTIVE_PREFERENCE_DELIVERY_TRACE_SCHEMA,
         "active_preference_contract_available": available,
@@ -384,6 +504,8 @@ def build_active_preference_delivery_trace(
         "contract_version": str(payload.get("contract_version") or ""),
         "contract_status": status,
         "source_receipt_count": len(list(payload.get("source_receipt_ids") or [])),
+        "compiled_char_count": compiled_char_count,
+        "estimated_token_count": int(size_warning.get("estimated_token_count") or 0),
         "compiled_rule_count": compiled_rule_count,
         "source_rule_count": source_rule_count,
         "source_storage_key": _text(first_source.get("storage_key")),
@@ -392,6 +514,10 @@ def build_active_preference_delivery_trace(
         "read_only_projection": bool(first_source.get("read_only_projection")),
         "source_profile_stable_key": _text(first_source.get("source_profile_stable_key")),
         "generic_profile_fallback_status": _text(generic_profile_fallback_status),
+        "supplemental_profile_behavior_source_suppressed": int(suppressed_behavior_profile_source_count or 0) > 0,
+        "suppressed_behavior_profile_source_count": int(suppressed_behavior_profile_source_count or 0),
+        "extra_suppressed_behavior_profile_source_count": extra_suppressed_source_count,
+        "active_card_size_warning": size_warning,
         "omitted_or_compacted_rule_count": len(list(payload.get("omitted_or_compacted_rules") or [])),
         "raw_private_text_in_trace": False,
         "drop_or_skip_reason_code": None
@@ -434,15 +560,38 @@ def build_active_preference_delivery_inspect_payload(
     source_refs = [dict(ref) for ref in list(payload.get("source_preference_refs") or []) if isinstance(ref, Mapping)]
     first_source = source_refs[0] if source_refs else {}
     status = str(payload.get("contract_status") or trace.get("contract_status") or CONTRACT_STATUS_EMPTY).strip() or CONTRACT_STATUS_EMPTY
+    delivered_full = bool(trace.get("active_preference_contract_delivered_full"))
+    suppressed_source_count = int(trace.get("suppressed_behavior_profile_source_count") or 0)
+    extra_suppressed_source_count = int(trace.get("extra_suppressed_behavior_profile_source_count") or 0)
+    active_rule_count = int(trace.get("compiled_rule_count") or len(list(payload.get("compiled_rules") or [])))
+    source_rule_count = int(trace.get("source_rule_count") or first_source.get("source_rule_count") or 0)
+    size_warning = trace.get("active_card_size_warning")
+    if not isinstance(size_warning, Mapping):
+        size_warning = _active_card_size_warning(compiled_char_count=int(trace.get("compiled_char_count") or 0))
+    if delivered_full and extra_suppressed_source_count:
+        authority_status = "canonical_card_delivered_full_with_suppressed_legacy_sources"
+        recommended_action = "inspect_active_card_before_claiming_legacy_sources_are_integrated"
+    elif delivered_full:
+        authority_status = "canonical_card_delivered_full"
+        recommended_action = "none"
+    elif status in {CONTRACT_STATUS_ACTIVE, CONTRACT_STATUS_DEGRADED}:
+        authority_status = "canonical_card_delivered_partial"
+        recommended_action = "inspect_active_card_before_claiming_full_behavior_contract"
+    elif suppressed_source_count:
+        authority_status = "behavior_sources_suppressed_no_active_card"
+        recommended_action = "ask_user_for_explicit_style_contract_then_write_with_brainstack_remember"
+    else:
+        authority_status = "no_active_behavior_card"
+        recommended_action = "ask_user_for_explicit_style_contract_if_behavior_preferences_are_needed"
     return {
         "schema": "brainstack.active_preference_delivery_inspect.v1",
         "contract_status": status,
         "delivery_reason": str(trace.get("delivery_reason") or ""),
         "delivery_status": str(trace.get("delivery_status") or "not_delivered"),
         "delivered": bool(trace.get("active_preference_contract_delivered")),
-        "delivered_full": bool(trace.get("active_preference_contract_delivered_full")),
-        "active_rule_count": int(trace.get("compiled_rule_count") or len(list(payload.get("compiled_rules") or []))),
-        "source_rule_count": int(trace.get("source_rule_count") or first_source.get("source_rule_count") or 0),
+        "delivered_full": delivered_full,
+        "active_rule_count": active_rule_count,
+        "source_rule_count": source_rule_count,
         "source_storage_key": str(trace.get("source_storage_key") or first_source.get("storage_key") or ""),
         "source_stable_key": str(trace.get("source_stable_key") or first_source.get("stable_key") or ""),
         "source_lane": str(trace.get("source_lane") or first_source.get("source_lane") or ""),
@@ -451,9 +600,21 @@ def build_active_preference_delivery_inspect_payload(
             trace.get("source_profile_stable_key") or first_source.get("source_profile_stable_key") or ""
         ),
         "source_receipt_count": int(trace.get("source_receipt_count") or 0),
+        "compiled_char_count": int(trace.get("compiled_char_count") or 0),
+        "estimated_token_count": int(trace.get("estimated_token_count") or size_warning.get("estimated_token_count") or 0),
+        "active_card_size_warning": dict(size_warning),
         "prompt_rebuild_id_present": bool(trace.get("prompt_rebuild_id")),
         "compaction_event_id_present": bool(trace.get("compaction_event_id")),
         "generic_profile_fallback_status": str(trace.get("generic_profile_fallback_status") or ""),
+        "supplemental_profile_behavior_source_suppressed": bool(
+            trace.get("supplemental_profile_behavior_source_suppressed")
+        ),
+        "suppressed_behavior_profile_source_count": suppressed_source_count,
+        "extra_suppressed_behavior_profile_source_count": extra_suppressed_source_count,
+        "suppressed_behavior_sources_prompt_rendered": False,
+        "behavior_card_authority_status": authority_status,
+        "agent_safe_repair_action": recommended_action,
+        "agent_safe_repair_requires_explicit_user_rules": recommended_action != "none",
         "raw_private_text_in_trace": bool(trace.get("raw_private_text_in_trace")),
         "trace_safe": True,
     }

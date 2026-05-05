@@ -22,14 +22,14 @@ def _upsert_profile_lane_contract(store: BrainstackStore, *, scope: str, rules: 
     store.upsert_profile_item(
         stable_key=STYLE_CONTRACT_SLOT,
         category="style_contract",
-        content="LauraTom behavior card\n\nRules:\n" + "\n".join(f"- {rule}" for rule in rules),
+        content="Public fixture behavior card\n\nRules:\n" + "\n".join(f"- {rule}" for rule in rules),
         source="operator_explicit",
         confidence=0.99,
         metadata={
             "principal_scope_key": scope,
             "source_role": "user",
             "memory_write_receipt_id": f"receipt:{scope}",
-            "style_contract_title": "LauraTom behavior card",
+            "style_contract_title": "Public fixture behavior card",
             "style_contract_sections": [{"heading": "Rules", "lines": rules}],
         },
     )

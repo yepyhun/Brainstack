@@ -85,6 +85,25 @@ def test_agent_tool_surface_exposes_read_tools_and_schema_gated_capture_tools(tm
         provider.shutdown()
 
 
+def test_agent_tool_surface_explains_behavior_card_repair_boundary(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        schemas = {schema["name"]: schema for schema in provider.get_tool_schemas()}
+
+        inspect_description = str(schemas["brainstack_inspect"].get("description") or "")
+        remember_description = str(schemas["brainstack_remember"].get("description") or "")
+
+        assert "active behavior-card delivery health" in inspect_description
+        assert "behavior/profile source rows are suppressed" in inspect_description
+        assert "explicit user style contract" in inspect_description
+        assert "structured rule-pack content" in remember_description
+        assert "canonical preference:style_contract active card" in remember_description
+        assert "Do not repair old profile rows" in remember_description
+        assert "without an explicit current user rule pack or receipt" in remember_description
+    finally:
+        provider.shutdown()
+
+
 def test_brainstack_recall_tool_returns_evidence_without_mutating_profile(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     try:

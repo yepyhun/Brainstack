@@ -119,7 +119,7 @@ def build_report() -> dict[str, Any]:
             old = _proposal(claim_id="phase268-old-creator", value="Old support owner")
             new = _proposal(
                 claim_id="phase268-new-creator",
-                value="Laura",
+                value="ExampleOwner",
                 authority=SourceAuthority.USER_CORRECTION,
                 span_kind=SpanKind.CORRECTION,
             )

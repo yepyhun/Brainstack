@@ -11,7 +11,7 @@ from brainstack.persistent_bloat import (
     build_persistent_bloat_report,
 )
 
-PRIVATE_TEXT = "Laura private raw memory text must never appear"
+PRIVATE_TEXT = "Example private raw memory text must never appear"
 
 
 def _store(tmp_path: Path) -> BrainstackStore:

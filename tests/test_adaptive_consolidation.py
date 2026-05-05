@@ -49,7 +49,7 @@ def test_async_consolidation_contract_keeps_durable_truth_synchronous_and_public
     assert validate_adaptive_consolidation_public_safety(report) == []
 
     with pytest.raises(DurableTruthMustRemainSynchronousError):
-        defer_durable_truth_write({"stable_fact_id": "identity:name", "value": "Laura"})
+        defer_durable_truth_write({"stable_fact_id": "identity:name", "value": "ExampleUser"})
 
 
 def test_async_consolidation_failure_paths_are_explicit_without_hidden_readiness() -> None:

@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, List, Mapping
 
 from .db import BrainstackStore
 from .active_preference_contract import (
+    ACTIVE_PREFERENCE_CARD_SIZE_WARNING_ACK_SLOT,
     DELIVERY_REASON_SESSION_SUBSTRATE_REBUILT,
     build_active_preference_contract,
     build_active_preference_delivery_inspect_payload,
@@ -17,6 +18,7 @@ from .literal_index import redact_literal_text
 from .operating_context import render_operating_context_section
 from .profile_contract import (
     is_native_explicit_style_item,
+    logical_profile_slot_from_row,
     normalize_profile_slot,
     profile_item_display_label,
 )
@@ -46,6 +48,22 @@ def _render_numbered_items(items: Iterable[str]) -> str:
 
 STYLE_AUTHORITY_RESIDUE_SLOTS = {
     STYLE_CONTRACT_SLOT,
+}
+
+BEHAVIOR_PROFILE_SOURCE_CATEGORIES = {
+    "communication_style",
+    "operating_preference",
+    "style_contract",
+    "style_preference",
+}
+
+BEHAVIOR_PROFILE_SOURCE_SLOTS = {
+    STYLE_CONTRACT_SLOT,
+    "preference:addressing",
+    "preference:assistant_address_name",
+    "preference:communication_style",
+    "preference:formatting",
+    "preference:verbosity",
 }
 
 _INTERNAL_CONTRACT_MARKERS = (
@@ -123,6 +141,25 @@ def _row_temporal_label(row: Dict[str, Any]) -> str:
 
 def _is_style_authority_residue_profile_item(row: Dict[str, Any]) -> bool:
     stable_key = normalize_profile_slot(str(row.get("stable_key") or "")).strip()
+    return stable_key in STYLE_AUTHORITY_RESIDUE_SLOTS
+
+
+def _profile_prompt_source_key(row: Dict[str, Any]) -> str:
+    key = str(row.get("logical_stable_key") or "").strip()
+    if not key:
+        key = str(logical_profile_slot_from_row(row) or "").strip()
+    if not key:
+        key = str(row.get("stable_key") or row.get("storage_key") or "").strip()
+    return key.split("::principal_scope::", 1)[0].strip()
+
+
+def _is_behavior_profile_source_item(row: Dict[str, Any]) -> bool:
+    category = normalize_profile_slot(str(row.get("category") or "")).strip()
+    stable_key = normalize_profile_slot(str(logical_profile_slot_from_row(row) or "")).strip()
+    if category in BEHAVIOR_PROFILE_SOURCE_CATEGORIES:
+        return True
+    if category == "preference" and stable_key in BEHAVIOR_PROFILE_SOURCE_SLOTS:
+        return True
     return stable_key in STYLE_AUTHORITY_RESIDUE_SLOTS
 
 
@@ -237,13 +274,53 @@ def build_system_prompt_projection(
         source_profile_stable_key = str(
             active_preference_contract.get("source_preference_refs", [{}])[0].get("source_profile_stable_key") or ""
         ).strip()
+    operating_context_snapshot = store.get_operating_context_snapshot(
+        principal_scope_key=principal_scope_key,
+        session_id=session_id,
+    )
+    hidden_profile_keys: set[str] = set()
+    filtered_items = list(items)
+    suppressed_behavior_profile_source_keys: List[str] = []
+
+    filtered_items = [item for item in filtered_items if not _is_native_profile_mirror_receipt(item)]
+
+    retained_items: List[Dict[str, Any]] = []
+    for item in filtered_items:
+        key = _profile_prompt_source_key(item)
+        if normalize_profile_slot(key) == normalize_profile_slot(ACTIVE_PREFERENCE_CARD_SIZE_WARNING_ACK_SLOT):
+            if key:
+                hidden_profile_keys.add(key)
+            continue
+        if _is_behavior_profile_source_item(item):
+            if key:
+                hidden_profile_keys.add(key)
+                if normalize_profile_slot(key) != normalize_profile_slot(STYLE_CONTRACT_SLOT):
+                    suppressed_behavior_profile_source_keys.append(key)
+            continue
+        retained_items.append(item)
+    filtered_items = retained_items
+
+    source_profile_suppressed = bool(
+        source_profile_stable_key
+        and any(
+            key == source_profile_stable_key
+            or normalize_profile_slot(key) == normalize_profile_slot(source_profile_stable_key)
+            for key in suppressed_behavior_profile_source_keys
+        )
+    )
     generic_profile_fallback_status = (
-        "supplemental_source_profile_present"
+        "supplemental_source_profile_suppressed"
+        if source_profile_suppressed
+        else "supplemental_source_profile_present"
         if source_profile_stable_key
         and any(str(item.get("stable_key") or "").strip() == source_profile_stable_key for item in items)
         else "not_required"
         if active_preference_section
         else "no_active_card"
+    )
+    size_warning_ack = store.get_profile_item(
+        stable_key=ACTIVE_PREFERENCE_CARD_SIZE_WARNING_ACK_SLOT,
+        principal_scope_key=principal_scope_key,
     )
     active_preference_delivery_trace = build_active_preference_delivery_trace(
         active_preference_contract,
@@ -252,18 +329,10 @@ def build_system_prompt_projection(
         prompt_rebuild_id=prompt_rebuild_id,
         compaction_event_id=compaction_event_id,
         generic_profile_fallback_status=generic_profile_fallback_status,
+        suppressed_behavior_profile_source_count=len(suppressed_behavior_profile_source_keys),
+        source_profile_suppressed=source_profile_suppressed,
+        size_warning_ack=size_warning_ack,
     )
-    operating_context_snapshot = store.get_operating_context_snapshot(
-        principal_scope_key=principal_scope_key,
-        session_id=session_id,
-    )
-    hidden_profile_keys: set[str] = set()
-    filtered_items = list(items)
-
-    filtered_items = [item for item in filtered_items if not _is_native_profile_mirror_receipt(item)]
-
-    if canonical_style_present or native_explicit_style_present:
-        filtered_items = [item for item in filtered_items if not _is_style_authority_residue_profile_item(item)]
 
     operating_context_section = render_operating_context_section(operating_context_snapshot)
     truthful_memory_operations_section = _render_truthful_memory_operations_section(
@@ -990,6 +1059,13 @@ def _filtered_profile_items_for_packet(
         filtered_profile_items = [
             item for item in filtered_profile_items if str(item.get("stable_key") or "").strip() != STYLE_CONTRACT_SLOT
         ]
+    filtered_profile_items = [
+        item
+        for item in filtered_profile_items
+        if not _is_behavior_profile_source_item(item)
+        and normalize_profile_slot(_profile_prompt_source_key(item))
+        != normalize_profile_slot(ACTIVE_PREFERENCE_CARD_SIZE_WARNING_ACK_SLOT)
+    ]
     return [item for item in filtered_profile_items if not _is_native_profile_mirror_receipt(item)]
 
 

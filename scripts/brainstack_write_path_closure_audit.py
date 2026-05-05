@@ -89,6 +89,8 @@ def _classify(file: str, method: str, caller: str) -> tuple[str, str]:
         return "TEST_OR_CANARY_SEED", "persistent-bloat policy verifier fixture seed"
     if file.startswith("scripts/verify_profile_scope_index.py"):
         return "TEST_OR_CANARY_SEED", "profile-scope index verifier fixture seed"
+    if file.startswith("scripts/verify_behavior_card_delivery.py"):
+        return "TEST_OR_CANARY_SEED", "behavior-card delivery verifier fixture seed"
     if file.startswith("scripts/run_packet_budget_soak.py"):
         return "TEST_OR_CANARY_SEED", "packet-budget soak measurement fixture seed"
     if file.startswith("scripts/run_persistent_bloat_soak.py"):
