@@ -100,6 +100,11 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "owner": "host-provider-hotfix",
         "removal_condition": "Hermes auxiliary task resolver natively supports provider=main model inheritance.",
     },
+    "_patch_session_search_total_deadline": {
+        "category": "required_seam",
+        "owner": "host-tool-hotfix",
+        "removal_condition": "Hermes session_search natively enforces a tool-level total deadline below gateway idle timeout.",
+    },
     "_patch_credential_pool": {
         "category": "compat_hotfix",
         "owner": "host-provider-hotfix",
@@ -335,6 +340,14 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_modes": ("source", "docker"),
         "purpose": "Expose Brainstack auxiliary task routing and provider control without forking the host client stack.",
         "why": "Brainstack structured-understanding and flush paths need stable auxiliary task plumbing.",
+    },
+    {
+        "patcher": "_patch_session_search_total_deadline",
+        "target": "tools/session_search_tool.py",
+        "scope": "host-tool-timeout-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Keep Hermes session_search bounded so long summarization cannot outlive the gateway turn timeout.",
+        "why": "Session search can otherwise spend several per-session retry windows inside the tool and leave the agent stuck until the gateway kills the turn.",
     },
     {
         "patcher": "_patch_credential_pool",
@@ -3812,6 +3825,118 @@ def _patch_auxiliary_client(path: Path, dry_run: bool) -> list[str]:
     return applied
 
 
+def _patch_session_search_total_deadline(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    helper = (
+        "\n\n"
+        "def _get_session_search_total_deadline(default: float = 90.0) -> float:\n"
+        "    \"\"\"Return a tool-level deadline below the gateway idle timeout.\"\"\"\n"
+        "    try:\n"
+        "        from hermes_cli.config import load_config\n"
+        "        config = load_config()\n"
+        "    except ImportError:\n"
+        "        return default\n"
+        "    aux = config.get(\"auxiliary\", {}) if isinstance(config, dict) else {}\n"
+        "    task_config = aux.get(\"session_search\", {}) if isinstance(aux, dict) else {}\n"
+        "    if not isinstance(task_config, dict):\n"
+        "        task_config = {}\n"
+        "    configured = task_config.get(\"total_timeout\")\n"
+        "    try:\n"
+        "        value = float(configured) if configured is not None else default\n"
+        "    except (TypeError, ValueError):\n"
+        "        value = default\n"
+        "    agent = config.get(\"agent\", {}) if isinstance(config, dict) else {}\n"
+        "    gateway_timeout = agent.get(\"gateway_timeout\") if isinstance(agent, dict) else None\n"
+        "    try:\n"
+        "        gateway_limit = float(gateway_timeout) - 10.0\n"
+        "    except (TypeError, ValueError):\n"
+        "        gateway_limit = default\n"
+        "    return max(5.0, min(value, gateway_limit))\n"
+    )
+    if "def _get_session_search_total_deadline" not in text:
+        text = _replace_once(
+            text,
+            "\n\ndef _format_timestamp",
+            helper + "\n\ndef _format_timestamp",
+            label="session_search total deadline helper",
+            path=path,
+        )
+        applied.append("session_search:total_deadline_helper")
+
+    old_gather = "            return await asyncio.gather(*coros, return_exceptions=True)\n"
+    new_gather = (
+        "            return await asyncio.wait_for(\n"
+        "                asyncio.gather(*coros, return_exceptions=True),\n"
+        "                timeout=_get_session_search_total_deadline(),\n"
+        "            )\n"
+    )
+    if "timeout=_get_session_search_total_deadline()" not in text:
+        text = _replace_once(
+            text,
+            old_gather,
+            new_gather,
+            label="session_search bounded gather",
+            path=path,
+        )
+        applied.append("session_search:bounded_gather")
+
+    old_timeout = (
+        "        except concurrent.futures.TimeoutError:\n"
+        "            logging.warning(\n"
+        "                \"Session summarization timed out after 60 seconds\",\n"
+        "                exc_info=True,\n"
+        "            )\n"
+        "            return json.dumps({\n"
+        "                \"success\": False,\n"
+        "                \"error\": \"Session summarization timed out. Try a more specific query or reduce the limit.\",\n"
+        "            }, ensure_ascii=False)\n"
+    )
+    new_timeout = (
+        "        except (asyncio.TimeoutError, TimeoutError, concurrent.futures.TimeoutError):\n"
+        "            deadline = _get_session_search_total_deadline()\n"
+        "            logging.warning(\n"
+        "                \"Session summarization timed out after %.1f seconds\",\n"
+        "                deadline,\n"
+        "                exc_info=True,\n"
+        "            )\n"
+        "            summaries = []\n"
+        "            for session_id, match_info, conversation_text, session_meta in tasks:\n"
+        "                preview = (conversation_text[:500] + \"\\\\n...[truncated]\") if conversation_text else \"No preview available.\"\n"
+        "                summaries.append({\n"
+        "                    \"session_id\": session_id,\n"
+        "                    \"when\": _format_timestamp(session_meta.get(\"started_at\") or match_info.get(\"session_started\")),\n"
+        "                    \"source\": session_meta.get(\"source\") or match_info.get(\"source\", \"unknown\"),\n"
+        "                    \"model\": session_meta.get(\"model\") or match_info.get(\"model\"),\n"
+        "                    \"summary\": \"[Raw preview: summarization timed out]\\\\n\" + preview,\n"
+        "                })\n"
+        "            return json.dumps({\n"
+        "                \"success\": True,\n"
+        "                \"query\": query,\n"
+        "                \"results\": summaries,\n"
+        "                \"count\": len(summaries),\n"
+        "                \"sessions_searched\": len(seen_sessions),\n"
+        "                \"degraded\": True,\n"
+        "                \"degraded_reason\": \"SESSION_SEARCH_SUMMARIZATION_TIMEOUT\",\n"
+        "                \"tool_total_deadline_seconds\": deadline,\n"
+        "            }, ensure_ascii=False)\n"
+    )
+    if "SESSION_SEARCH_SUMMARIZATION_TIMEOUT" not in text:
+        text = _replace_once(
+            text,
+            old_timeout,
+            new_timeout,
+            label="session_search timeout degradation",
+            path=path,
+        )
+        applied.append("session_search:timeout_degraded_preview")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -5470,6 +5595,7 @@ def main() -> int:
     host_patches.extend(_run_host_patch("_patch_cron_scheduler_tests", target / "tests" / "cron" / "test_scheduler.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_cron_tests", target / "tests" / "cron" / "test_jobs.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_auxiliary_client", target / "agent" / "auxiliary_client.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_session_search_total_deadline", target / "tools" / "session_search_tool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_credential_pool", target / "agent" / "credential_pool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_credential_pool_tests", target / "tests" / "agent" / "test_credential_pool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_memory_provider", target / "agent" / "memory_provider.py", args.dry_run, host_patch_mode=args.host_patch_mode))

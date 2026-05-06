@@ -94,8 +94,11 @@ def test_session_start_delivers_full_active_behavior_card(tmp_path: Path) -> Non
 
         block = provider.system_prompt_block()
         trace = provider.behavior_policy_trace()["system_prompt_block"]["active_preference_contract_delivery"]
+        projection = provider.behavior_policy_trace()["system_prompt_block"]["projection"]
 
         _assert_full_card(block, lines)
+        assert STYLE_CONTRACT_SLOT not in projection["rendered_profile_keys"]
+        assert STYLE_CONTRACT_SLOT in projection["hidden_profile_keys"]
         assert trace["delivery_reason"] == DELIVERY_REASON_SESSION_START
         assert trace["delivery_status"] == "delivered_full"
         assert trace["active_preference_contract_delivered_full"] is True

@@ -72,6 +72,7 @@ def test_core_host_patch_inventory_skips_native_metadata_compat_seams() -> None:
     assert inventory["_patch_memory_provider"]["selected"] is False
     assert inventory["_patch_memory_manager_required_seam"]["selected"] is False
     assert inventory["_patch_auxiliary_client"]["selected"] is True
+    assert inventory["_patch_session_search_total_deadline"]["selected"] is True
     assert inventory["_patch_dockerfile_backend_dependencies"]["selected"] is True
     assert inventory["_patch_dockerignore"]["selected"] is True
     assert inventory["_patch_compose_plugin_pythonpath"]["selected"] is True

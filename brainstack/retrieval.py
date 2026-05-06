@@ -117,12 +117,19 @@ def _profile_prompt_source_key(row: Dict[str, Any]) -> str:
 
 def _is_behavior_profile_source_item(row: Dict[str, Any]) -> bool:
     category = normalize_profile_slot(str(row.get("category") or "")).strip()
-    stable_key = normalize_profile_slot(str(logical_profile_slot_from_row(row) or "")).strip()
+    logical_key = normalize_profile_slot(str(logical_profile_slot_from_row(row) or "")).strip()
+    stored_key = normalize_profile_slot(str(row.get("stable_key") or "")).strip()
+    storage_key = normalize_profile_slot(
+        str(row.get("storage_key") or "").split("::principal_scope::", 1)[0]
+    ).strip()
+    candidate_keys = {key for key in (logical_key, stored_key, storage_key) if key}
+    if candidate_keys & STYLE_AUTHORITY_RESIDUE_SLOTS:
+        return True
     if category in BEHAVIOR_PROFILE_SOURCE_CATEGORIES:
         return True
-    if category == "preference" and stable_key in BEHAVIOR_PROFILE_SOURCE_SLOTS:
+    if category == "preference" and candidate_keys & BEHAVIOR_PROFILE_SOURCE_SLOTS:
         return True
-    return stable_key in STYLE_AUTHORITY_RESIDUE_SLOTS
+    return False
 
 
 def _has_native_explicit_style_generation(profile_items: Iterable[Dict[str, Any]]) -> bool:
