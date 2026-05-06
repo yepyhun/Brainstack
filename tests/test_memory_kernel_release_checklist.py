@@ -529,6 +529,22 @@ def test_version_metadata_parity_passes_matching_exact_tag(tmp_path: Path) -> No
     assert result.summary["exact_release_tag_versions"] == ["1.0.57"]
 
 
+def test_version_metadata_parity_allows_hotfix_tag_for_same_base_version(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "brainstack-hermes-plugin"\nversion = "1.0.64"\n',
+        encoding="utf-8",
+    )
+
+    result = _check_version_metadata_parity(pyproject_path=pyproject, exact_tags=["v1.0.64-hotfix.1"])
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["pyproject_version"] == "1.0.64"
+    assert result.summary["exact_release_tag_versions"] == ["1.0.64-hotfix.1"]
+    assert result.summary["exact_release_tag_base_versions"] == ["1.0.64"]
+
+
 def test_version_metadata_parity_is_explicit_when_head_has_no_release_tag(tmp_path: Path) -> None:
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(

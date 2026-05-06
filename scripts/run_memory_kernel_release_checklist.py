@@ -363,6 +363,11 @@ def _normalize_release_tag(tag: str) -> str:
     return value
 
 
+def _release_version_base(version: str) -> str:
+    match = re.fullmatch(r"(\d+\.\d+\.\d+)(?:[-+]hotfix(?:[.-]\d+)*)?", str(version or "").strip())
+    return match.group(1) if match else str(version or "").strip()
+
+
 def _current_head_tags() -> list[str]:
     proc = _run(["git", "tag", "--points-at", "HEAD"])
     if proc.returncode != 0:
@@ -397,9 +402,15 @@ def _version_metadata_parity_summary(
     tag_names = list(exact_tags if exact_tags is not None else _current_head_tags())
     release_tags = [tag for tag in tag_names if re.fullmatch(r"v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", tag)]
     tag_versions = sorted({_normalize_release_tag(tag) for tag in release_tags})
+    tag_base_versions = sorted({_release_version_base(version) for version in tag_versions})
     if len(tag_versions) > 1:
         issues.append({"code": "multiple_exact_release_tag_versions", "tag_versions": tag_versions})
-    if pyproject_version and tag_versions and pyproject_version not in tag_versions:
+    if (
+        pyproject_version
+        and tag_versions
+        and pyproject_version not in tag_versions
+        and tag_base_versions != [pyproject_version]
+    ):
         issues.append(
             {
                 "code": "version_metadata_mismatch",
@@ -417,6 +428,7 @@ def _version_metadata_parity_summary(
         "pyproject_version": pyproject_version,
         "exact_release_tags": release_tags,
         "exact_release_tag_versions": tag_versions,
+        "exact_release_tag_base_versions": tag_base_versions,
         "issue_count": len(issues),
         "issues": issues[:20],
     }
