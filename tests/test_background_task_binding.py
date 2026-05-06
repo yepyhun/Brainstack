@@ -69,12 +69,31 @@ def test_installer_materializes_explicit_hermes_owned_background_routes() -> Non
     }
 
 
-def test_installer_records_unavailable_without_silent_main_fallback() -> None:
+def test_installer_defaults_brainstack_background_routes_to_current_main_model() -> None:
+    config: dict = {
+        "model": {"provider": "openai-codex", "default": "gpt-5.5"},
+        "plugins": {"brainstack": {}},
+        "auxiliary": {},
+    }
+
+    status = install_default_background_task_bindings(config)
+
+    for binding in REQUIRED_BACKGROUND_TASK_BINDINGS:
+        route = config["auxiliary"][binding["hermes_task_slot"]]
+        assert route["provider"] == "main"
+        assert route["model"] == ""
+    assert status["summary"]["all_required_routes_explicit"] is True
+    assert status["summary"]["all_required_routes_ready"] is True
+    assert {task["effective_model_label"] for task in status["tasks"]} == {"gpt-5.5"}
+
+
+def test_installer_normalizes_auto_background_routes_to_current_main_model() -> None:
     config: dict = {"plugins": {"brainstack": {}}, "auxiliary": {"flush_memories": {"provider": "auto"}}}
 
     status = install_default_background_task_bindings(config)
 
-    assert config["auxiliary"]["flush_memories"]["provider"] == "auto"
+    assert config["auxiliary"]["flush_memories"]["provider"] == "main"
+    assert config["auxiliary"]["flush_memories"]["model"] == ""
     assert status["tier2_write_allowed"] is False
     assert status["summary"]["configured_unavailable"] == len(REQUIRED_BACKGROUND_TASK_BINDINGS)
 
@@ -104,14 +123,36 @@ def test_runtime_guard_rejects_main_route_without_model(monkeypatch: pytest.Monk
     agent_module = ModuleType("agent")
     auxiliary_module = ModuleType("agent.auxiliary_client")
     auxiliary_module._get_auxiliary_task_config = lambda task: {"provider": "main", "model": ""}  # type: ignore[attr-defined]
+    hermes_cli_module = ModuleType("hermes_cli")
+    config_module = ModuleType("hermes_cli.config")
+    config_module.load_config = lambda: {"model": {"provider": "openai-codex", "default": ""}}  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "agent", agent_module)
     monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary_module)
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_module)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", config_module)
 
     with pytest.raises(RuntimeError, match="AUXILIARY_MAIN_MODEL_UNRESOLVED"):
         require_explicit_hermes_auxiliary_route("flush_memories")
 
 
-def test_installer_marks_main_stepfun_on_codex_unavailable_before_runtime_call() -> None:
+def test_runtime_guard_allows_main_route_when_current_model_is_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_module = ModuleType("agent")
+    auxiliary_module = ModuleType("agent.auxiliary_client")
+    auxiliary_module._get_auxiliary_task_config = lambda task: {"provider": "main", "model": ""}  # type: ignore[attr-defined]
+    hermes_cli_module = ModuleType("hermes_cli")
+    config_module = ModuleType("hermes_cli.config")
+    config_module.load_config = lambda: {"model": {"provider": "openai-codex", "default": "gpt-5.5"}}  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent", agent_module)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary_module)
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_module)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", config_module)
+
+    require_explicit_hermes_auxiliary_route("flush_memories")
+
+
+def test_installer_rewrites_stale_main_model_to_current_main_inheritance() -> None:
     config: dict = {
         "model": {"provider": "openai-codex", "default": "gpt-5.5"},
         "plugins": {"brainstack": {}},
@@ -129,7 +170,9 @@ def test_installer_marks_main_stepfun_on_codex_unavailable_before_runtime_call()
         for task in status["tasks"]
         if task["hermes_task_slot"] == CAPTURE_UNDERSTANDING_HERMES_TASK_SLOT
     )
-    assert capture["status"] == "configured_unavailable"
-    assert capture["route_readiness_status"] == "blocked"
-    assert capture["route_readiness_reason_code"] == "AUXILIARY_MODEL_UNSUPPORTED_FOR_PROVIDER"
-    assert status["summary"]["all_required_routes_ready"] is False
+    assert config["auxiliary"][CAPTURE_UNDERSTANDING_HERMES_TASK_SLOT]["provider"] == "main"
+    assert config["auxiliary"][CAPTURE_UNDERSTANDING_HERMES_TASK_SLOT]["model"] == ""
+    assert capture["status"] == "active"
+    assert capture["route_readiness_status"] == "ready"
+    assert capture["effective_model_label"] == "gpt-5.5"
+    assert status["summary"]["all_required_routes_ready"] is True

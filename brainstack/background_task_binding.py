@@ -36,6 +36,12 @@ BACKGROUND_TASK_SLOT_BY_ID = {
     binding["task_id"]: binding["hermes_task_slot"] for binding in REQUIRED_BACKGROUND_TASK_BINDINGS
 }
 
+BACKGROUND_TASK_DEFAULT_TIMEOUTS = {
+    BACKGROUND_CONSOLIDATION_HERMES_TASK_SLOT: 30,
+    CAPTURE_UNDERSTANDING_HERMES_TASK_SLOT: 5,
+    QUERY_UNDERSTANDING_HERMES_TASK_SLOT: 5,
+}
+
 VALID_BACKGROUND_TASK_STATUSES = {"active", "configured_unavailable", "experimental", "blocked"}
 
 READY_ROUTE_STATUS = "ready"
@@ -85,6 +91,27 @@ def _main_model(config: Mapping[str, Any]) -> str:
     if isinstance(model_config, Mapping):
         return _text(model_config.get("default"))
     return ""
+
+
+def _normalize_brainstack_auxiliary_route(config: dict[str, Any], task_slot: str) -> Mapping[str, Any]:
+    auxiliary = config["auxiliary"]
+    aux_entry = _mapping(auxiliary.get(task_slot))
+    if not isinstance(aux_entry, dict):
+        aux_entry = dict(aux_entry)
+
+    provider = _text(aux_entry.get("provider")).lower()
+    if not provider or provider == "auto":
+        aux_entry["provider"] = "main"
+        aux_entry["model"] = ""
+    elif provider == "main":
+        aux_entry["provider"] = "main"
+        # Brainstack-owned background routes follow the current Hermes main
+        # model. Pinning a model here makes old model names survive upgrades.
+        aux_entry["model"] = ""
+
+    aux_entry.setdefault("timeout", BACKGROUND_TASK_DEFAULT_TIMEOUTS.get(task_slot, 30))
+    auxiliary[task_slot] = aux_entry
+    return aux_entry
 
 
 def _model_supported_by_provider(*, provider: str, model: str) -> tuple[bool, str]:
@@ -314,7 +341,7 @@ def install_default_background_task_bindings(config: dict[str, Any]) -> dict[str
     for binding in REQUIRED_BACKGROUND_TASK_BINDINGS:
         task_id = binding["task_id"]
         hermes_task_slot = binding["hermes_task_slot"]
-        aux_entry = _mapping(config["auxiliary"].get(hermes_task_slot))
+        aux_entry = _normalize_brainstack_auxiliary_route(config, hermes_task_slot)
         provider = _text(aux_entry.get("provider")).lower()
         model = _text(aux_entry.get("model"))
         readiness = resolve_auxiliary_route_readiness(
@@ -359,10 +386,24 @@ def require_explicit_hermes_auxiliary_route(task_slot: str) -> None:
     if not provider or provider == "auto":
         raise RuntimeError(f"Brainstack background task {task_slot!r} requires an explicit Hermes auxiliary route")
     model = _text(_mapping(task_config).get("model"))
+    main_provider = ""
+    main_model = ""
+    if provider == "main" and not model:
+        try:
+            from hermes_cli.config import load_config  # type: ignore[import-not-found,import-untyped]
+
+            config = load_config()
+            main_provider = _main_provider(config)
+            main_model = _main_model(config)
+        except Exception:
+            main_provider = ""
+            main_model = ""
     readiness = resolve_auxiliary_route_readiness(
         task_slot=task_slot,
         provider_label=provider,
         model_label=model,
+        main_provider_label=main_provider,
+        main_model_label=main_model,
     )
     if readiness["status"] != READY_ROUTE_STATUS:
         raise RuntimeError(
