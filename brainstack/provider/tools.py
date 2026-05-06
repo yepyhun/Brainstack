@@ -17,7 +17,7 @@ from ..proactive_agent_contract import (
     list_proactive_agent_items,
     set_proactive_mode_from_explicit_request,
 )
-from ..style_contract import STYLE_CONTRACT_SLOT
+from ..style_contract import STYLE_CONTRACT_SLOT, list_style_contract_rules
 from ..tool_schemas import proactive_control_tool_schema
 from .provider_protocol import ProviderRuntimeBase
 from .runtime import (
@@ -127,6 +127,9 @@ def _style_contract_materialization_receipt(
     elif reason_code == "not_explicit_style_contract":
         agent_safe_status = "source_profile_only_not_rule_pack"
         agent_safe_repair_action = "ask_user_for_exact_structured_rule_pack_or_use_rule_id_correction_surface"
+    elif reason_code == "would_shrink_existing_style_contract":
+        agent_safe_status = "source_profile_only_would_shrink_active_card"
+        agent_safe_repair_action = "use_dedicated_active_card_update_surface_or_write_full_rule_pack"
     elif reason_code == "source_role_not_user_authority":
         agent_safe_status = "blocked_non_user_authority"
         agent_safe_repair_action = "ask_user_to_confirm_exact_rules_before_materializing"
@@ -646,6 +649,28 @@ class ProviderToolsMixin(ProviderRuntimeBase):
                 source_profile_category=str(capture.get("category") or ""),
             )
             return
+        existing = store.get_profile_item(
+            stable_key=STYLE_CONTRACT_SLOT,
+            principal_scope_key=self._principal_scope_key,
+        )
+        if isinstance(existing, Mapping):
+            existing_rules = list_style_contract_rules(
+                raw_text=existing.get("content"),
+                metadata=existing.get("metadata"),
+            )
+            candidate_rules = list_style_contract_rules(
+                raw_text=candidate.get("content"),
+                metadata=candidate.get("metadata"),
+            )
+            if len(existing_rules) >= 3 and len(candidate_rules) < len(existing_rules):
+                receipt["style_contract_materialization"] = _style_contract_materialization_receipt(
+                    status="skipped",
+                    reason_code="would_shrink_existing_style_contract",
+                    rule_count=len(existing_rules),
+                    source_profile_stable_key=str(capture.get("stable_key") or ""),
+                    source_profile_category=str(capture.get("category") or ""),
+                )
+                return
         candidate_metadata = dict(candidate.get("metadata") or {})
         candidate_metadata.update(metadata)
         store.upsert_profile_item(

@@ -570,6 +570,54 @@ def test_single_style_preference_does_not_patch_existing_card_without_correction
         provider.shutdown()
 
 
+def test_one_rule_style_contract_addition_does_not_replace_existing_active_card(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        old_lines = [
+            "Use formal wording.",
+            "Keep replies concise.",
+            "Report tool-backed certainty.",
+        ]
+        _write_style_rules(provider, old_lines)
+        receipt = json.loads(
+            provider.handle_tool_call(
+                "brainstack_remember",
+                {
+                    "shelf": "profile",
+                    "stable_key": "preference.public_fixture_single_rule_addition",
+                    "category": "style_preference",
+                    "content": "User style contract rule-pack addition:\n- Use plain language.",
+                    "source_role": "user",
+                    "authority_class": "profile",
+                    "confidence": 0.99,
+                    "metadata": {"target_slot": "preference.public_fixture_single_rule_addition"},
+                },
+            )
+        )
+
+        assert receipt["status"] == "committed"
+        assert receipt["style_contract_materialization"]["status"] == "skipped"
+        assert (
+            receipt["style_contract_materialization"]["reason_code"]
+            == "would_shrink_existing_style_contract"
+        )
+        assert receipt["style_contract_materialization"]["active_card_mutated"] is False
+        assert (
+            receipt["style_contract_materialization"]["agent_safe_status"]
+            == "source_profile_only_would_shrink_active_card"
+        )
+        assert provider._store is not None
+        canonical = provider._store.get_profile_item(
+            stable_key=STYLE_CONTRACT_SLOT,
+            principal_scope_key=provider._principal_scope_key,
+        )
+        assert canonical is not None
+        assert "Use formal wording." in canonical["content"]
+        assert "Use plain language." not in canonical["content"]
+    finally:
+        provider.shutdown()
+
+
 def test_user_supplied_patch_authorization_metadata_cannot_patch_active_card(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     try:
