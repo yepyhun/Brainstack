@@ -96,7 +96,7 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "removal_condition": "Hermes provides a first-class provider activation config writer.",
     },
     "_patch_auxiliary_client": {
-        "category": "compat_hotfix",
+        "category": "required_seam",
         "owner": "host-provider-hotfix",
         "removal_condition": "Hermes auxiliary task resolver natively supports provider=main model inheritance.",
     },

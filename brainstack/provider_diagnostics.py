@@ -108,9 +108,28 @@ def _tier2_runtime_route_status(config: Mapping[str, Any] | None) -> dict[str, A
         except Exception:
             effective_model = ""
             effective_model_source = "unavailable"
+    extractor_override = callable(cfg.get("_tier2_extractor"))
+    if runtime == "hindsight_public_api_bridge":
+        binding_status = "configured_unbound"
+        binding_reason_code = "TIER2_HINDSIGHT_PUBLIC_API_BRIDGE_UNBOUND"
+        actual_worker_path = "internal_extractor"
+        runtime_invoked_by_worker = False
+        if extractor_override:
+            binding_status = "test_extractor_override"
+            binding_reason_code = "TIER2_TEST_EXTRACTOR_OVERRIDE_NOT_RUNTIME_BINDING"
+            actual_worker_path = "test_injected_extractor"
+    else:
+        binding_status = "bound"
+        binding_reason_code = "TIER2_INTERNAL_EXTRACTOR_BOUND"
+        actual_worker_path = "internal_extractor" if not extractor_override else "test_injected_extractor"
+        runtime_invoked_by_worker = True
     return {
         "schema": "brainstack.tier2_runtime_route.v1",
         "runtime": runtime,
+        "actual_worker_path": actual_worker_path,
+        "binding_status": binding_status,
+        "binding_reason_code": binding_reason_code,
+        "runtime_invoked_by_worker": runtime_invoked_by_worker,
         "mode": mode,
         "hindsight_mode": hindsight_mode,
         "llm_provider": llm_provider or "default",
@@ -208,6 +227,7 @@ def build_provider_memory_kernel_doctor(
     last_tier2_schedule: Mapping[str, Any] | None,
     last_tier2_batch_result: Mapping[str, Any] | None,
     tier2_batch_history_count: int,
+    config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if store is None:
         return {
@@ -232,6 +252,7 @@ def build_provider_memory_kernel_doctor(
             "last_schedule": dict(last_tier2_schedule or {}),
             "last_result": dict(last_tier2_batch_result or {}),
             "history_count": tier2_batch_history_count,
+            "runtime_route": _tier2_runtime_route_status(config),
         },
     )
 
@@ -479,15 +500,24 @@ def _compact_tier2_route(route: Any) -> dict[str, Any]:
         compact_background_tasks = {
             "schema": _normalize_compact_text(background_task_status.get("schema")),
             "tier2_write_allowed": bool(background_task_status.get("tier2_write_allowed")),
-            "summary": dict(summary) if isinstance(summary, Mapping) else {},
+            "route_counts": {
+                key: int(summary.get(key) or 0)
+                for key in ("active", "configured_unavailable", "experimental", "blocked")
+            }
+            if isinstance(summary, Mapping)
+            else {},
         }
     return {
         "runtime": _normalize_compact_text(route.get("runtime")),
+        "actual_worker_path": _normalize_compact_text(route.get("actual_worker_path")),
+        "binding_status": _normalize_compact_text(route.get("binding_status")),
+        "binding_reason_code": _normalize_compact_text(route.get("binding_reason_code")),
+        "runtime_invoked_by_worker": bool(route.get("runtime_invoked_by_worker")),
         "mode": _normalize_compact_text(route.get("mode")),
         "hindsight_mode": _normalize_compact_text(route.get("hindsight_mode")),
         "llm_provider": _normalize_compact_text(route.get("llm_provider")),
         "effective_model": _normalize_compact_text(route.get("effective_model")),
-        "model_source": _normalize_compact_text(route.get("model_source")),
+        "model_source": _normalize_compact_text(route.get("effective_model_source") or route.get("model_source")),
         "uses_legacy_gpt_5_2_codex": bool(route.get("uses_legacy_gpt_5_2_codex")),
         "background_task_status": compact_background_tasks,
     }
@@ -555,6 +585,7 @@ def _compact_doctor_report(report: Any, *, strict_requested: bool) -> dict[str, 
                 "active": bool(raw.get("active")),
                 "requested": bool(raw.get("requested")),
                 "reason": _trim_compact_text(raw.get("reason"), limit=140),
+                "reason_code": _normalize_compact_text(raw.get("reason_code")),
             }
     return {
         "schema": _normalize_compact_text(report.get("schema")),
@@ -568,6 +599,7 @@ def _compact_doctor_report(report: Any, *, strict_requested: bool) -> dict[str, 
                 "status": _normalize_compact_text(issue.get("status")) if isinstance(issue, Mapping) else "",
                 "severity": _normalize_compact_text(issue.get("severity")) if isinstance(issue, Mapping) else "",
                 "reason": _trim_compact_text(issue.get("reason"), limit=160) if isinstance(issue, Mapping) else "",
+                "reason_code": _normalize_compact_text(issue.get("reason_code")) if isinstance(issue, Mapping) else "",
             }
             for issue in issues[:5]
         ],

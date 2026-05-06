@@ -467,6 +467,25 @@ CREATE TABLE IF NOT EXISTS corpus_sections (
 CREATE INDEX IF NOT EXISTS idx_corpus_sections_document
 ON corpus_sections(document_id, section_index);
 
+CREATE TABLE IF NOT EXISTS source_sync_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL UNIQUE,
+    source_set_id TEXT NOT NULL,
+    connector TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'manual',
+    deletion_policy TEXT NOT NULL DEFAULT 'retain_missing',
+    status TEXT NOT NULL,
+    cursor TEXT NOT NULL DEFAULT '',
+    fingerprint TEXT NOT NULL DEFAULT '',
+    counts_json TEXT NOT NULL DEFAULT '{}',
+    issue_json TEXT NOT NULL DEFAULT '[]',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_sync_runs_source_created
+ON source_sync_runs(source_set_id, created_at DESC);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS corpus_section_fts USING fts5(
     title,
     heading,

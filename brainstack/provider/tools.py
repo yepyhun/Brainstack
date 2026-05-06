@@ -851,6 +851,7 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             last_tier2_schedule=self._last_tier2_schedule,
             last_tier2_batch_result=self._last_tier2_batch_result,
             tier2_batch_history_count=len(self._tier2_batch_history),
+            config=self._config,
         )
 
     def query_inspect(self, *, query: str, session_id: str | None = None) -> Dict[str, Any]:

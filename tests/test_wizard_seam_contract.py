@@ -106,6 +106,30 @@ def test_compat_memory_manager_patch_adds_metadata_seam(tmp_path: Path) -> None:
     assert "private recalled memory context" not in text
 
 
+def test_core_host_patch_mode_applies_auxiliary_main_model_inheritance(tmp_path: Path) -> None:
+    auxiliary_client = tmp_path / "auxiliary_client.py"
+    auxiliary_client.write_text(
+        "def resolve_provider_client(provider=None, model=None):\n"
+        "    cfg_provider = provider\n"
+        "    cfg_model = None\n"
+        "    resolved_model = model or cfg_model\n"
+        "    return provider, resolved_model\n",
+        encoding="utf-8",
+    )
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_auxiliary_client",
+        auxiliary_client,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    text = auxiliary_client.read_text(encoding="utf-8")
+
+    assert actions == ["auxiliary_client:inherit_main_model"]
+    assert 'explicit_provider == "main"' in text
+    assert "_read_main_model() or None" in text
+
+
 def test_brainstack_projection_carries_private_memory_and_scheduler_contract(
     tmp_path: Path,
 ) -> None:

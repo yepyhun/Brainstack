@@ -1013,6 +1013,164 @@ def _check_projection_semantics_runtime_parity(tmp: Path) -> CheckResult:
     )
 
 
+def _check_tier2_truthful_diagnostics(tmp: Path) -> CheckResult:
+    out = tmp / "tier2_truthful_diagnostics.json"
+    command = [sys.executable, "scripts/verify_tier2_truthful_diagnostics.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    failed_probe = data.get("failed_run_probe") if isinstance(data.get("failed_run_probe"), dict) else {}
+    unbound_probe = data.get("unbound_runtime_probe") if isinstance(data.get("unbound_runtime_probe"), dict) else {}
+    issues = data.get("issues") if isinstance(data.get("issues"), list) else []
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and issues == []
+        and failed_probe.get("tier2_reason_code") == "TIER2_PERSISTED_RUN_FAILED"
+        and failed_probe.get("doctor_verdict") == "fail"
+        and unbound_probe.get("route_binding_status") == "configured_unbound"
+        and unbound_probe.get("tier2_reason_code") == "TIER2_RUNTIME_CONFIGURED_UNBOUND"
+    )
+    return CheckResult(
+        name="tier2_truthful_diagnostics",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "issue_count": len(issues),
+            "failed_run_tier2_reason_code": failed_probe.get("tier2_reason_code"),
+            "failed_run_doctor_verdict": failed_probe.get("doctor_verdict"),
+            "failed_run_stats_status": failed_probe.get("stats_status"),
+            "unbound_route_binding_status": unbound_probe.get("route_binding_status"),
+            "unbound_route_reason_code": unbound_probe.get("route_binding_reason_code"),
+            "unbound_tier2_reason_code": unbound_probe.get("tier2_reason_code"),
+        },
+    )
+
+
+def _check_typed_graph_producer_population(tmp: Path) -> CheckResult:
+    out = tmp / "typed_graph_producer_population.json"
+    command = [sys.executable, "scripts/verify_typed_graph_producer_population.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    projected = data.get("projected_probe") if isinstance(data.get("projected_probe"), dict) else {}
+    rejected = data.get("rejected_probe") if isinstance(data.get("rejected_probe"), dict) else {}
+    empty = data.get("empty_probe") if isinstance(data.get("empty_probe"), dict) else {}
+    issues = data.get("issues") if isinstance(data.get("issues"), list) else []
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and issues == []
+        and projected.get("producer_state") == "projected"
+        and projected.get("relation_count") == 1
+        and rejected.get("producer_state") == "rejected"
+        and rejected.get("relation_count") == 0
+        and empty.get("graph_status") == "active"
+        and empty.get("producer_state") == "no_input"
+    )
+    return CheckResult(
+        name="typed_graph_producer_population",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "issue_count": len(issues),
+            "projected_state": projected.get("producer_state"),
+            "projected_relation_count": projected.get("relation_count"),
+            "rejected_state": rejected.get("producer_state"),
+            "rejected_relation_count": rejected.get("relation_count"),
+            "empty_graph_status": empty.get("graph_status"),
+            "empty_producer_state": empty.get("producer_state"),
+        },
+    )
+
+
+def _check_source_sync_spine(tmp: Path) -> CheckResult:
+    out = tmp / "source_sync_spine.json"
+    command = [sys.executable, "scripts/verify_source_sync_spine.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    issues = data.get("issues") if isinstance(data.get("issues"), list) else []
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and issues == []
+        and data.get("full_sync_status") == "changed"
+        and data.get("unchanged_sync_status") == "unchanged"
+        and data.get("changed_sync_status") == "changed"
+        and data.get("delete_sync_status") == "changed"
+        and data.get("truth_authority") == "admission_receipts_only"
+        and data.get("raw_private_source_in_status") is False
+    )
+    return CheckResult(
+        name="source_sync_spine",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "issue_count": len(issues),
+            "full_sync_status": data.get("full_sync_status"),
+            "unchanged_sync_status": data.get("unchanged_sync_status"),
+            "changed_sync_status": data.get("changed_sync_status"),
+            "delete_sync_status": data.get("delete_sync_status"),
+            "latest_status": data.get("latest_status"),
+            "truth_authority": data.get("truth_authority"),
+            "raw_private_source_in_status": data.get("raw_private_source_in_status"),
+        },
+    )
+
+
+def _check_retrieval_context_envelope(tmp: Path) -> CheckResult:
+    out = tmp / "retrieval_context_envelope.json"
+    command = [sys.executable, "scripts/verify_retrieval_context_envelope.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    issues = data.get("issues") if isinstance(data.get("issues"), list) else []
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and issues == []
+        and data.get("current_route") == "current_truth"
+        and data.get("current_truth_count") == 1
+        and data.get("stale_prior_conflict_count") == 1
+        and data.get("corpus_route") == "corpus"
+        and data.get("source_expand_handles") == 1
+        and data.get("no_memory_route") == "no_memory_minimal"
+        and data.get("no_memory_semantic_enabled") is False
+        and data.get("raw_private_payload_in_envelope") is False
+        and data.get("raw_private_scope_in_envelope") is False
+    )
+    return CheckResult(
+        name="retrieval_context_envelope",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "issue_count": len(issues),
+            "current_route": data.get("current_route"),
+            "current_truth_count": data.get("current_truth_count"),
+            "stale_prior_conflict_count": data.get("stale_prior_conflict_count"),
+            "corpus_route": data.get("corpus_route"),
+            "source_expand_handles": data.get("source_expand_handles"),
+            "no_memory_route": data.get("no_memory_route"),
+            "no_memory_semantic_enabled": data.get("no_memory_semantic_enabled"),
+            "raw_private_payload_in_envelope": data.get("raw_private_payload_in_envelope"),
+            "raw_private_scope_in_envelope": data.get("raw_private_scope_in_envelope"),
+        },
+    )
+
+
 def _check_persistent_bloat_rebuild(tmp: Path) -> CheckResult:
     out = tmp / "persistent_bloat_rebuild.json"
     command = [sys.executable, "scripts/verify_persistent_bloat_rebuild.py", "--out", str(out)]
@@ -1732,6 +1890,10 @@ def run_checklist(
             _check_graph_conflict_lifecycle(tmp),
             _check_public_fixtures(),
             _check_projection_semantics_runtime_parity(tmp),
+            _check_tier2_truthful_diagnostics(tmp),
+            _check_typed_graph_producer_population(tmp),
+            _check_source_sync_spine(tmp),
+            _check_retrieval_context_envelope(tmp),
             _check_hermes_proactive_runtime_parity(tmp),
             _check_behavior_card_delivery(tmp),
             _check_live_crash_regression_guard(tmp),

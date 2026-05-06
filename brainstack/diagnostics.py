@@ -13,6 +13,7 @@ from .literal_index import detect_literal_tokens, redact_literal_text, semantic_
 from .answerability import build_memory_answerability
 from .backend_health_contract import build_backend_health_contract
 from .retrieval_candidate import build_candidate_trace
+from .source_sync_spine import build_source_sync_status
 from .trace_tiering import build_compact_query_trace
 from .working_memory_allocator import build_global_allocator_shadow
 
@@ -45,6 +46,7 @@ _COUNT_TABLES: tuple[str, ...] = (
     "publish_journal",
     "corpus_documents",
     "corpus_sections",
+    "source_sync_runs",
     "semantic_evidence_index",
     "tier2_run_records",
     "canonical_memory_events",
@@ -66,6 +68,7 @@ _LAST_WRITE_COLUMNS: dict[str, str] = {
     "publish_journal": "updated_at",
     "corpus_documents": "updated_at",
     "corpus_sections": "created_at",
+    "source_sync_runs": "created_at",
     "semantic_evidence_index": "updated_at",
     "tier2_run_records": "updated_at",
     "canonical_memory_events": "created_at",
@@ -153,35 +156,261 @@ def _tier2_capability(tier2_state: Mapping[str, Any] | None) -> Dict[str, Any]:
             "active": False,
             "status": "unavailable",
             "reason": "Tier-2 state was not supplied to the doctor surface.",
+            "reason_code": "TIER2_STATE_UNAVAILABLE",
         }
     enabled = bool(tier2_state.get("enabled"))
     running = bool(tier2_state.get("running"))
     raw_last_result = tier2_state.get("last_result")
     last_result: Mapping[str, Any] = raw_last_result if isinstance(raw_last_result, Mapping) else {}
     last_status = str(last_result.get("status") or "").strip().lower()
+    runtime_route = tier2_state.get("runtime_route")
+    route: Mapping[str, Any] = runtime_route if isinstance(runtime_route, Mapping) else {}
+    binding_status = str(route.get("binding_status") or "").strip().lower()
     if not enabled:
         status = "unavailable"
         reason = "Tier-2 extraction is disabled by configuration."
+        reason_code = "TIER2_DISABLED"
+    elif binding_status == "configured_unbound":
+        status = "unavailable"
+        reason = "Tier-2 runtime is configured but not bound to the actual worker path."
+        reason_code = "TIER2_RUNTIME_CONFIGURED_UNBOUND"
     elif running:
         status = "active"
         reason = "Tier-2 worker is currently running."
+        reason_code = "TIER2_WORKER_RUNNING"
     elif last_status in {"failed", "error"}:
         status = "degraded"
         reason = "The latest Tier-2 run failed."
+        reason_code = "TIER2_LAST_RESULT_FAILED"
     else:
         status = "active"
         reason = "Tier-2 extraction is enabled."
+        reason_code = "TIER2_ENABLED"
     return {
         "kind": "tier2",
         "requested": enabled,
         "active": enabled and status == "active",
         "status": status,
         "reason": reason,
+        "reason_code": reason_code,
         "pending_turns": int(tier2_state.get("pending_turns") or 0),
         "last_schedule": dict(tier2_state.get("last_schedule") or {}),
         "last_result": dict(last_result),
         "history_count": int(tier2_state.get("history_count") or 0),
+        "runtime_route": dict(route),
     }
+
+
+def _public_tier2_run_summary(record: Mapping[str, Any]) -> dict[str, Any]:
+    no_op_reasons = record.get("no_op_reasons") if isinstance(record.get("no_op_reasons"), list) else []
+    extracted_counts = record.get("extracted_counts") if isinstance(record.get("extracted_counts"), Mapping) else {}
+    action_counts = record.get("action_counts") if isinstance(record.get("action_counts"), Mapping) else {}
+    return {
+        "run_id": str(record.get("run_id") or ""),
+        "turn_number": int(record.get("turn_number") or 0),
+        "trigger_reason": str(record.get("trigger_reason") or ""),
+        "request_status": str(record.get("request_status") or ""),
+        "parse_status": str(record.get("parse_status") or ""),
+        "status": str(record.get("status") or ""),
+        "transcript_count": int(record.get("transcript_count") or 0),
+        "extracted_counts": dict(extracted_counts),
+        "action_counts": dict(action_counts),
+        "writes_performed": int(record.get("writes_performed") or 0),
+        "no_op_reasons": [str(item) for item in no_op_reasons[:8] if str(item or "").strip()],
+        "duration_ms": int(record.get("duration_ms") or 0),
+        "error_recorded": bool(str(record.get("error_reason") or "").strip()),
+        "created_at": str(record.get("created_at") or ""),
+        "updated_at": str(record.get("updated_at") or ""),
+    }
+
+
+def _tier2_record_failed(record: Mapping[str, Any]) -> bool:
+    request_status = str(record.get("request_status") or "").strip().lower()
+    status = str(record.get("status") or "").strip().lower()
+    return request_status in {"failed", "error"} or status in {"failed", "error"}
+
+
+def _tier2_record_route_unavailable(record: Mapping[str, Any]) -> bool:
+    status = str(record.get("status") or "").strip().lower()
+    reasons = record.get("no_op_reasons") if isinstance(record.get("no_op_reasons"), list) else []
+    return status == "skipped_background_task_unavailable" or "background_consolidation_route_unavailable" in {
+        str(reason) for reason in reasons
+    }
+
+
+def _apply_persistent_tier2_health(tier2: dict[str, Any], recent_records: list[Mapping[str, Any]]) -> None:
+    if not recent_records:
+        tier2["persistent_run_health"] = {
+            "status": "no_runs",
+            "sample_size": 0,
+            "failed_count": 0,
+            "route_unavailable_count": 0,
+        }
+        return
+
+    summaries = [_public_tier2_run_summary(record) for record in recent_records]
+    latest = recent_records[0]
+    latest_failed = _tier2_record_failed(latest)
+    latest_route_unavailable = _tier2_record_route_unavailable(latest)
+    failed_count = sum(1 for record in recent_records if _tier2_record_failed(record))
+    route_unavailable_count = sum(1 for record in recent_records if _tier2_record_route_unavailable(record))
+
+    tier2["latest_persistent_run"] = summaries[0]
+    tier2["recent_persistent_runs"] = summaries[:3]
+    tier2["persistent_run_health"] = {
+        "status": "failed" if latest_failed else ("route_unavailable" if latest_route_unavailable else "ok"),
+        "sample_size": len(recent_records),
+        "failed_count": failed_count,
+        "route_unavailable_count": route_unavailable_count,
+        "latest_failed": latest_failed,
+        "latest_route_unavailable": latest_route_unavailable,
+        "public_safe": True,
+    }
+
+    if not tier2.get("requested"):
+        return
+    if latest_route_unavailable:
+        tier2["active"] = False
+        tier2["status"] = "unavailable"
+        tier2["reason"] = "The latest persisted Tier-2 run could not use a configured background route."
+        tier2["reason_code"] = "TIER2_PERSISTED_ROUTE_UNAVAILABLE"
+    elif latest_failed and tier2.get("status") == "active":
+        tier2["active"] = False
+        tier2["status"] = "degraded"
+        tier2["reason"] = "The latest persisted Tier-2 run failed."
+        tier2["reason_code"] = "TIER2_PERSISTED_RUN_FAILED"
+
+
+def _graph_candidate_counts(record: Mapping[str, Any] | None) -> dict[str, int]:
+    if not isinstance(record, Mapping):
+        return {"relations": 0, "inferred_relations": 0, "typed_entities": 0, "total": 0}
+    raw_counts = record.get("extracted_counts")
+    counts = raw_counts if isinstance(raw_counts, Mapping) else {}
+    output = {
+        "relations": int(counts.get("relations") or 0),
+        "inferred_relations": int(counts.get("inferred_relations") or 0),
+        "typed_entities": int(counts.get("typed_entities") or 0),
+    }
+    output["total"] = sum(output.values())
+    return output
+
+
+def _graph_action_counts(record: Mapping[str, Any] | None) -> dict[str, int]:
+    if not isinstance(record, Mapping):
+        return {"accepted": 0, "rejected": 0, "noop": 0}
+    raw_counts = record.get("action_counts")
+    counts = raw_counts if isinstance(raw_counts, Mapping) else {}
+    accepted = sum(int(counts.get(action) or 0) for action in ("ADD", "UPDATE", "MERGE_ALIAS"))
+    rejected = sum(
+        int(counts.get(action) or 0)
+        for action in (
+            "QUARANTINE_PROPOSAL",
+            "REJECT_ASSISTANT_AUTHORED",
+            "REJECT_LOW_CONFIDENCE",
+            "MARK_CORRECTED_FALSE_EVENT",
+            "BLOCK_DERIVED_TRUTH",
+        )
+    )
+    noop = int(counts.get("NONE") or 0)
+    return {"accepted": accepted, "rejected": rejected, "noop": noop}
+
+
+def _graph_producer_capability(
+    *,
+    row_counts: Mapping[str, int],
+    recent_tier2_runs: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    graph_rows = {
+        "entities": int(row_counts.get("graph_entities") or 0),
+        "relations": int(row_counts.get("graph_relations") or 0),
+        "inferred_relations": int(row_counts.get("graph_inferred_relations") or 0),
+        "states": int(row_counts.get("graph_states") or 0),
+        "conflicts": int(row_counts.get("graph_conflicts") or 0),
+    }
+    graph_row_total = sum(graph_rows.values())
+    latest = recent_tier2_runs[0] if recent_tier2_runs else {}
+    candidate_counts = _graph_candidate_counts(latest)
+    action_counts = _graph_action_counts(latest)
+    latest_status = str(latest.get("status") or "").strip().lower() if isinstance(latest, Mapping) else ""
+    no_op_reasons = latest.get("no_op_reasons") if isinstance(latest.get("no_op_reasons"), list) else []
+    requested = bool(graph_row_total or recent_tier2_runs)
+    capability = {
+        "kind": "graph_producer",
+        "requested": requested,
+        "active": True,
+        "status": "active",
+        "producer_state": "no_input",
+        "reason_code": "GRAPH_PRODUCER_NO_INPUT",
+        "reason": "No accepted typed graph input has been observed yet.",
+        "latest_run_id": str(latest.get("run_id") or "") if isinstance(latest, Mapping) else "",
+        "latest_status": latest_status,
+        "latest_graph_candidate_counts": candidate_counts,
+        "latest_action_counts": action_counts,
+        "graph_row_counts": graph_rows,
+        "public_safe": True,
+    }
+    if graph_row_total:
+        capability.update(
+            {
+                "producer_state": "projected",
+                "reason_code": "GRAPH_PRODUCER_PROJECTED_TYPED_INPUT",
+                "reason": "Accepted typed graph input has projected graph rows.",
+            }
+        )
+        return capability
+    if not recent_tier2_runs:
+        capability["requested"] = False
+        return capability
+    if latest_status == "failed":
+        capability.update(
+            {
+                "active": False,
+                "status": "degraded",
+                "producer_state": "failed",
+                "reason_code": "GRAPH_PRODUCER_BLOCKED_BY_TIER2_FAILURE",
+                "reason": "The latest persisted Tier-2 producer run failed before graph projection.",
+            }
+        )
+        return capability
+    if "background_consolidation_route_unavailable" in {str(reason) for reason in no_op_reasons}:
+        capability.update(
+            {
+                "active": False,
+                "status": "degraded",
+                "producer_state": "route_unavailable",
+                "reason_code": "GRAPH_PRODUCER_ROUTE_UNAVAILABLE",
+                "reason": "The typed graph producer route was not available.",
+            }
+        )
+        return capability
+    if candidate_counts["total"] <= 0:
+        capability.update(
+            {
+                "producer_state": "no_graph_candidates",
+                "reason_code": "GRAPH_PRODUCER_NO_TYPED_GRAPH_CANDIDATES",
+                "reason": "The latest Tier-2 run emitted no typed graph candidates.",
+            }
+        )
+        return capability
+    if action_counts["accepted"] > 0:
+        capability.update(
+            {
+                "active": False,
+                "status": "degraded",
+                "producer_state": "accepted_no_projection",
+                "reason_code": "GRAPH_PRODUCER_ACCEPTED_WITHOUT_PROJECTION",
+                "reason": "Typed graph input was accepted but no graph rows are visible.",
+            }
+        )
+        return capability
+    capability.update(
+        {
+            "producer_state": "rejected",
+            "reason_code": "GRAPH_PRODUCER_TYPED_INPUT_REJECTED",
+            "reason": "Typed graph candidates were rejected or quarantined before graph projection.",
+        }
+    )
+    return capability
 
 
 def _capability_issue_severity(capability: Mapping[str, Any]) -> str:
@@ -229,9 +458,13 @@ def _query_capability_health(store: BrainstackStore) -> Dict[str, Any]:
     db_substrate_raw = capability_map.get("db_substrate")
     semantic_index_raw = capability_map.get("semantic_index")
     graph_recall_raw = capability_map.get("graph_recall")
+    graph_producer_raw = capability_map.get("graph_producer")
+    source_sync_raw = capability_map.get("source_sync_spine")
     db_substrate: Mapping[str, Any] = db_substrate_raw if isinstance(db_substrate_raw, Mapping) else {}
     semantic_index: Mapping[str, Any] = semantic_index_raw if isinstance(semantic_index_raw, Mapping) else {}
     graph_recall: Mapping[str, Any] = graph_recall_raw if isinstance(graph_recall_raw, Mapping) else {}
+    graph_producer: Mapping[str, Any] = graph_producer_raw if isinstance(graph_producer_raw, Mapping) else {}
+    source_sync: Mapping[str, Any] = source_sync_raw if isinstance(source_sync_raw, Mapping) else {}
     backend_health = build_backend_health_contract(
         {
             "graph": graph,
@@ -252,6 +485,8 @@ def _query_capability_health(store: BrainstackStore) -> Dict[str, Any]:
         "chroma": _named_backend_health(corpus, backend_name="chroma"),
         "semantic_index": dict(semantic_index),
         "graph_recall": dict(graph_recall),
+        "graph_producer": dict(graph_producer),
+        "source_sync_spine": dict(source_sync),
         "lexical_index": {
             "kind": "lexical_index",
             "requested": True,
@@ -291,9 +526,17 @@ def build_memory_kernel_doctor(
     )
     tier2 = _tier2_capability(tier2_state)
     db_substrate = build_db_substrate_snapshot(store.conn)
-    latest_tier2_run = store.latest_tier2_run_record()
-    if latest_tier2_run:
-        tier2["latest_persistent_run"] = latest_tier2_run
+    recent_tier2_runs: list[Mapping[str, Any]] = []
+    try:
+        if hasattr(store, "recent_tier2_run_records"):
+            recent_tier2_runs = list(store.recent_tier2_run_records(limit=5))
+        else:
+            latest_tier2_run = store.latest_tier2_run_record()
+            if latest_tier2_run:
+                recent_tier2_runs = [latest_tier2_run]
+    except Exception:
+        recent_tier2_runs = []
+    _apply_persistent_tier2_health(tier2, recent_tier2_runs)
     semantic_index = dict(store.semantic_evidence_channel_status())
     semantic_index.update(
         {
@@ -310,8 +553,29 @@ def build_memory_kernel_doctor(
             "active": str(graph_recall.get("status") or "") == "active",
         }
     )
+    graph_producer = _graph_producer_capability(
+        row_counts=row_counts,
+        recent_tier2_runs=recent_tier2_runs,
+    )
+    source_sync = build_source_sync_status(store)
+    source_sync.update(
+        {
+            "kind": "source_sync_spine",
+            "requested": bool(source_sync.get("run_count") or source_sync.get("active_document_count")),
+            "active": str(source_sync.get("status") or "") in {"active", "idle"},
+        }
+    )
     issues: list[Dict[str, str]] = []
-    for capability in (db_substrate, graph, corpus, tier2, semantic_index, graph_recall):
+    for capability in (
+        db_substrate,
+        graph,
+        corpus,
+        tier2,
+        semantic_index,
+        graph_recall,
+        graph_producer,
+        source_sync,
+    ):
         if capability.get("requested") and capability.get("status") != "active":
             issues.append(
                 {
@@ -319,6 +583,7 @@ def build_memory_kernel_doctor(
                     "status": str(capability.get("status") or "unavailable"),
                     "severity": _capability_issue_severity(capability),
                     "reason": str(capability.get("reason") or ""),
+                    "reason_code": str(capability.get("reason_code") or ""),
                 }
             )
     verdict = "pass"
@@ -332,6 +597,8 @@ def build_memory_kernel_doctor(
         "corpus": corpus,
         "semantic_index": semantic_index,
         "graph_recall": graph_recall,
+        "graph_producer": graph_producer,
+        "source_sync_spine": source_sync,
         "tier2": tier2,
     }
     backend_health = build_backend_health_contract(capabilities)

@@ -18,6 +18,7 @@ from .executive_retrieval import retrieve_executive_context
 from .local_typed_understanding import analyze_local_query
 from .profile_contract import resolve_direct_identity_profile_slots
 from .retrieval import render_working_memory_block
+from .retrieval_context_envelope import build_retrieval_context_envelope
 from .temporal import record_is_effective_at, record_temporal_status
 
 
@@ -909,6 +910,28 @@ def build_working_memory_packet(
     corpus_rows = budgeted["corpus_rows"]
     packet_budget = dict(budgeted["telemetry"])
     policy_payload["packet_budget"] = packet_budget
+    retrieval_context_envelope = build_retrieval_context_envelope(
+        principal_scope_key=principal_scope_key,
+        adaptive_route_plan=adaptive_route_plan,
+        current_truth_view={
+            "rebuild": dict(current_truth_view.get("rebuild") or {}),
+            "counters": dict(current_truth_view.get("counters") or {}),
+            "current_truth_row_count": len(current_truth_view.get("current_truth_rows") or []),
+            "non_answerable_row_count": len(current_truth_view.get("non_answerable_rows") or []),
+        },
+        policy=policy_payload,
+        packet_budget=packet_budget,
+        profile_items=profile_items,
+        task_rows=task_rows,
+        operating_rows=operating_rows,
+        matched=matched,
+        recent=recent,
+        transcript_rows=transcript_rows,
+        graph_rows=graph_rows,
+        corpus_rows=corpus_rows,
+        system_substrate=system_substrate,
+    )
+    policy_payload["retrieval_context_envelope"] = retrieval_context_envelope
 
     block = render_working_memory_block(
         policy=policy_payload,
@@ -961,5 +984,6 @@ def build_working_memory_packet(
         },
         "system_substrate": dict(system_substrate or {}),
         "packet_budget": packet_budget,
+        "retrieval_context_envelope": retrieval_context_envelope,
         "block": block,
     }

@@ -691,6 +691,31 @@ class SemanticIndexStoreMixin(StoreRuntimeBase):
         item["no_op_reasons"] = _decode_json_array(item.pop("no_op_reasons_json", []))
         return item
 
+    @_locked
+    def recent_tier2_run_records(self, *, session_id: str = "", limit: int = 5) -> list[Dict[str, Any]]:
+        bounded_limit = max(1, min(int(limit or 5), 20))
+        params: list[Any] = []
+        sql = """
+            SELECT *
+            FROM tier2_run_records
+            WHERE 1 = 1
+        """
+        normalized_session_id = str(session_id or "").strip()
+        if normalized_session_id:
+            sql += " AND session_id = ?"
+            params.append(normalized_session_id)
+        sql += " ORDER BY updated_at DESC, id DESC LIMIT ?"
+        params.append(bounded_limit)
+        rows = self.conn.execute(sql, tuple(params)).fetchall()
+        records: list[Dict[str, Any]] = []
+        for row in rows:
+            item = _row_to_dict(row)
+            item["extracted_counts"] = _decode_json_object(item.pop("extracted_counts_json", {}))
+            item["action_counts"] = _decode_json_object(item.pop("action_counts_json", {}))
+            item["no_op_reasons"] = _decode_json_array(item.pop("no_op_reasons_json", []))
+            records.append(item)
+        return records
+
     def _materialize_semantic_evidence_row(self, row: Mapping[str, Any]) -> Dict[str, Any] | None:
         shelf = str(row.get("shelf") or "").strip()
         row_id = int(row.get("row_id") or 0)

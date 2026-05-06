@@ -47,6 +47,7 @@ def test_background_task_status_blocks_ambient_auto_fallback() -> None:
 
 def test_installer_materializes_explicit_hermes_owned_background_routes() -> None:
     config: dict = {
+        "model": {"provider": "openai-codex", "default": "gpt-5.5"},
         "plugins": {"brainstack": {}},
         "auxiliary": {
             "flush_memories": {"provider": "main"},
@@ -62,6 +63,7 @@ def test_installer_materializes_explicit_hermes_owned_background_routes() -> Non
     assert config["auxiliary"][QUERY_UNDERSTANDING_HERMES_TASK_SLOT]["provider"] == "custom"
     assert status["tier2_write_allowed"] is True
     assert status["summary"]["all_required_routes_explicit"] is True
+    assert status["summary"]["all_required_routes_ready"] is True
     assert set(config["plugins"]["brainstack"]["background_tasks"]) == {
         binding["task_id"] for binding in REQUIRED_BACKGROUND_TASK_BINDINGS
     }
@@ -91,8 +93,43 @@ def test_runtime_guard_rejects_ambient_auxiliary_auto(monkeypatch: pytest.Monkey
 def test_runtime_guard_allows_explicit_auxiliary_route(monkeypatch: pytest.MonkeyPatch) -> None:
     agent_module = ModuleType("agent")
     auxiliary_module = ModuleType("agent.auxiliary_client")
-    auxiliary_module._get_auxiliary_task_config = lambda task: {"provider": "main"}  # type: ignore[attr-defined]
+    auxiliary_module._get_auxiliary_task_config = lambda task: {"provider": "main", "model": "gpt-5.5"}  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "agent", agent_module)
     monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary_module)
 
     require_explicit_hermes_auxiliary_route("flush_memories")
+
+
+def test_runtime_guard_rejects_main_route_without_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    agent_module = ModuleType("agent")
+    auxiliary_module = ModuleType("agent.auxiliary_client")
+    auxiliary_module._get_auxiliary_task_config = lambda task: {"provider": "main", "model": ""}  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent", agent_module)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary_module)
+
+    with pytest.raises(RuntimeError, match="AUXILIARY_MAIN_MODEL_UNRESOLVED"):
+        require_explicit_hermes_auxiliary_route("flush_memories")
+
+
+def test_installer_marks_main_stepfun_on_codex_unavailable_before_runtime_call() -> None:
+    config: dict = {
+        "model": {"provider": "openai-codex", "default": "gpt-5.5"},
+        "plugins": {"brainstack": {}},
+        "auxiliary": {
+            "flush_memories": {"provider": "main", "model": "gpt-5.5"},
+            CAPTURE_UNDERSTANDING_HERMES_TASK_SLOT: {"provider": "main", "model": "stepfun/step-3.5-flash"},
+            QUERY_UNDERSTANDING_HERMES_TASK_SLOT: {"provider": "main", "model": "gpt-5.5"},
+        },
+    }
+
+    status = install_default_background_task_bindings(config)
+
+    capture = next(
+        task
+        for task in status["tasks"]
+        if task["hermes_task_slot"] == CAPTURE_UNDERSTANDING_HERMES_TASK_SLOT
+    )
+    assert capture["status"] == "configured_unavailable"
+    assert capture["route_readiness_status"] == "blocked"
+    assert capture["route_readiness_reason_code"] == "AUXILIARY_MODEL_UNSUPPORTED_FOR_PROVIDER"
+    assert status["summary"]["all_required_routes_ready"] is False

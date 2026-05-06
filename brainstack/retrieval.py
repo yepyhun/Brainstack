@@ -23,6 +23,7 @@ from .profile_contract import (
     profile_item_display_label,
 )
 from .provenance import summarize_provenance
+from .retrieval_context_envelope import render_retrieval_context_envelope_section
 from .style_contract import STYLE_CONTRACT_SLOT
 from .temporal import record_is_effective_at, record_temporal_status
 from .transcript import primary_user_turn_content, trim_text_boundary
@@ -1237,6 +1238,10 @@ def render_working_memory_block(
 
     if not suppress_evidence_priority:
         sections.append(_render_evidence_priority_section("## Brainstack Evidence Priority"))
+
+    retrieval_context_section = render_retrieval_context_envelope_section(policy.get("retrieval_context_envelope"))
+    if retrieval_context_section:
+        sections.append(retrieval_context_section)
 
     lookup_semantics_section = _render_lookup_semantics_section(policy.get("lookup_semantics"))
     if lookup_semantics_section:

@@ -15,6 +15,10 @@ from scripts.run_memory_kernel_release_checklist import (
     _check_persistent_bloat_rebuild,
     _check_projection_semantics_runtime_parity,
     _check_release_claim_contract,
+    _check_retrieval_context_envelope,
+    _check_source_sync_spine,
+    _check_typed_graph_producer_population,
+    _check_tier2_truthful_diagnostics,
     _check_tier2_extraction_quality,
     _check_version_metadata_parity,
     _count_python_hermes_coredumps,
@@ -217,6 +221,67 @@ def test_projection_semantics_runtime_parity_check_passes(tmp_path: Path) -> Non
     assert result.summary["unsafe_selected_event_ids"] == []
     assert result.summary["packet_authority_critical_dropped"] == 0
     assert result.summary["public_safe"] is True
+
+
+def test_tier2_truthful_diagnostics_release_check_passes(tmp_path: Path) -> None:
+    result = _check_tier2_truthful_diagnostics(tmp_path)
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["issue_count"] == 0
+    assert result.summary["failed_run_tier2_reason_code"] == "TIER2_PERSISTED_RUN_FAILED"
+    assert result.summary["failed_run_doctor_verdict"] == "fail"
+    assert result.summary["unbound_route_binding_status"] == "configured_unbound"
+    assert result.summary["unbound_tier2_reason_code"] == "TIER2_RUNTIME_CONFIGURED_UNBOUND"
+
+
+def test_typed_graph_producer_population_release_check_passes(tmp_path: Path) -> None:
+    result = _check_typed_graph_producer_population(tmp_path)
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["issue_count"] == 0
+    assert result.summary["projected_state"] == "projected"
+    assert result.summary["projected_relation_count"] == 1
+    assert result.summary["rejected_state"] == "rejected"
+    assert result.summary["rejected_relation_count"] == 0
+    assert result.summary["empty_graph_status"] == "active"
+    assert result.summary["empty_producer_state"] == "no_input"
+
+
+def test_source_sync_spine_release_check_passes(tmp_path: Path) -> None:
+    result = _check_source_sync_spine(tmp_path)
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["issue_count"] == 0
+    assert result.summary["full_sync_status"] == "changed"
+    assert result.summary["unchanged_sync_status"] == "unchanged"
+    assert result.summary["changed_sync_status"] == "changed"
+    assert result.summary["delete_sync_status"] == "changed"
+    assert result.summary["truth_authority"] == "admission_receipts_only"
+    assert result.summary["raw_private_source_in_status"] is False
+
+
+def test_retrieval_context_envelope_release_check_passes(tmp_path: Path) -> None:
+    result = _check_retrieval_context_envelope(tmp_path)
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["issue_count"] == 0
+    assert result.summary["current_route"] == "current_truth"
+    assert result.summary["current_truth_count"] == 1
+    assert result.summary["stale_prior_conflict_count"] == 1
+    assert result.summary["corpus_route"] == "corpus"
+    assert result.summary["source_expand_handles"] == 1
+    assert result.summary["no_memory_route"] == "no_memory_minimal"
+    assert result.summary["no_memory_semantic_enabled"] is False
+    assert result.summary["raw_private_payload_in_envelope"] is False
+    assert result.summary["raw_private_scope_in_envelope"] is False
 
 
 def test_hermes_proactive_runtime_parity_check_passes(tmp_path: Path) -> None:
@@ -603,6 +668,21 @@ def test_release_report_fails_tier2_extraction_quality_even_in_dev_mode() -> Non
     assert report["status"] == "fail"
     assert report["release_allowed"] is False
     assert report["non_git_failures"] == ["tier2_extraction_quality"]
+
+
+def test_release_report_fails_tier2_truthful_diagnostics_even_in_dev_mode() -> None:
+    checks = [
+        CheckResult("release_claim_contract", "pass", ["contract"], 0, {}),
+        CheckResult("tier2_unbreakable_operation", "pass", ["tier2"], 0, {}),
+        CheckResult("tier2_truthful_diagnostics", "fail", ["tier2-truth"], 2, {"status": "fail"}),
+        CheckResult("git_hygiene", "fail", ["git"], 0, {"git_dirty": True}),
+    ]
+
+    report = _report(checks, ignore_git_dirty_for_dev=True)
+
+    assert report["status"] == "fail"
+    assert report["release_allowed"] is False
+    assert report["non_git_failures"] == ["tier2_truthful_diagnostics"]
 
 
 def test_release_report_fails_phase249_ralph_gate_even_in_dev_mode() -> None:

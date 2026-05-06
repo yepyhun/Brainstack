@@ -38,6 +38,16 @@ BACKGROUND_TASK_SLOT_BY_ID = {
 
 VALID_BACKGROUND_TASK_STATUSES = {"active", "configured_unavailable", "experimental", "blocked"}
 
+READY_ROUTE_STATUS = "ready"
+UNAVAILABLE_ROUTE_STATUS = "unavailable"
+BLOCKED_ROUTE_STATUS = "blocked"
+
+REASON_ROUTE_READY = "AUXILIARY_ROUTE_READY"
+REASON_MISSING_ROUTE = "AUXILIARY_ROUTE_MISSING"
+REASON_AUTO_PROVIDER_BLOCKED = "AUXILIARY_AUTO_PROVIDER_BLOCKED"
+REASON_MAIN_MODEL_UNRESOLVED = "AUXILIARY_MAIN_MODEL_UNRESOLVED"
+REASON_UNSUPPORTED_MODEL_FOR_PROVIDER = "AUXILIARY_MODEL_UNSUPPORTED_FOR_PROVIDER"
+
 
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
@@ -48,8 +58,131 @@ def _text(value: Any) -> str:
 
 
 def _task_config(config: Mapping[str, Any], task_id: str) -> Mapping[str, Any]:
-    tasks = _mapping(config.get("background_tasks"))
+    tasks = _background_tasks_config(config)
     return _mapping(tasks.get(task_id))
+
+
+def _background_tasks_config(config: Mapping[str, Any]) -> Mapping[str, Any]:
+    tasks = _mapping(config.get("background_tasks"))
+    if tasks:
+        return tasks
+    plugins = _mapping(config.get("plugins"))
+    brainstack = _mapping(plugins.get("brainstack"))
+    return _mapping(brainstack.get("background_tasks"))
+
+
+def _main_provider(config: Mapping[str, Any]) -> str:
+    model_config = config.get("model")
+    if isinstance(model_config, Mapping):
+        return _text(model_config.get("provider")).lower()
+    return ""
+
+
+def _main_model(config: Mapping[str, Any]) -> str:
+    model_config = config.get("model")
+    if isinstance(model_config, str):
+        return _text(model_config)
+    if isinstance(model_config, Mapping):
+        return _text(model_config.get("default"))
+    return ""
+
+
+def _model_supported_by_provider(*, provider: str, model: str) -> tuple[bool, str]:
+    provider = _text(provider).lower()
+    model = _text(model)
+    if not provider or not model:
+        return True, ""
+    if provider == "openai-codex" and "/" in model:
+        return False, REASON_UNSUPPORTED_MODEL_FOR_PROVIDER
+    return True, ""
+
+
+def resolve_auxiliary_route_readiness(
+    *,
+    task_slot: str,
+    provider_label: str,
+    model_label: str,
+    main_provider_label: str = "",
+    main_model_label: str = "",
+) -> dict[str, Any]:
+    """Classify a Hermes-owned auxiliary route without doing an LLM call.
+
+    Brainstack does not choose providers here. It only validates whether the
+    configured Hermes route is specific enough to claim readiness.
+    """
+    provider = _text(provider_label).lower()
+    configured_model = _text(model_label)
+    main_provider = _text(main_provider_label).lower()
+    main_model = _text(main_model_label)
+
+    if not provider:
+        return {
+            "status": UNAVAILABLE_ROUTE_STATUS,
+            "reason_code": REASON_MISSING_ROUTE,
+            "task_slot": task_slot,
+            "provider_label": "",
+            "model_label": configured_model,
+            "effective_provider_label": "",
+            "effective_model_label": "",
+            "public_safe": True,
+            "secret_redacted": True,
+        }
+    if provider == "auto":
+        return {
+            "status": BLOCKED_ROUTE_STATUS,
+            "reason_code": REASON_AUTO_PROVIDER_BLOCKED,
+            "task_slot": task_slot,
+            "provider_label": provider,
+            "model_label": configured_model,
+            "effective_provider_label": "",
+            "effective_model_label": "",
+            "public_safe": True,
+            "secret_redacted": True,
+        }
+
+    effective_provider = provider
+    effective_model = configured_model
+    if provider == "main":
+        effective_provider = main_provider
+        effective_model = configured_model or main_model
+        if not effective_model:
+            return {
+                "status": BLOCKED_ROUTE_STATUS,
+                "reason_code": REASON_MAIN_MODEL_UNRESOLVED,
+                "task_slot": task_slot,
+                "provider_label": provider,
+                "model_label": configured_model,
+                "effective_provider_label": effective_provider,
+                "effective_model_label": "",
+                "public_safe": True,
+                "secret_redacted": True,
+            }
+
+    supported, reason_code = _model_supported_by_provider(provider=effective_provider, model=effective_model)
+    if not supported:
+        return {
+            "status": BLOCKED_ROUTE_STATUS,
+            "reason_code": reason_code,
+            "task_slot": task_slot,
+            "provider_label": provider,
+            "model_label": configured_model,
+            "effective_provider_label": effective_provider,
+            "effective_model_label": effective_model,
+            "public_safe": True,
+            "secret_redacted": True,
+        }
+
+    return {
+        "status": READY_ROUTE_STATUS,
+        "reason_code": REASON_ROUTE_READY,
+        "task_slot": task_slot,
+        "provider_label": provider,
+        "model_label": configured_model,
+        "effective_provider_label": effective_provider,
+        "effective_model_label": effective_model,
+        "public_safe": True,
+        "secret_redacted": True,
+    }
 
 
 def _normalized_task_status(raw: Mapping[str, Any], *, has_explicit_route: bool) -> str:
@@ -67,6 +200,17 @@ def _background_task_card(config: Mapping[str, Any], binding: Mapping[str, str])
     raw = _task_config(config, task_id)
     provider_label = _text(raw.get("provider_label") or raw.get("provider")).lower()
     model_label = _text(raw.get("model_label") or raw.get("model"))
+    readiness = dict(raw.get("route_readiness") or {})
+    if not readiness:
+        readiness = resolve_auxiliary_route_readiness(
+            task_slot=hermes_task_slot,
+            provider_label=provider_label,
+            model_label=model_label,
+            main_provider_label=_text(raw.get("main_provider_label")),
+            main_model_label=_text(raw.get("main_model_label")),
+        )
+    readiness_status = _text(readiness.get("status")).lower()
+    readiness_reason_code = _text(readiness.get("reason_code")) or REASON_MISSING_ROUTE
     fallback_policy = _text(raw.get("fallback_policy") or "none").lower() or "none"
     route_source = _text(raw.get("route_source") or "brainstack.background_tasks")
     has_explicit_route = bool(provider_label and provider_label != "auto")
@@ -82,12 +226,16 @@ def _background_task_card(config: Mapping[str, Any], binding: Mapping[str, str])
         status = "blocked"
         issues.append("unnamed_fallback_policy_not_allowed")
 
-    task_use_allowed = status == "active"
+    if status == "active" and readiness_status != READY_ROUTE_STATUS:
+        status = "blocked" if readiness_status == BLOCKED_ROUTE_STATUS else "configured_unavailable"
+        issues.append(readiness_reason_code)
+
+    task_use_allowed = status == "active" and readiness_status == READY_ROUTE_STATUS
     tier2_write_allowed = task_id == BACKGROUND_CONSOLIDATION_TASK_ID and task_use_allowed
     reason = _text(raw.get("reason"))
     if not reason:
         if status == "active":
-            reason = "explicit Hermes-owned task route is configured"
+            reason = "explicit Hermes-owned task route is configured and ready"
         elif status == "configured_unavailable":
             reason = "no explicit Hermes-owned task route is configured"
         elif status == "experimental":
@@ -101,6 +249,11 @@ def _background_task_card(config: Mapping[str, Any], binding: Mapping[str, str])
         "status": status,
         "provider_label": provider_label,
         "model_label": model_label,
+        "effective_provider_label": _text(readiness.get("effective_provider_label")).lower(),
+        "effective_model_label": _text(readiness.get("effective_model_label")),
+        "route_readiness": readiness,
+        "route_readiness_status": readiness_status,
+        "route_readiness_reason_code": readiness_reason_code,
         "route_source": route_source,
         "fallback_policy": fallback_policy,
         "secret_redacted": True,
@@ -136,10 +289,8 @@ def build_background_task_status(config: Mapping[str, Any] | None) -> dict[str, 
             **counts,
             "required_task_count": len(tasks),
             "tier2_write_allowed": tier2_write_allowed,
-            "all_required_routes_explicit": all(
-                task["status"] == "active" and task["provider_label"] and task["provider_label"] != "auto"
-                for task in tasks
-            ),
+            "all_required_routes_explicit": all(task["provider_label"] and task["provider_label"] != "auto" for task in tasks),
+            "all_required_routes_ready": all(task["status"] == "active" and task["route_readiness_status"] == "ready" for task in tasks),
         },
     }
 
@@ -165,21 +316,34 @@ def install_default_background_task_bindings(config: dict[str, Any]) -> dict[str
         hermes_task_slot = binding["hermes_task_slot"]
         aux_entry = _mapping(config["auxiliary"].get(hermes_task_slot))
         provider = _text(aux_entry.get("provider")).lower()
+        model = _text(aux_entry.get("model"))
+        readiness = resolve_auxiliary_route_readiness(
+            task_slot=hermes_task_slot,
+            provider_label=provider,
+            model_label=model,
+            main_provider_label=_main_provider(config),
+            main_model_label=_main_model(config),
+        )
         has_explicit_route = bool(provider and provider != "auto")
         task_entry = background_tasks.setdefault(task_id, {})
         if not isinstance(task_entry, dict):
             task_entry = {}
             background_tasks[task_id] = task_entry
         task_entry["hermes_task_slot"] = hermes_task_slot
-        task_entry["status"] = "active" if has_explicit_route else "configured_unavailable"
+        task_entry["status"] = "active" if readiness["status"] == READY_ROUTE_STATUS else "configured_unavailable"
         task_entry["provider_label"] = provider if has_explicit_route else ""
-        task_entry["model_label"] = _text(aux_entry.get("model"))
+        task_entry["model_label"] = model
+        task_entry["effective_provider_label"] = _text(readiness.get("effective_provider_label")).lower()
+        task_entry["effective_model_label"] = _text(readiness.get("effective_model_label"))
+        task_entry["main_provider_label"] = _main_provider(config)
+        task_entry["main_model_label"] = _main_model(config)
+        task_entry["route_readiness"] = readiness
         task_entry["fallback_policy"] = "none"
         task_entry["secret_redacted"] = True
         task_entry["route_source"] = f"auxiliary.{hermes_task_slot}"
         task_entry["reason"] = (
-            "explicit Hermes-owned task route is configured"
-            if has_explicit_route
+            "explicit Hermes-owned task route is configured and ready"
+            if readiness["status"] == READY_ROUTE_STATUS
             else "no explicit Hermes-owned task route is configured"
         )
     return build_background_task_status(brainstack)
@@ -194,3 +358,13 @@ def require_explicit_hermes_auxiliary_route(task_slot: str) -> None:
     provider = _text(_mapping(task_config).get("provider")).lower()
     if not provider or provider == "auto":
         raise RuntimeError(f"Brainstack background task {task_slot!r} requires an explicit Hermes auxiliary route")
+    model = _text(_mapping(task_config).get("model"))
+    readiness = resolve_auxiliary_route_readiness(
+        task_slot=task_slot,
+        provider_label=provider,
+        model_label=model,
+    )
+    if readiness["status"] != READY_ROUTE_STATUS:
+        raise RuntimeError(
+            f"Brainstack background task {task_slot!r} route is not ready: {readiness['reason_code']}"
+        )
