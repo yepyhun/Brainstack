@@ -53,6 +53,26 @@ def test_backend_health_contract_sanitizes_degraded_chroma_embedding_error(tmp_p
         store.close()
 
 
+def test_backend_health_contract_classifies_corrupt_chroma_store_with_repair_plan(tmp_path: Path) -> None:
+    store = _open_store(tmp_path, graph_backend="sqlite", corpus_backend="sqlite")
+    try:
+        store._corpus_backend_name = "chroma"
+        store._corpus_backend = None
+        store._corpus_backend_error = f"sqlite3.DatabaseError: file is not a database: {PRIVATE_PATH}"
+
+        report = build_memory_kernel_doctor(store, strict=False, tier2_state={"enabled": False, "running": False})
+        health = report["backend_health"]
+        corpus = health["backends"]["corpus"]
+
+        assert health["status"] == "degraded"
+        assert corpus["reason_code"] == "BACKEND_STORE_CORRUPT"
+        assert PRIVATE_PATH not in corpus["safe_reason"]
+        assert corpus["repair_plan"]["status"] == "repairable_empty_cache"
+        assert corpus["repair_plan"]["auto_rebuild_allowed"] is True
+    finally:
+        store.close()
+
+
 def test_backend_health_contract_sanitizes_kuzu_active_lock(tmp_path: Path) -> None:
     store = _open_store(tmp_path, graph_backend="sqlite", corpus_backend="sqlite")
     try:

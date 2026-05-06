@@ -20,6 +20,7 @@ from scripts.run_memory_kernel_release_checklist import (
     _check_release_claim_contract,
     _check_retrieval_context_envelope,
     _check_retrieval_packet_source_destructive_proof,
+    _check_runtime_spine_capability_parity,
     _check_source_sync_spine,
     _check_tier2_graph_destructive_proof,
     _check_typed_graph_producer_population,
@@ -239,6 +240,19 @@ def test_tier2_truthful_diagnostics_release_check_passes(tmp_path: Path) -> None
     assert result.summary["failed_run_doctor_verdict"] == "fail"
     assert result.summary["unbound_route_binding_status"] == "configured_unbound"
     assert result.summary["unbound_tier2_reason_code"] == "TIER2_RUNTIME_CONFIGURED_UNBOUND"
+
+
+def test_runtime_spine_capability_parity_release_check_passes(tmp_path: Path) -> None:
+    result = _check_runtime_spine_capability_parity(tmp_path)
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["issue_count"] == 0
+    assert result.summary["default_runtime"] == "internal_extractor"
+    assert result.summary["default_actual_worker_path"] == "internal_extractor"
+    assert result.summary["installer_tier2_runtime"] == "internal_extractor"
+    assert result.summary["corrupt_corpus_reason_code"] == "BACKEND_STORE_CORRUPT"
 
 
 def test_typed_graph_producer_population_release_check_passes(tmp_path: Path) -> None:

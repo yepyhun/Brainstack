@@ -5,9 +5,9 @@ from typing import Any
 
 from .answerability import build_memory_answerability
 from .authority_policy import is_current_assignment_authority
-from .background_task_binding import build_background_task_status
 from .diagnostics import build_memory_kernel_doctor, build_query_inspect
 from .persistent_bloat import PERSISTENT_BLOAT_REPORT_SCHEMA
+from .tier2_runtime_spine import build_tier2_runtime_route_status
 
 
 def _normalize_compact_text(value: Any) -> str:
@@ -90,61 +90,7 @@ def _compact_selected_evidence(selected: Mapping[str, Any], *, per_shelf_limit: 
 
 
 def _tier2_runtime_route_status(config: Mapping[str, Any] | None) -> dict[str, Any]:
-    cfg = config if isinstance(config, Mapping) else {}
-    runtime = _normalize_compact_text(cfg.get("tier2_runtime")) or "internal_extractor"
-    mode = _normalize_compact_text(cfg.get("tier2_mode")) or "unknown"
-    hindsight_mode = _normalize_compact_text(cfg.get("tier2_hindsight_mode"))
-    llm_provider = _normalize_compact_text(cfg.get("tier2_hindsight_llm_provider"))
-    configured_model = _normalize_compact_text(cfg.get("tier2_hindsight_llm_model"))
-    configured_base_url = _normalize_compact_text(cfg.get("tier2_hindsight_llm_base_url"))
-    effective_model = configured_model
-    effective_model_source = "brainstack_config"
-    if llm_provider == "hermes_managed" and not effective_model:
-        try:
-            from .hindsight_public_api_bridge import _hermes_main_model
-
-            effective_model = _normalize_compact_text(_hermes_main_model())
-            effective_model_source = "hermes_main_model"
-        except Exception:
-            effective_model = ""
-            effective_model_source = "unavailable"
-    extractor_override = callable(cfg.get("_tier2_extractor"))
-    if runtime == "hindsight_public_api_bridge":
-        binding_status = "configured_unbound"
-        binding_reason_code = "TIER2_HINDSIGHT_PUBLIC_API_BRIDGE_UNBOUND"
-        actual_worker_path = "internal_extractor"
-        runtime_invoked_by_worker = False
-        if extractor_override:
-            binding_status = "test_extractor_override"
-            binding_reason_code = "TIER2_TEST_EXTRACTOR_OVERRIDE_NOT_RUNTIME_BINDING"
-            actual_worker_path = "test_injected_extractor"
-    else:
-        binding_status = "bound"
-        binding_reason_code = "TIER2_INTERNAL_EXTRACTOR_BOUND"
-        actual_worker_path = "internal_extractor" if not extractor_override else "test_injected_extractor"
-        runtime_invoked_by_worker = True
-    return {
-        "schema": "brainstack.tier2_runtime_route.v1",
-        "runtime": runtime,
-        "actual_worker_path": actual_worker_path,
-        "binding_status": binding_status,
-        "binding_reason_code": binding_reason_code,
-        "runtime_invoked_by_worker": runtime_invoked_by_worker,
-        "mode": mode,
-        "hindsight_mode": hindsight_mode,
-        "llm_provider": llm_provider or "default",
-        "configured_model": configured_model,
-        "effective_model": effective_model,
-        "effective_model_source": effective_model_source,
-        "configured_base_url_present": bool(configured_base_url),
-        "uses_legacy_gpt_5_2_codex": effective_model == "gpt-5.2-codex" or configured_model == "gpt-5.2-codex",
-        "background_task_status": build_background_task_status(cfg),
-        "model_answer": (
-            f"Tier2 current route uses {effective_model} via {llm_provider or 'default provider'}."
-            if effective_model
-            else "Tier2 current route model is not resolved in this process."
-        ),
-    }
+    return build_tier2_runtime_route_status(config)
 
 
 def build_provider_lifecycle_status(

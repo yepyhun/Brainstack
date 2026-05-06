@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .provider_protocol import ProviderRuntimeBase
 from ..background_task_binding import build_background_task_status
+from ..tier2_reconcile_result import Tier2ReconcileResult
 from ..tier2_consolidation import (
     attach_consolidation_plan_metadata,
     bound_tier2_extracted_payload,
@@ -169,6 +170,12 @@ class Tier2WorkerMixin(ProviderRuntimeBase):
                 turn_number=turn_number,
                 trigger_reason=trigger_reason,
             )
+        from ..tier2_runtime_spine import build_tier2_runtime_spine
+
+        runtime_spine = build_tier2_runtime_spine(self._config)
+        block_reason = runtime_spine.worker_block_reason()
+        if block_reason:
+            raise RuntimeError(block_reason)
         return extract_tier2_candidates(
             transcript_rows,
             transcript_limit=self._tier2_transcript_limit,
@@ -238,9 +245,9 @@ class Tier2WorkerMixin(ProviderRuntimeBase):
         extracted: Dict[str, Any],
         transcript_rows: List[Dict[str, Any]],
         consolidation_source: Dict[str, Any],
-    ) -> tuple[Dict[str, int], int, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    ) -> Tier2ReconcileResult:
         if self._store is None:
-            return {}, 0, {}, {}, {}
+            return Tier2ReconcileResult.empty()
         bounded_extracted, budget_report = bound_tier2_extracted_payload(extracted)
         metadata = self._scoped_metadata({
             "batch_reason": trigger_reason,
@@ -300,7 +307,13 @@ class Tier2WorkerMixin(ProviderRuntimeBase):
                 },
             ),
         }
-        return action_counts, writes_performed, operating_promotions, budget_report, consolidation_plan
+        return Tier2ReconcileResult.from_parts(
+            action_counts=action_counts,
+            writes_performed=writes_performed,
+            operating_promotions=operating_promotions,
+            budget_report=budget_report,
+            consolidation_plan=consolidation_plan,
+        )
 
     def _run_tier2_batch(self, *, session_id: str, turn_number: int, trigger_reason: str) -> Dict[str, Any]:
         started_monotonic = time.monotonic()
@@ -347,7 +360,7 @@ class Tier2WorkerMixin(ProviderRuntimeBase):
             result["error_reason"] = "Tier-2 extractor returned a non-dict payload."
             return self._tier2_finish_result(result, started_monotonic=started_monotonic, record=True)
         self._annotate_tier2_payload(result, extracted)
-        action_counts, writes_performed, operating_promotions, budget_report, consolidation_plan = self._reconcile_tier2_payload(
+        reconcile_result = self._reconcile_tier2_payload(
             session_id=session_id,
             turn_number=turn_number,
             trigger_reason=trigger_reason,
@@ -355,14 +368,14 @@ class Tier2WorkerMixin(ProviderRuntimeBase):
             transcript_rows=transcript_rows,
             consolidation_source=consolidation_source,
         )
-        result["action_counts"] = action_counts
-        result["writes_performed"] = writes_performed
-        result["operating_promotions"] = operating_promotions
-        result["consolidation_budget"] = budget_report
-        result["consolidation_plan"] = consolidation_plan
-        if writes_performed <= 0:
+        result["action_counts"] = reconcile_result.action_counts
+        result["writes_performed"] = reconcile_result.writes_performed
+        result["operating_promotions"] = reconcile_result.operating_promotions
+        result["consolidation_budget"] = reconcile_result.budget_report
+        result["consolidation_plan"] = reconcile_result.consolidation_plan
+        if reconcile_result.writes_performed <= 0:
             result["no_op_reasons"].append("no_durable_writes_performed")
-        if action_counts and set(action_counts).issubset({"NONE", "REJECT_ASSISTANT_AUTHORED"}):
+        if reconcile_result.action_counts and set(reconcile_result.action_counts).issubset({"NONE", "REJECT_ASSISTANT_AUTHORED"}):
             result["no_op_reasons"].append("all_candidates_rejected_or_noop")
         result["status"] = "ok"
         return self._tier2_finish_result(result, started_monotonic=started_monotonic, record=True)

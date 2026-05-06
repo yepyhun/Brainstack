@@ -13,6 +13,7 @@ BACKEND_HEALTH_REASON_CODES = {
     "BACKEND_EMBEDDING_CONFIG_MISSING",
     "BACKEND_PERMISSION_ERROR",
     "BACKEND_OPEN_MEMORY_ERROR",
+    "BACKEND_STORE_CORRUPT",
     "BACKEND_ACTIVE_RUNTIME_LOCK_EXPECTED",
     "BACKEND_UNAVAILABLE",
     "SEMANTIC_INDEX_ACTIVE",
@@ -63,6 +64,8 @@ def _classify_backend(capability: Mapping[str, Any]) -> tuple[str, str]:
         )
     if error_class == "backend_open_memory_error":
         return "BACKEND_OPEN_MEMORY_ERROR", f"{kind or 'backend'} external backend could not open because of memory/open failure."
+    if error_class == "backend_store_corrupt" or "file is not a database" in lowered_error:
+        return "BACKEND_STORE_CORRUPT", f"{kind or 'backend'} external backend storage is unreadable and needs repair."
     if "permission denied" in lowered_error or "operation not permitted" in lowered_error:
         return "BACKEND_PERMISSION_ERROR", f"{kind or 'backend'} external backend has a permission or ownership problem."
     if "could not set lock on file" in lowered_error or "docs.kuzudb.com/concurrency" in lowered_error:
@@ -77,6 +80,7 @@ def _classify_backend(capability: Mapping[str, Any]) -> tuple[str, str]:
 
 def _backend_card(capability: Mapping[str, Any]) -> dict[str, Any]:
     reason_code, safe_reason = _classify_backend(capability)
+    repair_plan = capability.get("repair_plan") if isinstance(capability.get("repair_plan"), Mapping) else {}
     return {
         "kind": _text(capability.get("kind")),
         "requested": _text(capability.get("requested")),
@@ -88,6 +92,7 @@ def _backend_card(capability: Mapping[str, Any]) -> dict[str, Any]:
         "reason_code": reason_code,
         "safe_reason": safe_reason,
         "error_class": _text(capability.get("error_class")),
+        "repair_plan": dict(repair_plan),
     }
 
 

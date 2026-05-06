@@ -4106,7 +4106,7 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
     brainstack.setdefault("corpus_match_limit", 4)
     brainstack.setdefault("corpus_char_budget", 700)
     brainstack.setdefault("tier2_mode", "shadow")
-    brainstack.setdefault("tier2_runtime", "hindsight_public_api_bridge")
+    brainstack.setdefault("tier2_runtime", "internal_extractor")
     brainstack.setdefault("tier2_hindsight_mode", "local_embedded")
     brainstack.setdefault("tier2_hindsight_bank_id", "brainstack-tier2")
     brainstack.setdefault("tier2_hindsight_llm_provider", "hermes_managed")

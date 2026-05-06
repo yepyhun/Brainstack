@@ -1139,6 +1139,48 @@ def _check_tier2_graph_destructive_proof(tmp: Path) -> CheckResult:
     )
 
 
+def _check_runtime_spine_capability_parity(tmp: Path) -> CheckResult:
+    out = tmp / "runtime_spine_capability_parity.json"
+    command = [sys.executable, "scripts/run_runtime_spine_capability_parity_proof.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    required_flags = (
+        "default_runtime_bound_internal",
+        "explicit_hindsight_unbound_fails_closed",
+        "explicit_capture_uses_typed_reconcile_result",
+        "corrupt_empty_corpus_repairable_without_source_delete",
+        "corrupt_source_corpus_requires_source_replay",
+        "installer_default_not_unbound",
+        "similar_bug_audit_clean",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("issues") == []
+        and data.get("public_safe") is True
+        and all(proof.get(flag) is True for flag in required_flags)
+    )
+    default_probe = data.get("default_runtime_probe") if isinstance(data.get("default_runtime_probe"), Mapping) else {}
+    installer_probe = data.get("installer_default_probe") if isinstance(data.get("installer_default_probe"), Mapping) else {}
+    corpus_probe = data.get("corrupt_empty_corpus_probe") if isinstance(data.get("corrupt_empty_corpus_probe"), Mapping) else {}
+    return CheckResult(
+        name="runtime_spine_capability_parity",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "issue_count": len(data.get("issues") or []),
+            "default_runtime": default_probe.get("runtime"),
+            "default_actual_worker_path": default_probe.get("actual_worker_path"),
+            "installer_tier2_runtime": installer_probe.get("tier2_runtime"),
+            "corrupt_corpus_reason_code": corpus_probe.get("health_reason_code"),
+        },
+    )
+
+
 def _check_source_sync_spine(tmp: Path) -> CheckResult:
     out = tmp / "source_sync_spine.json"
     command = [sys.executable, "scripts/verify_source_sync_spine.py", "--out", str(out)]
@@ -2111,6 +2153,7 @@ def run_checklist(
             _check_tier2_truthful_diagnostics(tmp),
             _check_typed_graph_producer_population(tmp),
             _check_tier2_graph_destructive_proof(tmp),
+            _check_runtime_spine_capability_parity(tmp),
             _check_source_sync_spine(tmp),
             _check_retrieval_context_envelope(tmp),
             _check_retrieval_packet_source_destructive_proof(tmp),

@@ -113,6 +113,8 @@ def _backend_capability(
         lowered_error = error_text.casefold()
         if "std::bad_alloc" in lowered_error or "memoryerror" in lowered_error:
             error_class = "backend_open_memory_error"
+        elif "file is not a database" in lowered_error:
+            error_class = "backend_store_corrupt"
         elif "chroma default embedding is disabled" in lowered_error:
             error_class = "backend_embedding_config_missing"
         elif "permission denied" in lowered_error or "operation not permitted" in lowered_error:
@@ -145,6 +147,50 @@ def _backend_capability(
         "reason": reason,
         "error": error_text,
         "error_class": error_class,
+    }
+
+
+def _corpus_repair_plan(corpus: Mapping[str, Any], row_counts: Mapping[str, int]) -> dict[str, Any]:
+    if str(corpus.get("kind") or "") != "corpus":
+        return {
+            "schema": "brainstack.corpus_backend_repair_plan.v1",
+            "status": "not_applicable",
+            "reason_code": "NOT_CORPUS_BACKEND",
+            "auto_rebuild_allowed": False,
+            "public_safe": True,
+        }
+    if str(corpus.get("error_class") or "") != "backend_store_corrupt":
+        return {
+            "schema": "brainstack.corpus_backend_repair_plan.v1",
+            "status": "not_needed",
+            "reason_code": "CORPUS_BACKEND_NOT_CORRUPT",
+            "auto_rebuild_allowed": False,
+            "public_safe": True,
+        }
+    document_count = int(row_counts.get("corpus_documents") or 0)
+    section_count = int(row_counts.get("corpus_sections") or 0)
+    if document_count == 0 and section_count == 0:
+        return {
+            "schema": "brainstack.corpus_backend_repair_plan.v1",
+            "status": "repairable_empty_cache",
+            "reason_code": "CORPUS_BACKEND_CORRUPT_EMPTY_SOURCE",
+            "auto_rebuild_allowed": True,
+            "required_action": "archive_or_recreate_backend_cache",
+            "source_rows_preserved": True,
+            "document_count": document_count,
+            "section_count": section_count,
+            "public_safe": True,
+        }
+    return {
+        "schema": "brainstack.corpus_backend_repair_plan.v1",
+        "status": "source_replay_required",
+        "reason_code": "CORPUS_BACKEND_CORRUPT_SOURCE_ROWS_PRESENT",
+        "auto_rebuild_allowed": False,
+        "required_action": "rebuild_from_corpus_source_rows",
+        "source_rows_preserved": True,
+        "document_count": document_count,
+        "section_count": section_count,
+        "public_safe": True,
     }
 
 
@@ -524,6 +570,7 @@ def build_memory_kernel_doctor(
         error=getattr(store, "_corpus_backend_error", ""),
         fallback_reason="No external corpus backend was requested; SQLite corpus storage/search is the active mode.",
     )
+    corpus["repair_plan"] = _corpus_repair_plan(corpus, row_counts)
     tier2 = _tier2_capability(tier2_state)
     db_substrate = build_db_substrate_snapshot(store.conn)
     recent_tier2_runs: list[Mapping[str, Any]] = []

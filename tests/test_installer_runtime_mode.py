@@ -105,7 +105,7 @@ def test_config_patch_embedding_none_makes_corpus_explicitly_unavailable(tmp_pat
     assert brainstack["corpus_backend"] == "none"
     assert "corpus_db_path" not in brainstack
     assert brainstack["tier2_mode"] == "shadow"
-    assert brainstack["tier2_runtime"] == "hindsight_public_api_bridge"
+    assert brainstack["tier2_runtime"] == "internal_extractor"
     assert brainstack["tier2_hindsight_mode"] == "local_embedded"
     assert brainstack["tier2_hindsight_llm_provider"] == "hermes_managed"
     assert brainstack["tier2_hindsight_llm_model"] == ""

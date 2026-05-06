@@ -190,7 +190,7 @@ class ProviderInspectionMixin(ProviderRuntimeBase):
         reconcile = getattr(self, "_reconcile_tier2_payload", None)
         if callable(reconcile):
             try:
-                action_counts, writes_performed, operating_promotions = reconcile(
+                reconcile_result = reconcile(
                     session_id=active_session_id,
                     turn_number=turn_number,
                     trigger_reason="final_output_validation_explicit_capture",
@@ -198,13 +198,7 @@ class ProviderInspectionMixin(ProviderRuntimeBase):
                     transcript_rows=[transcript_row],
                     consolidation_source={"source_kind": "current_user_turn", "turn_numbers": [turn_number or 1]},
                 )
-                trace["tier2"].update(
-                    {
-                        "action_counts": dict(action_counts or {}),
-                        "writes_performed": int(writes_performed or 0),
-                        "operating_promotions": dict(operating_promotions or {}),
-                    }
-                )
+                trace["tier2"].update(reconcile_result.to_trace())
             except Exception as exc:
                 logger.warning("Brainstack explicit capture validation reconcile failed: %s", exc)
                 trace["tier2"].update({"reconcile_error": str(exc)})
