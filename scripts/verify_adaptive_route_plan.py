@@ -122,7 +122,7 @@ def _cases() -> list[dict[str, Any]]:
         },
         {
             "case_id": "multilingual_paraphrase_profile",
-            "query": "strukturalt profil kerdes magyarul",
+            "query": "structured profile question",
             "query_understanding": {"profile_slot_targets": ["profile.preferred_language"], "language": "hu"},
             "expected_route": "profile",
             "expected_reduced": True,

@@ -509,16 +509,11 @@ def _compact_tier2_route(route: Any) -> dict[str, Any]:
         }
     return {
         "runtime": _normalize_compact_text(route.get("runtime")),
-        "actual_worker_path": _normalize_compact_text(route.get("actual_worker_path")),
         "binding_status": _normalize_compact_text(route.get("binding_status")),
         "binding_reason_code": _normalize_compact_text(route.get("binding_reason_code")),
-        "runtime_invoked_by_worker": bool(route.get("runtime_invoked_by_worker")),
         "mode": _normalize_compact_text(route.get("mode")),
-        "hindsight_mode": _normalize_compact_text(route.get("hindsight_mode")),
         "llm_provider": _normalize_compact_text(route.get("llm_provider")),
         "effective_model": _normalize_compact_text(route.get("effective_model")),
-        "model_source": _normalize_compact_text(route.get("effective_model_source") or route.get("model_source")),
-        "uses_legacy_gpt_5_2_codex": bool(route.get("uses_legacy_gpt_5_2_codex")),
         "background_task_status": compact_background_tasks,
     }
 
@@ -530,7 +525,6 @@ def _compact_lifecycle_status(lifecycle: Any) -> dict[str, Any]:
     return {
         "schema": _normalize_compact_text(lifecycle.get("schema")),
         "status": _normalize_compact_text(lifecycle.get("status")),
-        "reason": _trim_compact_text(lifecycle.get("reason"), limit=180),
         "store_initialized": bool(lifecycle.get("store_initialized")),
         "tier2_worker_running": bool(lifecycle.get("tier2_worker_running")),
         "pending_tier2_turns": int(lifecycle.get("pending_tier2_turns") or 0),
@@ -584,7 +578,6 @@ def _compact_doctor_report(report: Any, *, strict_requested: bool) -> dict[str, 
                 "status": _normalize_compact_text(raw.get("status")),
                 "active": bool(raw.get("active")),
                 "requested": bool(raw.get("requested")),
-                "reason": _trim_compact_text(raw.get("reason"), limit=140),
                 "reason_code": _normalize_compact_text(raw.get("reason_code")),
             }
     return {
@@ -603,7 +596,6 @@ def _compact_doctor_report(report: Any, *, strict_requested: bool) -> dict[str, 
             }
             for issue in issues[:5]
         ],
-        "row_counts": dict(report.get("row_counts") or {}) if isinstance(report.get("row_counts"), Mapping) else {},
         "capabilities": capabilities,
     }
 

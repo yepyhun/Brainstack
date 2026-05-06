@@ -33,21 +33,6 @@ _INTERNAL_MEMORY_FILE_MARKERS = (
     "~/.hermes/",
 )
 
-_INTERNAL_PROMPT_MARKERS = (
-    "system prompt",
-    "prompt block",
-    "memory block",
-    "loaded at startup",
-    "loaded every reply",
-    "every reply",
-    "minden üzenetnél",
-    "betöltődik",
-    "betöltötte",
-    "inject",
-    "injected",
-    "brainstack active communication contract",
-)
-
 _INTERNAL_STATE_ATTRIBUTES = {
     "persona_source",
     "profile_source",
@@ -90,13 +75,7 @@ def _looks_like_internal_mechanics_text(value: Any) -> bool:
     normalized = _normalize_text(value).lower()
     if not normalized:
         return False
-    if any(marker in normalized for marker in _INTERNAL_MEMORY_FILE_MARKERS):
-        return True
-    if any(marker in normalized for marker in _INTERNAL_PROMPT_MARKERS):
-        return True
-    return "brainstack" in normalized and any(
-        marker in normalized for marker in ("prompt", "loaded", "inject", "persona", "skill", "file")
-    )
+    return any(marker in normalized for marker in _INTERNAL_MEMORY_FILE_MARKERS)
 
 
 def _should_drop_profile_item(*, category: str, content: str) -> bool:
@@ -666,7 +645,7 @@ def extract_tier2_candidates(
                 "- when emitting style_contract, preserve the user's own section headings and rule lines as literally as possible; keep the original language, wording, numbering markers, and polarity unless the transcript itself later corrects them\n"
                 "- do not paraphrase, translate, merge, soften, invent, or normalize style_contract rules into generic summaries; only clean whitespace and place lines under the right section headings\n"
                 "- do not use a section heading as the style_contract title; set title only if the transcript explicitly names the pack, otherwise return an empty string\n"
-                "- do not split one user rule into a heading plus a suffix line; if the transcript says 'konkrét tények nem jelentőségfelfújás', keep it as one rule line under the correct section heading\n"
+                "- do not split one user rule into a heading plus a suffix line; if a transcript sentence contains both the rule and its rationale, keep it as one rule line under the correct section heading\n"
                 "- if the transcript contains later corrections to an earlier rule, keep the latest corrected wording in style_contract and discard the superseded wording\n"
                 "- never emit filesystem paths, prompt-loading claims, or skill/persona file mechanics as durable memory facts or states\n"
                 "- never emit shell, terminal, file, tool, provider, or runtime capability as profile_items, states, relations, or decisions; those belong to runtime diagnostics, not memory truth\n"

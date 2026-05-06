@@ -56,14 +56,6 @@ def _loads_mapping(value: Any) -> dict[str, Any]:
     return dict(parsed) if isinstance(parsed, Mapping) else {}
 
 
-def _loads_list(value: Any) -> list[Any]:
-    try:
-        parsed = json.loads(str(value or "[]"))
-    except (TypeError, ValueError):
-        return []
-    return list(parsed) if isinstance(parsed, list) else []
-
-
 def _empty_counters() -> dict[str, int]:
     return {key: 0 for key in _COUNTER_KEYS}
 

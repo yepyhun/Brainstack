@@ -29,8 +29,7 @@ from brainstack.tier2_decision_core import (  # noqa: E402
 
 SCHEMA = "brainstack.phase249.literal_universal_proof.v1"
 EXACT_DONE_GATE_CLAIM = (
-    "MINDE HELYZHETBEN BÁRMILYEN ESETBEN AKÁRHOGY KOMIBNÁLVA BÁRMILYEN "
-    "HASZNÁLAT KÖZBEN NEM TÖRHET EL SEMMILYEN ESETBEN SEM SOHA SEHHOGY!"
+    "Every supported operation combination must return a bounded, schema-valid decision without durable truth bypass."
 )
 
 DECISION_CORE_PATH = ROOT / "brainstack" / "tier2_decision_core.py"

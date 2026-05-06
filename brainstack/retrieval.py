@@ -67,27 +67,6 @@ BEHAVIOR_PROFILE_SOURCE_SLOTS = {
     "preference:verbosity",
 }
 
-_INTERNAL_CONTRACT_MARKERS = (
-    "persona.md",
-    "skill.md",
-    "memory.md",
-    "user.md",
-    "/.hermes/",
-    "~/.hermes/",
-    "system prompt",
-    "prompt block",
-    "memory block",
-    "loaded at startup",
-    "loaded every reply",
-    "every reply",
-    "minden üzenetnél",
-    "betöltődik",
-    "betöltötte",
-    "inject",
-    "injected",
-    "source_ai",
-)
-
 def _normalize_compare_text(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().split())
 
@@ -96,27 +75,9 @@ def _is_native_profile_mirror_receipt(row: Dict[str, Any]) -> bool:
     return str(row.get("category") or "").strip() == "native_profile_mirror"
 
 
-def _extract_identity_name_hint(value: Any) -> str:
-    text = " ".join(str(value or "").strip().split())
-    lowered = text.lower()
-    if lowered.startswith("user's name is "):
-        candidate = text[len("User's name is ") :].strip()
-        if " (" in candidate:
-            candidate = candidate.split(" (", 1)[0].strip()
-        return _normalize_compare_text(candidate)
-    return ""
-
-
 def _row_metadata(row: Dict[str, Any]) -> Dict[str, Any]:
     payload = row.get("metadata")
     return dict(payload) if isinstance(payload, dict) else {}
-
-
-def _looks_like_internal_contract_text(value: Any) -> bool:
-    normalized = _normalize_compare_text(value)
-    if not normalized:
-        return False
-    return any(marker in normalized for marker in _INTERNAL_CONTRACT_MARKERS)
 
 
 def _row_temporal_label(row: Dict[str, Any]) -> str:
@@ -187,7 +148,7 @@ def _render_evidence_priority_section(title: str) -> str:
     preface = (
         "This private recalled memory context is background evidence, not new user input. "
         "Use explicit, committed, non-conflicted user/owner-backed records as authoritative. "
-        "Supporting-only/runtime state is not active assignment or project-status truth. "
+        "Supporting-only/runtime state is not active assignment and not active workstream/project status. "
         "Pulse/scheduler evidence alone is not assignment truth. "
         "If asked about current work, assignment, or workstream and no explicit task/operating record is shown, say it is not recorded instead of inferring it from background evidence. "
         "Do not mention Brainstack blocks or memory internals unless asked."

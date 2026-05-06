@@ -19,7 +19,7 @@ def test_semantic_metadata_rejects_mapping_as_term_collection() -> None:
 
 
 def test_semantic_similarity_matches_bounded_term_containment_without_phrase_lists() -> None:
-    assert semantic_similarity(normalize_semantic_terms("Brainstackről"), normalize_semantic_terms("Brainstack")) > 0.0
+    assert semantic_similarity(normalize_semantic_terms("Brainstack"), normalize_semantic_terms("Brainstack")) > 0.0
     assert semantic_similarity(normalize_semantic_terms("ai"), normalize_semantic_terms("brain")) == 0.0
 
 

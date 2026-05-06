@@ -720,9 +720,9 @@ def run_adversarial_synthetic_gateway_contract() -> dict[str, Any]:
         source_authority="user_explicit_assertion",
     )
     packet = model_facing_packet_firewall([*corrected_claims, *user_truth, {"evidence_id": "reference", **reference}])
-    rendered_assignment = render_current_assignment_status(has_current_assignment_evidence=False, language="hu")
+    rendered_assignment = render_current_assignment_status(has_current_assignment_evidence=False, language="en")
     final_text, style_trace = apply_presentation_hygiene(
-        "SyntheticPersona 🐞\n" + rendered_assignment + "\nVan még kérdésed?",
+        "SyntheticPersona 🐞\n" + rendered_assignment + "\nWhat can I help with?",
         no_emoji=True,
         no_final_followup=True,
         decorative_prefixes=("SyntheticPersona",),
@@ -1042,10 +1042,6 @@ def apply_presentation_hygiene(
         if lines:
             last = lines[-1].strip()
             generic = {
-                "miben segíthetek?",
-                "miben segíthetek még?",
-                "kell még valami?",
-                "van még kérdésed?",
                 "what can i help with?",
             }
             if last.casefold() in generic:
@@ -1068,12 +1064,11 @@ def apply_presentation_hygiene(
 def render_current_assignment_status(
     *,
     has_current_assignment_evidence: bool,
-    language: str,
+    language: str = "default",
 ) -> str:
+    del language
     if has_current_assignment_evidence:
-        return "Aktuális feladat rögzítve." if language.startswith("hu") else "Current assignment evidence is recorded."
-    if language.startswith("hu"):
-        return "Nincs rögzített aktuális feladat explicit assignment evidence alapján."
+        return "Current assignment evidence is recorded."
     return "No typed current-assignment evidence is recorded."
 
 
@@ -1279,14 +1274,7 @@ def validate_patch_against_playbook(changed_files: Sequence[str], patch_text: st
         for forbidden in playbook.forbidden_modules
         if file == forbidden or file.startswith(forbidden.rstrip("/") + "/")
     ]
-    language_router_pattern = "|".join(
-        (
-            "keresd" + " meg",
-            "nyisd" + " meg",
-            "open this " + "url",
-            "fi" + "nd .*" + r"\.md",
-        )
-    )
+    language_router_pattern = r"if\s+['\"][^'\"]{3,120}['\"]\s+in\s+\w+\s*:\s*(?:load|open|search|read)\w*\("
     forbidden_patterns = {
         "language_keyword_router": (language_router_pattern, re.IGNORECASE),
         "generic_identity_name_slot": (r"identity\.name", 0),

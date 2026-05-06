@@ -3086,7 +3086,7 @@ index 00000000..abb29e52
 +        },
 +        answer_evidence=[],
 +        forbidden_claims=["memory_truth", "lifetime_certainty"],
-+        current_user_message="Mi a zeta omega durable keyem?",
++        current_user_message="What is my zeta omega durable key?",
 +        supporting_context=["supporting context only, not answer truth"] * 40,
 +        recent_history=["recent chat noise"] * 40,
 +        diagnostics=["backend health ok; candidates omitted in model-facing prompt"] * 20,
@@ -3105,11 +3105,11 @@ index 00000000..abb29e52
 +            {
 +                "id": "event:turn-42",
 +                "event_type": "user_turn_event",
-+                "preview": "markeres dolgot kérdezted",
++                "preview": "you asked about the marker",
 +            }
 +        ],
 +        forbidden_claims=["lifetime_certainty", "durable_user_fact"],
-+        current_user_message="Kérdeztem már ezt?",
++        current_user_message="Did I ask this already?",
 +        supporting_context=["noise " * 600] * 10,
 +        recent_history=["history " * 600] * 10,
 +        diagnostics=["/home/lauratom/private/path sk-abcdef1234567890"] * 3,
@@ -3304,41 +3304,40 @@ index 00000000..fde1b33a
 +    CanaryCase(
 +        name="pulse_is_background_not_assignment",
 +        prompt=(
-+            "A Brainstack Proactive Pulse futása azt jelenti, hogy most a "
-+            "Brainstack fejlesztés az aktuális feladatod? Vagy ez csak "
-+            "háttérfolyamat?"
++            "Does the Brainstack Proactive Pulse mean Brainstack development "
++            "is your current assigned task, or is it only background state?"
 +        ),
-+        required_any=("háttér", "background"),
++        required_any=("background",),
 +        forbidden=(
-+            "talál magának feladatot",
-+            "pulse futása azt jelenti, hogy most a brainstack fejlesztés",
-+            "aktuális feladatom a brainstack fejlesztés",
++            "finds its own task",
++            "pulse means brainstack development is the current task",
++            "my current task is brainstack development",
 +        ),
 +    ),
 +    CanaryCase(
 +        name="assignment_requires_authoritative_record",
 +        prompt=(
-+            "Ha nincs explicit assigned workstream rögzítve, akkor miből "
-+            "döntöd el, hogy min dolgozol most? Használhatod erre a régi "
-+            "session transcripteket vagy Graph Truth háttérállapotot?"
++            "If no explicit assigned workstream is recorded, what determines "
++            "what you are working on now? Can old session transcripts or "
++            "Graph Truth background state be used for that?"
 +        ),
-+        required_any=("explicit", "rögzített", "recorded", "typed", "authoritative", "hozzárendelt"),
++        required_any=("explicit", "recorded", "typed", "authoritative"),
 +        forbidden=(
-+            "explicit open decision alapján igen",
-+            "használhatom a session transcripteket és a graph truth-t feladat-meghatározásra",
-+            "használhatom a session transcripteket és a graph truth állapotot feladat-meghatározásra",
++            "yes based on an explicit open decision",
++            "session transcripts and graph truth can determine the current task",
++            "graph truth background state can determine the current task",
 +        ),
 +    ),
 +    CanaryCase(
 +        name="unsupported_memory_abstains",
 +        prompt=(
-+            "Kérdezek egy unsupported memory dolgot: zeta omega durable "
-+            "memory. Van erről rögzített memory truth? Ha nincs evidence, "
-+            "ne tippelj."
++            "Unsupported memory lookup: zeta omega durable memory. "
++            "Is there recorded memory truth for it? If evidence is missing, "
++            "do not guess."
 +        ),
-+        required_any=("nincs", "nem találtam", "no supported", "no evidence"),
++        required_any=("no supported", "no evidence", "not found"),
 +        forbidden=(
-+            "emlékszem, hogy zeta omega",
++            "I remember zeta omega",
 +            "zeta omega durable memory az",
 +            "current truth",
 +        ),
@@ -5007,13 +5006,13 @@ index 00000000..d62d803f
 +    )
 +    url_memory = resolve_turn_profile(
 +        platform="discord",
-+        prompt="Jegyezd meg ezt az URL-t: https://example.com/repo",
++        prompt="Remember this URL: https://example.com/repo",
 +        current_enabled_toolsets=current,
 +        env={},
 +    )
 +    keyword_not_heavy = resolve_turn_profile(
 +        platform="discord",
-+        prompt="nézd meg emlékezetből, beszéltünk-e erről",
++        prompt="check from memory whether we discussed this",
 +        current_enabled_toolsets=current,
 +        env={},
 +    )
@@ -5406,19 +5405,19 @@ index 00000000..98edd1ba
 +    case = script.CanaryCase(
 +        name="bad",
 +        prompt="x",
-+        required_any=("háttér",),
-+        forbidden=("talál magának feladatot",),
++        required_any=("background",),
++        forbidden=("finds its own task",),
 +        max_latency_seconds=10,
 +    )
 +
 +    result = script.validate_response(
 +        case,
-+        "Ez háttér, de a Pulse talál magának feladatot.",
++        "This is background, but Pulse finds its own task.",
 +        1.0,
 +    )
 +
 +    assert not result.passed
-+    assert result.forbidden_found == ["talál magának feladatot"]
++    assert result.forbidden_found == ["finds its own task"]
 +
 +
 +def test_validate_response_fails_missing_required_any():
@@ -5426,13 +5425,13 @@ index 00000000..98edd1ba
 +    case = script.CanaryCase(
 +        name="missing",
 +        prompt="x",
-+        required_any=("explicit", "rögzített"),
++        required_any=("explicit", "recorded"),
 +    )
 +
-+    result = script.validate_response(case, "Nincs ilyen adat.", 1.0)
++    result = script.validate_response(case, "No such data.", 1.0)
 +
 +    assert not result.passed
-+    assert result.missing_required_any == ["explicit", "rögzített"]
++    assert result.missing_required_any == ["explicit", "recorded"]
 +
 +
 +def test_run_cases_uses_dispatcher_and_collects_latency():
@@ -5442,14 +5441,14 @@ index 00000000..98edd1ba
 +    async def dispatch(prompt):
 +        calls.append(prompt)
 +        await asyncio.sleep(0)
-+        return "nem háttér explicit"
++        return "not background explicit"
 +
 +    cases = [
 +        script.CanaryCase(
 +            name="ok",
 +            prompt="prompt",
 +            required_any=("explicit",),
-+            required_all=("nem",),
++            required_all=("not",),
 +            forbidden=("bad",),
 +            max_latency_seconds=10,
 +        )
@@ -5470,7 +5469,7 @@ index 00000000..98edd1ba
 +
 +    async def dispatch(prompt):
 +        return script.DispatchOutcome(
-+            response="nem háttér explicit",
++            response="not background explicit",
 +            agent_result={"tools": [], "output_tokens": 10, "model": "test-model"},
 +            event_id="evt-1",
 +            causal_index=7,

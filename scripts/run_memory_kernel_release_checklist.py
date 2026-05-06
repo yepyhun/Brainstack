@@ -27,8 +27,7 @@ from brainstack.benchmark_transparency import REQUIRED_BENCHMARK_VARIANTS  # noq
 DEFAULT_RELEASE_CLAIM_CONTRACT = ROOT / ".planning" / "release" / "RELEASE-CLAIM-CONTRACT.json"
 DEFAULT_RELEASE_NOTES = ROOT / ".planning" / "release" / "RELEASE-NOTES.md"
 UNBREAKABLE_TARGET = (
-    "MINDE HELYZHETBEN BÁRMILYEN ESETBEN AKÁRHOGY KOMIBNÁLVA BÁRMILYEN "
-    "HASZNÁLAT KÖZBEN NEM TÖRHET EL SEMMILYEN ESETBEN SEM SOHA SEHHOGY!"
+    "Every supported operation combination must return a bounded, schema-valid decision without durable truth bypass."
 )
 REQUIRED_OPERATION_CLASSES = {
     "inputs",

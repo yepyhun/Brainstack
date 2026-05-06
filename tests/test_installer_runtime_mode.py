@@ -1001,7 +1001,7 @@ class AIAgent:
     assert "final_response = self._validate_terminal_final_response(" in text
 
 
-def test_memory_answer_renderer_language_patch_localizes_current_assignment(tmp_path):
+def test_memory_answer_renderer_language_patch_is_import_only_after_contract_cleanup(tmp_path):
     module = tmp_path / "memory_answer_renderer.py"
     module.write_text(
         '''"""renderer"""
@@ -1024,13 +1024,9 @@ def _render_text(answer_type: str, claim_style: str, answer_value: str) -> str:
     applied = install_into_hermes._patch_memory_answer_renderer_language(module, dry_run=False)
 
     text = module.read_text(encoding="utf-8")
-    assert applied == [
-        "memory_renderer:language_import",
-        "memory_renderer:response_language_helper",
-        "memory_renderer:localized_templates",
-    ]
-    assert "def _response_language()" in text
-    assert "Nincs rögzített aktuális feladat explicit assignment evidence alapján." in text
+    assert applied == ["memory_renderer:language_import"]
+    assert "def _response_language()" not in text
+    assert "No typed current-assignment evidence is recorded." in text
 
 
 def test_memory_answer_renderer_language_patch_skips_new_answer_evidence_signature(tmp_path):

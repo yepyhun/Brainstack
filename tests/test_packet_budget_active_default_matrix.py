@@ -105,7 +105,7 @@ def test_active_matrix_preserves_protected_truth_and_drops_support() -> None:
             admission_id="",
             token_estimate=10,
         ),
-        _candidate("multilingual-árvíztűrő-可检查", token_estimate=8),
+        _candidate("multilingual-cjk-proof", token_estimate=8),
     ]
 
     result = apply_packet_budget(candidates, PacketBudgetPolicy(max_candidate_tokens=16))
@@ -115,7 +115,7 @@ def test_active_matrix_preserves_protected_truth_and_drops_support() -> None:
     selected_ids = {item["candidate_id"] for item in result.candidates if item["decision"] == "selected"}
     dropped_ids = {item["candidate_id"] for item in result.candidates if item["decision"] == "dropped"}
 
-    assert {"truth-current", "multilingual-árvíztűrő-可检查"} <= selected_ids
+    assert {"truth-current", "multilingual-cjk-proof"} <= selected_ids
     assert {"support-only", "conflict", "prior-stale"} <= dropped_ids
     assert validate_packet_budget_trace(trace) == []
     assert validate_broker_trace(broker) == []

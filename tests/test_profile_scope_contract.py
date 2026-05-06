@@ -24,7 +24,7 @@ def test_user_specific_profile_categories_are_storage_key_scoped(tmp_path: Path)
             content="Use terse Hungarian.",
             source="user_explicit",
             confidence=0.97,
-            metadata={"principal_scope_key": "principal:laura"},
+            metadata={"principal_scope_key": "principal:example"},
         )
         store.upsert_profile_item(
             stable_key="style.reply_tone",
@@ -35,7 +35,7 @@ def test_user_specific_profile_categories_are_storage_key_scoped(tmp_path: Path)
             metadata={"principal_scope_key": "principal:other"},
         )
 
-        laura_item = store.get_profile_item(stable_key="style.reply_tone", principal_scope_key="principal:laura")
+        laura_item = store.get_profile_item(stable_key="style.reply_tone", principal_scope_key="principal:example")
         other_item = store.get_profile_item(stable_key="style.reply_tone", principal_scope_key="principal:other")
 
         assert laura_item is not None
@@ -56,7 +56,7 @@ def test_operating_profile_categories_remain_list_scoped(tmp_path: Path) -> None
             content="Brainstack live follow-up.",
             source="user_explicit",
             confidence=0.95,
-            metadata={"principal_scope_key": "principal:laura"},
+            metadata={"principal_scope_key": "principal:example"},
         )
         store.upsert_profile_item(
             stable_key="workspace.current_focus",
@@ -70,7 +70,7 @@ def test_operating_profile_categories_remain_list_scoped(tmp_path: Path) -> None
         laura_items = store.list_profile_items(
             limit=4,
             categories=["work_context"],
-            principal_scope_key="principal:laura",
+            principal_scope_key="principal:example",
         )
 
         assert [item["content"] for item in laura_items] == ["Brainstack live follow-up."]

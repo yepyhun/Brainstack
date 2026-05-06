@@ -297,8 +297,8 @@ def test_final_output_validation_commits_receipt_backed_profile_captures(tmp_pat
         result = provider.validate_assistant_output(
             "Megjegyeztem.",
             user_content=(
-                "Canary Alex a nevem, 19 éves vagyok. "
-                "Jegyezd meg repo URL-ként: https://example.com/example-lib"
+                "My name is Canary Alex, and I am 19 years old. "
+                "Remember as a repo URL: https://example.com/example-lib"
             ),
             session_id="receipt-session",
         )
@@ -371,7 +371,7 @@ def test_final_output_validation_preserves_exact_source_url_literal(tmp_path: Pa
     try:
         result = provider.validate_assistant_output(
             "Megjegyeztem.",
-            user_content="Jegyezd meg ezt repo URL-ként: https://example.com/example-lib",
+            user_content="Remember this as a repo URL: https://example.com/example-lib",
             session_id="receipt-session",
         )
 
@@ -430,7 +430,7 @@ def test_final_output_validation_preserves_exact_source_age_literal(tmp_path: Pa
     try:
         result = provider.validate_assistant_output(
             "Megjegyeztem.",
-            user_content="A nevem Canary Alex. 19 éves vagyok.",
+            user_content="My name is Canary Alex. I am 19 years old.",
             session_id="receipt-session",
         )
 
@@ -503,7 +503,7 @@ def test_live_receipt_enforcement_partial_coverage_forbids_full_ack(tmp_path: Pa
     try:
         result = provider.validate_assistant_output(
             "Megjegyeztem.",
-            user_content="Canary Alex a nevem, 19 éves vagyok.",
+            user_content="My name is Canary Alex, and I am 19 years old.",
             session_id="receipt-session",
         )
 
@@ -551,8 +551,8 @@ def test_live_receipt_enforcement_no_capture_does_not_invent_memory_write(tmp_pa
     )
     try:
         result = provider.validate_assistant_output(
-            "Általános válasz.",
-            user_content="Beszélgessünk általánosan.",
+            "Generic answer.",
+            user_content="Talk generally.",
             session_id="receipt-session",
         )
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parents[1]
-FORBIDDEN = re.compile(r"keresd meg|nyisd meg|open this url|find .*\\.md", re.IGNORECASE)
+FORBIDDEN = re.compile(r"if\s+['\"][^'\"]{3,120}['\"]\s+in\s+\w+\s*:\s*(?:load|open|search|read)\w*\(", re.IGNORECASE)
 SCAN_DIRS = (ROOT / "brainstack", ROOT / "scripts")
 
 

@@ -126,6 +126,7 @@ def is_current_assignment_authority(item: Mapping[str, Any]) -> bool:
 
 
 def infer_query_intent(*, query: str, analysis: Mapping[str, Any] | None = None) -> str:
+    del query
     payload = analysis if isinstance(analysis, Mapping) else {}
     operating_lookup = payload.get("operating_lookup")
     lookup_payload: Mapping[str, Any] = operating_lookup if isinstance(operating_lookup, Mapping) else {}
@@ -134,18 +135,10 @@ def infer_query_intent(*, query: str, analysis: Mapping[str, Any] | None = None)
         for value in lookup_payload.get("record_types", [])
         if _text(value)
     }
-    normalized = _text(query).casefold()
-    asks_assignment = (
-        "assignment" in normalized
-        or "assigned" in normalized
-        or "current work" in normalized
-        or "workstream" in normalized
-        or "aktuális feladat" in normalized
-    )
     # Current-assignment authority is a positive typed record gate. Do not let
     # route analysis fall back to generic memory/event answerability when the
     # user is explicitly asking what the agent is currently assigned to do.
-    if asks_assignment or (bool(payload.get("operating_like")) and "active_work" in record_types):
+    if bool(payload.get("operating_like")) and "active_work" in record_types:
         return "current_assignment"
     return "memory"
 

@@ -229,8 +229,7 @@ def test_capture_pipeline_has_no_language_keyword_router() -> None:
     import brainstack.capture_pipeline as capture_pipeline
 
     source = inspect.getsource(capture_pipeline)
-    assert "Alexnek hívnak" not in source
-    assert "jegyezd meg" not in source
+    assert "My name is Alex" not in source
     assert "remember that" not in source
 
 

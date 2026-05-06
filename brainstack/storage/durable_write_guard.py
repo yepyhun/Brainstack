@@ -69,21 +69,6 @@ def _has_admission(metadata: Mapping[str, Any]) -> bool:
     )
 
 
-def _has_trusted_context(metadata: Mapping[str, Any]) -> bool:
-    context = _as_mapping(metadata.get("durable_write_context"))
-    permit = _as_mapping(metadata.get("truth_write_permit"))
-    return bool(
-        context.get("trusted_context_id")
-        or context.get("migration_id")
-        or context.get("operator_action_id")
-        or context.get("canary_run_id")
-        or permit.get("trusted_context_id")
-        or permit.get("migration_id")
-        or permit.get("operator_action_id")
-        or permit.get("canary_run_id")
-    )
-
-
 def _source_authority(metadata: Mapping[str, Any]) -> str:
     context = _as_mapping(metadata.get("durable_write_context"))
     permit = _as_mapping(metadata.get("truth_write_permit"))

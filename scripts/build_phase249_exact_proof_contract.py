@@ -25,8 +25,7 @@ from scripts.build_phase249_literal_universal_proof import (  # noqa: E402
 from scripts.run_phase249_operation_combination_proof import run_proof as run_combination_proof  # noqa: E402
 
 EXACT_DONE_GATE_CLAIM = (
-    "MINDE HELYZHETBEN BÁRMILYEN ESETBEN AKÁRHOGY KOMIBNÁLVA BÁRMILYEN "
-    "HASZNÁLAT KÖZBEN NEM TÖRHET EL SEMMILYEN ESETBEN SEM SOHA SEHHOGY!"
+    "Every supported operation combination must return a bounded, schema-valid decision without durable truth bypass."
 )
 EXACT_PROOF_CONTRACT_SCHEMA = "brainstack.phase249_exact_gate_proof.v1"
 
@@ -168,9 +167,9 @@ def _operation_class_evidence() -> dict[str, Any]:
 def _literal_universal_proof_available(
     artifact_override: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    artifact = dict(artifact_override) if artifact_override is not None else _load_json(LITERAL_UNIVERSAL_PROOF_ARTIFACT)
+    artifact = dict(artifact_override) if artifact_override is not None else {}
     generated = False
-    if artifact_override is None and not artifact:
+    if artifact_override is None:
         artifact = build_literal_universal_proof()
         generated = True
     passed = (

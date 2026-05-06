@@ -21,9 +21,9 @@ from brainstack.product_contracts import (  # noqa: E402
 
 def write_artifacts(out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    rendered = render_current_assignment_status(has_current_assignment_evidence=False, language="hu")
+    rendered = render_current_assignment_status(has_current_assignment_evidence=False)
     cleaned, trace = apply_presentation_hygiene(
-        "Hermes 😊\n" + rendered + "\nVan még kérdésed?",
+        "Hermes 😊\n" + rendered + "\nWhat can I help with?",
         no_emoji=True,
         no_final_followup=True,
         decorative_prefixes=("Hermes",),
@@ -33,7 +33,7 @@ def write_artifacts(out_dir: Path) -> None:
         {
             "schema": "brainstack.phase182.presentation_path_proof.v1",
             "contract": default_presentation_runtime_contract(),
-            "renderer_language": "hu",
+            "renderer_language": "default",
             "final_text": cleaned,
         },
     )

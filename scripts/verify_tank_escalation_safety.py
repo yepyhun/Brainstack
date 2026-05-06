@@ -76,7 +76,7 @@ def _cases() -> list[dict[str, Any]]:
         },
         {
             "case_id": "multilingual_paraphrase",
-            "query": "strukturalt magyar profil kerdes",
+            "query": "structured profile question",
             "query_understanding": {"profile_slot_targets": ["profile.preferred_language"], "language": "hu"},
             "required_evidence_classes": ["profile"],
         },

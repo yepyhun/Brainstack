@@ -170,17 +170,6 @@ def _derive_native_profile_mirror_entries(content: str) -> List[Dict[str, Any]]:
     return entries
 
 
-def _build_personal_scope_key(*, platform: str = "", user_id: str = "") -> str:
-    parts: List[str] = []
-    normalized_platform = str(platform or "").strip()
-    normalized_user_id = str(user_id or "").strip()
-    if normalized_platform:
-        parts.append(f"platform:{normalized_platform}")
-    if normalized_user_id:
-        parts.append(f"user_id:{normalized_user_id}")
-    return "|".join(parts)
-
-
 def _extract_heading_titles(block: str) -> List[str]:
     titles: List[str] = []
     for raw_line in str(block or "").splitlines():

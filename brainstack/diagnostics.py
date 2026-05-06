@@ -845,7 +845,7 @@ def _final_packet_diagnostic_payload(
         "char_count": len(block),
         "section_count": len(sections),
         "sections": sections,
-        "preview": block[:1200],
+        "preview": block[:1600],
         "policy": dict(policy_snapshot),
         "memory_answerability": dict(packet_answerability),
         "explicit_truth_parity": explicit_truth_parity,

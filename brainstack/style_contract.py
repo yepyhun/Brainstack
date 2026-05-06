@@ -26,7 +26,6 @@ _STYLE_CONTRACT_SOURCE_RANKS = (
     ("sync_turn:user_style_contract", 300),
     ("tier2_llm", 100),
 )
-_PATCH_TOKEN_RE = re.compile(r"[0-9A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű]{2,}", re.UNICODE)
 _PATCH_LINE_MAX_CHARS = 360
 _PATCH_LINE_MAX_TOKENS = 56
 
@@ -51,7 +50,18 @@ def _coerce_confidence(value: Any, *, default: float = 0.86) -> float:
 
 
 def _tokenize_patch_text(value: Any) -> List[str]:
-    return [token.casefold() for token in _PATCH_TOKEN_RE.findall(_normalize_text(value))]
+    tokens: List[str] = []
+    current: List[str] = []
+    for char in _normalize_text(value):
+        if char.isalnum():
+            current.append(char.casefold())
+            continue
+        if len(current) >= 2:
+            tokens.append("".join(current))
+        current = []
+    if len(current) >= 2:
+        tokens.append("".join(current))
+    return tokens
 
 
 def _normalize_rule_lines(values: Any) -> List[str]:

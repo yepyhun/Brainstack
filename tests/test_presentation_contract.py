@@ -10,25 +10,23 @@ from brainstack.product_contracts import (
 
 def test_hermes_prompt_includes_style_contract() -> None:
     cleaned, trace = apply_presentation_hygiene(
-        "Szia 😊\nMiben segíthetek?",
+        "Hello 😊\nWhat can I help with?",
         no_emoji=True,
         no_final_followup=True,
     )
 
     assert "😊" not in cleaned
-    assert "Miben segíthetek?" not in cleaned
+    assert "What can I help with?" not in cleaned
     assert trace["applied_by"] == "hermes.presentation"
 
 
-def test_direct_renderer_uses_user_language_template() -> None:
+def test_direct_renderer_uses_default_template() -> None:
     text = render_current_assignment_status(
         has_current_assignment_evidence=False,
-        language="hu",
     )
     cleaned, trace = apply_presentation_hygiene(text, no_emoji=True)
 
-    assert "Nincs rögzített aktuális feladat" in cleaned
-    assert "No typed" not in cleaned
+    assert "No typed current-assignment evidence is recorded" in cleaned
     assert trace["semantic_changes_allowed"] is False
 
 

@@ -61,7 +61,7 @@ def _event(
         "claim": {
             "memory_kind": memory_kind,
             "target_slot": "profile.preferred_language",
-            "subject_ref": "entity:user:laura",
+            "subject_ref": "entity:user:example",
             "predicate": "prefers_language",
             "object_ref": "entity:language:hu",
             "normalized_value_hash": f"sha256:value_{event_id}",
@@ -83,7 +83,7 @@ def _event(
             "superseded_by": superseded_by,
         },
         "projection": {
-            "entity_refs": ["entity:user:laura", "entity:language:hu"],
+            "entity_refs": ["entity:user:example", "entity:language:hu"],
             "relation_refs": [f"rel:{event_id}"],
             "budget_class": "task_relevant",
             "authority_critical": truth_eligible,

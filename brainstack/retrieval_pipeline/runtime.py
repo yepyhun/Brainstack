@@ -33,7 +33,6 @@ from ..operating_truth import (
 from ..profile_contract import is_native_explicit_style_item
 from ..style_contract import STYLE_CONTRACT_SLOT
 from ..temporal import record_is_effective_at, record_temporal_status
-from ..tier2_extractor import _default_llm_caller, _extract_json_object, _extract_text_content
 from ..transcript import primary_user_turn_content, split_turn_content
 from ..usefulness import graph_priority_adjustment, profile_priority_adjustment
 from ..workstream_recap import annotate_workstream_recap_row, row_workstream_id, workstream_bank_mismatch_reason
@@ -361,47 +360,8 @@ def _weak_cross_session_keyword_residue_reason(candidate: EvidenceCandidate) -> 
     )
 
 
-_CURRENT_ASSIGNMENT_MARKERS = {
-    "active",
-    "aktualis",
-    "current",
-    "jelenlegi",
-    "most",
-    "now",
-}
-
-_ASSIGNMENT_DOMAIN_MARKERS = {
-    "assigned",
-    "assignment",
-    "feladat",
-    "feladatod",
-    "munka",
-    "task",
-    "work",
-    "workstream",
-}
-
-
-def _current_assignment_lookup_requested(query: str) -> bool:
-    """Return true when the query asks for current assigned work authority.
-
-    This is a narrow authority gate, not a semantic router: current assignment
-    truth must come from task/operating owner records, never assistant-authored
-    transcript residue or Tier-2 background graph guesses.
-    """
-    normalized = _normalize_text(query).casefold()
-    tokens = {
-        token
-        for token in re.findall(r"[^\W_]+", normalized, flags=re.UNICODE)
-        if len(token) >= 3
-    }
-    has_current_marker = bool(tokens & _CURRENT_ASSIGNMENT_MARKERS)
-    has_assignment_marker = bool(tokens & _ASSIGNMENT_DOMAIN_MARKERS)
-    return has_current_marker and has_assignment_marker
-
-
-def _assistant_assignment_residue_reason(candidate: EvidenceCandidate, *, query: str) -> str:
-    if not _current_assignment_lookup_requested(query):
+def _assistant_assignment_residue_reason(candidate: EvidenceCandidate, *, current_assignment_lookup_requested: bool) -> str:
+    if not current_assignment_lookup_requested:
         return ""
     if candidate.shelf not in {"transcript", "continuity_match", "continuity_recent"}:
         return ""
@@ -423,8 +383,8 @@ def _assistant_assignment_residue_reason(candidate: EvidenceCandidate, *, query:
     )
 
 
-def _tier2_graph_assignment_residue_reason(candidate: EvidenceCandidate, *, query: str) -> str:
-    if not _current_assignment_lookup_requested(query):
+def _tier2_graph_assignment_residue_reason(candidate: EvidenceCandidate, *, current_assignment_lookup_requested: bool) -> str:
+    if not current_assignment_lookup_requested:
         return ""
     if candidate.shelf != "graph":
         return ""
@@ -473,37 +433,6 @@ def _fusion_rank_contribution(*, channel_name: str, shelf: str, rank: int) -> fl
     channel_weight = float(FUSION_CHANNEL_WEIGHTS.get(channel_name, 1.0))
     shelf_weight = float(FUSION_SHELF_WEIGHTS.get(shelf, 1.0))
     return (channel_weight * shelf_weight) / (RRF_K + rank)
-
-
-def _llm_route_resolver(query: str) -> Dict[str, Any]:
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You classify Brainstack memory retrieval questions into one of four modes.\n"
-                "Return JSON only with the schema {\"mode\": \"fact|temporal|aggregate|style_contract\", \"reason\": \"...\"}.\n"
-                "Use temporal when the user needs ordering, before/after comparison, date difference, or change over time.\n"
-                "Use aggregate when the user needs totals, counts across multiple events, or exhaustive collection.\n"
-                "Use style_contract when the user is explicitly asking about their detailed rule pack, named style pack, rule list, or the full style contract itself.\n"
-                "Use fact for ordinary fact lookup or if uncertain."
-            ),
-        },
-        {
-            "role": "user",
-            "content": query,
-        },
-    ]
-    response = _default_llm_caller(
-        task="memory_prefetch_routing_hint",
-        messages=messages,
-        timeout=6.0,
-        max_tokens=120,
-    )
-    payload = _extract_json_object(_extract_text_content(response))
-    return {
-        "mode": _normalize_text(payload.get("mode")),
-        "reason": _normalize_text(payload.get("reason")),
-    }
 
 
 def _missing_style_contract_row(*, principal_scope_key: str = "") -> Dict[str, Any]:
@@ -1528,17 +1457,23 @@ def _materialize_candidate(candidate: EvidenceCandidate) -> Dict[str, Any]:
 def _selection_suppression_reason(
     candidate: EvidenceCandidate,
     *,
-    query: str,
+    current_assignment_lookup_requested: bool,
     has_scoped_recap_anchor: bool,
     scoped_recap_anchor_workstream_ids: set[str],
 ) -> str:
     suppression_reason = _weak_cross_session_keyword_residue_reason(candidate)
     if suppression_reason:
         return suppression_reason
-    suppression_reason = _assistant_assignment_residue_reason(candidate, query=query)
+    suppression_reason = _assistant_assignment_residue_reason(
+        candidate,
+        current_assignment_lookup_requested=current_assignment_lookup_requested,
+    )
     if suppression_reason:
         return suppression_reason
-    suppression_reason = _tier2_graph_assignment_residue_reason(candidate, query=query)
+    suppression_reason = _tier2_graph_assignment_residue_reason(
+        candidate,
+        current_assignment_lookup_requested=current_assignment_lookup_requested,
+    )
     if suppression_reason:
         return suppression_reason
     if (
@@ -1580,7 +1515,7 @@ def _select_rows(
     graph_limit: int,
     corpus_limit: int,
     evidence_item_budget: int,
-    query: str = "",
+    current_assignment_lookup_requested: bool = False,
 ) -> Dict[str, List[Dict[str, Any]]]:
     buckets = _SelectionBuckets()
     has_scoped_recap_anchor = any(
@@ -1598,7 +1533,7 @@ def _select_rows(
         row = _materialize_candidate(candidate)
         suppression_reason = _selection_suppression_reason(
             candidate,
-            query=query,
+            current_assignment_lookup_requested=current_assignment_lookup_requested,
             has_scoped_recap_anchor=has_scoped_recap_anchor,
             scoped_recap_anchor_workstream_ids=scoped_recap_anchor_workstream_ids,
         )

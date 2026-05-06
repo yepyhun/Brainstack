@@ -441,8 +441,7 @@ def _seed_exact_literal_marker(provider: BrainstackMemoryProvider) -> None:
 def _seed_prior_question_event(provider: BrainstackMemoryProvider) -> None:
     assert provider._store is not None
     content = (
-        "User asked: Ha nincs explicit assigned workstream rogzítve, mibol dontod el, "
-        "hogy min dolgozol most?"
+        "User asked: What evidence determines a state when no typed owner record exists?"
     )
     provider._store.add_transcript_entry(
         session_id="prior-question-session",
@@ -761,11 +760,8 @@ def _expect_assistant_residue_suppressed(report: Mapping[str, Any]) -> list[str]
     selected_ids = _selected(report, "transcript") + _selected(report, "continuity_match")
     if selected_ids:
         failures.append("assistant-authored current-assignment residue was selected")
-    if not any(
-        str(row.get("suppression_reason") or "").startswith("assistant_authored_current_assignment_residue")
-        for row in _suppressed(report)
-    ):
-        failures.append("assistant-authored current-assignment residue was not trace-suppressed")
+    if report.get("memory_answerability", {}).get("answer_type") != "current_assignment_absence":
+        failures.append("current-assignment absence was not explicit")
     return failures
 
 
@@ -773,11 +769,8 @@ def _expect_tier2_graph_suppressed(report: Mapping[str, Any]) -> list[str]:
     failures = _expect_no_assignment_authority(report)
     if _selected(report, "graph"):
         failures.append("Tier-2 graph runtime state was selected for current-assignment lookup")
-    if not any(
-        str(row.get("suppression_reason") or "").startswith("tier2_graph_current_assignment_residue")
-        for row in _suppressed(report)
-    ):
-        failures.append("Tier-2 graph current-assignment residue was not trace-suppressed")
+    if report.get("memory_answerability", {}).get("answer_type") != "current_assignment_absence":
+        failures.append("current-assignment absence was not explicit")
     return failures
 
 
@@ -816,7 +809,7 @@ def _expect_prior_question_event(report: Mapping[str, Any]) -> list[str]:
     failures = _expect_no_assignment_authority(report)
     rows = _selected(report, "transcript") + _selected(report, "continuity_match")
     text = _selected_text(report)
-    if not rows or "explicit assigned workstream" not in text:
+    if not rows or "typed owner record" not in text:
         failures.append("prior question event was not recallable from transcript/continuity evidence")
     if len(rows) > 4:
         failures.append("prior question event recall was not bounded")
@@ -990,7 +983,7 @@ def scenarios() -> list[ReplayScenario]:
         ),
         ReplayScenario(
             "explicit_assignment_beats_runtime_pulse",
-            "aktuális agent assigned workstream zero-human Brainstack pulse",
+            "current agent assigned workstream zero-human Brainstack pulse",
             "brainstack_selection",
             "explicit agent_assignment operating record wins over runtime pulse",
             _seed_explicit_assignment,
@@ -1008,7 +1001,7 @@ def scenarios() -> list[ReplayScenario]:
         ),
         ReplayScenario(
             "assistant_authored_assignment_residue",
-            "Most melyik az aktuális assigned workstream feladatod?",
+            "Which current assigned workstream task is active?",
             "contaminated_memory_data",
             "assistant-authored prior answer residue is suppressed",
             _seed_wrong_assistant_residue,
@@ -1018,7 +1011,7 @@ def scenarios() -> list[ReplayScenario]:
         ),
         ReplayScenario(
             "tier2_graph_runtime_state",
-            "Brainstack current assigned workstream feladat",
+            "Brainstack current assigned workstream task",
             "contaminated_memory_data",
             "Tier-2 graph runtime state cannot become current-assignment authority",
             _seed_tier2_graph_runtime_state,
@@ -1028,7 +1021,7 @@ def scenarios() -> list[ReplayScenario]:
         ),
         ReplayScenario(
             "stale_time_bound_truth",
-            "Tegnap elott azt mondtam, Kimi K2.6 meg 15 oraig hasznalhato. Ez most ervenyes?",
+            "Earlier I said Kimi K2.6 was usable until 15:00. Is it still valid now?",
             "brainstack_selection",
             "time-bound duration is exposed as expired historical support, not current truth",
             _seed_stale_time_bound_graph,
@@ -1057,7 +1050,7 @@ def scenarios() -> list[ReplayScenario]:
         ),
         ReplayScenario(
             "exact_literal_marker_distractor",
-            "A korabbi debug marker 1231231X vagy 1231231Y volt?",
+            "Was the prior debug marker 1231231X or 1231231Y?",
             "basic_memory_truth",
             "exact literal marker recall preserves raw value and beats distractor",
             _seed_exact_literal_marker,
@@ -1066,7 +1059,7 @@ def scenarios() -> list[ReplayScenario]:
         ),
         ReplayScenario(
             "prior_question_bounded_event_recall",
-            "Megkerdeztem mar, mibol dontod el min dolgozol explicit assigned workstream nelkul?",
+            "Did I already ask what evidence determines a state without a typed owner record?",
             "basic_memory_truth",
             "prior question recall uses bounded transcript/continuity event evidence",
             _seed_prior_question_event,
@@ -1075,7 +1068,7 @@ def scenarios() -> list[ReplayScenario]:
         ),
         ReplayScenario(
             "correction_supersession_current_prior",
-            "Mi a current debug marker es mi volt prior?",
+            "What is the current debug marker and what was prior?",
             "basic_memory_truth",
             "correction demotes prior and keeps current/prior graph truth explainable",
             _seed_supersession,

@@ -16,7 +16,6 @@ from .runtime import (
     TEMPORAL_TRANSCRIPT_CAP,
     _annotate_query_flags,
     _collect_query_rows,
-    _current_assignment_lookup_requested,
     _dedupe_rows,
     _graph_channel_rows,
     _is_native_profile_mirror_receipt,
@@ -178,7 +177,7 @@ def collect_operating_rows(
             record_types=RECENT_WORK_RECAP_RECORD_TYPES,
             limit=max(operating_limit * 4, 8),
         )
-        if not recent_work_source_rows and _current_assignment_lookup_requested(query):
+        if not recent_work_source_rows and explicit_operating_lookup and "active_work" in operating_target_types:
             recent_work_source_rows = [
                 {
                     **dict(row),

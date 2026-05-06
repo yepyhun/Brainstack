@@ -63,9 +63,19 @@ def select_route_rows(
     rows: Mapping[str, Any],
     fused: List[EvidenceCandidate],
 ) -> Dict[str, Any]:
+    operating_lookup = rows.get("operating_lookup")
+    requested_record_types = (
+        {
+            str(value or "").strip()
+            for value in operating_lookup.get("record_types", [])
+            if str(value or "").strip()
+        }
+        if isinstance(operating_lookup, Mapping)
+        else set()
+    )
     fact_selected = _select_rows(
         fused,
-        query=query,
+        current_assignment_lookup_requested="active_work" in requested_record_types,
         profile_limit=limits["profile_limit"],
         continuity_match_limit=limits["continuity_match_limit"],
         continuity_recent_limit=limits["continuity_recent_limit"],

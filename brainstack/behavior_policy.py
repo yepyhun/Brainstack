@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from typing import Any, Dict, Iterable, List, Mapping
 
 from .style_contract import (
@@ -23,44 +22,6 @@ BEHAVIOR_POLICY_PROJECTION_STATUS_INJECTED = "injected"
 BEHAVIOR_POLICY_PROJECTION_STATUS_OMITTED_DUE_BUDGET = "omitted_due_budget"
 DEFAULT_BEHAVIOR_POLICY_CHAR_BUDGET = 8000
 DEFAULT_PINNED_BEHAVIOR_POLICY_CHAR_BUDGET = 720
-_POLICY_TOKEN_RE = re.compile(r"[0-9A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű]{3,}", re.UNICODE)
-_CORRECTION_CUES = (
-    "nem ",
-    "nem az",
-    "most is",
-    "még mindig",
-    "megint",
-    "miért",
-    "hiba",
-    "rossz",
-    "megszeg",
-    "megszegted",
-    "javítsd",
-    "javitsd",
-    "isn't",
-    "isnt",
-    "still",
-    "again",
-    "wrong",
-    "you wrote",
-    "used",
-)
-_TOKEN_STOPWORDS = {
-    "hogy",
-    "mert",
-    "mint",
-    "with",
-    "this",
-    "that",
-    "your",
-    "have",
-    "just",
-    "reply",
-    "should",
-    "most",
-    "majd",
-    "igen",
-}
 
 _KIND_LABELS = {
     "language_policy": "Language and locale",
@@ -103,14 +64,6 @@ PINNED_ORDINARY_TURN_KINDS = (
     "forbidden_surface_form",
     "uncertainty_policy",
 )
-_SECTION_FALLBACK_KIND = {
-    "tartalmi": "content_policy",
-    "kommunikációs": "tone_policy",
-    "nyelvi": "structure_policy",
-    "töltelék": "verbosity_policy",
-    "stilus": "tone_policy",
-    "stílus": "tone_policy",
-}
 
 
 def _normalize_text(value: Any) -> str:
@@ -143,11 +96,6 @@ def _slug(value: str) -> str:
     while "--" in output:
         output = output.replace("--", "-")
     return output.strip("-") or "rules"
-
-
-def _contains_any(text: str, needles: Iterable[str]) -> bool:
-    lowered = text.casefold()
-    return any(needle in lowered for needle in needles)
 
 
 def _sanitize_policy_surface(text: Any) -> str:
@@ -196,12 +144,7 @@ def _sections_from_metadata(metadata: Mapping[str, Any] | None) -> tuple[str, Li
 
 
 def _classify_rule(section: str, text: str) -> tuple[str, str]:
-    section_lower = _normalize_text(section).casefold()
-    del text
-
-    for marker, kind in _SECTION_FALLBACK_KIND.items():
-        if marker in section_lower:
-            return kind, "section_fallback"
+    del section, text
     return "custom_clause", "explicit_rule_fallback"
 
 
@@ -360,7 +303,6 @@ def build_pinned_behavior_policy_view(
         "source_contract_hash": str(policy.get("source_contract_hash") or "").strip(),
         "kinds": list(PINNED_ORDINARY_TURN_KINDS),
     }
-
 
 def compile_behavior_policy(
     *,
@@ -636,68 +578,4 @@ def build_behavior_policy_snapshot(
                 and int(raw_row.get("revision_number") or 0) == int(compiled_policy.get("source_revision_number") or 0)
             ),
         },
-    }
-
-
-def _tokenize_policy_text(value: Any) -> List[str]:
-    tokens = [token.casefold() for token in _POLICY_TOKEN_RE.findall(_normalize_text(value))]
-    return [token for token in tokens if token not in _TOKEN_STOPWORDS]
-
-
-def _looks_like_correction_query(query: str) -> bool:
-    lowered = _normalize_text(query).casefold()
-    if not lowered:
-        return False
-    return any(cue in lowered for cue in _CORRECTION_CUES) or lowered.endswith("?")
-
-
-def _correction_clause_score(*, query: str, clause_text: str) -> int:
-    query_lower = _normalize_text(query).casefold()
-    if not query_lower or not clause_text:
-        return 0
-    score = 0
-    for token in _tokenize_policy_text(clause_text):
-        if token in query_lower or query_lower in token:
-            score += 1
-    return score
-
-
-def build_behavior_policy_reinforcement(
-    *,
-    query: str,
-    compiled_policy: Mapping[str, Any] | None,
-) -> Dict[str, Any] | None:
-    if not isinstance(compiled_policy, Mapping):
-        return None
-    if not _looks_like_correction_query(query):
-        return None
-    clauses = compiled_policy.get("clauses")
-    if not isinstance(clauses, Iterable):
-        return None
-
-    scored: List[tuple[int, Dict[str, Any]]] = []
-    for raw_clause in clauses:
-        if not isinstance(raw_clause, Mapping):
-            continue
-        if str(raw_clause.get("status") or "").strip() != BEHAVIOR_POLICY_STATUS_ACTIVE:
-            continue
-        clause_text = _sanitize_policy_surface(raw_clause.get("compiled_short_form") or raw_clause.get("text"))
-        score = _correction_clause_score(query=query, clause_text=clause_text)
-        if score <= 0:
-            continue
-        scored.append((score, {"id": str(raw_clause.get("id") or ""), "text": clause_text}))
-
-    if not scored:
-        return None
-
-    scored.sort(key=lambda item: (item[0], item[1]["id"]), reverse=True)
-    matched = [item[1] for item in scored[:2]]
-    lines = [
-        "The user just corrected a drift against the active behavior policy. For this reply, re-apply these rules strictly:",
-        *[f"- {item['text']}" for item in matched],
-    ]
-    return {
-        "mode": "session_reinforcement",
-        "matched_clause_ids": [item["id"] for item in matched if item["id"]],
-        "text": "\n".join(lines),
     }

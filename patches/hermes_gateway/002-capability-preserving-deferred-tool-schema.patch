@@ -1771,7 +1771,7 @@ index 00000000..2b408e4a
 +def test_rc_default_discord_capability_preserved() -> None:
 +    resolved = resolve_turn_profile(
 +        platform="discord",
-+        prompt="keresd meg a .md fájlokat",
++        prompt="find the .md files",
 +        current_enabled_toolsets=["file", "terminal", "web"],
 +        env={},
 +    )
@@ -2252,7 +2252,7 @@ index 00000000..a78a2aa5
 +
 +    runner = GatewayRunner.__new__(GatewayRunner)
 +    result = runner._build_memory_direct_render_agent_result_sync(
-+        "Pulse futása azt jelenti, hogy ez az aktuális feladatod?",
++        "Does the Pulse run mean this is your current assigned task?",
 +        {
 +            "platform_key": "discord",
 +            "user_id": "u1",
@@ -2405,7 +2405,7 @@ index f58ebbf1..98b58b2c 100644
 +        manager = _DirectRenderMemoryManager()
 +        agent._memory_manager = manager
 +
-+        result = agent.run_conversation("Pulse aktuális feladat?")
++        result = agent.run_conversation("Pulse current assigned task?")
 +
 +    assert result["api_calls"] == 0
 +    assert result["memory_answer_renderer"]["used_renderer"] is True

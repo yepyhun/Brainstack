@@ -77,8 +77,8 @@ def test_profile_preference_policy_keyword_match_is_supporting_only_for_memory_l
         report = build_query_inspect(
             store,
             query=(
-                "Kérdezek egy unsupported memory dolgot: zeta omega durable "
-                "memory. Van erről rögzített memory truth? Ha nincs evidence, ne tippelj."
+                "Unsupported memory lookup: zeta omega durable memory. "
+                "Is there recorded memory truth for it? If evidence is missing, do not guess."
             ),
             session_id="answerability-session",
             principal_scope_key=PRINCIPAL_SCOPE,

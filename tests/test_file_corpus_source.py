@@ -39,7 +39,7 @@ def _config(root: Path, **overrides: object) -> FileCorpusSourceConfig:
 def test_file_corpus_source_enforces_allowlist_and_private_guards(tmp_path: Path) -> None:
     root = tmp_path / "wiki"
     _write(root / "pages" / "alpha.md", "# Alpha\n\nAlphaSourceAnchor belongs in corpus.")
-    _write(root / "pages" / "magyar.md", "# Árvíztűrő\n\nMagyar wiki oldal többnyelvű corpus proof.")
+    _write(root / "pages" / "latin.md", "# Latin\n\nLatin wiki page multilingual corpus proof.")
     _write(root / ".hidden.md", "hidden content must not leak")
     _write(root / "auth-token.md", "token content must not leak")
     _write(root / "too-large.md", "x" * 3_000)
@@ -51,7 +51,7 @@ def test_file_corpus_source_enforces_allowlist_and_private_guards(tmp_path: Path
     collected = collect_file_corpus_sources(_config(root))
 
     source_ids = {source["source_id"] for source in collected["sources"]}
-    assert source_ids == {"pages/alpha.md", "pages/magyar.md"}
+    assert source_ids == {"pages/alpha.md", "pages/latin.md"}
     reasons = {row["reason"] for row in collected["skipped"]}
     assert {
         "dotfile_denied",

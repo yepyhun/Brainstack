@@ -19,7 +19,6 @@ from brainstack.adaptive_evidence_broker import build_broker_trace_from_packet, 
 from brainstack.control_plane import build_working_memory_packet  # noqa: E402
 from brainstack.core.packet_budget import (  # noqa: E402
     DEFAULT_PACKET_BUDGET_MODE,
-    BUDGET_STATUS_INSUFFICIENT_AUTHORITY,
     PacketBudgetPolicy,
     apply_packet_budget,
     resolve_packet_budget_mode,
@@ -145,7 +144,7 @@ def _matrix_cases() -> list[dict[str, Any]]:
                     admission_id="",
                     token_estimate=10,
                 ),
-                _candidate("multilingual-árvíztűrő-可检查", token_estimate=8),
+                _candidate("multilingual-cjk-proof", token_estimate=8),
             ],
             max_tokens=16,
         ),

@@ -199,7 +199,7 @@ def test_literal_slot_match_uses_anchor_plus_shape_not_shape_alone() -> None:
 
 
 def test_url_literals_are_exact_model_facing_literals() -> None:
-    text = "Jegyezd meg repo URL-ként: https://github.com/NevaMind-AI/memU"
+    text = "Remember as a repo URL: https://github.com/NevaMind-AI/memU"
     tokens = detect_literal_tokens(text)
 
     assert detect_url_literals(text) == ["https://github.com/NevaMind-AI/memU"]

@@ -44,7 +44,7 @@ def test_explicit_profile_remember_writes_multilingual_user_truth_and_recall(tmp
                     "shelf": "profile",
                     "stable_key": "preference:engineering_style",
                     "category": "preference",
-                    "content": "Nem raktapasz megoldást kérünk, hanem gyökérok alapú mérnöki javítást.",
+                    "content": "Prefer root cause engineering fixes over reactive patching.",
                     "source_role": "user",
                     "authority_class": "profile",
                     "confidence": 0.98,
@@ -60,13 +60,13 @@ def test_explicit_profile_remember_writes_multilingual_user_truth_and_recall(tmp
         assert receipt["write_contract_trace"]["lane"] == "profile"
         assert receipt["write_contract_trace"]["accepted"] is True
         assert receipt["write_contract_trace"]["canonical"] is True
-        assert "gyökérok" not in json.dumps(receipt["write_contract_trace"], ensure_ascii=False)
+        assert "root cause" not in json.dumps(receipt["write_contract_trace"], ensure_ascii=False)
         row = provider._store.get_profile_item(
             stable_key="preference:engineering_style",
             principal_scope_key=provider._principal_scope_key,
         )
         assert row is not None
-        assert "gyökérok" in row["content"]
+        assert "root cause" in row["content"]
 
         recall = json.loads(
             provider.handle_tool_call("brainstack_recall", {"query": "root cause engineering preference"})

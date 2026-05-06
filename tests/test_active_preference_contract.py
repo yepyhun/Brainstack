@@ -180,7 +180,7 @@ def test_multilingual_preferences_are_compiled_without_language_specific_path(tm
             store,
             scope=scope,
             lines=[
-                "Válaszolj magyarul.",
+                "Answer in the requested language.",
                 "Write in concise English when asked.",
                 "Antworte formell auf Deutsch.",
                 "用简洁自然的语气回答。",
@@ -194,7 +194,7 @@ def test_multilingual_preferences_are_compiled_without_language_specific_path(tm
         )
         block = str(projection["block"])
 
-        assert "Válaszolj magyarul" in block
+        assert "Answer in the requested language." in block
         assert "concise English" in block
         assert "Antworte formell" in block
         assert "用简洁自然的语气回答" in block
@@ -238,9 +238,9 @@ def test_explicit_profile_lane_style_contract_projects_active_contract_without_b
             content=(
                 "Public fixture communication rules\n\n"
                 "Rules\n"
-                "- Válaszolj alapból magyarul.\n"
-                "- Csak akkor válaszolj angolul, ha a user kifejezetten kéri.\n"
-                "- Magyarázz röviden és közérthetően."
+                "- Answer in the default requested language.\n"
+                "- Switch language only when the user explicitly asks.\n"
+                "- Explain briefly and plainly."
             ),
             source="operator_explicit_user_instruction",
             confidence=0.99,
@@ -253,9 +253,9 @@ def test_explicit_profile_lane_style_contract_projects_active_contract_without_b
                     {
                         "heading": "Rules",
                         "lines": [
-                            "Válaszolj alapból magyarul.",
-                            "Csak akkor válaszolj angolul, ha a user kifejezetten kéri.",
-                            "Magyarázz röviden és közérthetően.",
+                            "Answer in the default requested language.",
+                            "Switch language only when the user explicitly asks.",
+                            "Explain briefly and plainly.",
                         ],
                     }
                 ],
@@ -273,8 +273,8 @@ def test_explicit_profile_lane_style_contract_projects_active_contract_without_b
 
         assert contract["contract_status"] == CONTRACT_STATUS_ACTIVE
         assert projection["active_preference_delivery_trace"]["active_preference_contract_delivered"] is True
-        assert "Válaszolj alapból magyarul" in block
-        assert "Csak akkor válaszolj angolul" in block
+        assert "Answer in the default requested language." in block
+        assert "Switch language only when the user explicitly asks." in block
         assert store.conn.execute("select count(*) from behavior_contracts").fetchone()[0] == 0
         assert store.conn.execute("select count(*) from compiled_behavior_policies").fetchone()[0] == 0
     finally:

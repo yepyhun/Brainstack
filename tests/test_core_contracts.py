@@ -81,4 +81,4 @@ def test_evidence_receipt_contracts_are_json_ready() -> None:
 def test_typed_errors_expose_reason_code() -> None:
     assert AuthorityBoundaryViolation.reason_code == ReasonCode.AUTHORITY_MISMATCH
     assert issubclass(AuthorityBoundaryViolation, Exception)
-    assert ScopeKey("principal:tomi") == "principal:tomi"
+    assert ScopeKey("principal:example") == "principal:example"

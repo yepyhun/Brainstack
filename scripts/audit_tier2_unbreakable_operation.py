@@ -28,8 +28,7 @@ REQUIRED_PROOF_FAMILIES = {
     "hindsight_update_rehearsal",
 }
 EXACT_DONE_GATE_CLAIM = (
-    "MINDE HELYZHETBEN BÁRMILYEN ESETBEN AKÁRHOGY KOMIBNÁLVA BÁRMILYEN "
-    "HASZNÁLAT KÖZBEN NEM TÖRHET EL SEMMILYEN ESETBEN SEM SOHA SEHHOGY!"
+    "Every supported operation combination must return a bounded, schema-valid decision without durable truth bypass."
 )
 EXACT_PROOF_CONTRACT_SCHEMA = "brainstack.phase249_exact_gate_proof.v1"
 DISALLOWED_PROOF_SOURCES = {

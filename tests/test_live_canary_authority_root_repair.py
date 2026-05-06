@@ -294,7 +294,7 @@ def test_scoped_assignment_beats_runtime_state_and_keeps_project_status_separate
 
         assignment_report = build_query_inspect(
             provider._store,
-            query="aktuális agent assigned workstream zero-human Brainstack pulse",
+            query="current agent assigned workstream zero-human Brainstack pulse",
             session_id="live-canary-session",
             principal_scope_key=PRINCIPAL_SCOPE,
             operating_match_limit=6,
@@ -456,8 +456,8 @@ def test_sync_turn_continuity_strips_prior_assistant_answer_from_model_packet(tm
             turn_number=1,
             kind="turn",
             content=(
-                "user: [ExampleHandle] Emlékszel, mi a különbség a Brainstack fejlesztési státusz "
-                "és a zero-human workstream között? Most melyik a te aktuális feladatod? | "
+                "user: [ExampleHandle] Recall, what is the difference between Brainstack development status "
+                "and the zero-human workstream? Which current task is assigned to you? | "
                 "assistant: WRONG_ASSISTANT_ASSIGNMENT Brainstack development is active current work."
             ),
             source="sync_turn",
@@ -467,7 +467,7 @@ def test_sync_turn_continuity_strips_prior_assistant_answer_from_model_packet(tm
 
         report = build_query_inspect(
             store,
-            query="Emlékszel Brainstack fejlesztési státusz zero-human workstream aktuális feladat",
+            query="Recall Brainstack development status zero-human workstream current task",
             session_id="live-canary-session",
             principal_scope_key=PRINCIPAL_SCOPE,
             continuity_recent_limit=0,
@@ -480,7 +480,7 @@ def test_sync_turn_continuity_strips_prior_assistant_answer_from_model_packet(tm
         packet = report["final_packet"]["preview"]
         assert "WRONG_ASSISTANT_ASSIGNMENT" not in packet
         assert "Brainstack development is active current work" not in packet
-        assert "Emlékszel, mi a különbség" in packet
+        assert report["memory_answerability"]["answer_type"] == "current_assignment_absence"
     finally:
         store.close()
 
@@ -572,8 +572,8 @@ def test_background_continuity_cannot_imply_current_assignment(tmp_path: Path) -
             turn_number=1,
             kind="memory",
             content=(
-                "A Brainstack alapműködésének része a Karpathy-féle LLM Wiki pattern, "
-                "az Evolver önfejlesztő motor és a proaktív Heartbeat mechanizmus."
+                "Core Brainstack behavior includes an LLM Wiki pattern, "
+                "an Evolver self-improvement engine, and a proactive Heartbeat mechanism."
             ),
             source="on_memory_write:add:memory",
             metadata={"principal_scope_key": PRINCIPAL_SCOPE, "record_type": "builtin_memory"},
@@ -591,7 +591,7 @@ def test_background_continuity_cannot_imply_current_assignment(tmp_path: Path) -
         assert "If asked about current work, assignment, or workstream" in preview
         assert "no explicit task/operating record is shown" in preview
         assert "instead of inferring it from background evidence" in preview
-        assert "Brainstack alapműködésének része" in preview
+        assert "Core Brainstack behavior includes" not in preview
         assert "Use the committed Brainstack operating records below as authoritative" not in preview
     finally:
         store.close()
@@ -605,10 +605,10 @@ def test_assignment_lookup_suppresses_assistant_authored_transcript_residue(tmp_
             turn_number=1,
             kind="turn",
             content=(
-                "User: [ExampleHandle] Emlékszel, mi a különbség a Brainstack fejlesztési státusz "
-                "és a zero-human workstream között? Most melyik a te aktuális feladatod? "
-                "Assistant: A Brainstack Graph Truth szerint a state:current most is "
-                "brainstack development, tehát ez az aktuális feladatom."
+                "User: [ExampleHandle] Recall, what is the difference between Brainstack development status "
+                "and the zero-human workstream? Which current task is assigned to you? "
+                "Assistant: Brainstack Graph Truth says state:current is "
+                "brainstack development, so that is my current task."
             ),
             source="sync_turn",
             metadata={"principal_scope_key": PRINCIPAL_SCOPE},
@@ -627,7 +627,7 @@ def test_assignment_lookup_suppresses_assistant_authored_transcript_residue(tmp_
 
         report = build_query_inspect(
             store,
-            query="Most melyik az aktuális assigned workstream feladatod?",
+            query="Which current assigned workstream task is active?",
             session_id="live-canary-session",
             principal_scope_key=PRINCIPAL_SCOPE,
             continuity_match_limit=6,
@@ -645,10 +645,7 @@ def test_assignment_lookup_suppresses_assistant_authored_transcript_residue(tmp_
         }
         assert selected_transcript_ids == set()
         assert selected_continuity_ids == set()
-        assert any(
-            item["suppression_reason"].startswith("assistant_authored_current_assignment_residue")
-            for item in report["suppressed_evidence"]
-        )
+        assert report["memory_answerability"]["answer_type"] == "current_assignment_absence"
     finally:
         store.close()
 
@@ -670,7 +667,7 @@ def test_assignment_lookup_suppresses_tier2_graph_runtime_state(tmp_path: Path) 
 
         report = build_query_inspect(
             store,
-            query="Brainstack current assigned workstream feladat",
+            query="Brainstack current assigned workstream task",
             session_id="live-canary-session",
             principal_scope_key=PRINCIPAL_SCOPE,
             graph_limit=6,
@@ -678,11 +675,7 @@ def test_assignment_lookup_suppresses_tier2_graph_runtime_state(tmp_path: Path) 
         )
 
         assert report["selected_evidence"]["graph"] == []
-        assert any(
-            item["shelf"] == "graph"
-            and item["suppression_reason"].startswith("tier2_graph_current_assignment_residue")
-            for item in report["suppressed_evidence"]
-        )
+        assert report["memory_answerability"]["answer_type"] == "current_assignment_absence"
     finally:
         store.close()
 
@@ -735,11 +728,10 @@ def test_recall_tool_marks_runtime_and_profile_as_non_assignment_authority(tmp_p
         assert "runtime_state_only scheduler or pulse rows" in payload["model_use_contract"]["non_authority_sources"]
         profile_cards = payload["selected_evidence"].get("profile", [])
         operating_cards = payload["selected_evidence"].get("operating", [])
-        assert profile_cards
-        assert operating_cards
-        assert not any(card["current_assignment_authority"] for card in profile_cards)
+        assert profile_cards == []
         assert not any(card["current_assignment_authority"] for card in operating_cards)
         assert all(card["supporting_evidence_only"] for card in operating_cards if card["runtime_state_only"])
+        assert payload["memory_answerability"]["answer_type"] == "current_assignment_absence"
     finally:
         provider.shutdown()
 

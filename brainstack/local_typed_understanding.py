@@ -389,39 +389,49 @@ def _rank_operating_rows_locally(rows: list[Mapping[str, Any]], *, query: str, l
     return [row for _, row in ranked[: max(int(limit or 0), 1)]]
 
 
-def _operating_lookup_intent_present(query: str) -> bool:
+def _operating_lookup_record_types_for_query(query: str) -> list[str]:
     """Bound local fallback to operating-state grammar instead of topical overlap."""
     terms = set(normalize_semantic_terms(query))
     if not terms:
-        return False
-    if any("_" in term and term in _operating_record_types() for term in terms):
-        return True
+        return []
+    record_types: list[str] = [term for term in terms if "_" in term and term in _operating_record_types()]
     if {"active", "work"} <= terms or {"current", "work"} <= terms:
-        return True
+        record_types.append("active_work")
     if {"active", "phase"} <= terms or {"current", "phase"} <= terms:
-        return True
+        record_types.append("active_work")
+    if terms & {"assigned", "assignment", "handoff"}:
+        record_types.append("active_work")
+    if terms & {"current", "now"} and terms & {"assigned", "assignment", "task", "workstream"}:
+        record_types.append("active_work")
     if "runtime" in terms and terms.intersection({"health", "status", "pulse", "state"}):
-        return True
+        record_types.append("live_system_state")
     if terms.intersection({"scheduler", "cron", "job"}) and terms.intersection({"status", "state", "health"}):
-        return True
-    record_type_phrases = (
-        ("recent", "work"),
-        ("work", "summary"),
-        ("completed", "outcome"),
-        ("discarded", "work"),
-        ("open", "decision"),
-        ("current", "commitment"),
-        ("next", "step"),
-        ("external", "owner"),
-        ("runtime", "approval"),
-        ("canonical", "policy"),
-        ("procedure", "memory"),
-        ("session", "state"),
-        ("live", "system"),
+        record_types.append("live_system_state")
+    phrase_record_types = (
+        (("recent", "work"), "recent_work_summary"),
+        (("work", "summary"), "recent_work_summary"),
+        (("completed", "outcome"), "completed_outcome"),
+        (("discarded", "work"), "discarded_work"),
+        (("open", "decision"), "open_decision"),
+        (("current", "commitment"), "current_commitment"),
+        (("next", "step"), "next_step"),
+        (("external", "owner"), "external_owner_pointer"),
+        (("runtime", "approval"), "runtime_approval_policy"),
+        (("canonical", "policy"), "canonical_policy"),
+        (("procedure", "memory"), "procedure_memory"),
+        (("session", "state"), "session_state"),
+        (("live", "system"), "live_system_state"),
     )
-    if any(set(phrase) <= terms for phrase in record_type_phrases):
-        return True
-    return bool(terms & {"assignment", "handoff", "commitment"})
+    for phrase, record_type in phrase_record_types:
+        if set(phrase) <= terms:
+            record_types.append(record_type)
+    if "commitment" in terms:
+        record_types.append("current_commitment")
+    return [record_type for record_type in dict.fromkeys(record_types) if record_type in _operating_record_types()]
+
+
+def _operating_lookup_intent_present(query: str) -> bool:
+    return bool(_operating_lookup_record_types_for_query(query))
 
 
 def _probe_operating_lookup(
@@ -430,7 +440,8 @@ def _probe_operating_lookup(
     query: str,
     principal_scope_key: str,
 ) -> Dict[str, Any] | None:
-    if not _operating_lookup_intent_present(query):
+    requested_record_types = _operating_lookup_record_types_for_query(query)
+    if not requested_record_types:
         return None
     rows = list(
         store.search_operating_records(
@@ -451,12 +462,17 @@ def _probe_operating_lookup(
             limit=8,
         )
     if not rows:
-        return None
-    record_types = [
+        return {
+            "record_types": requested_record_types,
+            "matched_rows": [],
+            "source": "brainstack.local_typed_understanding.operating_probe",
+        }
+    row_record_types = [
         str(row.get("record_type") or "").strip()
         for row in rows
         if str(row.get("record_type") or "").strip() in _operating_record_types()
     ]
+    record_types = list(dict.fromkeys([*requested_record_types, *row_record_types]))
     if not record_types:
         return None
     return {

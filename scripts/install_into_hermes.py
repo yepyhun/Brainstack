@@ -1033,13 +1033,13 @@ def _patch_memory_manager_output_validation_seam(path: Path, dry_run: bool) -> l
             "        covered.extend(str(slot) for slot in ack.get(\"covered_slots\") or [] if slot)\n"
             "        missing.extend(str(slot) for slot in ack.get(\"missing_slots\") or [] if slot)\n"
             "    if covered or missing:\n"
-            "        covered_text = \", \".join(covered) if covered else \"nincs igazolt mező\"\n"
-            "        missing_text = \", \".join(missing) if missing else \"nincs hiányzó mező\"\n"
+            "        covered_text = \", \".join(covered) if covered else \"no verified fields\"\n"
+            "        missing_text = \", \".join(missing) if missing else \"no missing fields\"\n"
             "        return (\n"
-            "            \"Nem állíthatom, hogy mindent elmentettem, mert nincs teljes write receipt coverage. \"\n"
-            "            f\"Igazolt: {covered_text}. Hiányzik: {missing_text}.\"\n"
+            "            \"I cannot claim everything was saved because full write receipt coverage is missing. \"\n"
+            "            f\"Verified: {covered_text}. Missing: {missing_text}.\"\n"
             "        )\n"
-            "    return \"Nem állíthatom, hogy elmentettem ezt, mert nincs sikeres durable memory write receipt.\"\n"
+            "    return \"I cannot claim this was saved because there is no successful durable memory write receipt.\"\n"
             "\n\n"
             "class MemoryManager:\n"
         )
@@ -2737,7 +2737,7 @@ def _patch_run_agent_terminal_final_guard_seam(path: Path, dry_run: bool) -> lis
             "    @staticmethod\n"
             "    def _terminal_success_claim_present(response_text: str, command: str) -> bool:\n"
             "        lower = response_text.lower()\n"
-            "        if any(marker in lower for marker in (\"sikeresen lefutott\", \"lefutott\", \"executed successfully\", \"deleted\", \"törölve\")):\n"
+            "        if any(marker in lower for marker in (\"executed successfully\", \"deleted\")):\n"
             "            return True\n"
             "        if command.strip().split(\" \", 1)[0] == \"pwd\":\n"
             "            return bool(re.search(r\"(?m)^\\\\s*/[^\\\\s]+\", response_text.strip()))\n"
@@ -2798,8 +2798,8 @@ def _patch_run_agent_terminal_final_guard_seam(path: Path, dry_run: bool) -> lis
             "                return output.strip()\n"
             "            return final_response\n"
             "        return (\n"
-            "            \"Nem tudom igazolni, hogy a parancs lefutott: nincs terminal tool result ehhez a turnhöz. \"\n"
-            "            \"Ezért nem állítom sikeres végrehajtásnak.\"\n"
+            "            \"I cannot verify that the command ran: this turn has no terminal tool result. \"\n"
+            "            \"I will not claim successful execution.\"\n"
             "        )\n"
             "\n"
         )
@@ -2885,13 +2885,13 @@ def _patch_run_agent_terminal_final_guard_seam(path: Path, dry_run: bool) -> lis
         text = text.replace(
             "        if self._terminal_success_claim_present(response_text, command):\n"
             "            return (\n"
-            "                \"Nem tudom igazolni, hogy a parancs lefutott: nincs terminal tool result ehhez a turnhöz. \"\n"
-            "                \"Ezért nem állítom sikeres végrehajtásnak.\"\n"
+            "                \"I cannot verify that the command ran: this turn has no terminal tool result. \"\n"
+            "                \"I will not claim successful execution.\"\n"
             "            )\n"
             "        return final_response\n",
             "        return (\n"
-            "            \"Nem tudom igazolni, hogy a parancs lefutott: nincs terminal tool result ehhez a turnhöz. \"\n"
-            "            \"Ezért nem állítom sikeres végrehajtásnak.\"\n"
+            "            \"I cannot verify that the command ran: this turn has no terminal tool result. \"\n"
+            "            \"I will not claim successful execution.\"\n"
             "        )\n",
         )
         applied.append("run_agent:terminal_command_requires_tool_result")
@@ -3035,55 +3035,26 @@ def _patch_memory_answer_renderer_language(path: Path, dry_run: bool) -> list[st
         )
         applied.append("memory_renderer:language_import")
 
-    if "def _response_language()" not in text:
-        language_helper = (
-            "\n"
-            "def _response_language() -> str:\n"
-            "    value = (os.getenv(\"HERMES_RESPONSE_LANGUAGE\") or os.getenv(\"LANGUAGE\") or \"\").strip().lower()\n"
-            "    if value in {\"hu\", \"hun\", \"hungarian\", \"magyar\"} or value.startswith(\"hu_\"):\n"
-            "        return \"hu\"\n"
-            "    return \"en\"\n"
-            "\n"
-        )
-        text = _replace_once(
-            text,
-            "\n\ndef _render_text(answer_type: str, claim_style: str, answer_value: str) -> str:\n",
-            language_helper + "\ndef _render_text(answer_type: str, claim_style: str, answer_value: str) -> str:\n",
-            label="memory renderer response language helper",
-            path=path,
-        )
-        applied.append("memory_renderer:response_language_helper")
+    text, removed_language_helper = re.subn(
+        r"\n\ndef _response_language\(\) -> str:\n(?:    .*\n)+?\n(?=def _render_text\(answer_type: str, claim_style: str, answer_value: str\) -> str:\n)",
+        "\n\n",
+        text,
+        count=1,
+    )
+    if removed_language_helper:
+        applied.append("memory_renderer:remove_response_language_helper")
 
-    if 'return "Nincs rögzített aktuális feladat explicit assignment evidence alapján."' not in text:
-        text = _replace_once(
-            text,
-            "def _render_text(answer_type: str, claim_style: str, answer_value: str) -> str:\n"
-            "    if claim_style == \"unsupported\":\n"
-            "        return \"No supported memory evidence for this request.\"\n"
-            "    if claim_style == \"current_assignment_absence\":\n"
-            "        return \"No typed current-assignment evidence is recorded. Background runtime/Pulse evidence alone is not current assignment.\"\n",
-            "def _render_text(answer_type: str, claim_style: str, answer_value: str) -> str:\n"
-            "    if _response_language() == \"hu\":\n"
-            "        if claim_style == \"unsupported\":\n"
-            "            return \"Nincs támogatott memória-evidence ehhez a kéréshez.\"\n"
-            "        if claim_style == \"current_assignment_absence\":\n"
-            "            return \"Nincs rögzített aktuális feladat explicit assignment evidence alapján.\"\n"
-            "        if claim_style == \"bounded_event\":\n"
-            "            return f\"Rögzített esemény a keresett scope-ban: {answer_value}.\"\n"
-            "        if claim_style == \"current_assignment_presence\":\n"
-            "            return f\"Rögzített aktuális feladat: {answer_value}.\"\n"
-            "        if answer_type == \"exact_literal\":\n"
-            "            return f\"Rögzített azonosító: {answer_value}.\"\n"
-            "        return f\"Rögzített érték: {answer_value}.\"\n"
-            "\n"
-            "    if claim_style == \"unsupported\":\n"
-            "        return \"No supported memory evidence for this request.\"\n"
-            "    if claim_style == \"current_assignment_absence\":\n"
-            "        return \"No typed current-assignment evidence is recorded. Background runtime/Pulse evidence alone is not current assignment.\"\n",
-            label="memory renderer localized templates",
-            path=path,
-        )
-        applied.append("memory_renderer:localized_templates")
+    text, removed_localized_branch = re.subn(
+        r"(def _render_text\(answer_type: str, claim_style: str, answer_value: str\) -> str:\n)"
+        r"    if _response_language\(\) == \"hu\":\n"
+        r"(?:        .*\n)+?\n"
+        r"(?=    if claim_style == \"unsupported\":\n)",
+        r"\1",
+        text,
+        count=1,
+    )
+    if removed_localized_branch:
+        applied.append("memory_renderer:remove_localized_templates")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -4341,7 +4312,7 @@ confirm_destructive_reset() {
   printf "Ird be pontosan hogy DELETE: "
   read -r CONFIRM
   if [ "$CONFIRM" != "DELETE" ]; then
-    echo "Megszakitva."
+    echo "Interrupted."
     exit 1
   fi
 }
@@ -4349,7 +4320,7 @@ confirm_destructive_reset() {
 purge_runtime_state() {
   CLEANUP_SERVICE="$SERVICE"
   if [ -z "$CLEANUP_SERVICE" ]; then
-    echo "Nincs egyertelmuen detektalhato compose service. Add meg HERMES_DOCKER_SERVICE kornyezeti valtozokent."
+    echo "No compose service was detected. Set HERMES_DOCKER_SERVICE."
     exit 1
   fi
   docker compose -f "$COMPOSE_FILE" run --rm --no-deps --entrypoint sh "$CLEANUP_SERVICE" -lc '

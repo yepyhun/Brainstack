@@ -118,16 +118,6 @@ def _build_stable_profile_entries(profile_items: Iterable[Mapping[str, Any]], *,
     return entries
 
 
-def _build_active_work_summary(continuity_rows: Iterable[Mapping[str, Any]]) -> str:
-    for row in continuity_rows:
-        if str(row.get("kind") or "").strip() != "tier2_summary":
-            continue
-        summary = _normalize_text(row.get("content"))
-        if summary:
-            return summary
-    return ""
-
-
 def _operating_record_lines(
     operating_rows: Iterable[Mapping[str, Any]],
     *,
@@ -167,17 +157,6 @@ def _recent_work_line_and_status(
         if content:
             return content, status
     return "", {"status": "none", "source_kind": "", "source_count": 0}
-
-
-def _build_open_decisions(continuity_rows: Iterable[Mapping[str, Any]], *, limit: int) -> List[str]:
-    return _unique_lines(
-        (
-            str(row.get("content") or "")
-            for row in continuity_rows
-            if str(row.get("kind") or "").strip() == "decision"
-        ),
-        limit=limit,
-    )
 
 
 def _build_current_commitments(

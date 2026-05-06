@@ -54,7 +54,7 @@ def _seed(store: BrainstackStore, *, scope: str, session: str) -> None:
     store.upsert_profile_item(
         stable_key="identity:m008:fts5",
         category="identity",
-        content="M008 profilekeyword magyar német continuity corpus lexical proof.",
+        content="M008 profilekeyword german chinese continuity corpus lexical proof.",
         source="m008_fts5_verifier",
         confidence=0.99,
         metadata={"principal_scope_key": scope, "truth_eligible": True},

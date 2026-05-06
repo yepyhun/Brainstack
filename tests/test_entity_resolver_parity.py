@@ -221,14 +221,14 @@ def test_multilingual_alias_resolution_uses_explicit_alias_not_locale_wordlist(t
     store = _open_store(tmp_path)
     try:
         store.upsert_graph_state(
-            subject_name="München計画",
+            subject_name="ProjectCjk計画",
             attribute="状態",
             value_text="緑",
             source="resolver-fixture",
             metadata={"principal_scope_key": PRINCIPAL_SCOPE},
         )
         store.get_or_create_entity("Muenchen計画")
-        store.merge_entity_alias(alias_name="Muenchen計画", target_name="München計画")
+        store.merge_entity_alias(alias_name="Muenchen計画", target_name="ProjectCjk計画")
 
         report = build_query_inspect(
             store,
@@ -240,7 +240,7 @@ def test_multilingual_alias_resolution_uses_explicit_alias_not_locale_wordlist(t
 
         graph_rows = _selected_graph(report)
         assert graph_rows
-        assert graph_rows[0]["subject"] == "München計画"
+        assert graph_rows[0]["subject"] == "ProjectCjk計画"
         assert graph_rows[0]["matched_alias"] == "Muenchen計画"
         assert graph_rows[0]["entity_resolution_source"] == "explicit_alias"
         assert report["entity_resolution"]["mode"] == "shadow_read_only"

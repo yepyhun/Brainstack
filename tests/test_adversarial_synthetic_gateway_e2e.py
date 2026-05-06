@@ -37,11 +37,10 @@ def test_reference_url_recalls_exact_after_reset() -> None:
     assert result["reference_recall"] == "https://example.com/org/resource-x"
 
 
-def test_current_assignment_renderer_localized_and_style_clean() -> None:
+def test_current_assignment_renderer_is_style_clean() -> None:
     result = run_adversarial_synthetic_gateway_contract()
 
-    assert "Nincs rögzített aktuális feladat" in result["final_text"]
-    assert "No typed" not in result["final_text"]
+    assert "No typed current-assignment evidence is recorded" in result["final_text"]
     assert "🐞" not in result["final_text"]
     assert "SyntheticPersona" not in result["final_text"]
 

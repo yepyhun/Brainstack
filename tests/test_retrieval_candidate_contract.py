@@ -40,7 +40,7 @@ def _seed_cross_shelf_fixture(store: BrainstackStore) -> None:
         session_id="candidate-session",
         turn_number=2,
         kind="user",
-        content="Cobalt transcript asks for multilingual Árvíztűrő trace metadata.",
+        content="Cobalt transcript asks for multilingual Cjk-proof trace metadata.",
         source="candidate.fixture",
         metadata=metadata,
     )
@@ -86,7 +86,7 @@ def test_query_inspect_projects_selected_candidates_across_shelves(tmp_path: Pat
 
         report = build_query_inspect(
             store,
-            query="Cobalt traceable candidate recall Árvíztűrő corpus graph operating",
+            query="Cobalt traceable candidate recall Cjk-proof corpus graph operating",
             session_id="candidate-session",
             principal_scope_key=PRINCIPAL_SCOPE,
             profile_match_limit=4,

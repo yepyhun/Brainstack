@@ -93,7 +93,7 @@ def test_replay_markdown_contains_boundary_and_trace() -> None:
 
     assert "boundary_verdict" in markdown
     assert "selected_counts" in markdown
-    assert "assistant_authored_current_assignment_residue" in markdown
+    assert "current_assignment_absence" in markdown
     assert "memory_answerability" in markdown
     assert "hook_coverage" in markdown
     assert "fixture_variant" in markdown

@@ -23,10 +23,9 @@ def test_patch_guard_rejects_forbidden_module() -> None:
 def test_patch_guard_rejects_language_keyword_router() -> None:
     result = validate_patch_against_playbook(
         ["gateway/tool_state_guard.py"],
-        "if 'keresd meg' in text: load_files()",
+        "if 'literal command' in text: load_files()",
         "TOOL_STATE_FINAL_ANSWER_BLOCK",
     )
 
     assert result["accepted"] is False
     assert "language_keyword_router" in result["forbidden_fixes"]
-
