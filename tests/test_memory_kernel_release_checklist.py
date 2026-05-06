@@ -7,7 +7,10 @@ from scripts.run_memory_kernel_release_checklist import (
     GATE_EVASION_PATTERNS,
     REQUIRED_OPERATION_CLASSES,
     UNBREAKABLE_TARGET,
+    _check_admission_final_state_destructive_proof,
+    _check_actionable_proactive_runtime_wizard_destructive_proof,
     _check_benchmark_transparency,
+    _check_behavior_card_destructive_proof,
     _check_packet_budget_active_default,
     _check_adaptive_evidence_kernel,
     _check_adaptive_evidence_performance_completion,
@@ -16,7 +19,9 @@ from scripts.run_memory_kernel_release_checklist import (
     _check_projection_semantics_runtime_parity,
     _check_release_claim_contract,
     _check_retrieval_context_envelope,
+    _check_retrieval_packet_source_destructive_proof,
     _check_source_sync_spine,
+    _check_tier2_graph_destructive_proof,
     _check_typed_graph_producer_population,
     _check_tier2_truthful_diagnostics,
     _check_tier2_extraction_quality,
@@ -251,6 +256,18 @@ def test_typed_graph_producer_population_release_check_passes(tmp_path: Path) ->
     assert result.summary["empty_producer_state"] == "no_input"
 
 
+def test_tier2_graph_destructive_proof_release_check_passes(tmp_path: Path) -> None:
+    result = _check_tier2_graph_destructive_proof(tmp_path)
+
+    assert result.status == "pass"
+    assert result.returncode == 0
+    assert result.summary["status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["issue_count"] == 0
+    assert result.summary["failure_case_ids"] == []
+    assert all(result.summary["proof"].values())
+
+
 def test_source_sync_spine_release_check_passes(tmp_path: Path) -> None:
     result = _check_source_sync_spine(tmp_path)
 
@@ -282,6 +299,57 @@ def test_retrieval_context_envelope_release_check_passes(tmp_path: Path) -> None
     assert result.summary["no_memory_semantic_enabled"] is False
     assert result.summary["raw_private_payload_in_envelope"] is False
     assert result.summary["raw_private_scope_in_envelope"] is False
+
+
+def test_retrieval_packet_source_destructive_proof_release_check_passes(tmp_path: Path) -> None:
+    result = _check_retrieval_packet_source_destructive_proof(tmp_path)
+
+    assert result.status == "pass"
+    assert result.returncode == 0
+    assert result.summary["status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["issue_count"] == 0
+    assert result.summary["failure_case_ids"] == []
+    assert all(result.summary["proof"].values())
+
+
+def test_actionable_proactive_runtime_wizard_destructive_proof_release_check_passes(tmp_path: Path) -> None:
+    result = _check_actionable_proactive_runtime_wizard_destructive_proof(tmp_path)
+
+    assert result.status == "pass"
+    assert result.returncode == 0
+    assert result.summary["status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["llm_calls_performed"] is False
+    assert result.summary["issue_count"] == 0
+    assert result.summary["failure_case_ids"] == []
+    assert all(result.summary["proof"].values())
+
+
+def test_behavior_card_destructive_proof_release_check_passes(tmp_path: Path) -> None:
+    result = _check_behavior_card_destructive_proof(tmp_path)
+
+    assert result.status == "pass"
+    assert result.returncode == 0
+    assert result.summary["status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["issue_count"] == 0
+    assert all(result.summary["proof"].values())
+
+
+def test_admission_final_state_destructive_proof_release_check_passes(tmp_path: Path) -> None:
+    result = _check_admission_final_state_destructive_proof(tmp_path)
+
+    assert result.status == "pass"
+    assert result.returncode == 0
+    assert result.summary["status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["issue_count"] == 0
+    assert all(result.summary["proof"].values())
+    assert result.summary["current_truth_final_state"]["unsafe_answer_truth_projection_count"] == 0
+    assert result.summary["current_truth_final_state"]["l0_parity_status"] == "pass"
+    assert result.summary["packet_final_state"]["conformance_status"] == "pass"
+    assert result.summary["packet_final_state"]["inspect_verdict"] == "pass"
 
 
 def test_hermes_proactive_runtime_parity_check_passes(tmp_path: Path) -> None:

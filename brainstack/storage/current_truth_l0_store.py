@@ -80,6 +80,17 @@ def _snapshot_hash(value: Any, *, length: int = 32) -> str:
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:length]
 
 
+def _canonical_rows_chronological(rows: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            _text(row.get("created_at")),
+            int(row.get("id") or 0),
+            _text(row.get("event_id")),
+        ),
+    )
+
+
 class CurrentTruthL0StoreMixin:
     def _project_current_truth_l0_event(
         self,
@@ -147,14 +158,12 @@ class CurrentTruthL0StoreMixin:
         for raw in rows:
             row = _loads_mapping(raw["row_json"])
             counters = _loads_mapping(raw["counter_json"])
-            reason_codes = [
+            existing_reasons = [
                 reason
                 for reason in (_text(reason) for reason in _list(row.get("projection_reason_codes")))
-                if reason and reason != _ANSWER_SAFE_REASON
+                if reason and reason not in {_ANSWER_SAFE_REASON, _PRIOR_SUPERSEDED_REASON, _NOT_ANSWERABLE_PRIOR_REASON}
             ]
-            for reason in (_PRIOR_SUPERSEDED_REASON, _NOT_ANSWERABLE_PRIOR_REASON):
-                if reason not in reason_codes:
-                    reason_codes.append(reason)
+            reason_codes = list(dict.fromkeys([_PRIOR_SUPERSEDED_REASON, _NOT_ANSWERABLE_PRIOR_REASON, *existing_reasons]))
             row.update(
                 {
                     "answerable_current_truth": False,
@@ -269,7 +278,7 @@ class CurrentTruthL0StoreMixin:
         projected_at: str | None = None,
     ) -> dict[str, Any]:
         timestamp = _text(projected_at) or utc_now_iso()
-        rows = self.list_canonical_memory_events(limit=max(int(limit or 0), 1))
+        rows = _canonical_rows_chronological(self.list_canonical_memory_events(limit=max(int(limit or 0), 1)))
         events = [row.get("event") for row in rows if isinstance(row.get("event"), Mapping)]
         self.conn.execute("DELETE FROM current_truth_l0_rows")
         for event in events:
@@ -486,7 +495,7 @@ class CurrentTruthL0StoreMixin:
         checked_at: str | None = None,
     ) -> dict[str, Any]:
         timestamp = _text(checked_at) or utc_now_iso()
-        canonical_rows = self.list_canonical_memory_events(limit=max(int(limit or 0), 1))
+        canonical_rows = _canonical_rows_chronological(self.list_canonical_memory_events(limit=max(int(limit or 0), 1)))
         events = [row.get("event") for row in canonical_rows if isinstance(row.get("event"), Mapping)]
         rebuilt = rebuild_current_truth_view(events, rebuilt_at=timestamp, checked_at=timestamp)
         self.rebuild_current_truth_l0_snapshot(limit=limit, projected_at=timestamp)

@@ -1101,6 +1101,44 @@ def _check_typed_graph_producer_population(tmp: Path) -> CheckResult:
     )
 
 
+def _check_tier2_graph_destructive_proof(tmp: Path) -> CheckResult:
+    out = tmp / "tier2_graph_destructive_proof.json"
+    command = [sys.executable, "scripts/run_tier2_graph_destructive_proof.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    required_flags = (
+        "dirty_live_shaped_failed_runs",
+        "configured_unbound_not_healthy",
+        "empty_graph_explains_no_input_or_failed_dependency",
+        "source_backed_relation_requires_lineage_receipt_event",
+        "assistant_candidate_no_graph_truth",
+        "unverified_raw_chat_candidate_no_graph_truth",
+        "failed_run_raw_error_not_agent_facing",
+        "no_enabled_means_healthy",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("issues") == []
+        and data.get("public_safe") is True
+        and all(proof.get(flag) is True for flag in required_flags)
+    )
+    return CheckResult(
+        name="tier2_graph_destructive_proof",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": len(data.get("issues") or []),
+            "public_safe": data.get("public_safe"),
+            "proof": {flag: proof.get(flag) for flag in required_flags},
+            "failure_case_ids": data.get("failure_case_ids"),
+        },
+    )
+
+
 def _check_source_sync_spine(tmp: Path) -> CheckResult:
     out = tmp / "source_sync_spine.json"
     command = [sys.executable, "scripts/verify_source_sync_spine.py", "--out", str(out)]
@@ -1294,6 +1332,89 @@ def _check_tier2_extraction_quality(tmp: Path) -> CheckResult:
     )
 
 
+def _check_retrieval_packet_source_destructive_proof(tmp: Path) -> CheckResult:
+    out = tmp / "retrieval_packet_source_destructive_proof.json"
+    command = [sys.executable, "scripts/run_retrieval_packet_source_destructive_proof.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    required_flags = (
+        "agent_facing_context_matches_current_stale_support_counts",
+        "source_expand_handles_public_safe",
+        "source_sync_remains_source_only",
+        "hard_gated_routes_keep_backend_calls_skipped",
+        "stale_support_not_rendered_as_fresh_answer",
+        "no_private_source_or_scope_leak",
+        "deep_route_capability_preserved",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("issues") == []
+        and data.get("public_safe") is True
+        and all(proof.get(flag) is True for flag in required_flags)
+    )
+    return CheckResult(
+        name="retrieval_packet_source_destructive_proof",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": len(data.get("issues") or []),
+            "public_safe": data.get("public_safe"),
+            "proof": {flag: proof.get(flag) for flag in required_flags},
+            "failure_case_ids": data.get("failure_case_ids"),
+        },
+    )
+
+
+def _check_actionable_proactive_runtime_wizard_destructive_proof(tmp: Path) -> CheckResult:
+    out = tmp / "actionable_proactive_runtime_wizard_destructive_proof.json"
+    command = [
+        sys.executable,
+        "scripts/run_actionable_proactive_runtime_wizard_destructive_proof.py",
+        "--out",
+        str(out),
+    ]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    required_flags = (
+        "support_only_action_rejected_without_substrate",
+        "proactive_status_read_only_no_side_effect",
+        "no_outbox_or_scheduler_side_effect",
+        "runtime_degraded_states_truthful",
+        "auxiliary_invalid_routes_block_before_call",
+        "main_model_inheritance_ready",
+        "wizard_core_patches_auxiliary_and_session_search",
+        "proactive_payload_files_present",
+        "public_safe",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("issues") == []
+        and data.get("public_safe") is True
+        and data.get("llm_calls_performed") is False
+        and all(proof.get(flag) is True for flag in required_flags)
+    )
+    return CheckResult(
+        name="actionable_proactive_runtime_wizard_destructive_proof",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": len(data.get("issues") or []),
+            "public_safe": data.get("public_safe"),
+            "llm_calls_performed": data.get("llm_calls_performed"),
+            "proof": {flag: proof.get(flag) for flag in required_flags},
+            "failure_case_ids": data.get("failure_case_ids"),
+        },
+    )
+
+
 def _check_hermes_proactive_runtime_parity(tmp: Path) -> CheckResult:
     out = tmp / "hermes_proactive_runtime_parity.json"
     command = [sys.executable, "scripts/verify_hermes_proactive_runtime_parity.py", "--out", str(out)]
@@ -1377,6 +1498,92 @@ def _check_behavior_card_delivery(tmp: Path) -> CheckResult:
             "durable_behavior_rows": data.get("durable_behavior_rows"),
             "legacy_profile_source_suppression": legacy_suppression,
             "active_card_size_warning": size_warning,
+        },
+    )
+
+
+def _check_behavior_card_destructive_proof(tmp: Path) -> CheckResult:
+    out = tmp / "behavior_card_destructive_proof.json"
+    command = [sys.executable, "scripts/run_behavior_card_destructive_proof.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    required_flags = (
+        "dirty_live_shaped_fixture",
+        "small_write_cannot_shrink_active_card",
+        "collapsed_summary_cannot_patch_card",
+        "non_behavior_profile_cannot_materialize_card",
+        "full_structured_replacement_final_state",
+        "session_start_delivery_uses_canonical_card",
+        "compression_delivery_uses_same_card",
+        "source_profile_not_prompt_authority",
+        "large_card_warning_not_prompt_spam",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("issues") == []
+        and data.get("public_safe") is True
+        and all(proof.get(flag) is True for flag in required_flags)
+    )
+    return CheckResult(
+        name="behavior_card_destructive_proof",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": len(data.get("issues") or []),
+            "public_safe": data.get("public_safe"),
+            "proof": {flag: proof.get(flag) for flag in required_flags},
+            "details": data.get("details") if isinstance(data.get("details"), Mapping) else {},
+        },
+    )
+
+
+def _check_admission_final_state_destructive_proof(tmp: Path) -> CheckResult:
+    out = tmp / "admission_final_state_destructive_proof.json"
+    command = [sys.executable, "scripts/run_admission_final_state_destructive_proof.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    required_flags = (
+        "dirty_live_shaped_fixture",
+        "receipt_success_not_sufficient",
+        "rejected_receipt_not_answer_truth",
+        "support_only_cannot_answer",
+        "newer_rejected_cannot_override_current",
+        "explicit_supersession_final_state",
+        "missing_receipt_event_not_answer_truth",
+        "packet_selected_only_answer_safe",
+        "inspect_or_l0_reason_codes_present",
+        "l0_matches_rebuild",
+    )
+    final_state = data.get("current_truth_final_state") if isinstance(data.get("current_truth_final_state"), Mapping) else {}
+    packet_state = data.get("packet_final_state") if isinstance(data.get("packet_final_state"), Mapping) else {}
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("issues") == []
+        and data.get("public_safe") is True
+        and all(proof.get(flag) is True for flag in required_flags)
+        and final_state.get("unsafe_answer_truth_projection_count") == 0
+        and final_state.get("l0_parity_status") == "pass"
+        and packet_state.get("conformance_status") == "pass"
+        and packet_state.get("inspect_verdict") == "pass"
+    )
+    return CheckResult(
+        name="admission_final_state_destructive_proof",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": len(data.get("issues") or []),
+            "public_safe": data.get("public_safe"),
+            "proof": {flag: proof.get(flag) for flag in required_flags},
+            "current_truth_final_state": final_state,
+            "packet_final_state": packet_state,
         },
     )
 
@@ -1903,10 +2110,15 @@ def run_checklist(
             _check_projection_semantics_runtime_parity(tmp),
             _check_tier2_truthful_diagnostics(tmp),
             _check_typed_graph_producer_population(tmp),
+            _check_tier2_graph_destructive_proof(tmp),
             _check_source_sync_spine(tmp),
             _check_retrieval_context_envelope(tmp),
+            _check_retrieval_packet_source_destructive_proof(tmp),
+            _check_actionable_proactive_runtime_wizard_destructive_proof(tmp),
             _check_hermes_proactive_runtime_parity(tmp),
             _check_behavior_card_delivery(tmp),
+            _check_behavior_card_destructive_proof(tmp),
+            _check_admission_final_state_destructive_proof(tmp),
             _check_live_crash_regression_guard(tmp),
             _check_persistent_bloat_rebuild(tmp),
             _check_tier2_extraction_quality(tmp),
