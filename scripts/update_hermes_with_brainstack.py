@@ -13,10 +13,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.install_into_hermes import _default_compose_path, _default_config_path
-
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.install_into_hermes import _default_compose_path, _default_config_path  # noqa: E402
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> None:

@@ -24,7 +24,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from brainstack.background_task_binding import install_default_background_task_bindings
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from brainstack.background_task_binding import install_default_background_task_bindings  # noqa: E402
 
 try:
     from hermes_gateway_patch_support import (
@@ -38,7 +42,6 @@ except ModuleNotFoundError:
     )
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PLUGIN = REPO_ROOT / "brainstack"
 SOURCE_HOST_PAYLOAD = REPO_ROOT / "host_payload"
 SOURCE_HERMES_PROACTIVE_EXTENSION = REPO_ROOT / "extensions" / "hermes_proactive"
