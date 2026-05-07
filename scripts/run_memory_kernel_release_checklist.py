@@ -1548,6 +1548,118 @@ def _check_actionable_proactive_runtime_wizard_destructive_proof(tmp: Path) -> C
     )
 
 
+def _check_installer_gateway_timeout_boundary(tmp: Path) -> CheckResult:
+    command = ["installer gateway timeout boundary", "scripts/install_into_hermes.py"]
+    from scripts import install_into_hermes
+
+    existing_config = tmp / "gateway_timeout_existing.yaml"
+    existing_config.write_text(
+        "agent:\n"
+        "  gateway_timeout: 1800\n"
+        "  gateway_timeout_warning: 900\n"
+        "auxiliary:\n"
+        "  session_search:\n"
+        "    total_timeout: 90\n"
+        "    timeout: 90\n"
+        "    max_concurrency: 5\n",
+        encoding="utf-8",
+    )
+    existing_result = install_into_hermes._patch_config(
+        existing_config,
+        dry_run=False,
+        embedding_runtime="none",
+    )
+    existing_data = install_into_hermes._load_yaml(existing_config)
+
+    empty_config = tmp / "gateway_timeout_empty.yaml"
+    empty_config.write_text("{}", encoding="utf-8")
+    empty_result = install_into_hermes._patch_config(
+        empty_config,
+        dry_run=False,
+        embedding_runtime="none",
+    )
+    empty_data = install_into_hermes._load_yaml(empty_config)
+
+    existing_session_search = existing_data.get("auxiliary", {}).get("session_search", {})
+    empty_session_search = empty_data.get("auxiliary", {}).get("session_search", {})
+    proof = {
+        "existing_gateway_timeout_preserved": existing_data.get("agent", {}).get("gateway_timeout") == 1800,
+        "existing_gateway_warning_preserved": existing_data.get("agent", {}).get("gateway_timeout_warning") == 900,
+        "empty_config_does_not_gain_gateway_timeout": "gateway_timeout" not in empty_data.get("agent", {}),
+        "empty_config_does_not_gain_gateway_warning": "gateway_timeout_warning" not in empty_data.get("agent", {}),
+        "existing_session_search_still_bounded": existing_session_search.get("total_timeout") == 20
+        and existing_session_search.get("timeout") == 15
+        and existing_session_search.get("max_concurrency") == 1,
+        "empty_session_search_still_bounded": empty_session_search.get("total_timeout") == 20
+        and empty_session_search.get("timeout") == 15
+        and empty_session_search.get("max_concurrency") == 1,
+        "existing_result_reports_user_gateway_timeout": existing_result.get("gateway_timeout") == 1800
+        and existing_result.get("gateway_timeout_warning") == 900,
+        "empty_result_reports_no_gateway_timeout": empty_result.get("gateway_timeout") is None
+        and empty_result.get("gateway_timeout_warning") is None,
+    }
+    passed = all(proof.values())
+    return CheckResult(
+        name="installer_gateway_timeout_boundary",
+        status=_status(passed),
+        command=command,
+        returncode=0 if passed else 1,
+        summary={
+            "status": _status(passed),
+            "proof": proof,
+        },
+    )
+
+
+def _check_proactive_agent_facing_wake_contract(tmp: Path) -> CheckResult:
+    out = tmp / "proactive_agent_facing_wake_contract.json"
+    command = [
+        sys.executable,
+        "scripts/run_proactive_agent_facing_wake_contract_proof.py",
+        "--out",
+        str(out),
+    ]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    required_flags = (
+        "ready_idle_explicit",
+        "idle_status_read_only_no_side_effect",
+        "readiness_probe_zero_side_effect",
+        "blocked_actions_are_safety_boundary",
+        "source_backed_candidate_visible",
+        "support_only_not_actionable",
+        "heartbeat_not_work",
+        "execution_payload_rejected",
+        "wake_queued_not_executed",
+        "kanban_boundary_read_only",
+        "candidate_intake_valid_accepts_source_backed",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("issues") == []
+        and data.get("public_safe") is True
+        and data.get("llm_calls_performed") is False
+        and all(proof.get(flag) is True for flag in required_flags)
+    )
+    return CheckResult(
+        name="proactive_agent_facing_wake_contract",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": len(data.get("issues") or []),
+            "public_safe": data.get("public_safe"),
+            "llm_calls_performed": data.get("llm_calls_performed"),
+            "states": data.get("states"),
+            "kanban": data.get("kanban"),
+            "proof": {flag: proof.get(flag) for flag in required_flags},
+        },
+    )
+
+
 def _check_hermes_proactive_runtime_parity(tmp: Path) -> CheckResult:
     out = tmp / "hermes_proactive_runtime_parity.json"
     command = [sys.executable, "scripts/verify_hermes_proactive_runtime_parity.py", "--out", str(out)]
@@ -2382,7 +2494,9 @@ def run_checklist(
             _check_store_concurrency_contract(tmp),
             _check_enterprise_release_compliance(tmp),
             _check_retrieval_packet_source_destructive_proof(tmp),
+            _check_installer_gateway_timeout_boundary(tmp),
             _check_actionable_proactive_runtime_wizard_destructive_proof(tmp),
+            _check_proactive_agent_facing_wake_contract(tmp),
             _check_hermes_proactive_runtime_parity(tmp),
             _check_behavior_card_delivery(tmp),
             _check_behavior_card_destructive_proof(tmp),

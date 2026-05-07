@@ -109,6 +109,10 @@ def test_agent_status_list_and_inspect_surface_evolver_wake_context(tmp_path: Pa
         assert status["counts"]["pending_outbox_sample"][0]["delivery_target"] == "proactive_runtime"
         assert status["counts"]["latest_item_summary"]["agent_summary"]["source"] == "evolver"
         assert status["counts"]["latest_item_summary"]["agent_summary"]["pending_or_failing_reason"] == "EVOLVER_DIRECTIVE_OBSERVED"
+        assert status["operational_state"] == "wake_queued"
+        assert status["operational_verdict"]["agent_interpretation"] == (
+            "Proactive has queued a wake handoff; work is not executed yet."
+        )
 
         listed = json.loads(provider.handle_tool_call("brainstack_proactive_list", {"limit": 10}))
         item = listed["items"][0]
@@ -117,6 +121,7 @@ def test_agent_status_list_and_inspect_surface_evolver_wake_context(tmp_path: Pa
         assert item["agent_summary"]["evolver_signal"]["reason_code"] == "EVOLVER_DIRECTIVE_OBSERVED"
         assert item["agent_summary"]["evolver_signal"]["directive_execution"] == "inert_data_only"
         assert item["agent_summary"]["pending_or_failing_reason"] == "EVOLVER_DIRECTIVE_OBSERVED"
+        assert listed["model_use_contract"]["state_instruction"] == "Inspect candidate before claims."
         assert PRIVATE_TEXT not in _dump(listed)
         assert "sessions_spawn(task" not in _dump(listed)
 
@@ -124,6 +129,7 @@ def test_agent_status_list_and_inspect_surface_evolver_wake_context(tmp_path: Pa
         assert inspected["agent_summary"]["evolver_signal"]["directive_kinds"] == ["sessions_spawn"]
         assert inspected["outbox_summary"][0]["delivery_state"] == "pending"
         assert inspected["current_assignment_authority"] is False
+        assert inspected["model_use_contract"]["blocked_actions_mean_safety_boundary"] is True
         assert PRIVATE_TEXT not in _dump(inspected)
     finally:
         provider.shutdown()

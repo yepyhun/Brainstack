@@ -11,12 +11,16 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
-from .core.proactive import ProactiveEventState, ProactiveReasonCode
+from .core.proactive import ProactiveEventKind, ProactiveEventState, ProactiveReasonCode
 
 
 PROACTIVE_AGENT_CONTRACT_SCHEMA = "brainstack.proactive_agent_surface.v1"
 PROACTIVE_AGENT_CONTROL_SCHEMA = "brainstack.proactive_agent_control.v1"
 ACTIONABLE_SUBSTRATE_SCHEMA = "brainstack.actionable_substrate.v1"
+PROACTIVE_OPERATIONAL_VERDICT_SCHEMA = "brainstack.proactive_operational_verdict.v1"
+PROACTIVE_READINESS_PROBE_SCHEMA = "brainstack.proactive_readiness_probe.v1"
+PROACTIVE_CANDIDATE_INTAKE_SCHEMA = "brainstack.proactive_candidate_intake.v1"
+KANBAN_WORKSTATION_SCHEMA = "brainstack.workstation_integration.kanban.v1"
 
 PROACTIVE_ALLOWED_READ_ACTIONS = ("status", "doctor", "list", "inspect")
 PROACTIVE_ALLOWED_CONTROL_ACTIONS = (
@@ -37,6 +41,29 @@ PROACTIVE_BLOCKED_ACTIONS = (
     "create_current_assignment",
 )
 PROACTIVE_MODE_VALUES = ("disabled", "dry_run", "live")
+PROACTIVE_OPERATIONAL_STATES = (
+    "unavailable",
+    "disabled",
+    "killed",
+    "ready_idle",
+    "candidate_available",
+    "wake_queued",
+    "degraded",
+)
+PROACTIVE_ACTIVE_ITEM_STATES = {
+    ProactiveEventState.OBSERVED.value,
+    ProactiveEventState.QUEUED.value,
+    ProactiveEventState.BLOCKED.value,
+}
+KANBAN_BLOCKED_BOARD_ACTIONS = (
+    "create_kanban_task",
+    "claim_kanban_task",
+    "assign_kanban_task",
+    "complete_kanban_task",
+    "retry_kanban_task",
+    "reclaim_kanban_task",
+    "dispatch_kanban_worker",
+)
 
 
 def proactive_capability_card() -> dict[str, Any]:
@@ -87,6 +114,17 @@ def _resolve_hermes_root_from_package() -> Path | None:
         if parent.name == "brainstack" and parent.parent.name == "memory" and parent.parent.parent.name == "plugins":
             return parent.parent.parent.parent
     return None
+
+
+def _resolve_hermes_root(config: Mapping[str, Any] | None = None) -> Path | None:
+    raw = ""
+    if isinstance(config, Mapping):
+        raw = str(config.get("hermes_root") or config.get("_hermes_root") or "").strip()
+    if not raw:
+        raw = os.getenv("HERMES_ROOT", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return _resolve_hermes_root_from_package()
 
 
 def _config_path_from_home(hermes_home: Path | None) -> Path | None:
@@ -208,8 +246,8 @@ def _write_kill_switch_to_config(data: dict[str, Any], kill_switch: bool, reason
     _write_runtime_config_value(data, "proactive_kill_switch", bool(kill_switch), reason_code)
 
 
-def _extension_status() -> dict[str, Any]:
-    root = _resolve_hermes_root_from_package()
+def _extension_status(config: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    root = _resolve_hermes_root(config)
     if root is None:
         return {
             "installed": False,
@@ -225,6 +263,34 @@ def _extension_status() -> dict[str, Any]:
         "reason_code": "EXTENSION_PATH_EXISTS" if extension_path.exists() else "EXTENSION_PATH_MISSING",
         "source": "brainstack_package_path",
     }
+
+
+def _kanban_workstation_status(config: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    root = _resolve_hermes_root(config)
+    evidence_paths: list[str] = []
+    if root is not None:
+        candidates = (
+            root / "tools" / "kanban_tools.py",
+            root / "hermes_cli" / "kanban_db.py",
+            root / "plugins" / "kanban",
+            root / "website" / "docs" / "user-guide" / "features" / "kanban.md",
+        )
+        evidence_paths = [str(path) for path in candidates if path.exists()]
+    available = len(evidence_paths) >= 2
+    payload = {
+        "available": available,
+        "can_write_board": False,
+        "reason_code": "HERMES_KANBAN_DETECTED" if available else "HERMES_KANBAN_NOT_DETECTED",
+    }
+    if available:
+        payload.update(
+            {
+                "owner": "hermes_kanban",
+                "proactive_role": "wake_surface_and_handoff_only",
+                "blocked_board_actions": ["write", "claim", "assign", "complete", "retry", "reclaim", "dispatch"],
+            }
+        )
+    return payload
 
 
 def _agent_item_summary(item: Mapping[str, Any]) -> dict[str, Any]:
@@ -290,6 +356,14 @@ def _outbox_summary(items: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _is_agent_visible_candidate_item(item: Mapping[str, Any]) -> bool:
+    kind = str(item.get("kind") or "")
+    state = str(item.get("state") or "")
+    if kind == ProactiveEventKind.HEARTBEAT_OK.value:
+        return False
+    return state in PROACTIVE_ACTIVE_ITEM_STATES
+
+
 def _canonical_receipts_by_task_source(store: Any, principal_scope_key: str) -> dict[tuple[str, str], str]:
     if not hasattr(store, "list_canonical_memory_events"):
         return {}
@@ -315,12 +389,9 @@ def _canonical_receipts_by_task_source(store: Any, principal_scope_key: str) -> 
 def _actionable_substrate_summary(store: Any, principal_scope_key: str) -> dict[str, Any]:
     if not hasattr(store, "list_task_items"):
         return {
-            "schema": ACTIONABLE_SUBSTRATE_SCHEMA,
-            "source": "task_items",
             "available": False,
             "reason_code": "TASK_STORE_UNAVAILABLE",
             "pending_count": 0,
-            "sampled_items": [],
         }
     receipt_index = _canonical_receipts_by_task_source(store, principal_scope_key)
     rows = store.list_task_items(
@@ -363,46 +434,296 @@ def _actionable_substrate_summary(store: Any, principal_scope_key: str) -> dict[
                 "current_assignment_authority": False,
             }
         )
-    return {
-        "schema": ACTIONABLE_SUBSTRATE_SCHEMA,
-        "source": "task_items",
+    summary: dict[str, Any] = {
         "available": True,
-        "read_only": True,
-        "side_effect": False,
         "pending_count": len(sampled),
-        "rejected_or_degraded_count": rejected_or_degraded,
-        "sampled_items": sampled[:5],
-        "model_use_contract": {
-            "may_surface_as_pending_work": True,
-            "must_not_send_notification": True,
-            "must_not_execute_task": True,
-            "must_not_schedule_task": True,
-        },
         "reason_code": "SOURCE_BACKED_ACTIONABLE_SUBSTRATE_COMPACT",
     }
+    if rejected_or_degraded:
+        summary["rejected_or_degraded_count"] = rejected_or_degraded
+    if sampled:
+        summary["sampled_items"] = sampled[:5]
+    return summary
 
 
 def _store_counts(store: Any, principal_scope_key: str) -> dict[str, Any]:
     items = store.list_proactive_items(principal_scope_key=principal_scope_key, limit=200)
     state_counts = Counter(str(item.get("state") or "") for item in items)
+    candidate_items = [item for item in items if _is_agent_visible_candidate_item(item)]
+    heartbeat_items = [
+        item
+        for item in items
+        if str(item.get("kind") or "") == ProactiveEventKind.HEARTBEAT_OK.value
+    ]
     pending_outbox = store.list_pending_proactive_outbox(limit=200)
     latest = items[0] if items else {}
     actionable_substrate = _actionable_substrate_summary(store, principal_scope_key)
-    return {
+    counts: dict[str, Any] = {
         "total_items_sampled": len(items),
-        "state_counts": dict(sorted(state_counts.items())),
+        "candidate_item_count": len(candidate_items),
+        "heartbeat_item_count": len(heartbeat_items),
         "pending_outbox_count": len(pending_outbox),
-        "pending_outbox_sample": _outbox_summary(pending_outbox[:5]),
         "actionable_substrate": actionable_substrate,
         "pending_actionable_substrate_count": actionable_substrate.get("pending_count", 0),
-        "latest_item_summary": {
+    }
+    if state_counts:
+        counts["state_counts"] = dict(sorted(state_counts.items()))
+    if pending_outbox:
+        counts["pending_outbox_sample"] = _outbox_summary(pending_outbox[:5])
+    if latest:
+        counts["latest_item_summary"] = {
             "event_id": str(latest.get("event_id") or ""),
             "updated_at": str(latest.get("updated_at") or ""),
             "agent_summary": _agent_item_summary(latest),
         }
-        if latest
-        else {},
-        "recent_cost": store.proactive_recent_cost(limit=100),
+    return counts
+
+
+def _can_receive_candidates(runtime_config: Mapping[str, Any], counts: Mapping[str, Any]) -> bool:
+    substrate = _mapping(counts.get("actionable_substrate"))
+    if substrate.get("available") is False:
+        return False
+    if str(runtime_config.get("mode") or "") == "disabled":
+        return False
+    if bool(runtime_config.get("kill_switch")):
+        return False
+    return str(runtime_config.get("status") or "") == "loaded"
+
+
+def _agent_interpretation_for_state(state: str) -> str:
+    return {
+        "unavailable": "Proactive status is unavailable; do not claim it is running.",
+        "disabled": "Proactive is disabled by config.",
+        "killed": "Proactive is installed but the kill switch is on.",
+        "ready_idle": "Proactive is ready and idle; no work is pending.",
+        "candidate_available": "Proactive has a source-backed candidate; inspect it before making claims.",
+        "wake_queued": "Proactive has queued a wake handoff; work is not executed yet.",
+        "degraded": "Proactive is degraded; report the reason and do not infer capability.",
+    }.get(state, "Proactive status is unknown; inspect the reason code.")
+
+
+def _operational_state_reason(state: str) -> str:
+    return {
+        "unavailable": "PROACTIVE_STATUS_UNAVAILABLE",
+        "disabled": "PROACTIVE_DISABLED",
+        "killed": "PROACTIVE_KILL_SWITCH_ON",
+        "ready_idle": "PROACTIVE_READY_IDLE",
+        "candidate_available": "PROACTIVE_CANDIDATE_AVAILABLE",
+        "wake_queued": "PROACTIVE_WAKE_QUEUED",
+        "degraded": "PROACTIVE_DEGRADED",
+    }.get(state, "PROACTIVE_STATE_UNKNOWN")
+
+
+def _build_operational_verdict(
+    *,
+    runtime_config: Mapping[str, Any],
+    counts: Mapping[str, Any],
+    extension: Mapping[str, Any],
+) -> dict[str, Any]:
+    config_status = str(runtime_config.get("status") or "")
+    mode = str(runtime_config.get("mode") or "")
+    substrate = _mapping(counts.get("actionable_substrate"))
+    pending_outbox_count = _safe_int(counts.get("pending_outbox_count"), 0)
+    pending_actionable_count = _safe_int(counts.get("pending_actionable_substrate_count"), 0)
+    candidate_item_count = _safe_int(counts.get("candidate_item_count"), 0)
+    state = "ready_idle"
+    if config_status in {"unavailable", "missing"}:
+        state = "unavailable"
+    elif mode == "disabled":
+        state = "disabled"
+    elif bool(runtime_config.get("kill_switch")):
+        state = "killed"
+    elif substrate.get("available") is False:
+        state = "degraded"
+    elif config_status == "loaded" and mode not in PROACTIVE_MODE_VALUES:
+        state = "degraded"
+    elif pending_outbox_count > 0:
+        state = "wake_queued"
+    elif pending_actionable_count > 0 or candidate_item_count > 0:
+        state = "candidate_available"
+
+    can_receive = _can_receive_candidates(runtime_config, counts)
+    can_wake = can_receive and mode == "live"
+    return {
+        "operational_state": state,
+        "reason_code": _operational_state_reason(state),
+        "idle_is_failure": False,
+        "can_receive_candidates": can_receive,
+        "can_wake_agent_when_candidate_exists": can_wake,
+        "blocked_actions_mean_safety_boundary": True,
+        "agent_interpretation": _agent_interpretation_for_state(state),
+    }
+
+
+def _agent_use_contract(operational_state: str) -> dict[str, Any]:
+    state_instruction = {
+        "ready_idle": "Ready idle is healthy.",
+        "candidate_available": "Inspect candidate before claims.",
+        "wake_queued": "Wake queued is pending handoff, not execution.",
+        "degraded": "Report reason; do not infer capability.",
+        "disabled": "Disabled by config.",
+        "killed": "Kill switch is on.",
+        "unavailable": "Status unavailable.",
+    }.get(operational_state, "Use operational_state and reason_code.")
+    return {
+        "state_instruction": state_instruction,
+        "blocked_actions_mean_safety_boundary": True,
+        "must_not_claim": ["execute", "current_assignment", "idle_failure", "kanban_owner"],
+    }
+
+
+def validate_proactive_candidate_intake(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    kind = str(candidate.get("kind") or "")
+    source_authority = str(candidate.get("source_authority") or "")
+    principal_scope_key = str(candidate.get("principal_scope_key") or "")
+    source_refs = candidate.get("source_refs") if isinstance(candidate.get("source_refs"), list) else []
+    receipt_id = str(candidate.get("receipt_id") or "")
+    source_event_id = str(candidate.get("source_event_id") or "")
+    execution_payload_present = bool(candidate.get("execution_payload_present"))
+    current_assignment_authority = bool(candidate.get("current_assignment_authority"))
+    rejected_reasons: list[str] = []
+    if kind == ProactiveEventKind.HEARTBEAT_OK.value:
+        rejected_reasons.append("HEARTBEAT_IS_LIVENESS_NOT_WORK")
+    if source_authority not in {"source_backed", "kanban_owner"}:
+        rejected_reasons.append("UNSUPPORTED_CANDIDATE_AUTHORITY")
+    if not principal_scope_key:
+        rejected_reasons.append("MISSING_PRINCIPAL_SCOPE")
+    if not source_refs and not receipt_id and not source_event_id:
+        rejected_reasons.append("MISSING_SOURCE_REFERENCE")
+    if execution_payload_present:
+        rejected_reasons.append("EXECUTION_PAYLOAD_FORBIDDEN")
+    if current_assignment_authority:
+        rejected_reasons.append("CURRENT_ASSIGNMENT_AUTHORITY_FORBIDDEN")
+
+    classification = "candidate_visible" if not rejected_reasons else "rejected"
+    return {
+        "schema": PROACTIVE_CANDIDATE_INTAKE_SCHEMA,
+        "classification": classification,
+        "can_surface": classification == "candidate_visible",
+        "can_wake": classification == "candidate_visible",
+        "reason_code": "CANDIDATE_INTAKE_VALID" if not rejected_reasons else "CANDIDATE_INTAKE_REJECTED",
+        "rejected_reasons": rejected_reasons,
+        "current_assignment_authority": False,
+        "execution_authority": False,
+    }
+
+
+def _readiness_probe(runtime_config: Mapping[str, Any], counts: Mapping[str, Any]) -> dict[str, Any]:
+    synthetic_candidate = {
+        "kind": ProactiveEventKind.FOLLOW_UP.value,
+        "source_authority": "source_backed",
+        "principal_scope_key": "principal:probe",
+        "source_refs": ["probe:source"],
+        "receipt_id": "probe:receipt",
+        "execution_payload_present": False,
+        "current_assignment_authority": False,
+    }
+    candidate = validate_proactive_candidate_intake(synthetic_candidate)
+    try:
+        from extensions.hermes_proactive.hermes_proactive.pulse_producer import classify_pulse_wake
+        from extensions.hermes_proactive.hermes_proactive.surfacing import (
+            SurfacingContext,
+            decide_proactive_surfacing,
+        )
+
+        task = {
+            "source": "readiness_probe",
+            "kind": ProactiveEventKind.FOLLOW_UP.value,
+            "title": "Synthetic readiness probe",
+            "summary": "Synthetic source-backed candidate for no-write readiness proof.",
+            "priority": "normal",
+            "intended_next_action": "request_input",
+            "evidence_ids": ["probe:source"],
+            "candidate_key": "probe:source-backed",
+        }
+        surfacing = decide_proactive_surfacing(task, SurfacingContext(allow_notify=True))
+        wake = classify_pulse_wake(
+            {
+                "schema": "brainstack.proactive_readiness_probe.synthetic_pulse.v1",
+                "run_id": "readiness-probe",
+                "tasks": [task],
+                "no_op": False,
+                "provider_calls": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+            },
+            create_outbox=False,
+        )
+        import_status = "available"
+        import_error = ""
+    except Exception as exc:
+        surfacing = {}
+        wake = {}
+        import_status = "unavailable"
+        import_error = exc.__class__.__name__
+
+    counters = {
+        "provider_calls": _safe_int(wake.get("provider_calls"), 0),
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "db_mutation": 0,
+        "proactive_events_written": 0,
+        "proactive_outbox_written": 0,
+        "transcript_writes": _safe_int(wake.get("transcript_writes"), 0),
+    }
+    zero_side_effects = all(value == 0 for value in counters.values())
+    probe_pass = (
+        candidate.get("classification") == "candidate_visible"
+        and import_status == "available"
+        and str(wake.get("decision") or "") == "observed"
+        and wake.get("delivery_requested") is False
+        and str(surfacing.get("decision") or "") in {"needs_approval", "notify_user"}
+        and zero_side_effects
+    )
+    return {
+        "schema": PROACTIVE_READINESS_PROBE_SCHEMA,
+        "status": "pass" if probe_pass else "fail",
+        "synthetic": True,
+        "read_only": True,
+        "side_effect": False,
+        "live_delivery": False,
+        "provider_calls": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "proof_counters": counters,
+        "zero_side_effects": zero_side_effects,
+        "candidate_intake": candidate,
+        "surfacing": {
+            "decision": str(surfacing.get("decision") or ""),
+            "reason_code": str(surfacing.get("reason_code") or ""),
+            "should_notify": bool(surfacing.get("should_notify")),
+            "requires_approval": bool(surfacing.get("requires_approval")),
+        },
+        "wake": {
+            "decision": str(wake.get("decision") or ""),
+            "reason_code": str(wake.get("reason_code") or ""),
+            "delivery_requested": bool(wake.get("delivery_requested")),
+            "task_count": _safe_int(wake.get("task_count"), 0),
+        },
+        "import_status": import_status,
+        "import_error": import_error,
+        "config_mode": str(runtime_config.get("mode") or ""),
+        "pending_outbox_count": _safe_int(counts.get("pending_outbox_count"), 0),
+        "reason_code": "READINESS_PROBE_PASS" if probe_pass else "READINESS_PROBE_FAIL",
+    }
+
+
+def _compact_readiness_probe(probe: Mapping[str, Any]) -> dict[str, Any]:
+    wake = _mapping(probe.get("wake"))
+    surfacing = _mapping(probe.get("surfacing"))
+    intake = _mapping(probe.get("candidate_intake"))
+    return {
+        "status": str(probe.get("status") or ""),
+        "synthetic": bool(probe.get("synthetic")),
+        "read_only": bool(probe.get("read_only")),
+        "side_effect": bool(probe.get("side_effect")),
+        "live_delivery": bool(probe.get("live_delivery")),
+        "zero_side_effects": bool(probe.get("zero_side_effects")),
+        "candidate_classification": str(intake.get("classification") or ""),
+        "surfacing_decision": str(surfacing.get("decision") or ""),
+        "wake_decision": str(wake.get("decision") or ""),
+        "wake_delivery_requested": bool(wake.get("delivery_requested")),
+        "reason_code": str(probe.get("reason_code") or ""),
     }
 
 
@@ -416,27 +737,36 @@ def build_proactive_status(
     config_data, load_status = _load_yaml(_config_path_from_home(hermes_home))
     runtime_config = _runtime_config_summary(config_data, load_status)
     counts = _store_counts(store, principal_scope_key)
+    extension = _extension_status(config)
+    operational_verdict = _build_operational_verdict(
+        runtime_config=runtime_config,
+        counts=counts,
+        extension=extension,
+    )
+    workstation_integrations = {
+        "kanban": _kanban_workstation_status(config),
+    }
+    readiness_probe = _compact_readiness_probe(_readiness_probe(runtime_config, counts))
     return {
         "schema": PROACTIVE_AGENT_CONTRACT_SCHEMA,
         "operation": "status",
         "read_only": True,
         "side_effect": False,
         "bounded_model_facing": True,
-        "status_source": "brainstack_store_and_hermes_config",
-        "principal_scope_key": str(principal_scope_key or ""),
-        "capability_summary": "Inspectable proactive state; control is limited to explicit user-requested mode/item changes.",
-        "extension": _extension_status(),
+        "operational_state": operational_verdict["operational_state"],
+        "operational_verdict": operational_verdict,
+        "agent_interpretation": operational_verdict["agent_interpretation"],
+        "idle_is_failure": operational_verdict["idle_is_failure"],
+        "can_receive_candidates": operational_verdict["can_receive_candidates"],
+        "can_wake_agent_when_candidate_exists": operational_verdict["can_wake_agent_when_candidate_exists"],
+        "blocked_actions_mean_safety_boundary": operational_verdict["blocked_actions_mean_safety_boundary"],
         "config": runtime_config,
         "counts": counts,
-        "allowed_actions": list(PROACTIVE_ALLOWED_READ_ACTIONS + PROACTIVE_ALLOWED_CONTROL_ACTIONS),
+        "readiness_probe": readiness_probe,
+        "workstation_integrations": workstation_integrations,
         "blocked_actions": list(PROACTIVE_BLOCKED_ACTIONS),
         "current_assignment_authority": False,
-        "model_use_contract": {
-            "answer_source": "this_compact_status",
-            "do_not_infer_current_assignment": True,
-            "do_not_claim_notifications_are_enabled_from_memory": True,
-            "do_not_call_search_files_for_proactive_config": True,
-        },
+        "model_use_contract": _agent_use_contract(str(operational_verdict["operational_state"])),
         "reason_code": "PROACTIVE_STATUS_TOOL_BACKED_COMPACT",
     }
 
@@ -484,6 +814,7 @@ def list_proactive_agent_items(
         "items": summaries,
         "item_count": len(summaries),
         "current_assignment_authority": False,
+        "model_use_contract": _agent_use_contract("candidate_available" if summaries else "ready_idle"),
         "reason_code": "PROACTIVE_LIST_TOOL_BACKED",
     }
 
@@ -524,6 +855,7 @@ def inspect_proactive_agent_item(
     payload["current_assignment_authority"] = False
     payload["agent_summary"] = _agent_item_summary(item)
     payload["outbox_summary"] = _outbox_summary([entry for entry in payload.get("outbox") or [] if isinstance(entry, Mapping)])
+    payload["model_use_contract"] = _agent_use_contract("candidate_available")
     payload["reason_code"] = "PROACTIVE_INSPECT_TOOL_BACKED"
     return payload
 

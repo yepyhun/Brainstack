@@ -6,28 +6,35 @@ from pathlib import Path
 import yaml
 
 from brainstack import BrainstackMemoryProvider
-from brainstack.proactive_agent_contract import PROACTIVE_ALLOWED_CONTROL_ACTIONS
+from brainstack.proactive_agent_contract import (
+    PROACTIVE_ALLOWED_CONTROL_ACTIONS,
+    validate_proactive_candidate_intake,
+)
 from brainstack.tool_schemas import proactive_control_tool_schema, proactive_mode_tool_schema
 
 
-def _provider(tmp_path: Path) -> BrainstackMemoryProvider:
+def _provider(tmp_path: Path, *, config_text: str | None = None, hermes_root: str = "") -> BrainstackMemoryProvider:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     hermes_home = tmp_path / "hermes_home"
     hermes_home.mkdir()
     (hermes_home / "config.yaml").write_text(
-        "proactive_mode: live\n"
-
-        "proactive_cooldown_seconds: 21600\n"
-        "proactive_kill_switch: false\n",
+        config_text
+        or (
+            "proactive_mode: live\n"
+            "proactive_cooldown_seconds: 21600\n"
+            "proactive_kill_switch: false\n"
+        ),
         encoding="utf-8",
     )
-    provider = BrainstackMemoryProvider(
-        {
+    config = {
             "db_path": str(tmp_path / "brainstack.sqlite3"),
             "graph_backend": "sqlite",
             "corpus_backend": "sqlite",
             "hermes_home": str(hermes_home),
-        }
-    )
+    }
+    if hermes_root:
+        config["hermes_root"] = hermes_root
+    provider = BrainstackMemoryProvider(config)
     provider.initialize(
         "proactive-session",
         platform="test",
@@ -127,6 +134,14 @@ def _operator_control(provider: BrainstackMemoryProvider, args: dict[str, object
     )
 
 
+def _table_counts(provider: BrainstackMemoryProvider) -> dict[str, int]:
+    assert provider._store is not None
+    return {
+        name: int(provider._store.conn.execute(f"SELECT COUNT(*) AS count FROM {name}").fetchone()["count"])
+        for name in ("proactive_events", "proactive_outbox", "proactive_attention_ledger")
+    }
+
+
 def test_proactive_control_tool_schema_matches_contract() -> None:
     schema = proactive_control_tool_schema()
     properties = schema["parameters"]["properties"]
@@ -179,8 +194,162 @@ def test_proactive_status_is_tool_backed_and_read_only(tmp_path: Path) -> None:
         assert payload["counts"]["total_items_sampled"] == 1
         assert payload["current_assignment_authority"] is False
         assert "send_notification" in payload["blocked_actions"]
+        assert payload["operational_state"] == "candidate_available"
+        assert payload["operational_verdict"]["blocked_actions_mean_safety_boundary"] is True
+        assert payload["model_use_contract"]["state_instruction"] == "Inspect candidate before claims."
     finally:
         provider.shutdown()
+
+
+def test_proactive_status_ready_idle_is_explicit_and_probe_is_side_effect_free(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        before = _table_counts(provider)
+        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
+        after = _table_counts(provider)
+
+        assert payload["operational_state"] == "ready_idle"
+        assert payload["idle_is_failure"] is False
+        assert payload["agent_interpretation"] == "Proactive is ready and idle; no work is pending."
+        assert payload["can_receive_candidates"] is True
+        assert payload["can_wake_agent_when_candidate_exists"] is True
+        assert payload["readiness_probe"]["status"] == "pass"
+        assert payload["readiness_probe"]["live_delivery"] is False
+        assert payload["readiness_probe"]["zero_side_effects"] is True
+        assert after == before
+    finally:
+        provider.shutdown()
+
+
+def test_proactive_operational_precedence_disabled_killed_degraded(tmp_path: Path) -> None:
+    disabled = _provider(
+        tmp_path / "disabled",
+        config_text="proactive_mode: disabled\nproactive_cooldown_seconds: 21600\nproactive_kill_switch: false\n",
+    )
+    try:
+        payload = json.loads(disabled.handle_tool_call("brainstack_proactive_status", {}))
+        assert payload["operational_state"] == "disabled"
+        assert payload["can_receive_candidates"] is False
+    finally:
+        disabled.shutdown()
+
+    killed = _provider(
+        tmp_path / "killed",
+        config_text="proactive_mode: live\nproactive_cooldown_seconds: 21600\nproactive_kill_switch: true\n",
+    )
+    try:
+        payload = json.loads(killed.handle_tool_call("brainstack_proactive_status", {}))
+        assert payload["operational_state"] == "killed"
+        assert payload["can_wake_agent_when_candidate_exists"] is False
+    finally:
+        killed.shutdown()
+
+    degraded = _provider(
+        tmp_path / "degraded",
+        config_text="proactive_mode: automatic\nproactive_cooldown_seconds: 21600\nproactive_kill_switch: false\n",
+    )
+    try:
+        payload = json.loads(degraded.handle_tool_call("brainstack_proactive_status", {}))
+        assert payload["operational_state"] == "degraded"
+        assert payload["operational_verdict"]["reason_code"] == "PROACTIVE_DEGRADED"
+    finally:
+        degraded.shutdown()
+
+
+def test_proactive_status_kanban_boundary_is_read_only_and_donor_owned(tmp_path: Path) -> None:
+    hermes_root = tmp_path / "hermes_root"
+    (hermes_root / "tools").mkdir(parents=True)
+    (hermes_root / "hermes_cli").mkdir()
+    (hermes_root / "plugins" / "kanban").mkdir(parents=True)
+    (hermes_root / "tools" / "kanban_tools.py").write_text("# public fixture\n", encoding="utf-8")
+    (hermes_root / "hermes_cli" / "kanban_db.py").write_text("# public fixture\n", encoding="utf-8")
+    provider = _provider(tmp_path / "kanban", hermes_root=str(hermes_root))
+    try:
+        before = _table_counts(provider)
+        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
+        after = _table_counts(provider)
+        kanban = payload["workstation_integrations"]["kanban"]
+
+        assert kanban["available"] is True
+        assert kanban["owner"] == "hermes_kanban"
+        assert kanban["proactive_role"] == "wake_surface_and_handoff_only"
+        assert kanban["can_write_board"] is False
+        assert "dispatch" in kanban["blocked_board_actions"]
+        assert payload["operational_state"] == "ready_idle"
+        assert after == before
+    finally:
+        provider.shutdown()
+
+
+def test_proactive_status_kanban_absent_does_not_degrade_ready_idle(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    try:
+        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
+        kanban = payload["workstation_integrations"]["kanban"]
+
+        assert kanban["available"] is False
+        assert kanban["can_write_board"] is False
+        assert payload["operational_state"] == "ready_idle"
+    finally:
+        provider.shutdown()
+
+
+def test_proactive_candidate_intake_rejects_forbidden_sources_and_payloads() -> None:
+    valid = validate_proactive_candidate_intake(
+        {
+            "kind": "follow_up",
+            "source_authority": "source_backed",
+            "principal_scope_key": "principal:test",
+            "source_refs": ["event:test"],
+            "execution_payload_present": False,
+            "current_assignment_authority": False,
+        }
+    )
+    assert valid["classification"] == "candidate_visible"
+
+    support_only = validate_proactive_candidate_intake(
+        {
+            "kind": "follow_up",
+            "source_authority": "support_only",
+            "principal_scope_key": "principal:test",
+            "source_refs": ["event:test"],
+        }
+    )
+    assert support_only["classification"] == "rejected"
+    assert "UNSUPPORTED_CANDIDATE_AUTHORITY" in support_only["rejected_reasons"]
+
+    raw = validate_proactive_candidate_intake(
+        {
+            "kind": "follow_up",
+            "source_authority": "raw_transcript",
+            "principal_scope_key": "principal:test",
+        }
+    )
+    assert raw["classification"] == "rejected"
+    assert "MISSING_SOURCE_REFERENCE" in raw["rejected_reasons"]
+
+    heartbeat = validate_proactive_candidate_intake(
+        {
+            "kind": "heartbeat_ok",
+            "source_authority": "source_backed",
+            "principal_scope_key": "principal:test",
+            "source_refs": ["heartbeat:ok"],
+        }
+    )
+    assert heartbeat["classification"] == "rejected"
+    assert "HEARTBEAT_IS_LIVENESS_NOT_WORK" in heartbeat["rejected_reasons"]
+
+    execution_payload = validate_proactive_candidate_intake(
+        {
+            "kind": "follow_up",
+            "source_authority": "source_backed",
+            "principal_scope_key": "principal:test",
+            "source_refs": ["event:test"],
+            "execution_payload_present": True,
+        }
+    )
+    assert execution_payload["classification"] == "rejected"
+    assert "EXECUTION_PAYLOAD_FORBIDDEN" in execution_payload["rejected_reasons"]
 
 
 def test_proactive_status_reads_brainstack_plugin_config(tmp_path: Path) -> None:

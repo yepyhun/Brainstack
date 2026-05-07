@@ -15,6 +15,8 @@ from scripts.run_memory_kernel_release_checklist import (
     _check_adaptive_evidence_kernel,
     _check_adaptive_evidence_performance_completion,
     _check_hermes_proactive_runtime_parity,
+    _check_installer_gateway_timeout_boundary,
+    _check_proactive_agent_facing_wake_contract,
     _check_persistent_bloat_rebuild,
     _check_projection_semantics_runtime_parity,
     _check_release_claim_contract,
@@ -337,6 +339,34 @@ def test_actionable_proactive_runtime_wizard_destructive_proof_release_check_pas
     assert result.summary["llm_calls_performed"] is False
     assert result.summary["issue_count"] == 0
     assert result.summary["failure_case_ids"] == []
+    assert all(result.summary["proof"].values())
+
+
+def test_installer_gateway_timeout_boundary_release_check_passes(tmp_path: Path) -> None:
+    result = _check_installer_gateway_timeout_boundary(tmp_path)
+
+    assert result.status == "pass"
+    assert result.returncode == 0
+    assert result.summary["status"] == "pass"
+    assert all(result.summary["proof"].values())
+
+
+def test_proactive_agent_facing_wake_contract_release_check_passes(tmp_path: Path) -> None:
+    result = _check_proactive_agent_facing_wake_contract(tmp_path)
+
+    assert result.status == "pass"
+    assert result.returncode == 0
+    assert result.summary["status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["llm_calls_performed"] is False
+    assert result.summary["issue_count"] == 0
+    assert result.summary["states"] == {
+        "idle": "ready_idle",
+        "candidate": "candidate_available",
+        "wake": "wake_queued",
+    }
+    assert result.summary["kanban"]["owner"] == "hermes_kanban"
+    assert result.summary["kanban"]["can_write_board"] is False
     assert all(result.summary["proof"].values())
 
 

@@ -209,6 +209,47 @@ def test_config_patch_bounds_dirty_session_search_runtime(tmp_path):
     assert hygiene["changes"]["previous_max_concurrency"] == 5
 
 
+def test_config_patch_preserves_hermes_gateway_timeout_while_bounding_session_search(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "agent:\n"
+        "  gateway_timeout: 1800\n"
+        "  gateway_timeout_warning: 900\n"
+        "auxiliary:\n"
+        "  session_search:\n"
+        "    total_timeout: 90\n"
+        "    timeout: 90\n"
+        "    max_concurrency: 5\n",
+        encoding="utf-8",
+    )
+
+    result = install_into_hermes._patch_config(config, dry_run=False, embedding_runtime="none")
+    data = install_into_hermes._load_yaml(config)
+
+    assert data["agent"]["gateway_timeout"] == 1800
+    assert data["agent"]["gateway_timeout_warning"] == 900
+    assert data["auxiliary"]["session_search"]["total_timeout"] == 20
+    assert data["auxiliary"]["session_search"]["timeout"] == 15
+    assert data["auxiliary"]["session_search"]["max_concurrency"] == 1
+    assert result["gateway_timeout"] == 1800
+    assert result["gateway_timeout_warning"] == 900
+
+
+def test_config_patch_does_not_create_brainstack_owned_gateway_timeout_defaults(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("{}", encoding="utf-8")
+
+    result = install_into_hermes._patch_config(config, dry_run=False, embedding_runtime="none")
+    data = install_into_hermes._load_yaml(config)
+
+    assert data["agent"] == {}
+    assert result["gateway_timeout"] is None
+    assert result["gateway_timeout_warning"] is None
+    assert data["auxiliary"]["session_search"]["total_timeout"] == 20
+    assert data["auxiliary"]["session_search"]["timeout"] == 15
+    assert data["auxiliary"]["session_search"]["max_concurrency"] == 1
+
+
 def test_config_patch_normalizes_legacy_automatic_proactive_mode_to_dry_run(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text("proactive_mode: automatic\nproactive_kill_switch: false\n", encoding="utf-8")

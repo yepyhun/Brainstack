@@ -4332,19 +4332,6 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
     if not isinstance(config["agent"], dict):
         raise RuntimeError("config.yaml has non-object `agent` section")
     agent = config["agent"]
-
-    def _normalized_int(value: Any) -> int | None:
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
-
-    gateway_timeout = _normalized_int(agent.get("gateway_timeout"))
-    gateway_timeout_warning = _normalized_int(agent.get("gateway_timeout_warning"))
-    if gateway_timeout in {None, 1800}:
-        agent["gateway_timeout"] = 120
-    if gateway_timeout_warning in {None, 900}:
-        agent["gateway_timeout_warning"] = 30
     proactive_runtime = _normalize_proactive_runtime_config(config)
     if not dry_run:
         _write_yaml(config_path, config)

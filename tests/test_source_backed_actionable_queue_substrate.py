@@ -101,6 +101,12 @@ def _count(store: BrainstackStore, table: str) -> int:
 def test_source_backed_task_actionable_is_visible_in_proactive_status_without_outbox(tmp_path: Path) -> None:
     store = _open_store(tmp_path)
     try:
+        hermes_home = tmp_path / "hermes_home"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "proactive_mode: live\nproactive_cooldown_seconds: 21600\nproactive_kill_switch: false\n",
+            encoding="utf-8",
+        )
         writer = ProjectionWriter(store)
         proposal = _proposal(
             claim_id="source-backed-task",
@@ -117,11 +123,17 @@ def test_source_backed_task_actionable_is_visible_in_proactive_status_without_ou
             "proactive_attention_ledger": _count(store, "proactive_attention_ledger"),
         }
 
-        status = build_proactive_status(store=store, principal_scope_key=PRINCIPAL_SCOPE_KEY, config={})
+        status = build_proactive_status(
+            store=store,
+            principal_scope_key=PRINCIPAL_SCOPE_KEY,
+            config={"hermes_home": str(hermes_home)},
+        )
 
         assert task_id > 0
         assert status["read_only"] is True
         assert status["side_effect"] is False
+        assert status["operational_state"] == "candidate_available"
+        assert status["can_receive_candidates"] is True
         substrate = status["counts"]["actionable_substrate"]
         assert substrate["pending_count"] == 1
         item = substrate["sampled_items"][0]
@@ -144,6 +156,12 @@ def test_source_backed_task_actionable_is_visible_in_proactive_status_without_ou
 def test_support_only_action_candidate_records_rejection_but_not_actionable_substrate(tmp_path: Path) -> None:
     store = _open_store(tmp_path)
     try:
+        hermes_home = tmp_path / "hermes_home"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "proactive_mode: live\nproactive_cooldown_seconds: 21600\nproactive_kill_switch: false\n",
+            encoding="utf-8",
+        )
         writer = ProjectionWriter(store)
         rejected = _proposal(
             claim_id="ambiguous-tier2-task",
@@ -157,12 +175,17 @@ def test_support_only_action_candidate_records_rejection_but_not_actionable_subs
             metadata=_base_metadata(rejected.metadata),
         )
 
-        status = build_proactive_status(store=store, principal_scope_key=PRINCIPAL_SCOPE_KEY, config={})
+        status = build_proactive_status(
+            store=store,
+            principal_scope_key=PRINCIPAL_SCOPE_KEY,
+            config={"hermes_home": str(hermes_home)},
+        )
 
         assert receipt_id > 0
         assert store.list_task_items(principal_scope_key=PRINCIPAL_SCOPE_KEY, limit=10) == []
         assert status["counts"]["actionable_substrate"]["pending_count"] == 0
         assert status["counts"]["pending_outbox_count"] == 0
+        assert status["operational_state"] == "ready_idle"
         assert _count(store, "proactive_events") == 0
         assert _count(store, "proactive_outbox") == 0
     finally:

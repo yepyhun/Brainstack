@@ -168,7 +168,7 @@
       "component": {
         "name": "brainstack-hermes-plugin",
         "type": "library",
-        "version": "1.0.67"
+        "version": "1.0.68"
       }
     },
     "specVersion": "1.5",
