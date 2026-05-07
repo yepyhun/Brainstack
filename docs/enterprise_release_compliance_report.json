@@ -1,0 +1,191 @@
+{
+  "dependency_license_report": {
+    "dependencies": [
+      {
+        "group": "default",
+        "installed": true,
+        "license": "MIT",
+        "name": "PyYAML",
+        "spec": "PyYAML>=6.0",
+        "version": "6.0.3"
+      },
+      {
+        "group": "backends",
+        "installed": false,
+        "license": "unknown",
+        "name": "chromadb",
+        "spec": "chromadb",
+        "version": ""
+      },
+      {
+        "group": "backends",
+        "installed": false,
+        "license": "unknown",
+        "name": "kuzu",
+        "spec": "kuzu",
+        "version": ""
+      },
+      {
+        "group": "dev",
+        "installed": true,
+        "license": "unknown",
+        "name": "pytest",
+        "spec": "pytest>=8.0",
+        "version": "9.0.3"
+      },
+      {
+        "group": "dev",
+        "installed": true,
+        "license": "License :: OSI Approved :: MIT License",
+        "name": "ruff",
+        "spec": "ruff>=0.8",
+        "version": "0.15.11"
+      },
+      {
+        "group": "dev",
+        "installed": true,
+        "license": "unknown",
+        "name": "mypy",
+        "spec": "mypy>=1.14",
+        "version": "1.20.2"
+      },
+      {
+        "group": "donors",
+        "installed": false,
+        "license": "unknown",
+        "name": "hindsight-all-slim",
+        "spec": "hindsight-all-slim>=0.5.6",
+        "version": ""
+      },
+      {
+        "group": "donors",
+        "installed": true,
+        "license": "unknown",
+        "name": "hindsight-api-slim",
+        "spec": "hindsight-api-slim[embedded-db]>=0.5.6",
+        "version": "0.5.6"
+      }
+    ],
+    "dependency_count": 8,
+    "status": "present",
+    "unknown_license_count": 6
+  },
+  "license_state": {
+    "files": [],
+    "status": "decision_required_no_top_level_license"
+  },
+  "public_safe": true,
+  "release_claim_boundary": {
+    "local_memory_kernel_release_allowed_by_this_check": true,
+    "strict_enterprise_blockers": [
+      "license_decision_required",
+      "unknown_dependency_licenses",
+      "vulnerability_tool_unavailable"
+    ],
+    "strict_enterprise_claim_allowed": false
+  },
+  "sbom": {
+    "bomFormat": "CycloneDX",
+    "components": [
+      {
+        "licenses": [
+          {
+            "license": {
+              "name": "MIT"
+            }
+          }
+        ],
+        "name": "PyYAML",
+        "purl": "pkg:pypi/pyyaml",
+        "scope": "default",
+        "type": "library",
+        "version": "6.0.3"
+      },
+      {
+        "licenses": [],
+        "name": "chromadb",
+        "purl": "pkg:pypi/chromadb",
+        "scope": "backends",
+        "type": "library",
+        "version": "chromadb"
+      },
+      {
+        "licenses": [],
+        "name": "kuzu",
+        "purl": "pkg:pypi/kuzu",
+        "scope": "backends",
+        "type": "library",
+        "version": "kuzu"
+      },
+      {
+        "licenses": [],
+        "name": "pytest",
+        "purl": "pkg:pypi/pytest",
+        "scope": "dev",
+        "type": "library",
+        "version": "9.0.3"
+      },
+      {
+        "licenses": [
+          {
+            "license": {
+              "name": "License :: OSI Approved :: MIT License"
+            }
+          }
+        ],
+        "name": "ruff",
+        "purl": "pkg:pypi/ruff",
+        "scope": "dev",
+        "type": "library",
+        "version": "0.15.11"
+      },
+      {
+        "licenses": [],
+        "name": "mypy",
+        "purl": "pkg:pypi/mypy",
+        "scope": "dev",
+        "type": "library",
+        "version": "1.20.2"
+      },
+      {
+        "licenses": [],
+        "name": "hindsight-all-slim",
+        "purl": "pkg:pypi/hindsight-all-slim",
+        "scope": "donors",
+        "type": "library",
+        "version": "hindsight-all-slim>=0.5.6"
+      },
+      {
+        "licenses": [],
+        "name": "hindsight-api-slim",
+        "purl": "pkg:pypi/hindsight-api-slim",
+        "scope": "donors",
+        "type": "library",
+        "version": "0.5.6"
+      }
+    ],
+    "metadata": {
+      "component": {
+        "name": "brainstack-hermes-plugin",
+        "type": "library",
+        "version": "1.0.67"
+      }
+    },
+    "specVersion": "1.5",
+    "version": 1
+  },
+  "schema": "brainstack.enterprise_release_compliance.v1",
+  "secret_scan": {
+    "private_staged_count": 0,
+    "private_tracked_count": 0,
+    "secret_like_tracked_count": 0,
+    "status": "pass"
+  },
+  "status": "pass",
+  "vulnerability_scan": {
+    "status": "tool_unavailable",
+    "strict_enterprise_claim_blocker": true,
+    "tool": "pip-audit",
+    "tool_path": ""
+  }
+}

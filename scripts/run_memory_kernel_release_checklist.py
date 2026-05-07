@@ -1646,6 +1646,40 @@ def _check_store_concurrency_contract(tmp: Path) -> CheckResult:
     )
 
 
+def _check_enterprise_release_compliance(tmp: Path) -> CheckResult:
+    out = tmp / "enterprise_release_compliance.json"
+    command = [sys.executable, "scripts/verify_enterprise_release_compliance.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    boundary = data.get("release_claim_boundary") if isinstance(data.get("release_claim_boundary"), Mapping) else {}
+    license_state = data.get("license_state") if isinstance(data.get("license_state"), Mapping) else {}
+    secret_scan = data.get("secret_scan") if isinstance(data.get("secret_scan"), Mapping) else {}
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and secret_scan.get("status") == "pass"
+        and "strict_enterprise_claim_allowed" in boundary
+    )
+    return CheckResult(
+        name="enterprise_release_compliance",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "license_state": license_state.get("status"),
+            "strict_enterprise_claim_allowed": boundary.get("strict_enterprise_claim_allowed"),
+            "strict_enterprise_blockers": boundary.get("strict_enterprise_blockers"),
+            "secret_scan_status": secret_scan.get("status"),
+            "dependency_count": (data.get("dependency_license_report") or {}).get("dependency_count")
+            if isinstance(data.get("dependency_license_report"), Mapping)
+            else None,
+        },
+    )
+
+
 def _check_behavior_card_delivery(tmp: Path) -> CheckResult:
     out = tmp / "behavior_card_delivery.json"
     command = [sys.executable, "scripts/verify_behavior_card_delivery.py", "--out", str(out)]
@@ -2346,6 +2380,7 @@ def run_checklist(
             _check_runtime_retrieval_enforcement(tmp),
             _check_sota_proof_harness(tmp),
             _check_store_concurrency_contract(tmp),
+            _check_enterprise_release_compliance(tmp),
             _check_retrieval_packet_source_destructive_proof(tmp),
             _check_actionable_proactive_runtime_wizard_destructive_proof(tmp),
             _check_hermes_proactive_runtime_parity(tmp),
