@@ -257,6 +257,7 @@ def test_resolution_surface_is_not_model_callable() -> None:
         capture_schema_version="test",
         maintenance_schema_version="test",
         maintenance_class_semantic_index="semantic_index",
+        maintenance_class_style_source_hygiene="style_source_hygiene",
         owner_user_project="user_project",
         owner_agent_assignment="agent_assignment",
         source_explicit="explicit",

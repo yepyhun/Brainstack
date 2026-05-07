@@ -48,6 +48,7 @@ from ..extraction_pipeline import build_session_message_ingest_plan, build_turn_
 from ..maintenance import (
     MAINTENANCE_CLASS_SEMANTIC_INDEX,
     MAINTENANCE_SCHEMA_VERSION,
+    STYLE_SOURCE_HYGIENE_MAINTENANCE_CLASS,
     normalize_maintenance_args,
     run_bounded_maintenance,
 )

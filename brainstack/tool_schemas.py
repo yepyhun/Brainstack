@@ -409,12 +409,14 @@ def consolidate_tool_schema(
     *,
     maintenance_schema_version: str,
     maintenance_class_semantic_index: str,
+    maintenance_class_style_source_hygiene: str,
 ) -> Dict[str, Any]:
     return {
         "name": "brainstack_consolidate",
         "description": (
             "Run bounded Brainstack memory maintenance. Dry-run by default; apply mode is limited "
-            "to derived semantic index rebuild and does not delete durable truth."
+            "to derived semantic index rebuild and explicit user-requested style source hygiene; "
+            "it does not delete durable truth."
         ),
         "x_brainstack_tool_class": "bounded_memory_maintenance",
         "x_brainstack_maintenance_schema": maintenance_schema_version,
@@ -424,7 +426,14 @@ def consolidate_tool_schema(
                 "apply": {"type": "boolean"},
                 "maintenance_class": {
                     "type": "string",
-                    "enum": [maintenance_class_semantic_index],
+                    "enum": [maintenance_class_semantic_index, maintenance_class_style_source_hygiene],
+                },
+                "explicit_user_request": {
+                    "type": "boolean",
+                    "description": (
+                        "Required for apply=true style_source_hygiene. It confirms the current user "
+                        "explicitly asked to repair/demote legacy behavior profile source rows."
+                    ),
                 },
             },
             "additionalProperties": False,
@@ -437,6 +446,7 @@ def build_tool_schemas(
     capture_schema_version: str,
     maintenance_schema_version: str,
     maintenance_class_semantic_index: str,
+    maintenance_class_style_source_hygiene: str,
     owner_user_project: str,
     owner_agent_assignment: str,
     source_explicit: str,
@@ -472,6 +482,7 @@ def build_tool_schemas(
         consolidate_tool_schema(
             maintenance_schema_version=maintenance_schema_version,
             maintenance_class_semantic_index=maintenance_class_semantic_index,
+            maintenance_class_style_source_hygiene=maintenance_class_style_source_hygiene,
         ),
     ]
     if runtime_handoff_update_model_callable:

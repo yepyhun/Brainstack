@@ -1583,6 +1583,46 @@ def _check_behavior_card_destructive_proof(tmp: Path) -> CheckResult:
     )
 
 
+def _check_style_source_hygiene_repair_proof(tmp: Path) -> CheckResult:
+    out = tmp / "style_source_hygiene_repair_proof.json"
+    command = [sys.executable, "scripts/run_style_source_hygiene_repair_proof.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    required_flags = (
+        "dirty_live_shaped_fixture",
+        "dry_run_reports_candidates",
+        "apply_requires_explicit_user_request",
+        "canonical_card_unchanged",
+        "legacy_sources_demoted",
+        "agent_facing_card_still_delivered",
+        "legacy_sources_not_prompt_authority",
+        "no_behavior_contract_rows_created",
+        "no_compiled_policy_rows_created",
+        "public_safe_report",
+        "model_facing_backup_path_not_exposed",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("issues") == []
+        and data.get("public_safe") is True
+        and all(proof.get(flag) is True for flag in required_flags)
+    )
+    return CheckResult(
+        name="style_source_hygiene_repair_proof",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": len(data.get("issues") or []),
+            "public_safe": data.get("public_safe"),
+            "proof": {flag: proof.get(flag) for flag in required_flags},
+        },
+    )
+
+
 def _check_admission_final_state_destructive_proof(tmp: Path) -> CheckResult:
     out = tmp / "admission_final_state_destructive_proof.json"
     command = [sys.executable, "scripts/run_admission_final_state_destructive_proof.py", "--out", str(out)]
@@ -2161,6 +2201,7 @@ def run_checklist(
             _check_hermes_proactive_runtime_parity(tmp),
             _check_behavior_card_delivery(tmp),
             _check_behavior_card_destructive_proof(tmp),
+            _check_style_source_hygiene_repair_proof(tmp),
             _check_admission_final_state_destructive_proof(tmp),
             _check_live_crash_regression_guard(tmp),
             _check_persistent_bloat_rebuild(tmp),

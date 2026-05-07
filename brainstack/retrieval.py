@@ -18,9 +18,12 @@ from .literal_index import redact_literal_text
 from .operating_context import render_operating_context_section
 from .profile_contract import (
     is_native_explicit_style_item,
-    logical_profile_slot_from_row,
     normalize_profile_slot,
     profile_item_display_label,
+)
+from .profile_prompt_policy import (
+    is_behavior_profile_source_item,
+    profile_prompt_source_key,
 )
 from .provenance import summarize_provenance
 from .retrieval_context_envelope import render_retrieval_context_envelope_section
@@ -49,22 +52,6 @@ def _render_numbered_items(items: Iterable[str]) -> str:
 
 STYLE_AUTHORITY_RESIDUE_SLOTS = {
     STYLE_CONTRACT_SLOT,
-}
-
-BEHAVIOR_PROFILE_SOURCE_CATEGORIES = {
-    "communication_style",
-    "operating_preference",
-    "style_contract",
-    "style_preference",
-}
-
-BEHAVIOR_PROFILE_SOURCE_SLOTS = {
-    STYLE_CONTRACT_SLOT,
-    "preference:addressing",
-    "preference:assistant_address_name",
-    "preference:communication_style",
-    "preference:formatting",
-    "preference:verbosity",
 }
 
 def _normalize_compare_text(value: Any) -> str:
@@ -104,32 +91,6 @@ def _row_temporal_label(row: Dict[str, Any]) -> str:
 def _is_style_authority_residue_profile_item(row: Dict[str, Any]) -> bool:
     stable_key = normalize_profile_slot(str(row.get("stable_key") or "")).strip()
     return stable_key in STYLE_AUTHORITY_RESIDUE_SLOTS
-
-
-def _profile_prompt_source_key(row: Dict[str, Any]) -> str:
-    key = str(row.get("logical_stable_key") or "").strip()
-    if not key:
-        key = str(logical_profile_slot_from_row(row) or "").strip()
-    if not key:
-        key = str(row.get("stable_key") or row.get("storage_key") or "").strip()
-    return key.split("::principal_scope::", 1)[0].strip()
-
-
-def _is_behavior_profile_source_item(row: Dict[str, Any]) -> bool:
-    category = normalize_profile_slot(str(row.get("category") or "")).strip()
-    logical_key = normalize_profile_slot(str(logical_profile_slot_from_row(row) or "")).strip()
-    stored_key = normalize_profile_slot(str(row.get("stable_key") or "")).strip()
-    storage_key = normalize_profile_slot(
-        str(row.get("storage_key") or "").split("::principal_scope::", 1)[0]
-    ).strip()
-    candidate_keys = {key for key in (logical_key, stored_key, storage_key) if key}
-    if candidate_keys & STYLE_AUTHORITY_RESIDUE_SLOTS:
-        return True
-    if category in BEHAVIOR_PROFILE_SOURCE_CATEGORIES:
-        return True
-    if category == "preference" and candidate_keys & BEHAVIOR_PROFILE_SOURCE_SLOTS:
-        return True
-    return False
 
 
 def _has_native_explicit_style_generation(profile_items: Iterable[Dict[str, Any]]) -> bool:
@@ -255,12 +216,12 @@ def build_system_prompt_projection(
 
     retained_items: List[Dict[str, Any]] = []
     for item in filtered_items:
-        key = _profile_prompt_source_key(item)
+        key = profile_prompt_source_key(item)
         if normalize_profile_slot(key) == normalize_profile_slot(ACTIVE_PREFERENCE_CARD_SIZE_WARNING_ACK_SLOT):
             if key:
                 hidden_profile_keys.add(key)
             continue
-        if _is_behavior_profile_source_item(item):
+        if is_behavior_profile_source_item(item):
             if key:
                 hidden_profile_keys.add(key)
                 if normalize_profile_slot(key) != normalize_profile_slot(STYLE_CONTRACT_SLOT):
@@ -1031,8 +992,8 @@ def _filtered_profile_items_for_packet(
     filtered_profile_items = [
         item
         for item in filtered_profile_items
-        if not _is_behavior_profile_source_item(item)
-        and normalize_profile_slot(_profile_prompt_source_key(item))
+        if not is_behavior_profile_source_item(item)
+        and normalize_profile_slot(profile_prompt_source_key(item))
         != normalize_profile_slot(ACTIVE_PREFERENCE_CARD_SIZE_WARNING_ACK_SLOT)
     ]
     return [item for item in filtered_profile_items if not _is_native_profile_mirror_receipt(item)]

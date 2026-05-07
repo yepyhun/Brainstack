@@ -3,6 +3,10 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping
 
 from .persistent_bloat import build_persistent_bloat_report
+from .style_source_hygiene import (
+    STYLE_SOURCE_HYGIENE_MAINTENANCE_CLASS,
+    run_style_source_hygiene_repair,
+)
 
 
 MAINTENANCE_SCHEMA_VERSION = "brainstack.maintenance.v1"
@@ -17,7 +21,7 @@ UNSAFE_PERSISTENT_BLOAT_APPLY_CLASSES = {
     "canonical_event_cleanup",
     "receipt_cleanup",
 }
-SUPPORTED_APPLY_CLASSES = {MAINTENANCE_CLASS_SEMANTIC_INDEX}
+SUPPORTED_APPLY_CLASSES = {MAINTENANCE_CLASS_SEMANTIC_INDEX, STYLE_SOURCE_HYGIENE_MAINTENANCE_CLASS}
 
 
 def _candidate(
@@ -37,7 +41,7 @@ def _candidate(
     }
 
 
-def build_maintenance_dry_run(store: Any) -> Dict[str, Any]:
+def build_maintenance_dry_run(store: Any, *, principal_scope_key: str = "") -> Dict[str, Any]:
     semantic_status = store.semantic_evidence_channel_status()
     stale_semantic_count = int(semantic_status.get("stale_count") or 0)
     profile_duplicate_rows = store.conn.execute(
@@ -57,6 +61,12 @@ def build_maintenance_dry_run(store: Any) -> Dict[str, Any]:
     persistent_bloat = build_persistent_bloat_report(store)
     bloat_policy_candidates = list(persistent_bloat.get("policy_preview") or [])
     bloat_candidate_count = sum(int(item.get("candidate_count") or 0) for item in bloat_policy_candidates)
+    style_source_hygiene = run_style_source_hygiene_repair(
+        store,
+        principal_scope_key=str(principal_scope_key or "").strip(),
+        apply=False,
+        explicit_user_request=False,
+    )
 
     candidates = [
         _candidate(
@@ -87,6 +97,16 @@ def build_maintenance_dry_run(store: Any) -> Dict[str, Any]:
             apply_supported=False,
             risk="source_receipt_answerability_preservation_required",
         ),
+        _candidate(
+            maintenance_class=STYLE_SOURCE_HYGIENE_MAINTENANCE_CLASS,
+            reason=(
+                "Legacy behavior/style profile source rows may be demoted after a scoped canonical "
+                "active style contract is proven unchanged."
+            ),
+            count=int(style_source_hygiene.get("candidate_count") or 0),
+            apply_supported=True,
+            risk="source_only_prompt_authority_hygiene_explicit_user_request_required",
+        ),
     ]
     return {
         "schema": MAINTENANCE_SCHEMA_VERSION,
@@ -108,8 +128,12 @@ def run_bounded_maintenance(
     apply: bool = False,
     maintenance_class: str = MAINTENANCE_CLASS_SEMANTIC_INDEX,
     principal_scope_key: str = "",
+    explicit_user_request: bool = False,
 ) -> Dict[str, Any]:
-    dry_run = build_maintenance_dry_run(store)
+    dry_run = build_maintenance_dry_run(
+        store,
+        principal_scope_key=str(principal_scope_key or "").strip(),
+    )
     receipt: Dict[str, Any] = {
         "schema": MAINTENANCE_SCHEMA_VERSION,
         "mode": "apply" if apply else "dry_run",
@@ -157,6 +181,26 @@ def run_bounded_maintenance(
         )
         if not receipt["changes"]:
             receipt["no_op_reasons"].append("no_changes")
+    if maintenance_class == STYLE_SOURCE_HYGIENE_MAINTENANCE_CLASS:
+        result = run_style_source_hygiene_repair(
+            store,
+            principal_scope_key=str(principal_scope_key or "").strip(),
+            apply=True,
+            explicit_user_request=bool(explicit_user_request),
+        )
+        receipt["changes"].append(
+            {
+                "maintenance_class": STYLE_SOURCE_HYGIENE_MAINTENANCE_CLASS,
+                "operation": "demote_legacy_behavior_profile_sources",
+                "truth_mutation": False,
+                "result": result,
+            }
+        )
+        if result.get("status") != "applied":
+            receipt["status"] = str(result.get("status") or "rejected")
+            receipt["no_op_reasons"].extend(list(result.get("no_op_reasons") or []))
+        if int(result.get("demoted_count") or 0) <= 0:
+            receipt["no_op_reasons"].append("no_changes")
     return receipt
 
 
@@ -169,5 +213,5 @@ def normalize_maintenance_args(args: Mapping[str, Any] | None) -> Dict[str, Any]
     return {
         "apply": apply_raw if isinstance(apply_raw, bool) else str(apply_raw).strip().lower() in {"1", "true", "yes"},
         "maintenance_class": maintenance_class or MAINTENANCE_CLASS_SEMANTIC_INDEX,
+        "explicit_user_request": bool(payload.get("explicit_user_request") is True),
     }
-

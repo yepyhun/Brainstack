@@ -39,6 +39,7 @@ from .runtime import (
     RECENT_WORK_OWNER_USER_PROJECT,
     RECENT_WORK_SOURCE_EXPLICIT,
     RECENT_WORK_SOURCE_MANUAL_MIGRATION,
+    STYLE_SOURCE_HYGIENE_MAINTENANCE_CLASS,
     TERMINAL_TASK_STATUSES,
     _normalize_compact_text,
     build_commit_metadata,
@@ -184,6 +185,7 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             capture_schema_version=EXPLICIT_CAPTURE_SCHEMA_VERSION,
             maintenance_schema_version=MAINTENANCE_SCHEMA_VERSION,
             maintenance_class_semantic_index=MAINTENANCE_CLASS_SEMANTIC_INDEX,
+            maintenance_class_style_source_hygiene=STYLE_SOURCE_HYGIENE_MAINTENANCE_CLASS,
             owner_user_project=RECENT_WORK_OWNER_USER_PROJECT,
             owner_agent_assignment=RECENT_WORK_OWNER_AGENT_ASSIGNMENT,
             source_explicit=RECENT_WORK_SOURCE_EXPLICIT,
@@ -710,6 +712,7 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             apply=bool(normalized["apply"]),
             maintenance_class=str(normalized["maintenance_class"]),
             principal_scope_key=self._principal_scope_key,
+            explicit_user_request=bool(normalized.get("explicit_user_request")),
         )
         receipt["tool_name"] = "brainstack_consolidate"
         receipt["read_only"] = not bool(normalized["apply"])

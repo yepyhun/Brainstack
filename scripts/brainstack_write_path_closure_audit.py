@@ -107,6 +107,8 @@ def _classify(file: str, method: str, caller: str) -> tuple[str, str]:
         return "TEST_OR_CANARY_SEED", "graph supersession runtime population fixture seed"
     if file.startswith("scripts/run_source_backed_actionable_queue_substrate.py"):
         return "TEST_OR_CANARY_SEED", "source-backed actionable queue substrate fixture seed"
+    if file.startswith("scripts/run_style_source_hygiene_repair_proof.py"):
+        return "TEST_OR_CANARY_SEED", "style source hygiene repair proof fixture seed"
     if file.startswith("scripts/run_backend_lifecycle_gauntlet.py"):
         return "TEST_OR_CANARY_SEED", "backend lifecycle gauntlet fixture seed"
     if file.startswith("scripts/audit_graph_conflict_lifecycle.py"):
