@@ -33,6 +33,11 @@ from brainstack.background_task_binding import (  # noqa: E402
     install_default_background_task_bindings,
     resolve_auxiliary_route_readiness,
 )
+from brainstack.tier2_runtime_spine import (  # noqa: E402
+    TIER2_HINDSIGHT_PUBLIC_API_BRIDGE,
+    TIER2_INTERNAL_EXTRACTOR,
+    build_tier2_runtime_spine,
+)
 
 try:
     from hermes_gateway_patch_support import (
@@ -64,6 +69,8 @@ PROACTIVE_RUNTIME_MODES = {"disabled", "dry_run", "live"}
 DEFAULT_PROACTIVE_RUNTIME_MODE = "dry_run"
 PROACTIVE_CRON_JOB_NAME = "Brainstack Proactive Pulse"
 PROACTIVE_CRON_GATE_SCRIPT_NAME = "brainstack_proactive_pulse_gate.py"
+SESSION_SEARCH_TOTAL_TIMEOUT_SECONDS = 20
+SESSION_SEARCH_MAX_CONCURRENCY = 1
 
 HOST_PATCH_MODE_CATEGORIES: dict[str, set[str]] = {
     "core": {"required_seam", "core_hygiene"},
@@ -3891,7 +3898,7 @@ def _patch_session_search_total_deadline(path: Path, dry_run: bool) -> list[str]
 
     helper = (
         "\n\n"
-        "def _get_session_search_total_deadline(default: float = 90.0) -> float:\n"
+        "def _get_session_search_total_deadline(default: float = 20.0) -> float:\n"
         "    \"\"\"Return a tool-level deadline below the gateway idle timeout.\"\"\"\n"
         "    try:\n"
         "        from hermes_cli.config import load_config\n"
@@ -3924,6 +3931,15 @@ def _patch_session_search_total_deadline(path: Path, dry_run: bool) -> list[str]
             path=path,
         )
         applied.append("session_search:total_deadline_helper")
+    elif "def _get_session_search_total_deadline(default: float = 90.0)" in text:
+        text = _replace_once(
+            text,
+            "def _get_session_search_total_deadline(default: float = 90.0)",
+            "def _get_session_search_total_deadline(default: float = 20.0)",
+            label="session_search lower default total deadline",
+            path=path,
+        )
+        applied.append("session_search:lower_default_total_deadline")
 
     old_gather = "            return await asyncio.gather(*coros, return_exceptions=True)\n"
     new_gather = (
@@ -3957,9 +3973,8 @@ def _patch_session_search_total_deadline(path: Path, dry_run: bool) -> list[str]
         "        except (asyncio.TimeoutError, TimeoutError, concurrent.futures.TimeoutError):\n"
         "            deadline = _get_session_search_total_deadline()\n"
         "            logging.warning(\n"
-        "                \"Session summarization timed out after %.1f seconds\",\n"
+        "                \"Session summarization timed out after %.1f seconds; returning raw previews\",\n"
         "                deadline,\n"
-        "                exc_info=True,\n"
         "            )\n"
         "            summaries = []\n"
         "            for session_id, match_info, conversation_text, session_meta in tasks:\n"
@@ -3991,6 +4006,18 @@ def _patch_session_search_total_deadline(path: Path, dry_run: bool) -> list[str]
             path=path,
         )
         applied.append("session_search:timeout_degraded_preview")
+    elif "Session summarization timed out after %.1f seconds\",\n                deadline,\n                exc_info=True" in text:
+        text = _replace_once(
+            text,
+            "Session summarization timed out after %.1f seconds\",\n"
+            "                deadline,\n"
+            "                exc_info=True,\n",
+            "Session summarization timed out after %.1f seconds; returning raw previews\",\n"
+            "                deadline,\n",
+            label="session_search expected timeout log hygiene",
+            path=path,
+        )
+        applied.append("session_search:expected_timeout_log_hygiene")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -4180,6 +4207,71 @@ def _normalize_hermes_native_auxiliary_main_routes(config: dict[str, Any]) -> di
     }
 
 
+def _normalize_session_search_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Keep native session_search useful without letting it monopolize a turn."""
+    auxiliary = config.setdefault("auxiliary", {})
+    if not isinstance(auxiliary, dict):
+        raise RuntimeError("config.yaml has non-object `auxiliary` section")
+    entry = auxiliary.setdefault("session_search", {})
+    if not isinstance(entry, dict):
+        entry = {}
+        auxiliary["session_search"] = entry
+
+    changed: dict[str, Any] = {}
+
+    def _number(value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    total_timeout = _number(entry.get("total_timeout"))
+    if total_timeout is None or total_timeout > SESSION_SEARCH_TOTAL_TIMEOUT_SECONDS:
+        changed["previous_total_timeout"] = entry.get("total_timeout")
+        entry["total_timeout"] = SESSION_SEARCH_TOTAL_TIMEOUT_SECONDS
+
+    max_concurrency = _number(entry.get("max_concurrency"))
+    if max_concurrency is None or max_concurrency > SESSION_SEARCH_MAX_CONCURRENCY:
+        changed["previous_max_concurrency"] = entry.get("max_concurrency")
+        entry["max_concurrency"] = SESSION_SEARCH_MAX_CONCURRENCY
+
+    timeout = _number(entry.get("timeout"))
+    if timeout is None or timeout > SESSION_SEARCH_TOTAL_TIMEOUT_SECONDS:
+        changed["previous_timeout"] = entry.get("timeout")
+        entry["timeout"] = min(15, SESSION_SEARCH_TOTAL_TIMEOUT_SECONDS)
+
+    return {
+        "status": "normalized" if changed else "unchanged",
+        "total_timeout": entry.get("total_timeout"),
+        "max_concurrency": entry.get("max_concurrency"),
+        "timeout": entry.get("timeout"),
+        "changes": changed,
+        "secret_redacted": True,
+    }
+
+
+def _normalize_unbound_tier2_runtime(brainstack: dict[str, Any]) -> dict[str, Any]:
+    """Migrate unsupported Tier-2 runtime pins to the bound internal extractor."""
+    before = str(brainstack.get("tier2_runtime") or "").strip()
+    route = build_tier2_runtime_spine(brainstack)
+    if before == TIER2_HINDSIGHT_PUBLIC_API_BRIDGE and route.binding_status == "configured_unbound":
+        brainstack["tier2_runtime"] = TIER2_INTERNAL_EXTRACTOR
+        return {
+            "status": "normalized",
+            "previous_runtime": before,
+            "replacement": TIER2_INTERNAL_EXTRACTOR,
+            "reason_code": route.binding_reason_code,
+            "secret_redacted": True,
+        }
+    return {
+        "status": "unchanged",
+        "runtime": before or TIER2_INTERNAL_EXTRACTOR,
+        "binding_status": route.binding_status,
+        "reason_code": route.binding_reason_code,
+        "secret_redacted": True,
+    }
+
+
 def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = "external") -> dict[str, Any]:
     config = _load_yaml(config_path)
     config.setdefault("memory", {})
@@ -4224,6 +4316,8 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
         brainstack["tier2_hindsight_llm_provider"] = "hermes_managed"
         brainstack["tier2_hindsight_llm_model"] = ""
         brainstack["tier2_hindsight_llm_base_url"] = ""
+    tier2_runtime_hygiene = _normalize_unbound_tier2_runtime(brainstack)
+    session_search_runtime_hygiene = _normalize_session_search_runtime_config(config)
     brainstack.setdefault("tier2_hindsight_embeddings_provider", "tei")
     brainstack.setdefault("tier2_hindsight_embeddings_tei_url", "http://127.0.0.1:7997")
     brainstack.setdefault("tier2_hindsight_reranker_provider", "rrf")
@@ -4261,6 +4355,8 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
         "user_profile_enabled": True,
         "background_task_status": background_task_status,
         "auxiliary_main_route_hygiene": auxiliary_main_route_hygiene,
+        "tier2_runtime_hygiene": tier2_runtime_hygiene,
+        "session_search_runtime_hygiene": session_search_runtime_hygiene,
         "gateway_timeout": agent.get("gateway_timeout"),
         "gateway_timeout_warning": agent.get("gateway_timeout_warning"),
         "proactive_runtime": proactive_runtime,

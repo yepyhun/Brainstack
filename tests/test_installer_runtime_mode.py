@@ -121,6 +121,9 @@ def test_config_patch_embedding_none_makes_corpus_explicitly_unavailable(tmp_pat
     assert brainstack["background_tasks"]["brainstack.capture_understanding"]["status"] == "configured_unavailable"
     assert brainstack["background_tasks"]["brainstack.query_understanding"]["status"] == "configured_unavailable"
     assert brainstack["background_tasks"]["brainstack.background_consolidation"]["fallback_policy"] == "none"
+    assert data["auxiliary"]["session_search"]["total_timeout"] == 20
+    assert data["auxiliary"]["session_search"]["max_concurrency"] == 1
+    assert data["auxiliary"]["session_search"]["timeout"] == 15
     assert data["proactive_mode"] == "dry_run"
     assert data["proactive_kill_switch"] is False
 
@@ -155,6 +158,55 @@ def test_config_patch_clears_stale_main_auxiliary_models_that_active_provider_ca
     assert hygiene["normalized_count"] == 1
     assert hygiene["routes"][0]["task_slot"] == "web_extract"
     assert hygiene["routes"][0]["replacement"] == "inherit_main_model"
+
+
+def test_config_patch_migrates_unbound_tier2_runtime_to_internal_extractor(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "plugins:\n"
+        "  brainstack:\n"
+        "    tier2_runtime: hindsight_public_api_bridge\n"
+        "    tier2_hindsight_llm_provider: hermes_managed\n"
+        "    tier2_hindsight_llm_model: ''\n"
+        "    tier2_hindsight_llm_base_url: ''\n",
+        encoding="utf-8",
+    )
+
+    result = install_into_hermes._patch_config(config, dry_run=False, embedding_runtime="none")
+    data = install_into_hermes._load_yaml(config)
+
+    assert data["plugins"]["brainstack"]["tier2_runtime"] == "internal_extractor"
+    hygiene = result["tier2_runtime_hygiene"]
+    assert hygiene["status"] == "normalized"
+    assert hygiene["previous_runtime"] == "hindsight_public_api_bridge"
+    assert hygiene["replacement"] == "internal_extractor"
+    assert hygiene["reason_code"] == "TIER2_HINDSIGHT_PUBLIC_API_BRIDGE_UNBOUND"
+
+
+def test_config_patch_bounds_dirty_session_search_runtime(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "auxiliary:\n"
+        "  session_search:\n"
+        "    provider: main\n"
+        "    model: ''\n"
+        "    timeout: 90\n"
+        "    total_timeout: 90\n"
+        "    max_concurrency: 5\n",
+        encoding="utf-8",
+    )
+
+    result = install_into_hermes._patch_config(config, dry_run=False, embedding_runtime="none")
+    data = install_into_hermes._load_yaml(config)
+    session_search = data["auxiliary"]["session_search"]
+
+    assert session_search["total_timeout"] == 20
+    assert session_search["max_concurrency"] == 1
+    assert session_search["timeout"] == 15
+    hygiene = result["session_search_runtime_hygiene"]
+    assert hygiene["status"] == "normalized"
+    assert hygiene["changes"]["previous_total_timeout"] == 90
+    assert hygiene["changes"]["previous_max_concurrency"] == 5
 
 
 def test_config_patch_normalizes_legacy_automatic_proactive_mode_to_dry_run(tmp_path):

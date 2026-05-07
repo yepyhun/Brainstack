@@ -216,9 +216,49 @@ def test_core_host_patch_mode_bounds_session_search_before_gateway_timeout(
         "session_search:timeout_degraded_preview",
     ]
     assert "def _get_session_search_total_deadline" in text
+    assert "def _get_session_search_total_deadline(default: float = 20.0)" in text
     assert "timeout=_get_session_search_total_deadline()" in text
     assert "SESSION_SEARCH_SUMMARIZATION_TIMEOUT" in text
     assert '"success": True' in text
+
+
+def test_core_host_patch_lowers_existing_session_search_90s_default(tmp_path: Path) -> None:
+    session_search_tool = tmp_path / "session_search_tool.py"
+    session_search_tool.write_text(
+        "def _get_session_search_total_deadline(default: float = 90.0) -> float:\n"
+        "    return default\n\n"
+        "def session_search(query):\n"
+        "    try:\n"
+        "        seen_sessions = {}\n"
+        "        tasks = []\n"
+        "        async def _summarize_all():\n"
+        "            coros = []\n"
+        "            return await asyncio.gather(*coros, return_exceptions=True)\n"
+        "        try:\n"
+        "            results = _run_async(_summarize_all())\n"
+        "        except concurrent.futures.TimeoutError:\n"
+        "            logging.warning(\n"
+        "                \"Session summarization timed out after 60 seconds\",\n"
+        "                exc_info=True,\n"
+        "            )\n"
+        "            return json.dumps({\n"
+        "                \"success\": False,\n"
+        "                \"error\": \"Session summarization timed out. Try a more specific query or reduce the limit.\",\n"
+        "            }, ensure_ascii=False)\n",
+        encoding="utf-8",
+    )
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_session_search_total_deadline",
+        session_search_tool,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    text = session_search_tool.read_text(encoding="utf-8")
+
+    assert "session_search:lower_default_total_deadline" in actions
+    assert "default: float = 20.0" in text
+    assert "default: float = 90.0" not in text
 
 
 def test_brainstack_projection_carries_private_memory_and_scheduler_contract(
