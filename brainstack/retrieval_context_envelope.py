@@ -98,6 +98,8 @@ def build_retrieval_context_envelope(
 ) -> dict[str, Any]:
     route_class = _text(adaptive_route_plan.get("route_class")) or "unknown"
     semantic = _mapping(adaptive_route_plan.get("semantic_retrieval"))
+    control_plan = _mapping(policy.get("retrieval_control_plan"))
+    plan_id = _text(adaptive_route_plan.get("plan_id")) or _text(control_plan.get("plan_id"))
     current_rebuild = _mapping(current_truth_view.get("rebuild"))
     current_counters = _mapping(current_truth_view.get("counters"))
     source_sync = _source_sync_counts(corpus_rows)
@@ -129,6 +131,7 @@ def build_retrieval_context_envelope(
     behavior_card = _behavior_card_summary(_mapping(system_substrate), policy)
     return {
         "schema": RETRIEVAL_CONTEXT_ENVELOPE_SCHEMA,
+        "plan_id": plan_id,
         "route_class": route_class,
         "active_scope": {
             "kind": "principal_scoped" if scope_present else "global",
@@ -146,7 +149,8 @@ def build_retrieval_context_envelope(
         "semantic_retrieval": {
             "enabled": bool(semantic.get("enabled")),
             "reason": _text(semantic.get("reason")),
-            "limit": int(semantic.get("limit") or 0),
+            "limit": int(semantic.get("limit") or control_plan.get("semantic_limit") or 0),
+            "allowed_shelves": _list_text(semantic.get("allowed_shelves")),
         },
         "evidence_counts": {
             "current_truth": int(current_truth_view.get("current_truth_row_count") or 0),

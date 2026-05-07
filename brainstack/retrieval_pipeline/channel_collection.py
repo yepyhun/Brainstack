@@ -35,6 +35,43 @@ from .runtime import (
 )
 
 
+SEMANTIC_INDEX_SHELVES = ("profile", "task", "operating", "corpus", "graph", "continuity_match")
+
+
+def _normalize_allowed_semantic_shelves(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple, set)):
+        return ()
+    normalized: list[str] = []
+    for item in value:
+        shelf = str(item or "").strip()
+        if not shelf:
+            continue
+        normalized.append(shelf)
+        if shelf == "continuity":
+            normalized.append("continuity_match")
+        if shelf == "tank":
+            normalized.extend(SEMANTIC_INDEX_SHELVES)
+    return tuple(dict.fromkeys(normalized))
+
+
+def _semantic_index_shelves_for_plan(allowed_shelves: tuple[str, ...]) -> tuple[str, ...]:
+    if not allowed_shelves:
+        return ()
+    return tuple(shelf for shelf in allowed_shelves if shelf in SEMANTIC_INDEX_SHELVES)
+
+
+def _semantic_conversation_allowed(allowed_shelves: tuple[str, ...], *, plan_enforced: bool) -> bool:
+    if not plan_enforced:
+        return True
+    return bool({"continuity", "continuity_match", "transcript", "tank"}.intersection(allowed_shelves))
+
+
+def _semantic_corpus_allowed(allowed_shelves: tuple[str, ...], *, plan_enforced: bool) -> bool:
+    if not plan_enforced:
+        return True
+    return bool({"corpus", "tank"}.intersection(allowed_shelves))
+
+
 def collect_profile_rows(
     store: BrainstackStore,
     *,
@@ -248,8 +285,24 @@ def collect_semantic_rows(
     evidence_item_budget: int,
     entity_resolution: Mapping[str, Any],
     semantic_evidence_enabled: bool = True,
+    semantic_allowed_shelves: tuple[str, ...] = (),
+    semantic_plan_enforced: bool = False,
 ) -> dict[str, List[Dict[str, Any]]]:
     if not semantic_evidence_enabled:
+        return {
+            "conversation": [],
+            "corpus": [],
+            "evidence": [],
+            "profile": [],
+            "task": [],
+            "operating": [],
+            "continuity": [],
+            "graph": [],
+            "index_corpus": [],
+        }
+    allowed_semantic_shelves = _normalize_allowed_semantic_shelves(semantic_allowed_shelves)
+    semantic_index_shelves = _semantic_index_shelves_for_plan(allowed_semantic_shelves)
+    if semantic_plan_enforced and not allowed_semantic_shelves:
         return {
             "conversation": [],
             "corpus": [],
@@ -272,7 +325,7 @@ def collect_semantic_rows(
                 principal_scope_key=principal_scope_key,
             ),
         )
-        if transcript_limit > 0
+        if transcript_limit > 0 and _semantic_conversation_allowed(allowed_semantic_shelves, plan_enforced=semantic_plan_enforced)
         else []
     )
     corpus_rows = (
@@ -285,17 +338,23 @@ def collect_semantic_rows(
                 principal_scope_key=principal_scope_key,
             ),
         )
-        if corpus_limit > 0
+        if corpus_limit > 0 and _semantic_corpus_allowed(allowed_semantic_shelves, plan_enforced=semantic_plan_enforced)
         else []
     )
-    semantic_evidence_rows = _annotate_query_flags(
-        store.search_semantic_evidence(
+    if semantic_plan_enforced and not semantic_index_shelves:
+        semantic_evidence_rows = []
+    else:
+        semantic_search_kwargs: dict[str, Any] = {
+            "query": query,
+            "principal_scope_key": principal_scope_key,
+            "limit": max(evidence_item_budget * 4, 16),
+        }
+        if semantic_plan_enforced:
+            semantic_search_kwargs["shelves"] = semantic_index_shelves
+        semantic_evidence_rows = _annotate_query_flags(
+            store.search_semantic_evidence(**semantic_search_kwargs),
             query=query,
-            principal_scope_key=principal_scope_key,
-            limit=max(evidence_item_budget * 4, 16),
-        ),
-        query=query,
-    )
+        )
     semantic_graph_rows = [
         row for row in semantic_evidence_rows if str(row.get("semantic_shelf") or "") == "graph"
     ]
@@ -554,6 +613,8 @@ def collect_semantic_and_task_rows(
         evidence_item_budget=context["evidence_item_budget"],
         entity_resolution=context["entity_resolution"],
         semantic_evidence_enabled=bool(context.get("semantic_evidence_enabled", True)),
+        semantic_allowed_shelves=tuple(context.get("semantic_allowed_shelves") or ()),
+        semantic_plan_enforced=bool(context.get("plan_id")),
     )
     task_rows = list(context["task_rows"])
     if semantic_channels["task"]:

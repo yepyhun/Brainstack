@@ -16,6 +16,7 @@ from brainstack.adaptive_route_plan import (
 from brainstack.db import BrainstackStore
 from brainstack.control_plane import build_working_memory_packet
 from brainstack.retrieval_pipeline.orchestrator import retrieve_executive_context
+from brainstack.retrieval_control_plan import retrieval_control_plan_from_adaptive_plan
 from scripts.verify_adaptive_route_plan import build_report as build_route_report
 from scripts.verify_tank_escalation_safety import build_report as build_tank_report
 
@@ -237,9 +238,11 @@ class SemanticSpyStore(BrainstackStore):
         self.search_semantic_evidence_call_count = 0
         self.search_conversation_semantic_call_count = 0
         self.search_corpus_semantic_call_count = 0
+        self.search_semantic_evidence_kwargs: list[dict[str, Any]] = []
 
     def search_semantic_evidence(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         self.search_semantic_evidence_call_count += 1
+        self.search_semantic_evidence_kwargs.append(dict(kwargs))
         return []
 
     def search_conversation_semantic(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
@@ -308,12 +311,14 @@ class BackendCallSpyStore(SemanticSpyStore):
 
 def _policy_from_route_plan(plan: dict[str, Any]) -> dict[str, Any]:
     semantic = plan.get("semantic_retrieval") if isinstance(plan.get("semantic_retrieval"), dict) else {}
+    control_plan = retrieval_control_plan_from_adaptive_plan(plan)
     return {
         **route_plan_limit_overrides(plan),
         "show_authoritative_contract": False,
         "evidence_item_budget": route_plan_limit_overrides(plan)["evidence_item_budget"],
         "semantic_evidence_enabled": bool(semantic.get("enabled")),
         "semantic_evidence_reason": str(semantic.get("reason") or "route_gated"),
+        "retrieval_control_plan": control_plan.to_public_dict(),
     }
 
 
@@ -381,6 +386,38 @@ def test_build_working_memory_packet_preserves_semantic_backend_calls_for_deep_r
 
         assert packet["adaptive_route_plan"]["semantic_retrieval"]["enabled"] is True
         assert store.search_semantic_evidence_call_count >= 1
+    finally:
+        store.close()
+
+
+def test_retrieval_control_plan_scopes_semantic_evidence_store_call_to_allowed_shelves(tmp_path: Path) -> None:
+    store = SemanticSpyStore(str(tmp_path / "brainstack-corpus.sqlite3"), graph_backend="sqlite", corpus_backend="sqlite")
+    store.open()
+    try:
+        packet = _build_spy_packet(store, signals={"required_evidence_classes": ["corpus"]})
+
+        assert packet["adaptive_route_plan"]["route_class"] == "corpus"
+        assert packet["retrieval_control_plan"]["semantic_allowed_shelves"] == ("corpus",)
+        assert store.search_semantic_evidence_call_count == 1
+        assert store.search_semantic_evidence_kwargs[-1]["shelves"] == ("corpus",)
+        assert store.search_conversation_semantic_call_count == 0
+        assert store.search_corpus_semantic_call_count >= 1
+    finally:
+        store.close()
+
+
+def test_retrieval_control_plan_id_is_shared_by_packet_policy_and_channels(tmp_path: Path) -> None:
+    store = SemanticSpyStore(str(tmp_path / "brainstack-plan-id.sqlite3"), graph_backend="sqlite", corpus_backend="sqlite")
+    store.open()
+    try:
+        packet = _build_spy_packet(store, signals={"required_evidence_classes": ["corpus"]})
+
+        plan_id = packet["retrieval_control_plan"]["plan_id"]
+        assert plan_id
+        assert packet["adaptive_route_plan"]["plan_id"] == plan_id
+        assert packet["policy"]["adaptive_route_plan"]["plan_id"] == plan_id
+        assert packet["policy"]["retrieval_control_plan"]["plan_id"] == plan_id
+        assert {channel["plan_id"] for channel in packet["channels"]} == {plan_id}
     finally:
         store.close()
 

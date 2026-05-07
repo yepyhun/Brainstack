@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ..entity_resolver import ENTITY_RESOLUTION_SCHEMA
+from ..retrieval_channel_deadlines import build_channel_deadline_statuses
 from .runtime import (
     Any,
     BrainstackStore,
@@ -39,6 +40,27 @@ def effective_route_resolver(
 
 def policy_limit(policy: Mapping[str, Any], key: str) -> int:
     return max(int(policy.get(key, 0)), 0)
+
+
+def _tuple_text(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple, set)):
+        return ()
+    return tuple(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+
+
+def _limits_from_control_plan(plan: Mapping[str, Any]) -> Dict[str, int]:
+    shelf_limits = plan.get("shelf_limits") if isinstance(plan.get("shelf_limits"), Mapping) else {}
+    if not shelf_limits:
+        return {}
+    return {
+        "profile_limit": max(int(shelf_limits.get("profile") or 0), 0),
+        "continuity_match_limit": max(int(shelf_limits.get("continuity_match") or 0), 0),
+        "continuity_recent_limit": max(int(shelf_limits.get("continuity_recent") or 0), 0),
+        "transcript_limit": max(int(shelf_limits.get("transcript") or 0), 0),
+        "operating_limit": max(int(shelf_limits.get("operating") or 0), 0),
+        "graph_limit": max(int(shelf_limits.get("graph") or 0), 0),
+        "corpus_limit": max(int(shelf_limits.get("corpus") or 0), 0),
+    }
 
 
 def load_task_rows(
@@ -115,8 +137,9 @@ def build_route_context(
         "graph_limit": policy_limit(policy, "graph_limit"),
         "corpus_limit": policy_limit(policy, "corpus_limit"),
     }
+    retrieval_control_plan = policy.get("retrieval_control_plan") if isinstance(policy.get("retrieval_control_plan"), Mapping) else {}
     route = _resolve_route(query, route_resolver=effective_route_resolver(route_resolver, analysis))
-    limits = _route_limits(route=route, **base_limits)
+    limits = _limits_from_control_plan(retrieval_control_plan) or _route_limits(route=route, **base_limits)
     native_explicit_style_rows = (
         [
             row
@@ -127,7 +150,17 @@ def build_route_context(
         else []
     )
     search_queries = [_normalize_text(query)]
-    semantic_evidence_enabled = bool(policy.get("semantic_evidence_enabled", True))
+    semantic_evidence_enabled = bool(
+        retrieval_control_plan.get("semantic_enabled")
+        if isinstance(retrieval_control_plan, Mapping) and "semantic_enabled" in retrieval_control_plan
+        else policy.get("semantic_evidence_enabled", True)
+    )
+    semantic_allowed_shelves = _tuple_text(retrieval_control_plan.get("semantic_allowed_shelves"))
+    channel_deadline_statuses = build_channel_deadline_statuses(
+        store,
+        retrieval_control_plan=retrieval_control_plan,
+    ) if retrieval_control_plan else {}
+    entity_resolution_required = limits["graph_limit"] > 0 or bool({"graph", "tank"}.intersection(semantic_allowed_shelves))
     entity_resolution = (
         resolve_entity_candidates(
             store,
@@ -135,7 +168,7 @@ def build_route_context(
             principal_scope_key=principal_scope_key,
             limit=4,
         )
-        if semantic_evidence_enabled or limits["graph_limit"] > 0
+        if entity_resolution_required
         else {
             "schema": ENTITY_RESOLUTION_SCHEMA,
             "status": "idle",
@@ -163,7 +196,17 @@ def build_route_context(
         "limits": limits,
         "evidence_item_budget": policy_limit(policy, "evidence_item_budget"),
         "semantic_evidence_enabled": semantic_evidence_enabled,
-        "semantic_evidence_reason": str(policy.get("semantic_evidence_reason") or "route_gated"),
+        "semantic_evidence_reason": str(
+            retrieval_control_plan.get("semantic_reason")
+            or policy.get("semantic_evidence_reason")
+            or "route_gated"
+        ),
+        "semantic_allowed_shelves": semantic_allowed_shelves,
+        "retrieval_control_plan": dict(retrieval_control_plan),
+        "plan_id": str(retrieval_control_plan.get("plan_id") or ""),
+        "channel_deadlines_ms": dict(retrieval_control_plan.get("channel_deadlines_ms") or {}),
+        "channel_deadline_statuses": channel_deadline_statuses,
+        "total_deadline_ms": int(retrieval_control_plan.get("total_deadline_ms") or 0),
         "search_queries": search_queries,
         "graph_search_queries": list(dict.fromkeys(search_queries + resolver_query_variants)),
         "continuity_queries": _build_cross_session_search_queries(query),

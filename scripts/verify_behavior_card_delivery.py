@@ -22,7 +22,20 @@ from brainstack.style_contract import STYLE_CONTRACT_SLOT  # noqa: E402
 from brainstack.retrieval import build_system_prompt_projection  # noqa: E402
 
 
-DEFAULT_HERMES_SOURCE = Path("/home/lauratom/Asztal/ai/atado/hermes-latest-source-clean-20260504-003042")
+def _default_hermes_source() -> Path:
+    root = Path.home() / "Asztal" / "ai" / "atado"
+    candidates = [
+        *root.glob("hermes-latest-source-clean-*"),
+        root / "hermes-latest-source",
+        Path("/opt/hermes"),
+    ]
+    valid = [path for path in candidates if (path / "agent" / "memory_manager.py").exists()]
+    if valid:
+        return max(valid, key=lambda path: path.stat().st_mtime)
+    return root / "hermes-latest-source"
+
+
+DEFAULT_HERMES_SOURCE = _default_hermes_source()
 
 
 def _rules(count: int = 25) -> list[str]:

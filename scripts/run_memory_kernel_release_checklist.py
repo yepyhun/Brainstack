@@ -1262,6 +1262,97 @@ def _check_retrieval_context_envelope(tmp: Path) -> CheckResult:
     )
 
 
+def _check_runtime_retrieval_enforcement(tmp: Path) -> CheckResult:
+    out = tmp / "runtime_retrieval_enforcement.json"
+    command = [sys.executable, "scripts/verify_runtime_retrieval_enforcement.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    issues = data.get("issues") if isinstance(data.get("issues"), list) else []
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and issues == []
+        and data.get("no_memory_route") == "no_memory_minimal"
+        and data.get("corpus_route") == "corpus"
+        and data.get("corpus_semantic_shelves") == ["corpus"]
+        and data.get("current_truth_source") == "current_truth_l0_targeted"
+        and data.get("plan_id_surface_ok") is True
+        and data.get("deadline_surface_ok") is True
+        and data.get("timeout_enforcement") == "explicit_deadline_support_contract"
+    )
+    return CheckResult(
+        name="runtime_retrieval_enforcement",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "issue_count": len(issues),
+            "no_memory_route": data.get("no_memory_route"),
+            "corpus_route": data.get("corpus_route"),
+            "corpus_semantic_shelves": data.get("corpus_semantic_shelves"),
+            "temporal_semantic_shelves": data.get("temporal_semantic_shelves"),
+            "current_truth_source": data.get("current_truth_source"),
+            "plan_id_surface_ok": data.get("plan_id_surface_ok"),
+            "deadline_surface_ok": data.get("deadline_surface_ok"),
+            "timeout_enforcement": data.get("timeout_enforcement"),
+            "unsupported_cancellation_paths": data.get("unsupported_cancellation_paths"),
+        },
+    )
+
+
+def _check_sota_proof_harness(tmp: Path) -> CheckResult:
+    out = tmp / "sota_proof_harness.json"
+    command = [sys.executable, "scripts/run_sota_proof_harness.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    issues = data.get("issues") if isinstance(data.get("issues"), list) else []
+    metrics = data.get("metrics") if isinstance(data.get("metrics"), Mapping) else {}
+    behavior = data.get("behavior_card_state_machine") if isinstance(data.get("behavior_card_state_machine"), Mapping) else {}
+    negative = data.get("negative_recall_matrix") if isinstance(data.get("negative_recall_matrix"), Mapping) else {}
+    thin_first = data.get("thin_first_shadow") if isinstance(data.get("thin_first_shadow"), Mapping) else {}
+    route_matrix = data.get("route_matrix") if isinstance(data.get("route_matrix"), list) else []
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("llm_calls_performed") is False
+        and issues == []
+        and metrics.get("negative_recall_error_rate") == 0.0
+        and metrics.get("scope_bleed_count") == 0
+        and metrics.get("support_only_answer_truth_count") == 0
+        and metrics.get("superseded_truth_selected_as_current_count") == 0
+        and metrics.get("assistant_authored_truth_selected_count") == 0
+        and metrics.get("wrong_shelf_semantic_selected_count") == 0
+        and metrics.get("read_path_mutation_count") == 0
+        and behavior.get("behavior_card_shrink_without_replace_count") == 0
+        and negative.get("status") == "pass"
+        and thin_first.get("active_rollout_allowed") is False
+        and all(isinstance(row, Mapping) and row.get("plan_id_stable") is True for row in route_matrix)
+    )
+    return CheckResult(
+        name="sota_proof_harness",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "issue_count": len(issues),
+            "negative_recall_error_rate": metrics.get("negative_recall_error_rate"),
+            "scope_bleed_count": metrics.get("scope_bleed_count"),
+            "support_only_answer_truth_count": metrics.get("support_only_answer_truth_count"),
+            "assistant_authored_truth_selected_count": metrics.get("assistant_authored_truth_selected_count"),
+            "wrong_shelf_semantic_selected_count": metrics.get("wrong_shelf_semantic_selected_count"),
+            "behavior_card_survival_rate": behavior.get("behavior_card_survival_rate"),
+            "route_case_count": len(route_matrix),
+            "thin_first_status": thin_first.get("status"),
+        },
+    )
+
+
 def _check_persistent_bloat_rebuild(tmp: Path) -> CheckResult:
     out = tmp / "persistent_bloat_rebuild.json"
     command = [sys.executable, "scripts/verify_persistent_bloat_rebuild.py", "--out", str(out)]
@@ -1495,6 +1586,62 @@ def _check_hermes_proactive_runtime_parity(tmp: Path) -> CheckResult:
             "payload_missing_count": len(payload_files.get("missing") or []),
             "public_safe": data.get("public_safe"),
             "zero_runtime_side_effects": data.get("zero_runtime_side_effects"),
+        },
+    )
+
+
+def _check_store_concurrency_contract(tmp: Path) -> CheckResult:
+    out = tmp / "store_concurrency_contract.json"
+    command = [sys.executable, "scripts/verify_store_concurrency_contract.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    issues = data.get("issues") if isinstance(data.get("issues"), list) else []
+    read_probe = data.get("read_path_mutation_probe") if isinstance(data.get("read_path_mutation_probe"), Mapping) else {}
+    compiled_probe = (
+        data.get("compiled_behavior_policy_read_probe")
+        if isinstance(data.get("compiled_behavior_policy_read_probe"), Mapping)
+        else {}
+    )
+    audit = data.get("write_callsite_audit") if isinstance(data.get("write_callsite_audit"), Mapping) else {}
+    lane_taxonomy = audit.get("lane_taxonomy") if isinstance(audit.get("lane_taxonomy"), Mapping) else {}
+    queue = data.get("single_writer_queue") if isinstance(data.get("single_writer_queue"), Mapping) else {}
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and issues == []
+        and read_probe.get("default_packet_mutated_retrieval_telemetry") is False
+        and read_probe.get("explicit_opt_in_retrieval_telemetry_written") is True
+        and compiled_probe.get("compiled_record_returned") is True
+        and compiled_probe.get("direct_read_created_durable_row") is False
+        and compiled_probe.get("packet_read_created_durable_row") is False
+        and lane_taxonomy.get("unknown_lane_count") == 0
+        and audit.get("full_single_writer_safe_to_claim") is False
+        and queue.get("status") == "not_claimed"
+    )
+    return CheckResult(
+        name="store_concurrency_contract",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "issue_count": len(issues),
+            "default_packet_mutated_retrieval_telemetry": read_probe.get(
+                "default_packet_mutated_retrieval_telemetry"
+            ),
+            "explicit_opt_in_retrieval_telemetry_written": read_probe.get(
+                "explicit_opt_in_retrieval_telemetry_written"
+            ),
+            "compiled_record_returned": compiled_probe.get("compiled_record_returned"),
+            "compiled_direct_read_created_durable_row": compiled_probe.get("direct_read_created_durable_row"),
+            "compiled_packet_read_created_durable_row": compiled_probe.get("packet_read_created_durable_row"),
+            "callsite_count": audit.get("callsite_count"),
+            "by_class": audit.get("by_class"),
+            "lane_by_class": lane_taxonomy.get("by_lane"),
+            "unknown_lane_count": lane_taxonomy.get("unknown_lane_count"),
+            "single_writer_queue_status": queue.get("status"),
         },
     )
 
@@ -2196,6 +2343,9 @@ def run_checklist(
             _check_runtime_spine_capability_parity(tmp),
             _check_source_sync_spine(tmp),
             _check_retrieval_context_envelope(tmp),
+            _check_runtime_retrieval_enforcement(tmp),
+            _check_sota_proof_harness(tmp),
+            _check_store_concurrency_contract(tmp),
             _check_retrieval_packet_source_destructive_proof(tmp),
             _check_actionable_proactive_runtime_wizard_destructive_proof(tmp),
             _check_hermes_proactive_runtime_parity(tmp),

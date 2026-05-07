@@ -76,4 +76,5 @@ def retrieve_executive_context(
         "lookup_semantics": lookup_semantics,
         "associative_expansion": {key: value for key, value in associative_expansion.items() if key != "candidate_rows"},
         "routing": asdict(route),
+        "retrieval_control_plan": dict(context.get("retrieval_control_plan") or {}),
     }

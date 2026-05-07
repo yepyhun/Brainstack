@@ -61,7 +61,7 @@ def retrieval_channel_statuses(
     operating_channels = rows["operating_channels"]
     graph_channels = rows["graph_channels"]
     graph_recall_status = graph_channels["graph_recall_status"]
-    return [
+    statuses = [
         _channel_status(
             "task_memory",
             rows["task_rows"],
@@ -101,6 +101,18 @@ def retrieval_channel_statuses(
         ),
         _channel_status("temporal", rows["temporal_channels"]["merged"]),
     ]
+    plan_id = str(context.get("plan_id") or "")
+    deadline_statuses = context.get("channel_deadline_statuses") if isinstance(context.get("channel_deadline_statuses"), Mapping) else {}
+    if plan_id:
+        for status in statuses:
+            status["plan_id"] = plan_id
+            deadline_status = deadline_statuses.get(str(status.get("name") or ""))
+            if isinstance(deadline_status, Mapping):
+                status["deadline_ms"] = int(deadline_status.get("deadline_ms") or 0)
+                status["deadline_support_status"] = str(deadline_status.get("support_status") or "")
+                status["deadline_enforcement"] = str(deadline_status.get("enforcement") or "")
+                status["deadline_reason"] = str(deadline_status.get("reason") or "")
+    return statuses
 
 
 def row_text(row: Mapping[str, Any], key: str) -> str:

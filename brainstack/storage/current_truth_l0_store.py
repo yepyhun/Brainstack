@@ -328,31 +328,13 @@ class CurrentTruthL0StoreMixin:
             "current_truth_view_is_graph_authority": False,
         }
 
-    def get_current_truth_l0_snapshot(
+    def _current_truth_l0_view_from_raw_rows(
         self,
+        raw_rows: list[Any],
         *,
-        principal_scope_key: str = "",
-        limit: int = 5000,
-        checked_at: str | None = None,
+        checked: str,
+        source: str,
     ) -> dict[str, Any]:
-        clauses: list[str] = []
-        params: list[Any] = []
-        if principal_scope_key:
-            clauses.append("principal_scope_key = ?")
-            params.append(str(principal_scope_key))
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        raw_rows = self.conn.execute(
-            f"""
-            SELECT row_type, row_json, issue_json, counter_json, projected_at,
-                   graph_ready, memory_kind, event_id, source_event_id, transaction_time
-            FROM current_truth_l0_rows
-            {where}
-            ORDER BY principal_scope_key ASC, stable_fact_id ASC, event_id ASC
-            LIMIT ?
-            """,
-            (*params, max(int(limit or 0), 1)),
-        ).fetchall()
-        checked = _text(checked_at) or utc_now_iso()
         projected_rows: list[dict[str, Any]] = []
         counters = _empty_counters()
         issues: list[dict[str, Any]] = []
@@ -445,7 +427,7 @@ class CurrentTruthL0StoreMixin:
                 "cache_age_seconds": 0,
                 "freshness_status": "fresh",
                 "freshness_diagnostics_present": True,
-                "source": "current_truth_l0_snapshot",
+                "source": source,
                 "ordinary_hot_path_rebuild": False,
             },
             "source_event_span": source_event_span,
@@ -486,6 +468,93 @@ class CurrentTruthL0StoreMixin:
             "deep_graph_path": view.get("deep_graph_path"),
         }
         view["deterministic_snapshot_hash"] = _snapshot_hash(snapshot)
+        return view
+
+    def get_current_truth_l0_snapshot(
+        self,
+        *,
+        principal_scope_key: str = "",
+        limit: int = 5000,
+        checked_at: str | None = None,
+    ) -> dict[str, Any]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if principal_scope_key:
+            clauses.append("principal_scope_key = ?")
+            params.append(str(principal_scope_key))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        raw_rows = self.conn.execute(
+            f"""
+            SELECT row_type, row_json, issue_json, counter_json, projected_at,
+                   graph_ready, memory_kind, event_id, source_event_id, transaction_time
+            FROM current_truth_l0_rows
+            {where}
+            ORDER BY principal_scope_key ASC, stable_fact_id ASC, event_id ASC
+            LIMIT ?
+            """,
+            (*params, max(int(limit or 0), 1)),
+        ).fetchall()
+        checked = _text(checked_at) or utc_now_iso()
+        return self._current_truth_l0_view_from_raw_rows(
+            list(raw_rows),
+            checked=checked,
+            source="current_truth_l0_snapshot",
+        )
+
+    def get_current_truth_l0_candidates(
+        self,
+        *,
+        principal_scope_key: str = "",
+        target_slots: tuple[str, ...] = (),
+        stable_fact_ids: tuple[str, ...] = (),
+        limit: int = 96,
+        checked_at: str | None = None,
+    ) -> dict[str, Any]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if principal_scope_key:
+            clauses.append("principal_scope_key = ?")
+            params.append(str(principal_scope_key))
+
+        target_conditions: list[str] = []
+        normalized_target_slots = tuple(dict.fromkeys(_text(item) for item in target_slots if _text(item)))
+        normalized_fact_ids = tuple(dict.fromkeys(_text(item) for item in stable_fact_ids if _text(item)))
+        if normalized_target_slots:
+            placeholders = ",".join("?" for _ in normalized_target_slots)
+            target_conditions.append(f"target_slot IN ({placeholders})")
+            params.extend(normalized_target_slots)
+        if normalized_fact_ids:
+            placeholders = ",".join("?" for _ in normalized_fact_ids)
+            target_conditions.append(f"stable_fact_id IN ({placeholders})")
+            params.extend(normalized_fact_ids)
+        if target_conditions:
+            clauses.append(f"({' OR '.join(target_conditions)})")
+        else:
+            clauses.append("0 = 1")
+
+        where = f"WHERE {' AND '.join(clauses)}"
+        raw_rows = self.conn.execute(
+            f"""
+            SELECT row_type, row_json, issue_json, counter_json, projected_at,
+                   graph_ready, memory_kind, event_id, source_event_id, transaction_time
+            FROM current_truth_l0_rows
+            {where}
+            ORDER BY principal_scope_key ASC, target_slot ASC, stable_fact_id ASC, event_id ASC
+            LIMIT ?
+            """,
+            (*params, max(int(limit or 0), 1)),
+        ).fetchall()
+        view = self._current_truth_l0_view_from_raw_rows(
+            list(raw_rows),
+            checked=_text(checked_at) or utc_now_iso(),
+            source="current_truth_l0_targeted",
+        )
+        view["targeted_query"] = {
+            "target_slots": list(normalized_target_slots),
+            "stable_fact_ids": list(normalized_fact_ids),
+            "principal_scope_key": str(principal_scope_key or ""),
+            "row_count": len(raw_rows),
+        }
         return view
 
     def compare_current_truth_l0_to_rebuild(

@@ -556,6 +556,33 @@ class ProfileStoreMixin(StoreRuntimeBase):
         result["profile_lane_projection_cache"] = self._profile_lane_projection_cache_trace(status="miss", key=key)
         return result
 
+    def _compiled_behavior_policy_record_from_compiled_projection(
+        self,
+        *,
+        compiled: Dict[str, Any] | None,
+        principal_scope_key: str,
+        updated_at: str,
+        reason: str,
+    ) -> Dict[str, Any] | None:
+        if not compiled:
+            return None
+        return {
+            "principal_scope_key": str(principal_scope_key or "").strip(),
+            "source_storage_key": str(compiled.get("source_storage_key") or "").strip(),
+            "source_contract_hash": str(compiled.get("source_contract_hash") or "").strip(),
+            "source_contract_updated_at": str(compiled.get("source_contract_updated_at") or "").strip(),
+            "schema_version": int(compiled.get("schema_version") or 0),
+            "compiler_version": str(compiled.get("compiler_version") or "").strip(),
+            "title": str(compiled.get("title") or "").strip(),
+            "policy": compiled,
+            "projection_text": str(compiled.get("projection_text") or "").strip(),
+            "status": str(compiled.get("status") or "active").strip() or "active",
+            "updated_at": str(updated_at or "").strip(),
+            "durable_record": False,
+            "read_only_projection": True,
+            "read_only_projection_reason": str(reason or "").strip(),
+        }
+
     @_locked
     def get_compiled_behavior_policy(self, *, principal_scope_key: str = "") -> Dict[str, Any] | None:
         requested_scope_key = str(principal_scope_key or "").strip()
@@ -564,9 +591,6 @@ class ProfileStoreMixin(StoreRuntimeBase):
             raw_text=str(contract.get("content") or ""),
             metadata=contract.get("metadata") if isinstance(contract.get("metadata"), dict) else None,
         ):
-            polluted_scope_key = str(contract.get("principal_scope_key") or "").strip() or requested_scope_key
-            self._delete_compiled_behavior_policy_record(principal_scope_key=polluted_scope_key)
-            self.conn.commit()
             return None
         if contract and str(contract.get("source_lane") or "").strip() == PROFILE_STYLE_CONTRACT_PROFILE_LANE:
             return self._compiled_behavior_policy_record_from_profile_projection(contract)
@@ -578,24 +602,27 @@ class ProfileStoreMixin(StoreRuntimeBase):
                 str(compiled_item.get("source_contract_hash") or "").strip() != raw_hash
                 or str(compiled_item.get("source_storage_key") or "").strip() != str(contract.get("storage_key") or "").strip()
             ):
-                refreshed = self._ensure_compiled_behavior_policy_for_contract_item(contract)
-                self.conn.commit()
-                refreshed_row = (
-                    self._get_compiled_behavior_policy_row(principal_scope_key=requested_scope_key) if refreshed else None
+                refreshed = self._build_compiled_behavior_policy_from_contract_item(contract)
+                return self._compiled_behavior_policy_record_from_compiled_projection(
+                    compiled=refreshed,
+                    principal_scope_key=str(contract.get("principal_scope_key") or requested_scope_key).strip(),
+                    updated_at=str(contract.get("updated_at") or ""),
+                    reason="stale_durable_compiled_policy_read_projection",
                 )
-                return _compiled_behavior_policy_row_to_dict(refreshed_row) if refreshed_row is not None else None
             return compiled_item
         if not requested_scope_key:
             return None
         if not contract:
             return None
         fallback_scope_key = str(contract.get("principal_scope_key") or "").strip()
-        refreshed = self._ensure_compiled_behavior_policy_for_contract_item(contract)
+        refreshed = self._build_compiled_behavior_policy_from_contract_item(contract)
         if refreshed:
-            self.conn.commit()
-            scope_key = fallback_scope_key or requested_scope_key
-            rebuilt_row = self._get_compiled_behavior_policy_row(principal_scope_key=scope_key)
-            return _compiled_behavior_policy_row_to_dict(rebuilt_row) if rebuilt_row else None
+            return self._compiled_behavior_policy_record_from_compiled_projection(
+                compiled=refreshed,
+                principal_scope_key=fallback_scope_key or requested_scope_key,
+                updated_at=str(contract.get("updated_at") or ""),
+                reason="missing_durable_compiled_policy_read_projection",
+            )
         if not fallback_scope_key or fallback_scope_key == requested_scope_key:
             return None
         fallback_row = self._get_compiled_behavior_policy_row(principal_scope_key=fallback_scope_key)

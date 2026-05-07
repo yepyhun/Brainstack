@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import json
 import re
 from typing import Any, Callable, Dict, Mapping
@@ -18,6 +18,7 @@ from .executive_retrieval import retrieve_executive_context
 from .local_typed_understanding import analyze_local_query
 from .profile_contract import resolve_direct_identity_profile_slots
 from .retrieval import render_working_memory_block
+from .retrieval_control_plan import retrieval_control_plan_from_adaptive_plan
 from .retrieval_context_envelope import build_retrieval_context_envelope
 from .temporal import record_is_effective_at, record_temporal_status
 
@@ -109,6 +110,7 @@ class WorkingMemoryPolicy:
     render_ordinary_contract: bool
     semantic_evidence_enabled: bool
     semantic_evidence_reason: str
+    retrieval_control_plan: Dict[str, Any] = field(default_factory=dict)
 
 
 def analyze_query(
@@ -667,7 +669,34 @@ def _canonical_events_for_current_truth_view(store: BrainstackStore) -> list[dic
     return events
 
 
-def _current_truth_l0_view(store: BrainstackStore, *, principal_scope_key: str) -> dict[str, Any]:
+def _current_truth_targets_from_understanding(understanding: Mapping[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    target_slots = tuple(
+        str(item).strip()
+        for item in (understanding.get("current_truth_target_slots") or understanding.get("target_slots") or ())
+        if str(item).strip()
+    )
+    stable_fact_ids = tuple(
+        str(item).strip()
+        for item in (understanding.get("current_truth_stable_fact_ids") or understanding.get("stable_fact_ids") or ())
+        if str(item).strip()
+    )
+    return tuple(dict.fromkeys(target_slots)), tuple(dict.fromkeys(stable_fact_ids))
+
+
+def _current_truth_l0_view(
+    store: BrainstackStore,
+    *,
+    principal_scope_key: str,
+    target_slots: tuple[str, ...] = (),
+    stable_fact_ids: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    if (target_slots or stable_fact_ids) and hasattr(store, "get_current_truth_l0_candidates"):
+        return store.get_current_truth_l0_candidates(
+            principal_scope_key=principal_scope_key,
+            target_slots=target_slots,
+            stable_fact_ids=stable_fact_ids,
+            limit=96,
+        )
     if hasattr(store, "get_current_truth_l0_snapshot"):
         return store.get_current_truth_l0_snapshot(principal_scope_key=principal_scope_key, limit=5000)
     return rebuild_current_truth_view(_canonical_events_for_current_truth_view(store))
@@ -709,7 +738,7 @@ def build_working_memory_packet(
     timezone_name: str = "UTC",
     system_substrate: Dict[str, Any] | None = None,
     render_ordinary_contract: bool = False,
-    record_retrievals: bool = True,
+    record_retrievals: bool = False,
     packet_budget_mode: str | None = None,
     packet_budget_max_candidate_tokens: int | None = None,
     adaptive_route_signals: Mapping[str, Any] | None = None,
@@ -751,13 +780,21 @@ def build_working_memory_packet(
         adaptive_understanding.setdefault("required_evidence_classes", []).append("operating")
     if adaptive_route_signals:
         adaptive_understanding.update(dict(adaptive_route_signals))
-    current_truth_view = _current_truth_l0_view(store, principal_scope_key=principal_scope_key)
+    current_truth_target_slots, current_truth_stable_fact_ids = _current_truth_targets_from_understanding(adaptive_understanding)
+    current_truth_view = _current_truth_l0_view(
+        store,
+        principal_scope_key=principal_scope_key,
+        target_slots=current_truth_target_slots,
+        stable_fact_ids=current_truth_stable_fact_ids,
+    )
     adaptive_route_plan = build_adaptive_route_plan(
         query,
         query_understanding=adaptive_understanding,
         current_truth_view=current_truth_view,
         backend_health=_store_backend_health(store),
     )
+    retrieval_control_plan = retrieval_control_plan_from_adaptive_plan(adaptive_route_plan)
+    adaptive_route_plan["plan_id"] = retrieval_control_plan.plan_id
     _apply_adaptive_route_overrides(
         policy,
         adaptive_route_plan,
@@ -774,6 +811,7 @@ def build_working_memory_packet(
             "evidence_item_budget": evidence_item_budget,
         },
     )
+    policy.retrieval_control_plan = retrieval_control_plan.to_public_dict()
 
     effective_route_resolver = route_resolver
     if effective_route_resolver is None:
@@ -874,6 +912,7 @@ def build_working_memory_packet(
         retrieval=retrieval,
     )
     policy_payload["adaptive_route_plan"] = {
+        "plan_id": retrieval_control_plan.plan_id,
         "schema": adaptive_route_plan.get("schema"),
         "status": adaptive_route_plan.get("status"),
         "route_class": adaptive_route_plan.get("route_class"),
@@ -888,6 +927,7 @@ def build_working_memory_packet(
         "semantic_retrieval": dict(adaptive_route_plan.get("semantic_retrieval") or {}),
         "shelf_budget": dict(adaptive_route_plan.get("shelf_budget") or {}),
     }
+    policy_payload["retrieval_control_plan"] = retrieval_control_plan.to_public_dict()
     budgeted = _apply_working_memory_packet_budget(
         mode=packet_budget_mode,
         max_candidate_tokens=packet_budget_max_candidate_tokens,
@@ -973,6 +1013,7 @@ def build_working_memory_packet(
         "associative_expansion": retrieval.get("associative_expansion", {}),
         "routing": routing,
         "adaptive_route_plan": adaptive_route_plan,
+        "retrieval_control_plan": retrieval_control_plan.to_public_dict(),
         "current_truth_view": {
             "schema": current_truth_view.get("schema"),
             "status": current_truth_view.get("status"),

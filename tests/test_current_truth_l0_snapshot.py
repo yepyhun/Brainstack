@@ -75,6 +75,56 @@ def test_working_memory_packet_uses_l0_snapshot_without_canonical_event_rebuild(
         store.close()
 
 
+def test_current_truth_route_uses_targeted_l0_when_slot_hint_exists(tmp_path: Path) -> None:
+    store = _open_store(tmp_path)
+    try:
+        store.record_canonical_memory_event(_event(event_id="safe_current"))
+        calls = {"targeted": 0}
+        original_targeted = store.get_current_truth_l0_candidates
+
+        def spy_get_current_truth_l0_candidates(**kwargs: object) -> dict:
+            calls["targeted"] += 1
+            assert kwargs["target_slots"] == ("profile.preferred_language",)
+            return original_targeted(**kwargs)
+
+        def forbidden_get_current_truth_l0_snapshot(**_kwargs: object) -> dict:
+            raise AssertionError("targeted current-truth route must not read a broad L0 snapshot")
+
+        def forbidden_list_canonical_memory_events(**_kwargs: object) -> list[dict]:
+            raise AssertionError("hot path must not rebuild current truth from canonical events")
+
+        store.get_current_truth_l0_candidates = spy_get_current_truth_l0_candidates  # type: ignore[method-assign]
+        store.get_current_truth_l0_snapshot = forbidden_get_current_truth_l0_snapshot  # type: ignore[method-assign]
+        store.list_canonical_memory_events = forbidden_list_canonical_memory_events  # type: ignore[method-assign]
+
+        packet = build_working_memory_packet(
+            store,
+            query="structured current truth request",
+            session_id="session:test",
+            principal_scope_key="principal:a",
+            profile_match_limit=2,
+            continuity_recent_limit=2,
+            continuity_match_limit=2,
+            transcript_match_limit=2,
+            transcript_char_budget=400,
+            evidence_item_budget=4,
+            graph_limit=2,
+            corpus_limit=2,
+            corpus_char_budget=400,
+            record_retrievals=False,
+            adaptive_route_signals={
+                "required_evidence_classes": ["current_truth"],
+                "current_truth_target_slots": ["profile.preferred_language"],
+            },
+        )
+
+        assert calls["targeted"] == 1
+        assert packet["current_truth_view"]["rebuild"]["source"] == "current_truth_l0_targeted"
+        assert packet["adaptive_route_plan"]["route_class"] == "current_truth"
+    finally:
+        store.close()
+
+
 def test_current_truth_l0_verifier_passes() -> None:
     report = build_report()
 
