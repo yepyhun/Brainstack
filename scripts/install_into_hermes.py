@@ -28,7 +28,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from brainstack.background_task_binding import install_default_background_task_bindings  # noqa: E402
+from brainstack.background_task_binding import (  # noqa: E402
+    REASON_UNSUPPORTED_MODEL_FOR_PROVIDER,
+    install_default_background_task_bindings,
+    resolve_auxiliary_route_readiness,
+)
 
 try:
     from hermes_gateway_patch_support import (
@@ -72,6 +76,11 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "category": "compat_hotfix",
         "owner": "host-seam",
         "removal_condition": "Hermes exposes structured write-origin metadata and interrupted-turn sync suppression natively.",
+    },
+    "_patch_run_agent_cache_evict_memory_provider_shutdown": {
+        "category": "required_seam",
+        "owner": "host-lifecycle-seam",
+        "removal_condition": "Hermes soft cache eviction closes external memory provider runtime handles natively.",
     },
     "_patch_memory_provider": {
         "category": "compat_hotfix",
@@ -295,6 +304,14 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_modes": ("source", "docker"),
         "purpose": "Brainstack session-finalize wiring, transcript hygiene, and deterministic memory sync hooks.",
         "why": "Needed until Hermes exposes a stable memory-finalization seam for Brainstack.",
+    },
+    {
+        "patcher": "_patch_run_agent_cache_evict_memory_provider_shutdown",
+        "target": "run_agent.py",
+        "scope": "host-lifecycle-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Close external memory provider DB/backend handles when Hermes softly evicts a cached agent.",
+        "why": "Soft cache eviction rebuilds AIAgent later; open Brainstack graph/vector/sqlite handles can block the next init before the first model call.",
     },
     {
         "patcher": "_patch_prompt_builder",
@@ -1996,6 +2013,46 @@ def _patch_credential_pool_tests(path: Path, dry_run: bool) -> list[str]:
     if "def test_select_skips_stale_nous_agent_keys" not in text and marker in text:
         text = text.replace(marker, new_test + "\n\n" + marker)
         applied.append("credential_pool_tests:skip_stale_nous_entries")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_run_agent_cache_evict_memory_provider_shutdown(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    if "          - memory provider (has its own lifecycle; keeps running)\n" in text:
+        text = text.replace(
+            "          - memory provider (has its own lifecycle; keeps running)\n",
+            "          - memory provider session-end flush (soft eviction only closes runtime handles)\n",
+            1,
+        )
+        applied.append("run_agent:cache_evict_memory_provider_docstring")
+
+    cache_evict_memory_shutdown = (
+        "        # Close external memory provider runtime handles. Soft cache eviction\n"
+        "        # is not a session boundary, so do not call on_session_end() here.\n"
+        "        # Closing provider handles prevents graph/vector/sqlite locks from\n"
+        "        # leaking into the freshly rebuilt agent for the same session.\n"
+        "        try:\n"
+        "            if self._memory_manager:\n"
+        "                self._memory_manager.shutdown_all()\n"
+        "                self._memory_manager = None\n"
+        "        except Exception:\n"
+        "            pass\n\n"
+    )
+    if "Soft cache eviction\n        # is not a session boundary" not in text:
+        text = _replace_once(
+            text,
+            "        # Close the OpenAI/httpx client to release sockets immediately.\n",
+            cache_evict_memory_shutdown
+            + "        # Close the OpenAI/httpx client to release sockets immediately.\n",
+            label="run_agent cache-evict memory provider shutdown",
+            path=path,
+        )
+        applied.append("run_agent:cache_evict_memory_provider_shutdown")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -4075,6 +4132,54 @@ def _looks_like_legacy_local_tier2_llm_config(brainstack: dict[str, Any]) -> boo
     return provider == LOCAL_TIER2_PROVIDER and any(marker in base_url for marker in LOCAL_TIER2_LOOPBACK_MODEL_URL_MARKERS)
 
 
+def _normalize_hermes_native_auxiliary_main_routes(config: dict[str, Any]) -> dict[str, Any]:
+    """Clear stale provider=main model pins that the active main provider cannot run."""
+    auxiliary = config.setdefault("auxiliary", {})
+    if not isinstance(auxiliary, dict):
+        raise RuntimeError("config.yaml has non-object `auxiliary` section")
+    model_cfg = config.get("model", {})
+    if isinstance(model_cfg, dict):
+        main_provider = str(model_cfg.get("provider") or "").strip().lower()
+        main_model = str(model_cfg.get("default") or "").strip()
+    else:
+        main_provider = ""
+        main_model = str(model_cfg or "").strip()
+    normalized: list[dict[str, Any]] = []
+    for task_slot, raw_entry in list(auxiliary.items()):
+        if not isinstance(raw_entry, dict):
+            continue
+        provider = str(raw_entry.get("provider") or "").strip().lower()
+        model = str(raw_entry.get("model") or "").strip()
+        if provider != "main" or not model:
+            continue
+        readiness = resolve_auxiliary_route_readiness(
+            task_slot=str(task_slot),
+            provider_label=provider,
+            model_label=model,
+            main_provider_label=main_provider,
+            main_model_label=main_model,
+        )
+        if readiness.get("reason_code") != REASON_UNSUPPORTED_MODEL_FOR_PROVIDER:
+            continue
+        raw_entry["model"] = ""
+        normalized.append(
+            {
+                "task_slot": str(task_slot),
+                "previous_model": model,
+                "provider": provider,
+                "reason_code": readiness.get("reason_code"),
+                "effective_provider_label": readiness.get("effective_provider_label"),
+                "replacement": "inherit_main_model",
+            }
+        )
+    return {
+        "status": "normalized" if normalized else "unchanged",
+        "normalized_count": len(normalized),
+        "routes": normalized,
+        "secret_redacted": True,
+    }
+
+
 def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = "external") -> dict[str, Any]:
     config = _load_yaml(config_path)
     config.setdefault("memory", {})
@@ -4127,6 +4232,7 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
     brainstack.setdefault("tier2_hindsight_api_command", "/opt/hermes/.venv/bin/hindsight-api")
     brainstack.setdefault("tier2_hindsight_budget", "low")
     brainstack.setdefault("tier2_session_end_flush_enabled", True)
+    auxiliary_main_route_hygiene = _normalize_hermes_native_auxiliary_main_routes(config)
     background_task_status = install_default_background_task_bindings(config)
     config.setdefault("agent", {})
     if not isinstance(config["agent"], dict):
@@ -4154,6 +4260,7 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
         "memory_enabled": True,
         "user_profile_enabled": True,
         "background_task_status": background_task_status,
+        "auxiliary_main_route_hygiene": auxiliary_main_route_hygiene,
         "gateway_timeout": agent.get("gateway_timeout"),
         "gateway_timeout_warning": agent.get("gateway_timeout_warning"),
         "proactive_runtime": proactive_runtime,
@@ -5585,6 +5692,7 @@ def main() -> int:
         return 2
 
     host_patches: list[str] = []
+    host_patches.extend(_run_host_patch("_patch_run_agent_cache_evict_memory_provider_shutdown", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_run_agent", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_run_agent_deferred_tool_continuation", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_run_agent_memory_output_validation_seam", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))

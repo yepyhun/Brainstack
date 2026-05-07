@@ -130,6 +130,45 @@ def test_core_host_patch_mode_applies_auxiliary_main_model_inheritance(tmp_path:
     assert "_read_main_model() or None" in text
 
 
+def test_core_run_agent_patch_closes_memory_provider_on_soft_cache_eviction(tmp_path: Path) -> None:
+    run_agent = tmp_path / "run_agent.py"
+    run_agent.write_text(
+        "class AIAgent:\n"
+        "    def release_clients(self) -> None:\n"
+        "        \"\"\"Release cached agent resources.\n\n"
+        "        Do not kill:\n"
+        "          - process_registry entries for task_id\n"
+        "          - memory provider (has its own lifecycle; keeps running)\n"
+        "        \"\"\"\n"
+        "        if self._memory_manager and final_response and original_user_message and not interrupted:\n"
+        "            pass\n"
+        "        # Close the OpenAI/httpx client to release sockets immediately.\n"
+        "        try:\n"
+        "            client = getattr(self, \"client\", None)\n"
+        "            if client is not None:\n"
+        "                self._close_openai_client(client, reason=\"cache_evict\", shared=True)\n"
+        "                self.client = None\n"
+        "        except Exception:\n"
+        "            pass\n",
+        encoding="utf-8",
+    )
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_run_agent_cache_evict_memory_provider_shutdown",
+        run_agent,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    text = run_agent.read_text(encoding="utf-8")
+
+    assert "run_agent:cache_evict_memory_provider_shutdown" in actions
+    assert "self._memory_manager.shutdown_all()" in text
+    assert "self._memory_manager = None" in text
+    assert "do not call on_session_end() here" in text
+    assert "memory provider session-end flush" in text
+    assert "keeps running" not in text
+
+
 def test_core_host_patch_mode_bounds_session_search_before_gateway_timeout(
     tmp_path: Path,
 ) -> None:

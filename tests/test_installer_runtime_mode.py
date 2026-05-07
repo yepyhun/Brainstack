@@ -125,6 +125,38 @@ def test_config_patch_embedding_none_makes_corpus_explicitly_unavailable(tmp_pat
     assert data["proactive_kill_switch"] is False
 
 
+def test_config_patch_clears_stale_main_auxiliary_models_that_active_provider_cannot_run(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "model:\n"
+        "  provider: openai-codex\n"
+        "  default: gpt-5.5\n"
+        "auxiliary:\n"
+        "  web_extract:\n"
+        "    provider: main\n"
+        "    model: stepfun/step-3.5-flash\n"
+        "  compression:\n"
+        "    provider: main\n"
+        "    model: gpt-5.5\n"
+        "  user_profile_index:\n"
+        "    provider: openrouter\n"
+        "    model: stepfun/step-3.5-flash\n",
+        encoding="utf-8",
+    )
+
+    result = install_into_hermes._patch_config(config, dry_run=False, embedding_runtime="none")
+    data = install_into_hermes._load_yaml(config)
+
+    assert data["auxiliary"]["web_extract"]["model"] == ""
+    assert data["auxiliary"]["compression"]["model"] == "gpt-5.5"
+    assert data["auxiliary"]["user_profile_index"]["model"] == "stepfun/step-3.5-flash"
+    hygiene = result["auxiliary_main_route_hygiene"]
+    assert hygiene["status"] == "normalized"
+    assert hygiene["normalized_count"] == 1
+    assert hygiene["routes"][0]["task_slot"] == "web_extract"
+    assert hygiene["routes"][0]["replacement"] == "inherit_main_model"
+
+
 def test_config_patch_normalizes_legacy_automatic_proactive_mode_to_dry_run(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text("proactive_mode: automatic\nproactive_kill_switch: false\n", encoding="utf-8")
