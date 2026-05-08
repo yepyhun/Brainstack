@@ -21,6 +21,7 @@ REQUIRED_PAYLOAD_FILES = (
     "extensions/hermes_proactive/hermes_proactive/pulse_producer.py",
     "extensions/hermes_proactive/scripts/hermes_proactive_doctor.py",
     "extensions/hermes_proactive/scripts/hermes_proactive_pulse.py",
+    "extensions/hermes_proactive/hermes_proactive/workrun.py",
 )
 
 

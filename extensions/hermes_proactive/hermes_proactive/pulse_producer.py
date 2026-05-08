@@ -23,6 +23,7 @@ from .heartbeat_wake import (
     HeartbeatWakeState,
     classify_heartbeat_wake,
 )
+from .workrun import list_recovery_candidates
 
 
 PULSE_PRODUCER_SCHEMA = "hermes_proactive.pulse_producer.v1"
@@ -140,6 +141,7 @@ def produce_pulse(
     events: list[dict[str, Any]] = []
     handoff = _runtime_handoff_summary(hermes_home)
     evolver_signal = load_evolver_signal_file(evolver_health_file) if evolver_health_file is not None else None
+    workrun_recovery = list_recovery_candidates(hermes_home=hermes_home, stale_after_seconds=600, limit=5)
 
     if evolver_signal is not None and evolver_signal.actionable:
         signal = evolver_signal.to_public_dict()
@@ -169,6 +171,27 @@ def produce_pulse(
                 evidence_ids=["runtime_handoff:inbox"],
                 intended_next_action=ProactiveIntendedNextAction.INFORM_USER.value,
                 metadata={"handoff_summary": handoff},
+            )
+        )
+
+    for card in workrun_recovery:
+        run_id = str(card.get("run_id") or "")
+        risk = str(card.get("side_effect_risk") or "medium")
+        tasks.append(
+            _candidate(
+                source="workrun_recovery",
+                kind=ProactiveEventKind.BLOCKED.value if risk in {"medium", "high"} else ProactiveEventKind.FOLLOW_UP.value,
+                title="Interrupted runtime work needs recovery review",
+                summary=(
+                    f"{str(card.get('source_kind') or 'process')} work '{str(card.get('source_id') or run_id)}' "
+                    f"is {str(card.get('state') or 'reclaimable')}; next safe action: "
+                    f"{str(card.get('next_safe_action') or 'inspect checkpoint before retry')}."
+                ),
+                priority="high" if risk in {"medium", "high"} else "normal",
+                evidence_ids=[f"workrun:{run_id}"] if run_id else ["workrun:recovery"],
+                intended_next_action=ProactiveIntendedNextAction.ASK_PERMISSION.value,
+                source_ref=run_id,
+                metadata={"workrun_recovery": card},
             )
         )
 
@@ -203,6 +226,7 @@ def produce_pulse(
         "principal_scope_key": principal_scope_key,
         "workspace_scope_key": workspace_scope_key,
         "workstream_scope_key": workstream_scope_key,
+        "workrun_recovery_count": len(workrun_recovery),
     }
 
 

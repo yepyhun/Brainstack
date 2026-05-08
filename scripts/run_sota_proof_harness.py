@@ -283,6 +283,9 @@ def run_harness(*, force_failure: bool = False) -> dict[str, Any]:
             "runtime_retrieval_enforcement": {
                 "status": runtime_enforcement.get("status"),
                 "timeout_enforcement": runtime_enforcement.get("timeout_enforcement"),
+                "semantic_timeout_containment": runtime_enforcement.get("semantic_timeout_containment"),
+                "semantic_timeout_agent_facing_status": runtime_enforcement.get("semantic_timeout_agent_facing_status"),
+                "semantic_timeout_agent_facing_error_kind": runtime_enforcement.get("semantic_timeout_agent_facing_error_kind"),
             },
             "self_test": {
                 "forced_failure": force_failure,

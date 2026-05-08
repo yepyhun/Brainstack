@@ -72,6 +72,79 @@ def _semantic_corpus_allowed(allowed_shelves: tuple[str, ...], *, plan_enforced:
     return bool({"corpus", "tank"}.intersection(allowed_shelves))
 
 
+def _record_corpus_semantic_status(store: BrainstackStore, status: Mapping[str, Any]) -> None:
+    recorder = getattr(store, "record_corpus_semantic_runtime_status", None)
+    if callable(recorder):
+        recorder(status)
+
+
+def _collect_corpus_semantic_rows(
+    store: BrainstackStore,
+    *,
+    queries: List[str],
+    limit: int,
+    principal_scope_key: str,
+) -> List[Dict[str, Any]]:
+    if not queries:
+        _record_corpus_semantic_status(
+            store,
+            {
+                "status": "idle",
+                "reason": "No semantic corpus query variants were requested.",
+                "error_kind": "",
+                "fallback_used": False,
+                "followup_skipped": 0,
+            },
+        )
+        return []
+    status_searcher = getattr(store, "search_corpus_semantic_with_status", None)
+    if not callable(status_searcher):
+        return _collect_query_rows(
+            shelf="corpus",
+            queries=queries,
+            searcher=lambda variant: store.search_corpus_semantic(
+                query=variant,
+                limit=limit,
+                principal_scope_key=principal_scope_key,
+            ),
+        )
+
+    groups: List[List[Dict[str, Any]]] = []
+    skipped_followups = 0
+    for index, variant in enumerate(queries):
+        result = status_searcher(
+            query=variant,
+            limit=limit,
+            principal_scope_key=principal_scope_key,
+        )
+        status = str(result.get("status") or "")
+        rows = [dict(row) for row in list(result.get("rows") or [])]
+        for row in rows:
+            row.setdefault("_brainstack_query_variant", variant)
+        groups.append(rows)
+        if status == "degraded":
+            skipped_followups += max(0, len(queries) - index - 1)
+            skipped_followups += int(result.get("followup_skipped") or 0)
+            recorded = {
+                key: value
+                for key, value in dict(result).items()
+                if key != "rows"
+            }
+            recorded["followup_skipped"] = skipped_followups
+            _record_corpus_semantic_status(store, recorded)
+            break
+
+    seen: set[str] = set()
+    merged: List[Dict[str, Any]] = []
+    for row in _round_robin(*groups):
+        key = f"corpus:{row.get('document_id') or ''}:{row.get('section_id') or row.get('id') or ''}:{row.get('content') or ''}"
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(row)
+    return merged
+
+
 def collect_profile_rows(
     store: BrainstackStore,
     *,
@@ -329,14 +402,11 @@ def collect_semantic_rows(
         else []
     )
     corpus_rows = (
-        _collect_query_rows(
-            shelf="corpus",
+        _collect_corpus_semantic_rows(
+            store,
             queries=search_queries,
-            searcher=lambda variant: store.search_corpus_semantic(
-                query=variant,
-                limit=max(corpus_limit * 4, 8),
-                principal_scope_key=principal_scope_key,
-            ),
+            limit=max(corpus_limit * 4, 8),
+            principal_scope_key=principal_scope_key,
         )
         if corpus_limit > 0 and _semantic_corpus_allowed(allowed_semantic_shelves, plan_enforced=semantic_plan_enforced)
         else []

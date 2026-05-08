@@ -912,6 +912,129 @@ def test_tool_call_interim_boundary_is_required_core_host_seam() -> None:
     assert seam["owner"] == "host-output-seam"
 
 
+def test_gateway_background_process_output_boundary_is_required_core_host_seam() -> None:
+    inventory = {
+        item["patcher"]: item
+        for item in install_into_hermes._selected_host_patch_inventory(
+            "docker",
+            host_patch_mode="core",
+        )
+    }
+
+    seam = inventory["_patch_gateway_background_process_output_boundary"]
+    assert seam["selected"] is True
+    assert seam["category"] == "required_seam"
+    assert seam["owner"] == "host-output-seam"
+
+
+def test_gateway_background_process_output_boundary_compacts_large_output(tmp_path, monkeypatch) -> None:
+    module = tmp_path / "gateway_run.py"
+    module.write_text(
+        '''
+import asyncio
+import os
+import re
+import time
+from pathlib import Path
+
+def _format_gateway_process_notification(evt: dict) -> "str | None":
+    """Format a watch pattern event from completion_queue into a [IMPORTANT:] message."""
+    evt_type = evt.get("type", "completion")
+    _sid = evt.get("session_id", "unknown")
+    _cmd = evt.get("command", "unknown")
+
+    if evt_type == "watch_disabled":
+        return f"[IMPORTANT: {evt.get('message', '')}]"
+
+    if evt_type == "watch_match":
+        _pat = evt.get("pattern", "?")
+        _out = evt.get("output", "")
+        _sup = evt.get("suppressed", 0)
+        text = (
+            f"[IMPORTANT: Background process {_sid} matched "
+            f"watch pattern \\"{_pat}\\".\\n"
+            f"Command: {_cmd}\\n"
+            f"Matched output:\\n{_out}"
+        )
+        if _sup:
+            text += f"\\n({_sup} earlier matches were suppressed by rate limit)"
+        text += "]"
+        return text
+
+    return None
+
+class GatewayRunner:
+    async def _run_process_watcher(self, watcher: dict) -> None:
+        session_id = watcher["session_id"]
+        while True:
+            if session.exited:
+                from tools.process_registry import process_registry as _pr_check
+                if agent_notify and not _pr_check.is_completion_consumed(session_id):
+                    from tools.ansi_strip import strip_ansi
+                    _out = strip_ansi(session.output_buffer[-2000:]) if session.output_buffer else ""
+                    synth_text = (
+                        f"[IMPORTANT: Background process {session_id} completed "
+                        f"(exit code {session.exit_code}).\\n"
+                        f"Command: {session.command}\\n"
+                        f"Output:\\n{_out}]"
+                    )
+
+                if should_notify:
+                    new_output = session.output_buffer[-1000:] if session.output_buffer else ""
+                    message_text = (
+                        f"[Background process {session_id} finished with exit code {session.exit_code}~ "
+                        f"Here's the final output:\\n{new_output}]"
+                    )
+                break
+
+            elif has_new_output and notify_mode == "all" and not agent_notify:
+                new_output = session.output_buffer[-500:] if session.output_buffer else ""
+                message_text = (
+                    f"[Background process {session_id} is still running~ "
+                    f"New output:\\n{new_output}]"
+                )
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_gateway_background_process_output_boundary(module, dry_run=False)
+
+    text = module.read_text(encoding="utf-8")
+    assert applied == [
+        "gateway:background_output_boundary_helpers",
+        "gateway:watch_output_compact_artifact",
+        "gateway:agent_completion_output_compact_artifact",
+        "gateway:user_completion_output_compact_artifact",
+        "gateway:running_output_compact_artifact",
+    ]
+    assert "PROCESS_OUTPUT_CONTEXT_PREVIEW_CHARS = 600" in text
+    assert "Full output artifact" in text
+    assert "Here's the final output" not in text
+    compile(text, str(module), "exec")
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    namespace: dict[str, object] = {}
+    exec(text, namespace)
+    output = "start-" + ("middle-" * 400) + "end"
+    rendered = namespace["_format_gateway_process_notification"](
+        {
+            "type": "watch_match",
+            "session_id": "proc_abc",
+            "command": "long command",
+            "pattern": "done",
+            "output": output,
+        }
+    )
+
+    assert rendered is not None
+    assert "large output:" in rendered
+    assert "full output artifact:" in rendered
+    assert len(rendered) < 1300
+    artifacts = list((tmp_path / "hermes-home" / "process_artifacts").glob("*.txt"))
+    assert len(artifacts) == 1
+    assert artifacts[0].read_text(encoding="utf-8") == output
+
+
 def test_run_agent_tool_call_interim_boundary_blocks_protocol_content(tmp_path):
     module = tmp_path / "run_agent.py"
     module.write_text(
@@ -969,6 +1092,37 @@ class AIAgent:
 
     agent._emit_interim_assistant_message({"content": "I will inspect the logs."})
     assert calls == [("I will inspect the logs.", False)]
+
+
+def test_run_agent_stream_preface_is_buffered_until_tool_boundary_known(tmp_path):
+    from scripts.run_tool_call_preface_boundary_proof import _fixture
+
+    module = tmp_path / "run_agent.py"
+    module.write_text(_fixture(), encoding="utf-8")
+
+    applied = install_into_hermes._patch_run_agent_tool_call_interim_boundary(module, dry_run=False)
+
+    text = module.read_text(encoding="utf-8")
+    assert "run_agent:codex_stream_tool_boundary_buffer" in applied
+    assert "run_agent:codex_stream_buffer_preface" in applied
+    assert "run_agent:codex_stream_flush_safe_final" in applied
+    assert "run_agent:chat_stream_tool_boundary_buffer" in applied
+    assert "run_agent:chat_stream_buffer_preface" in applied
+    assert "run_agent:chat_stream_flush_safe_final" in applied
+    assert "tool_boundary_text_buffer.append(delta_text)" in text
+    assert "tool_boundary_text_buffer.append(delta.content)" in text
+    assert "_flush_tool_boundary_text_buffer()" in text
+    assert "if not tool_calls_acc and tool_boundary_text_buffer:" in text
+
+
+def test_tool_call_preface_boundary_release_proof_passes() -> None:
+    from scripts.run_tool_call_preface_boundary_proof import build_report
+
+    report = build_report()
+    assert report["status"] == "pass"
+    assert report["issues"] == []
+    assert report["proof"]["codex_stream_buffers_preface"] is True
+    assert report["proof"]["chat_stream_buffers_preface"] is True
 
 
 def test_run_agent_deferred_tool_continuation_patch_blocks_final_before_tool(tmp_path):

@@ -5,6 +5,7 @@ from typing import Any
 
 from brainstack.corpus_backend_chroma import ChromaCorpusBackend
 from brainstack.db import BrainstackStore
+from brainstack.retrieval_pipeline.channel_collection import collect_semantic_rows
 from scripts.verify_corpus_semantic_filtering import build_report
 
 
@@ -36,6 +37,13 @@ class FakeSemanticBackend:
         self.calls.append(dict(where or {}))
         key = tuple(sorted((str(k), str(v)) for k, v in dict(where or {}).items()))
         return [dict(row) for row in self.rows_by_where.get(key, [])]
+
+
+class TimeoutSemanticBackend(FakeSemanticBackend):
+    def search_semantic(self, *, query: str, limit: int, where: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        del query, limit
+        self.calls.append(dict(where or {}))
+        raise TimeoutError("semantic backend timed out")
 
 
 class FakeCollection:
@@ -170,6 +178,90 @@ def test_search_corpus_semantic_fallback_is_visible_when_filtered_query_empty(tm
         }
     finally:
         store.close()
+
+
+def test_search_corpus_semantic_timeout_does_not_fallback_to_base_scope(tmp_path: Path) -> None:
+    backend = TimeoutSemanticBackend()
+    store = _store(tmp_path)
+    try:
+        store._corpus_backend = backend
+
+        result = store.search_corpus_semantic_with_status(
+            query="slow",
+            limit=4,
+            principal_scope_key="principal:m008",
+        )
+        rows = store.search_corpus_semantic(
+            query="slow",
+            limit=4,
+            principal_scope_key="principal:m008",
+        )
+
+        assert rows == []
+        assert result["status"] == "degraded"
+        assert result["error_kind"] == "timeout"
+        assert result["fallback_used"] is False
+        assert result["followup_skipped"] == 1
+        assert backend.calls == [
+            {"semantic_class": "corpus", "principal_scope_key": "principal:m008"},
+            {"semantic_class": "corpus", "principal_scope_key": "principal:m008"},
+        ]
+    finally:
+        store.close()
+
+
+class StatusAwareTimeoutStore:
+    def __init__(self) -> None:
+        self.corpus_queries: list[str] = []
+        self.recorded_status: dict[str, Any] = {}
+
+    def search_corpus_semantic_with_status(self, *, query: str, limit: int, principal_scope_key: str) -> dict[str, Any]:
+        del limit, principal_scope_key
+        self.corpus_queries.append(query)
+        return {
+            "status": "degraded",
+            "reason": "Semantic corpus backend timeout.",
+            "rows": [],
+            "error_kind": "timeout",
+            "fallback_used": False,
+            "followup_skipped": 1,
+        }
+
+    def search_semantic_evidence(self, **kwargs: Any) -> list[dict[str, Any]]:
+        del kwargs
+        return []
+
+    def search_conversation_semantic(self, **kwargs: Any) -> list[dict[str, Any]]:
+        del kwargs
+        return []
+
+    def record_corpus_semantic_runtime_status(self, status: dict[str, Any]) -> None:
+        self.recorded_status = dict(status)
+
+
+def test_collect_semantic_rows_stops_corpus_variants_after_timeout() -> None:
+    store = StatusAwareTimeoutStore()
+
+    channels = collect_semantic_rows(
+        store,  # type: ignore[arg-type]
+        query="slow corpus",
+        session_id="session:test",
+        principal_scope_key="principal:m008",
+        search_queries=["slow corpus", "slow corpus expanded", "slow corpus fallback"],
+        transcript_limit=0,
+        corpus_limit=4,
+        evidence_item_budget=4,
+        entity_resolution={"candidates": []},
+        semantic_evidence_enabled=True,
+        semantic_allowed_shelves=("corpus",),
+        semantic_plan_enforced=True,
+    )
+
+    assert channels["corpus"] == []
+    assert store.corpus_queries == ["slow corpus"]
+    assert store.recorded_status["status"] == "degraded"
+    assert store.recorded_status["error_kind"] == "timeout"
+    assert store.recorded_status["followup_skipped"] == 3
 
 
 def test_chroma_publish_flattens_filter_metadata_for_corpus_scope_and_language() -> None:

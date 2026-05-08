@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from brainstack.control_plane import build_working_memory_packet  # noqa: E402
 from brainstack.db import BrainstackStore  # noqa: E402
+from brainstack.retrieval_pipeline.channel_collection import collect_semantic_rows  # noqa: E402
 from brainstack.retrieval_channel_deadlines import build_channel_deadline_statuses  # noqa: E402
 
 
@@ -30,6 +31,7 @@ class RuntimeRetrievalSpyStore(BrainstackStore):
             "search_semantic_evidence": 0,
             "search_conversation_semantic": 0,
             "search_corpus_semantic": 0,
+            "search_corpus_semantic_with_status": 0,
             "search_graph": 0,
             "search_corpus": 0,
             "get_current_truth_l0_candidates": 0,
@@ -50,6 +52,10 @@ class RuntimeRetrievalSpyStore(BrainstackStore):
     def search_corpus_semantic(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         self.calls["search_corpus_semantic"] += 1
         return super().search_corpus_semantic(*args, **kwargs)
+
+    def search_corpus_semantic_with_status(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self.calls["search_corpus_semantic_with_status"] += 1
+        return super().search_corpus_semantic_with_status(*args, **kwargs)
 
     def search_graph(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         self.calls["search_graph"] += 1
@@ -73,6 +79,20 @@ class RuntimeRetrievalSpyStore(BrainstackStore):
 
 
 class _UnsupportedExternalBackend:
+    def close(self) -> None:
+        return None
+
+
+class _TimeoutCorpusBackend:
+    target_name = "timeout-corpus-backend"
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def search_semantic(self, *, query: str, limit: int, where: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        self.calls.append({"query": query, "limit": limit, "where": dict(where or {})})
+        raise TimeoutError("runtime retrieval timeout containment probe")
+
     def close(self) -> None:
         return None
 
@@ -207,6 +227,66 @@ def _unsupported_deadline_contract(store: RuntimeRetrievalSpyStore, plan: dict[s
     return {"statuses": statuses, "unsupported_paths": unsupported}
 
 
+def _corpus_semantic_timeout_contract(store: RuntimeRetrievalSpyStore) -> dict[str, Any]:
+    original_corpus = getattr(store, "_corpus_backend", None)
+    direct_backend = _TimeoutCorpusBackend()
+    try:
+        store._corpus_backend = direct_backend
+        direct = store.search_corpus_semantic_with_status(
+            query="timeout containment direct probe",
+            limit=4,
+            principal_scope_key=PRINCIPAL_SCOPE,
+        )
+        direct_channel_status = store.corpus_semantic_channel_status()
+    finally:
+        store._corpus_backend = original_corpus
+
+    pipeline_backend = _TimeoutCorpusBackend()
+    try:
+        store._corpus_backend = pipeline_backend
+        store.reset_runtime_spies()
+        channels = collect_semantic_rows(
+            store,
+            query="timeout containment pipeline probe",
+            session_id="session:runtime-retrieval-enforcement",
+            principal_scope_key=PRINCIPAL_SCOPE,
+            search_queries=["first variant", "second variant", "third variant"],
+            transcript_limit=0,
+            corpus_limit=2,
+            evidence_item_budget=1,
+            entity_resolution={},
+            semantic_evidence_enabled=True,
+            semantic_allowed_shelves=("corpus",),
+            semantic_plan_enforced=True,
+        )
+        pipeline_channel_status = store.corpus_semantic_channel_status()
+    finally:
+        store._corpus_backend = original_corpus
+
+    direct_calls = list(direct_backend.calls)
+    pipeline_calls = list(pipeline_backend.calls)
+    direct_no_base_fallback = len(direct_calls) == 1 and direct_calls[0].get("where") != {"semantic_class": "corpus"}
+    pipeline_stopped_variants = len(pipeline_calls) == 1
+    return {
+        "direct_status": str(direct.get("status") or ""),
+        "direct_error_kind": str(direct.get("error_kind") or ""),
+        "direct_fallback_used": bool(direct.get("fallback_used")),
+        "direct_followup_skipped": int(direct.get("followup_skipped") or 0),
+        "direct_no_base_fallback": direct_no_base_fallback,
+        "direct_backend_call_count": len(direct_calls),
+        "pipeline_backend_call_count": len(pipeline_calls),
+        "pipeline_stopped_variants": pipeline_stopped_variants,
+        "pipeline_rows": len(channels.get("corpus") or []),
+        "agent_facing_status": str(pipeline_channel_status.get("status") or direct_channel_status.get("status") or ""),
+        "agent_facing_error_kind": str(pipeline_channel_status.get("error_kind") or direct_channel_status.get("error_kind") or ""),
+        "agent_facing_followup_skipped": int(
+            pipeline_channel_status.get("followup_skipped")
+            or direct_channel_status.get("followup_skipped")
+            or 0
+        ),
+    }
+
+
 def run_probe() -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="brainstack-runtime-retrieval-") as temp:
@@ -241,7 +321,7 @@ def run_probe() -> dict[str, Any]:
             temporal_semantic_kwargs = store.semantic_kwargs[-1] if store.semantic_kwargs else {}
             if "corpus" in tuple(temporal_semantic_kwargs.get("shelves") or ()):
                 issues.append({"code": "temporal_graph_fetched_corpus_semantic", "kwargs": temporal_semantic_kwargs})
-            if store.calls["search_corpus_semantic"] != 0 or store.calls["search_corpus"] != 0:
+            if store.calls["search_corpus_semantic"] != 0 or store.calls["search_corpus_semantic_with_status"] != 0 or store.calls["search_corpus"] != 0:
                 issues.append({"code": "temporal_graph_corpus_call", "calls": dict(store.calls)})
             if not _deadline_surface_ok(temporal):
                 issues.append({"code": "temporal_deadline_surface_missing_or_invalid", "channels": temporal.get("channels")})
@@ -280,6 +360,18 @@ def run_probe() -> dict[str, Any]:
             if "graph" in unsupported_paths:
                 issues.append({"code": "corpus_route_unexpected_graph_deadline_unsupported", "paths": unsupported_paths})
 
+            timeout_contract = _corpus_semantic_timeout_contract(store)
+            if timeout_contract["direct_status"] != "degraded":
+                issues.append({"code": "corpus_semantic_timeout_not_degraded", "contract": timeout_contract})
+            if timeout_contract["direct_error_kind"] != "timeout":
+                issues.append({"code": "corpus_semantic_timeout_kind_missing", "contract": timeout_contract})
+            if timeout_contract["direct_fallback_used"] is not False or timeout_contract["direct_no_base_fallback"] is not True:
+                issues.append({"code": "corpus_semantic_timeout_fell_back_to_base", "contract": timeout_contract})
+            if timeout_contract["pipeline_stopped_variants"] is not True:
+                issues.append({"code": "corpus_semantic_timeout_retried_variants", "contract": timeout_contract})
+            if timeout_contract["agent_facing_status"] != "degraded" or timeout_contract["agent_facing_error_kind"] != "timeout":
+                issues.append({"code": "corpus_semantic_timeout_not_agent_facing", "contract": timeout_contract})
+
             return {
                 "schema": "brainstack.runtime_retrieval_enforcement_verifier.v1",
                 "status": "pass" if not issues else "fail",
@@ -294,6 +386,12 @@ def run_probe() -> dict[str, Any]:
                 "deadline_surface_ok": _deadline_surface_ok(corpus) and _deadline_surface_ok(temporal),
                 "timeout_enforcement": "explicit_deadline_support_contract",
                 "unsupported_cancellation_paths": unsupported_paths,
+                "semantic_timeout_containment": "status_aware_fail_closed",
+                "semantic_timeout_no_base_fallback": timeout_contract["direct_no_base_fallback"],
+                "semantic_timeout_pipeline_stopped_variants": timeout_contract["pipeline_stopped_variants"],
+                "semantic_timeout_followup_skipped": timeout_contract["agent_facing_followup_skipped"],
+                "semantic_timeout_agent_facing_status": timeout_contract["agent_facing_status"],
+                "semantic_timeout_agent_facing_error_kind": timeout_contract["agent_facing_error_kind"],
             }
         finally:
             store.close()

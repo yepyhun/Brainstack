@@ -42,13 +42,23 @@ def semantic_retrieval_status(
             "status": "degraded",
             "reason": str(semantic_index_status.get("reason") or ""),
             "rows": semantic_channel_rows,
+            "corpus_semantic_status": dict(corpus_semantic_status),
+            "semantic_index_status": dict(semantic_index_status),
         }
     if semantic_channel_rows:
-        return {"status": "active", "reason": reason, "rows": semantic_channel_rows}
+        return {
+            "status": "active",
+            "reason": reason,
+            "rows": semantic_channel_rows,
+            "corpus_semantic_status": dict(corpus_semantic_status),
+            "semantic_index_status": dict(semantic_index_status),
+        }
     return {
         "status": str(corpus_semantic_status.get("status") or semantic_index_status.get("status") or "idle"),
         "reason": reason,
         "rows": semantic_channel_rows,
+        "corpus_semantic_status": dict(corpus_semantic_status),
+        "semantic_index_status": dict(semantic_index_status),
     }
 
 
@@ -112,6 +122,13 @@ def retrieval_channel_statuses(
                 status["deadline_support_status"] = str(deadline_status.get("support_status") or "")
                 status["deadline_enforcement"] = str(deadline_status.get("enforcement") or "")
                 status["deadline_reason"] = str(deadline_status.get("reason") or "")
+    for status in statuses:
+        if status.get("name") == "semantic":
+            corpus_status = semantic_status.get("corpus_semantic_status")
+            if isinstance(corpus_status, Mapping):
+                status["corpus_semantic_status"] = dict(corpus_status)
+                if corpus_status.get("followup_skipped") is not None:
+                    status["semantic_followup_skipped"] = int(corpus_status.get("followup_skipped") or 0)
     return statuses
 
 

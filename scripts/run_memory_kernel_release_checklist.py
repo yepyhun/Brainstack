@@ -1280,6 +1280,11 @@ def _check_runtime_retrieval_enforcement(tmp: Path) -> CheckResult:
         and data.get("plan_id_surface_ok") is True
         and data.get("deadline_surface_ok") is True
         and data.get("timeout_enforcement") == "explicit_deadline_support_contract"
+        and data.get("semantic_timeout_containment") == "status_aware_fail_closed"
+        and data.get("semantic_timeout_no_base_fallback") is True
+        and data.get("semantic_timeout_pipeline_stopped_variants") is True
+        and data.get("semantic_timeout_agent_facing_status") == "degraded"
+        and data.get("semantic_timeout_agent_facing_error_kind") == "timeout"
     )
     return CheckResult(
         name="runtime_retrieval_enforcement",
@@ -1299,6 +1304,12 @@ def _check_runtime_retrieval_enforcement(tmp: Path) -> CheckResult:
             "deadline_surface_ok": data.get("deadline_surface_ok"),
             "timeout_enforcement": data.get("timeout_enforcement"),
             "unsupported_cancellation_paths": data.get("unsupported_cancellation_paths"),
+            "semantic_timeout_containment": data.get("semantic_timeout_containment"),
+            "semantic_timeout_no_base_fallback": data.get("semantic_timeout_no_base_fallback"),
+            "semantic_timeout_pipeline_stopped_variants": data.get("semantic_timeout_pipeline_stopped_variants"),
+            "semantic_timeout_followup_skipped": data.get("semantic_timeout_followup_skipped"),
+            "semantic_timeout_agent_facing_status": data.get("semantic_timeout_agent_facing_status"),
+            "semantic_timeout_agent_facing_error_kind": data.get("semantic_timeout_agent_facing_error_kind"),
         },
     )
 
@@ -1698,6 +1709,127 @@ def _check_hermes_proactive_runtime_parity(tmp: Path) -> CheckResult:
             "payload_missing_count": len(payload_files.get("missing") or []),
             "public_safe": data.get("public_safe"),
             "zero_runtime_side_effects": data.get("zero_runtime_side_effects"),
+        },
+    )
+
+
+def _check_workrun_recovery_spine(tmp: Path) -> CheckResult:
+    out = tmp / "workrun_recovery_spine.json"
+    command = [sys.executable, "scripts/run_workrun_recovery_spine_proof.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    issues = data.get("issues") if isinstance(data.get("issues"), list) else []
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    required = (
+        "stale_running_reclaimable",
+        "fresh_running_not_reclaimed",
+        "completed_not_reclaimed",
+        "interrupted_recoverable",
+        "recovery_card_public_safe",
+        "pulse_surfaces_recovery_candidates",
+        "projection_is_side_effect_bounded",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("llm_calls_performed") is False
+        and issues == []
+        and all(proof.get(key) is True for key in required)
+    )
+    return CheckResult(
+        name="workrun_recovery_spine",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": len(issues),
+            "public_safe": data.get("public_safe"),
+            "llm_calls_performed": data.get("llm_calls_performed"),
+            "proof": {key: proof.get(key) for key in required},
+        },
+    )
+
+
+def _check_tool_call_preface_boundary(tmp: Path) -> CheckResult:
+    out = tmp / "tool_call_preface_boundary.json"
+    command = [sys.executable, "scripts/run_tool_call_preface_boundary_proof.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    issues = data.get("issues") if isinstance(data.get("issues"), list) else []
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    required = (
+        "interim_tool_call_content_suppressed",
+        "codex_stream_buffers_preface",
+        "codex_stream_flushes_only_after_boundary",
+        "chat_stream_buffers_preface",
+        "chat_stream_flushes_only_without_tool_calls",
+        "safe_progress_callbacks_not_disabled_by_config",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("llm_calls_performed") is False
+        and issues == []
+        and all(proof.get(key) is True for key in required)
+    )
+    return CheckResult(
+        name="tool_call_preface_boundary",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": len(issues),
+            "public_safe": data.get("public_safe"),
+            "llm_calls_performed": data.get("llm_calls_performed"),
+            "proof": {key: proof.get(key) for key in required},
+        },
+    )
+
+
+def _check_context_pressure_queue_liveness(tmp: Path) -> CheckResult:
+    out = tmp / "context_pressure_queue_liveness.json"
+    command = [sys.executable, "scripts/run_context_pressure_queue_liveness_proof.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    issues = data.get("issues") if isinstance(data.get("issues"), list) else []
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    required = (
+        "host_patch_selected",
+        "helpers_installed",
+        "watch_output_bounded",
+        "raw_middle_not_injected",
+        "artifact_written",
+        "artifact_preserves_full_output",
+        "agent_completion_path_patched",
+        "user_completion_path_patched",
+        "running_update_path_patched",
+        "old_raw_final_phrase_removed",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("llm_calls_performed") is False
+        and issues == []
+        and all(proof.get(key) is True for key in required)
+    )
+    return CheckResult(
+        name="context_pressure_queue_liveness",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": len(issues),
+            "public_safe": data.get("public_safe"),
+            "llm_calls_performed": data.get("llm_calls_performed"),
+            "rendered_length": data.get("rendered_length"),
+            "artifact_count": data.get("artifact_count"),
+            "proof": {key: proof.get(key) for key in required},
         },
     )
 
@@ -2498,6 +2630,9 @@ def run_checklist(
             _check_actionable_proactive_runtime_wizard_destructive_proof(tmp),
             _check_proactive_agent_facing_wake_contract(tmp),
             _check_hermes_proactive_runtime_parity(tmp),
+            _check_workrun_recovery_spine(tmp),
+            _check_tool_call_preface_boundary(tmp),
+            _check_context_pressure_queue_liveness(tmp),
             _check_behavior_card_delivery(tmp),
             _check_behavior_card_destructive_proof(tmp),
             _check_style_source_hygiene_repair_proof(tmp),

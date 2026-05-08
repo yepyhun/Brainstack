@@ -122,8 +122,59 @@ class SemanticIndexStoreMixin(StoreRuntimeBase):
         source: str = "",
         language: str = "",
     ) -> List[Dict[str, Any]]:
+        return list(
+            self._search_corpus_semantic_with_status_unlocked(
+                query=query,
+                limit=limit,
+                principal_scope_key=principal_scope_key,
+                doc_kind=doc_kind,
+                source=source,
+                language=language,
+            ).get("rows")
+            or []
+        )
+
+    @_locked
+    def search_corpus_semantic_with_status(
+        self,
+        *,
+        query: str,
+        limit: int,
+        principal_scope_key: str = "",
+        doc_kind: str = "",
+        source: str = "",
+        language: str = "",
+    ) -> Dict[str, Any]:
+        return self._search_corpus_semantic_with_status_unlocked(
+            query=query,
+            limit=limit,
+            principal_scope_key=principal_scope_key,
+            doc_kind=doc_kind,
+            source=source,
+            language=language,
+        )
+
+    def _search_corpus_semantic_with_status_unlocked(
+        self,
+        *,
+        query: str,
+        limit: int,
+        principal_scope_key: str = "",
+        doc_kind: str = "",
+        source: str = "",
+        language: str = "",
+    ) -> Dict[str, Any]:
         if self._corpus_backend is None:
-            return []
+            status = {
+                "status": "degraded",
+                "reason": "Semantic retrieval is disabled until a donor-aligned corpus backend is configured.",
+                "rows": [],
+                "error_kind": "backend_unavailable",
+                "fallback_used": False,
+                "followup_skipped": 0,
+            }
+            self._record_corpus_semantic_runtime_status_unlocked(status)
+            return status
         base_where = {"semantic_class": "corpus"}
         scoped_where = self._corpus_semantic_where(
             principal_scope_key=principal_scope_key,
@@ -131,15 +182,60 @@ class SemanticIndexStoreMixin(StoreRuntimeBase):
             source=source,
             language=language,
         )
-        rows = self._search_semantic_backend(query=query, limit=limit, where=scoped_where)
+        primary = self._search_semantic_backend_result(query=query, limit=limit, where=scoped_where)
+        if primary["status"] != "ok":
+            status = {
+                **primary,
+                "status": "degraded",
+                "rows": [],
+                "requested_where": dict(scoped_where),
+                "fallback_used": False,
+                "followup_skipped": 1 if scoped_where != base_where else 0,
+            }
+            self._record_corpus_semantic_runtime_status_unlocked(status)
+            return status
+        rows = list(primary.get("rows") or [])
         if rows or scoped_where == base_where:
-            return self._annotate_semantic_filter(rows, requested_where=scoped_where, fallback_used=False)
-        fallback_rows = self._search_semantic_backend(query=query, limit=limit, where=base_where)
-        return self._annotate_semantic_filter(
-            fallback_rows,
+            annotated = self._annotate_semantic_filter(rows, requested_where=scoped_where, fallback_used=False)
+            status = {
+                "status": "active" if annotated else "idle",
+                "reason": "Semantic corpus search completed.",
+                "rows": annotated,
+                "error_kind": "",
+                "requested_where": dict(scoped_where),
+                "fallback_used": False,
+                "followup_skipped": 0,
+            }
+            self._record_corpus_semantic_runtime_status_unlocked(status)
+            return status
+        fallback = self._search_semantic_backend_result(query=query, limit=limit, where=base_where)
+        if fallback["status"] != "ok":
+            status = {
+                **fallback,
+                "status": "degraded",
+                "rows": [],
+                "requested_where": dict(scoped_where),
+                "fallback_used": False,
+                "followup_skipped": 0,
+            }
+            self._record_corpus_semantic_runtime_status_unlocked(status)
+            return status
+        fallback_rows = self._annotate_semantic_filter(
+            list(fallback.get("rows") or []),
             requested_where=scoped_where,
             fallback_used=True,
         )
+        status = {
+            "status": "active" if fallback_rows else "idle",
+            "reason": "Semantic corpus search completed with scope fallback.",
+            "rows": fallback_rows,
+            "error_kind": "",
+            "requested_where": dict(scoped_where),
+            "fallback_used": bool(fallback_rows),
+            "followup_skipped": 0,
+        }
+        self._record_corpus_semantic_runtime_status_unlocked(status)
+        return status
 
     def _corpus_semantic_where(
         self,
@@ -188,16 +284,56 @@ class SemanticIndexStoreMixin(StoreRuntimeBase):
         limit: int,
         where: Dict[str, Any] | None = None,
     ) -> List[Dict[str, Any]]:
+        return list(self._search_semantic_backend_result(query=query, limit=limit, where=where).get("rows") or [])
+
+    def _search_semantic_backend_result(
+        self,
+        *,
+        query: str,
+        limit: int,
+        where: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         if self._corpus_backend is None:
-            return []
+            return {
+                "status": "degraded",
+                "reason": "Semantic corpus backend is unavailable.",
+                "rows": [],
+                "error_kind": "backend_unavailable",
+            }
         try:
             rows = self._corpus_backend.search_semantic(query=query, limit=limit, where=where)
         except Exception as exc:
             self._corpus_backend_error = str(exc)
             logger.warning("Brainstack corpus semantic search failed: %s", exc)
-            return []
+            error_kind = "timeout" if isinstance(exc, TimeoutError) else "backend_error"
+            return {
+                "status": "error",
+                "reason": f"Semantic corpus backend {error_kind}: {exc}",
+                "rows": [],
+                "error_kind": error_kind,
+            }
         self._corpus_backend_error = ""
-        return rows
+        return {
+            "status": "ok",
+            "reason": "Semantic corpus backend returned.",
+            "rows": rows,
+            "error_kind": "",
+        }
+
+    def _record_corpus_semantic_runtime_status_unlocked(self, status: Mapping[str, Any]) -> None:
+        self._corpus_semantic_runtime_status = {
+            key: value
+            for key, value in dict(status).items()
+            if key not in {"rows"}
+        }
+
+    @_locked
+    def record_corpus_semantic_runtime_status(self, status: Mapping[str, Any]) -> None:
+        self._record_corpus_semantic_runtime_status_unlocked(status)
+
+    @_locked
+    def corpus_semantic_runtime_status(self) -> Dict[str, Any]:
+        return dict(getattr(self, "_corpus_semantic_runtime_status", {}) or {})
 
     @_locked
     def search_conversation_semantic(
@@ -868,6 +1004,15 @@ class SemanticIndexStoreMixin(StoreRuntimeBase):
 
     @_locked
     def corpus_semantic_channel_status(self) -> Dict[str, str]:
+        runtime_status = dict(getattr(self, "_corpus_semantic_runtime_status", {}) or {})
+        if runtime_status and str(runtime_status.get("status") or "") == "degraded":
+            return {
+                "status": "degraded",
+                "reason": str(runtime_status.get("reason") or "Semantic retrieval backend is unhealthy."),
+                "error_kind": str(runtime_status.get("error_kind") or ""),
+                "fallback_used": str(bool(runtime_status.get("fallback_used"))).lower(),
+                "followup_skipped": str(int(runtime_status.get("followup_skipped") or 0)),
+            }
         if self._corpus_backend is None:
             return {
                 "status": "degraded",

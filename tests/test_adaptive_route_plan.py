@@ -253,6 +253,17 @@ class SemanticSpyStore(BrainstackStore):
         self.search_corpus_semantic_call_count += 1
         return []
 
+    def search_corpus_semantic_with_status(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self.search_corpus_semantic_call_count += 1
+        return {
+            "status": "idle",
+            "reason": "spy semantic corpus search",
+            "rows": [],
+            "error_kind": "",
+            "fallback_used": False,
+            "followup_skipped": 0,
+        }
+
 
 class BackendCallSpyStore(SemanticSpyStore):
     def __init__(self, *args: Any, **kwargs: Any) -> None:

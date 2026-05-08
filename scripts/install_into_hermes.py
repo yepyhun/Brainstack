@@ -94,6 +94,11 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "owner": "host-output-seam",
         "removal_condition": "Hermes natively treats assistant content on tool-call turns as transcript/API state and keeps public progress on explicit status/tool channels.",
     },
+    "_patch_gateway_background_process_output_boundary": {
+        "category": "required_seam",
+        "owner": "host-output-seam",
+        "removal_condition": "Hermes natively stores large background-process output as artifacts and injects only bounded summaries into chat/model context.",
+    },
     "_patch_memory_provider": {
         "category": "compat_hotfix",
         "owner": "host-seam",
@@ -436,6 +441,14 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_modes": ("source", "docker"),
         "purpose": "Brainstack lifecycle hooks that must execute at gateway runtime boundaries.",
         "why": "Avoids a parallel runtime while keeping Brainstack synchronized with the single Hermes gateway.",
+    },
+    {
+        "patcher": "_patch_gateway_background_process_output_boundary",
+        "target": "gateway/run.py",
+        "scope": "gateway-output-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Keep large background-process/watch output out of user-facing and model-facing chat context while preserving full output as an artifact.",
+        "why": "Raw process output injected through watch/queue messages can force repeated compression and make queued work look frozen.",
     },
     {
         "patcher": "_patch_gateway_turn_profiles_capability_preserving_default",
@@ -2085,9 +2098,6 @@ def _patch_run_agent_tool_call_interim_boundary(path: Path, dry_run: bool) -> li
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
 
-    if "Tool-call turns are transcript/API state" in text:
-        return []
-
     anchor = (
         "        if cb is None or not isinstance(assistant_msg, dict):\n"
         "            return\n"
@@ -2101,17 +2111,173 @@ def _patch_run_agent_tool_call_interim_boundary(path: Path, dry_run: bool) -> li
         "            return\n"
         "        content = assistant_msg.get(\"content\")\n"
     )
-    if anchor not in text:
-        return []
+    if "Tool-call turns are transcript/API state" not in text and anchor in text:
+        text = _replace_once(
+            text,
+            anchor,
+            replacement,
+            label="run_agent tool-call interim user-facing boundary",
+            path=path,
+        )
+        applied.append("run_agent:tool_call_interim_user_facing_boundary")
 
-    text = _replace_once(
-        text,
-        anchor,
-        replacement,
-        label="run_agent tool-call interim user-facing boundary",
-        path=path,
+    codex_state_anchor = (
+        "        max_stream_retries = 1\n"
+        "        has_tool_calls = False\n"
+        "        first_delta_fired = False\n"
     )
-    applied.append("run_agent:tool_call_interim_user_facing_boundary")
+    codex_state_replacement = (
+        "        max_stream_retries = 1\n"
+        "        has_tool_calls = False\n"
+        "        first_delta_fired = False\n"
+        "        tool_boundary_text_buffer: list[str] = []\n"
+        "\n"
+        "        def _flush_tool_boundary_text_buffer() -> None:\n"
+        "            nonlocal first_delta_fired\n"
+        "            if has_tool_calls or not tool_boundary_text_buffer:\n"
+        "                tool_boundary_text_buffer.clear()\n"
+        "                return\n"
+        "            for _delta_text in list(tool_boundary_text_buffer):\n"
+        "                if not first_delta_fired:\n"
+        "                    first_delta_fired = True\n"
+        "                    if on_first_delta:\n"
+        "                        try:\n"
+        "                            on_first_delta()\n"
+        "                        except Exception:\n"
+        "                            pass\n"
+        "                self._fire_stream_delta(_delta_text)\n"
+        "            tool_boundary_text_buffer.clear()\n"
+    )
+    if "def _flush_tool_boundary_text_buffer() -> None:" not in text and codex_state_anchor in text:
+        text = _replace_once(
+            text,
+            codex_state_anchor,
+            codex_state_replacement,
+            label="run_agent codex stream tool-boundary buffer",
+            path=path,
+        )
+        applied.append("run_agent:codex_stream_tool_boundary_buffer")
+
+    codex_delta_anchor = (
+        "                            if delta_text and not has_tool_calls:\n"
+        "                                if not first_delta_fired:\n"
+        "                                    first_delta_fired = True\n"
+        "                                    if on_first_delta:\n"
+        "                                        try:\n"
+        "                                            on_first_delta()\n"
+        "                                        except Exception:\n"
+        "                                            pass\n"
+        "                                self._fire_stream_delta(delta_text)\n"
+    )
+    codex_delta_replacement = (
+        "                            if delta_text:\n"
+        "                                # Buffer until the completed response proves this is not a tool-call turn.\n"
+        "                                tool_boundary_text_buffer.append(delta_text)\n"
+    )
+    if "tool_boundary_text_buffer.append(delta_text)" not in text and codex_delta_anchor in text:
+        text = _replace_once(
+            text,
+            codex_delta_anchor,
+            codex_delta_replacement,
+            label="run_agent codex stream buffer deltas before tool boundary",
+            path=path,
+        )
+        applied.append("run_agent:codex_stream_buffer_preface")
+
+    codex_flush_anchor = "                    final_response = stream.get_final_response()\n"
+    codex_flush_replacement = "                    _flush_tool_boundary_text_buffer()\n                    final_response = stream.get_final_response()\n"
+    if "_flush_tool_boundary_text_buffer()\n                    final_response = stream.get_final_response()" not in text and codex_flush_anchor in text:
+        text = _replace_once(
+            text,
+            codex_flush_anchor,
+            codex_flush_replacement,
+            label="run_agent codex stream flush non-tool final text",
+            path=path,
+        )
+        applied.append("run_agent:codex_stream_flush_safe_final")
+
+    chat_state_anchor = (
+        "            content_parts: list = []\n"
+        "            tool_calls_acc: dict = {}\n"
+    )
+    chat_state_replacement = (
+        "            content_parts: list = []\n"
+        "            tool_boundary_text_buffer: list[str] = []\n"
+        "            tool_calls_acc: dict = {}\n"
+    )
+    if "tool_boundary_text_buffer: list[str] = []\n            tool_calls_acc: dict = {}" not in text and chat_state_anchor in text:
+        text = _replace_once(
+            text,
+            chat_state_anchor,
+            chat_state_replacement,
+            label="run_agent chat stream tool-boundary buffer",
+            path=path,
+        )
+        applied.append("run_agent:chat_stream_tool_boundary_buffer")
+
+    chat_delta_anchor = (
+        "                if delta and delta.content:\n"
+        "                    content_parts.append(delta.content)\n"
+        "                    if not tool_calls_acc:\n"
+        "                        _fire_first_delta()\n"
+        "                        self._fire_stream_delta(delta.content)\n"
+        "                        deltas_were_sent[\"yes\"] = True\n"
+        "                    else:\n"
+        "                        # Tool calls suppress regular content streaming (avoids\n"
+        "                        # displaying chatty \"I'll use the tool...\" text alongside\n"
+        "                        # tool calls).  But reasoning tags embedded in suppressed\n"
+        "                        # content should still reach the display — otherwise the\n"
+        "                        # reasoning box only appears as a post-response fallback,\n"
+        "                        # rendering it confusingly after the already-streamed\n"
+        "                        # response.  Route suppressed content through the stream\n"
+        "                        # delta callback so its tag extraction can fire the\n"
+        "                        # reasoning display.  Non-reasoning text is harmlessly\n"
+        "                        # suppressed by the CLI's _stream_delta when the stream\n"
+        "                        # box is already closed (tool boundary flush).\n"
+        "                        if self.stream_delta_callback:\n"
+        "                            try:\n"
+        "                                self.stream_delta_callback(delta.content)\n"
+        "                                self._record_streamed_assistant_text(delta.content)\n"
+        "                            except Exception:\n"
+        "                                pass\n"
+    )
+    chat_delta_replacement = (
+        "                if delta and delta.content:\n"
+        "                    content_parts.append(delta.content)\n"
+        "                    if not tool_calls_acc:\n"
+        "                        # Buffer until the completed response proves this is not a tool-call turn.\n"
+        "                        tool_boundary_text_buffer.append(delta.content)\n"
+    )
+    if "tool_boundary_text_buffer.append(delta.content)" not in text and chat_delta_anchor in text:
+        text = _replace_once(
+            text,
+            chat_delta_anchor,
+            chat_delta_replacement,
+            label="run_agent chat stream buffer preface",
+            path=path,
+        )
+        applied.append("run_agent:chat_stream_buffer_preface")
+
+    chat_flush_anchor = "            # Build mock response matching non-streaming shape\n"
+    chat_flush_replacement = (
+        "            if not tool_calls_acc and tool_boundary_text_buffer:\n"
+        "                for _delta_text in list(tool_boundary_text_buffer):\n"
+        "                    _fire_first_delta()\n"
+        "                    self._fire_stream_delta(_delta_text)\n"
+        "                    deltas_were_sent[\"yes\"] = True\n"
+        "                tool_boundary_text_buffer.clear()\n"
+        "\n"
+        "            # Build mock response matching non-streaming shape\n"
+    )
+    if "if not tool_calls_acc and tool_boundary_text_buffer:" not in text and chat_flush_anchor in text:
+        text = _replace_once(
+            text,
+            chat_flush_anchor,
+            chat_flush_replacement,
+            label="run_agent chat stream flush safe final text",
+            path=path,
+        )
+        applied.append("run_agent:chat_stream_flush_safe_final")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -3463,6 +3629,175 @@ print(json.dumps(result, ensure_ascii=False))
     payload["status"] = "updated"
     payload["path"] = str(db_path)
     return payload
+
+
+def _patch_gateway_background_process_output_boundary(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    helper_anchor = "def _format_gateway_process_notification(evt: dict) -> \"str | None\":\n"
+    helper_block = (
+        "PROCESS_OUTPUT_CONTEXT_PREVIEW_CHARS = 600\n"
+        "PROCESS_OUTPUT_ARTIFACT_THRESHOLD_CHARS = 900\n"
+        "\n"
+        "\n"
+        "def _write_gateway_process_output_artifact(session_id: str, kind: str, output: str) -> str | None:\n"
+        "    if not output:\n"
+        "        return None\n"
+        "    try:\n"
+        "        safe_session = re.sub(r\"[^A-Za-z0-9_.-]+\", \"_\", str(session_id or \"process\"))[:80]\n"
+        "        safe_kind = re.sub(r\"[^A-Za-z0-9_.-]+\", \"_\", str(kind or \"output\"))[:40]\n"
+        "        base = Path(os.environ.get(\"HERMES_HOME\") or \"~/.hermes\").expanduser()\n"
+        "        out_dir = base / \"process_artifacts\"\n"
+        "        out_dir.mkdir(parents=True, exist_ok=True)\n"
+        "        path = out_dir / f\"{safe_session}_{safe_kind}_{int(time.time())}.txt\"\n"
+        "        path.write_text(output, encoding=\"utf-8\", errors=\"replace\")\n"
+        "        return str(path)\n"
+        "    except Exception:\n"
+        "        return None\n"
+        "\n"
+        "\n"
+        "def _compact_gateway_process_output(session_id: str, kind: str, output: str) -> tuple[str, str | None]:\n"
+        "    rendered = str(output or \"\")\n"
+        "    if len(rendered) <= PROCESS_OUTPUT_ARTIFACT_THRESHOLD_CHARS:\n"
+        "        return rendered, None\n"
+        "    artifact_ref = _write_gateway_process_output_artifact(session_id, kind, rendered)\n"
+        "    half = max(PROCESS_OUTPUT_CONTEXT_PREVIEW_CHARS // 2, 1)\n"
+        "    preview = rendered[:half].rstrip()\n"
+        "    tail = rendered[-half:].lstrip()\n"
+        "    if tail and tail != preview:\n"
+        "        preview = f\"{preview}\\n...\\n{tail}\"\n"
+        "    omitted = max(len(rendered) - len(preview), 0)\n"
+        "    if artifact_ref:\n"
+        "        prefix = f\"[large output: {len(rendered)} chars, {omitted} chars omitted; full output artifact: {artifact_ref}]\"\n"
+        "    else:\n"
+        "        prefix = f\"[large output: {len(rendered)} chars, {omitted} chars omitted; artifact write unavailable]\"\n"
+        "    return f\"{prefix}\\n{preview}\", artifact_ref\n"
+        "\n"
+        "\n"
+        + helper_anchor
+    )
+    if "PROCESS_OUTPUT_CONTEXT_PREVIEW_CHARS = 600" not in text and helper_anchor in text:
+        text = _replace_once(
+            text,
+            helper_anchor,
+            helper_block,
+            label="gateway background process output boundary helpers",
+            path=path,
+        )
+        applied.append("gateway:background_output_boundary_helpers")
+
+    replacements = [
+        (
+            (
+                "        _out = evt.get(\"output\", \"\")\n"
+                "        _sup = evt.get(\"suppressed\", 0)\n"
+                "        text = (\n"
+                "            f\"[IMPORTANT: Background process {_sid} matched \"\n"
+                "            f\"watch pattern \\\"{_pat}\\\".\\n\"\n"
+                "            f\"Command: {_cmd}\\n\"\n"
+                "            f\"Matched output:\\n{_out}\"\n"
+                "        )\n"
+            ),
+            (
+                "        _out, _artifact_ref = _compact_gateway_process_output(_sid, \"watch_match\", evt.get(\"output\", \"\"))\n"
+                "        _sup = evt.get(\"suppressed\", 0)\n"
+                "        _artifact_line = f\"Full output artifact: {_artifact_ref}\\n\" if _artifact_ref else \"\"\n"
+                "        text = (\n"
+                "            f\"[IMPORTANT: Background process {_sid} matched \"\n"
+                "            f\"watch pattern \\\"{_pat}\\\".\\n\"\n"
+                "            f\"Command: {_cmd}\\n\"\n"
+                "            f\"{_artifact_line}\"\n"
+                "            f\"Matched output:\\n{_out}\"\n"
+                "        )\n"
+            ),
+            "gateway:watch_output_compact_artifact",
+            "_compact_gateway_process_output(_sid, \"watch_match\"",
+        ),
+        (
+            (
+                "                    _out = strip_ansi(session.output_buffer[-2000:]) if session.output_buffer else \"\"\n"
+                "                    synth_text = (\n"
+                "                        f\"[IMPORTANT: Background process {session_id} completed \"\n"
+                "                        f\"(exit code {session.exit_code}).\\n\"\n"
+                "                        f\"Command: {session.command}\\n\"\n"
+                "                        f\"Output:\\n{_out}]\"\n"
+                "                    )\n"
+            ),
+            (
+                "                    _raw_output = strip_ansi(session.output_buffer) if session.output_buffer else \"\"\n"
+                "                    _out, _artifact_ref = _compact_gateway_process_output(session_id, \"agent_completion\", _raw_output)\n"
+                "                    _artifact_line = f\"Full output artifact: {_artifact_ref}\\n\" if _artifact_ref else \"\"\n"
+                "                    synth_text = (\n"
+                "                        f\"[IMPORTANT: Background process {session_id} completed \"\n"
+                "                        f\"(exit code {session.exit_code}).\\n\"\n"
+                "                        f\"Command: {session.command}\\n\"\n"
+                "                        f\"{_artifact_line}\"\n"
+                "                        f\"Output:\\n{_out}]\"\n"
+                "                    )\n"
+            ),
+            "gateway:agent_completion_output_compact_artifact",
+            "_compact_gateway_process_output(session_id, \"agent_completion\"",
+        ),
+        (
+            (
+                "                    new_output = session.output_buffer[-1000:] if session.output_buffer else \"\"\n"
+                "                    message_text = (\n"
+                "                        f\"[Background process {session_id} finished with exit code {session.exit_code}~ \"\n"
+                "                        f\"Here's the final output:\\n{new_output}]\"\n"
+                "                    )\n"
+            ),
+            (
+                "                    new_output, artifact_ref = _compact_gateway_process_output(\n"
+                "                        session_id,\n"
+                "                        \"user_completion\",\n"
+                "                        session.output_buffer if session.output_buffer else \"\",\n"
+                "                    )\n"
+                "                    artifact_line = f\"Full output artifact: {artifact_ref}\\n\" if artifact_ref else \"\"\n"
+                "                    message_text = (\n"
+                "                        f\"[Background process {session_id} finished with exit code {session.exit_code}~ \"\n"
+                "                        f\"{artifact_line}\"\n"
+                "                        f\"Final output preview:\\n{new_output}]\"\n"
+                "                    )\n"
+            ),
+            "gateway:user_completion_output_compact_artifact",
+            "_compact_gateway_process_output(\n                        session_id,\n                        \"user_completion\"",
+        ),
+        (
+            (
+                "                new_output = session.output_buffer[-500:] if session.output_buffer else \"\"\n"
+                "                message_text = (\n"
+                "                    f\"[Background process {session_id} is still running~ \"\n"
+                "                    f\"New output:\\n{new_output}]\"\n"
+                "                )\n"
+            ),
+            (
+                "                new_output, artifact_ref = _compact_gateway_process_output(\n"
+                "                    session_id,\n"
+                "                    \"running_update\",\n"
+                "                    session.output_buffer if session.output_buffer else \"\",\n"
+                "                )\n"
+                "                artifact_line = f\"Full output artifact: {artifact_ref}\\n\" if artifact_ref else \"\"\n"
+                "                message_text = (\n"
+                "                    f\"[Background process {session_id} is still running~ \"\n"
+                "                    f\"{artifact_line}\"\n"
+                "                    f\"New output preview:\\n{new_output}]\"\n"
+                "                )\n"
+            ),
+            "gateway:running_output_compact_artifact",
+            "_compact_gateway_process_output(\n                    session_id,\n                    \"running_update\"",
+        ),
+    ]
+    for old, new, label, marker in replacements:
+        if marker not in text and old in text:
+            text = _replace_once(text, old, new, label=label, path=path)
+            applied.append(label)
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
 
 
 def _patch_gateway_run(path: Path, dry_run: bool) -> list[str]:
@@ -5849,6 +6184,7 @@ def main() -> int:
     host_patches.extend(_run_host_patch("_patch_memory_manager_required_seam", target / "agent" / "memory_manager.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_memory_manager_output_validation_seam", target / "agent" / "memory_manager.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_memory_manager", target / "agent" / "memory_manager.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_gateway_background_process_output_boundary", target / "gateway" / "run.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_gateway_run", target / "gateway" / "run.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_gateway_turn_profiles_capability_preserving_default", target / "gateway" / "turn_profiles.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_gateway_run_turn_profile_resolution", target / "gateway" / "run.py", args.dry_run, host_patch_mode=args.host_patch_mode))
