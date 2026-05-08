@@ -897,6 +897,80 @@ def build_tool_load_result():
     assert '"next_step_instruction":' in text
 
 
+def test_tool_call_interim_boundary_is_required_core_host_seam() -> None:
+    inventory = {
+        item["patcher"]: item
+        for item in install_into_hermes._selected_host_patch_inventory(
+            "docker",
+            host_patch_mode="core",
+        )
+    }
+
+    seam = inventory["_patch_run_agent_tool_call_interim_boundary"]
+    assert seam["selected"] is True
+    assert seam["category"] == "required_seam"
+    assert seam["owner"] == "host-output-seam"
+
+
+def test_run_agent_tool_call_interim_boundary_blocks_protocol_content(tmp_path):
+    module = tmp_path / "run_agent.py"
+    module.write_text(
+        '''
+from typing import Any, Dict
+
+class AIAgent:
+    def _strip_think_blocks(self, text: str) -> str:
+        return text
+
+    def _emit_interim_assistant_message(self, assistant_msg: Dict[str, Any]) -> None:
+        """Surface a real mid-turn assistant commentary message to the UI layer."""
+        cb = getattr(self, "interim_assistant_callback", None)
+        if cb is None or not isinstance(assistant_msg, dict):
+            return
+        content = assistant_msg.get("content")
+        if not isinstance(content, str):
+            return
+        visible = self._strip_think_blocks(content).strip()
+        if not visible:
+            return
+        try:
+            cb(visible, already_streamed=False)
+        except TypeError:
+            cb(visible)
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_run_agent_tool_call_interim_boundary(
+        module,
+        dry_run=False,
+    )
+
+    text = module.read_text(encoding="utf-8")
+    assert applied == ["run_agent:tool_call_interim_user_facing_boundary"]
+    assert "if assistant_msg.get(\"tool_calls\"):" in text
+    assert "Tool-call turns are transcript/API state" in text
+
+    namespace: dict[str, object] = {}
+    exec(text, namespace)
+    agent = namespace["AIAgent"]()
+    calls: list[tuple[str, bool]] = []
+    agent.interim_assistant_callback = lambda text, already_streamed=False: calls.append(
+        (text, already_streamed)
+    )
+
+    agent._emit_interim_assistant_message(
+        {
+            "content": "Need inspect. Need verify list.",
+            "tool_calls": [{"type": "function", "function": {"name": "skill_view"}}],
+        }
+    )
+    assert calls == []
+
+    agent._emit_interim_assistant_message({"content": "I will inspect the logs."})
+    assert calls == [("I will inspect the logs.", False)]
+
+
 def test_run_agent_deferred_tool_continuation_patch_blocks_final_before_tool(tmp_path):
     module = tmp_path / "run_agent.py"
     module.write_text(

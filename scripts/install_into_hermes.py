@@ -89,6 +89,11 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "owner": "host-lifecycle-seam",
         "removal_condition": "Hermes soft cache eviction closes external memory provider runtime handles natively.",
     },
+    "_patch_run_agent_tool_call_interim_boundary": {
+        "category": "required_seam",
+        "owner": "host-output-seam",
+        "removal_condition": "Hermes natively treats assistant content on tool-call turns as transcript/API state and keeps public progress on explicit status/tool channels.",
+    },
     "_patch_memory_provider": {
         "category": "compat_hotfix",
         "owner": "host-seam",
@@ -319,6 +324,14 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_modes": ("source", "docker"),
         "purpose": "Close external memory provider DB/backend handles when Hermes softly evicts a cached agent.",
         "why": "Soft cache eviction rebuilds AIAgent later; open Brainstack graph/vector/sqlite handles can block the next init before the first model call.",
+    },
+    {
+        "patcher": "_patch_run_agent_tool_call_interim_boundary",
+        "target": "run_agent.py",
+        "scope": "host-output-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Prevent assistant content attached to tool-call turns from being emitted as user-facing interim commentary.",
+        "why": "Models may put planning text in assistant content before tool calls; public progress must use explicit status/tool callbacks, not protocol content.",
     },
     {
         "patcher": "_patch_prompt_builder",
@@ -2060,6 +2073,45 @@ def _patch_run_agent_cache_evict_memory_provider_shutdown(path: Path, dry_run: b
             path=path,
         )
         applied.append("run_agent:cache_evict_memory_provider_shutdown")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_run_agent_tool_call_interim_boundary(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    if "Tool-call turns are transcript/API state" in text:
+        return []
+
+    anchor = (
+        "        if cb is None or not isinstance(assistant_msg, dict):\n"
+        "            return\n"
+        "        content = assistant_msg.get(\"content\")\n"
+    )
+    replacement = (
+        "        if cb is None or not isinstance(assistant_msg, dict):\n"
+        "            return\n"
+        "        if assistant_msg.get(\"tool_calls\"):\n"
+        "            # Tool-call turns are transcript/API state; public progress uses explicit callbacks.\n"
+        "            return\n"
+        "        content = assistant_msg.get(\"content\")\n"
+    )
+    if anchor not in text:
+        return []
+
+    text = _replace_once(
+        text,
+        anchor,
+        replacement,
+        label="run_agent tool-call interim user-facing boundary",
+        path=path,
+    )
+    applied.append("run_agent:tool_call_interim_user_facing_boundary")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -5776,6 +5828,7 @@ def main() -> int:
 
     host_patches: list[str] = []
     host_patches.extend(_run_host_patch("_patch_run_agent_cache_evict_memory_provider_shutdown", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_run_agent_tool_call_interim_boundary", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_run_agent", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_run_agent_deferred_tool_continuation", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_run_agent_memory_output_validation_seam", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))
