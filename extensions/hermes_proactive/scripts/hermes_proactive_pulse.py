@@ -18,30 +18,11 @@ if (HERMES_ROOT / "brainstack").exists() and str(HERMES_ROOT) not in sys.path:
 
 from hermes_proactive.pulse_producer import produce_pulse, project_pulse_output  # noqa: E402
 from hermes_proactive.workrun import checkpoint_workrun, finish_workrun, prune_completed_workruns, start_workrun  # noqa: E402
+from hermes_proactive.config import load_runtime_config  # noqa: E402
 
 
 def _load_runtime_config(hermes_home: Path) -> dict[str, object]:
-    path = hermes_home / "config.yaml"
-    if not path.exists():
-        return {"mode": "dry_run", "kill_switch": False}
-    try:
-        import yaml  # type: ignore[import-untyped]
-
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return {"mode": "dry_run", "kill_switch": False}
-    if not isinstance(data, dict):
-        return {"mode": "dry_run", "kill_switch": False}
-    kernel_memory = data.get("kernel_memory") if isinstance(data.get("kernel_memory"), dict) else {}
-    plugins = data.get("plugins") if isinstance(data.get("plugins"), dict) else {}
-    brainstack = plugins.get("brainstack") if isinstance(plugins.get("brainstack"), dict) else {}
-    mode = data.get("proactive_mode") or kernel_memory.get("proactive_mode") or brainstack.get("proactive_mode") or "dry_run"
-    kill_switch = data.get("proactive_kill_switch")
-    if kill_switch is None:
-        kill_switch = kernel_memory.get("proactive_kill_switch")
-    if kill_switch is None:
-        kill_switch = brainstack.get("proactive_kill_switch")
-    return {"mode": str(mode or "dry_run"), "kill_switch": bool(kill_switch)}
+    return load_runtime_config(hermes_home)
 
 
 def _delivery_allowed(hermes_home: Path, requested: bool) -> bool:

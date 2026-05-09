@@ -5,55 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
+from .config import load_config_with_fallback, runtime_config_from_data
 from .heartbeat_wake import HeartbeatWakeState
 from .pulse_producer import classify_pulse_wake, produce_pulse
-
-
-def _load_config(hermes_home: Path) -> tuple[dict[str, Any], dict[str, str]]:
-    path = hermes_home / "config.yaml"
-    if not path.exists():
-        return {}, {"status": "missing", "reason_code": "CONFIG_FILE_MISSING", "config_path": str(path)}
-    try:
-        import yaml  # type: ignore[import-untyped]
-    except Exception:
-        return {}, {"status": "unavailable", "reason_code": "PYYAML_UNAVAILABLE", "config_path": str(path)}
-    try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return {}, {"status": "unavailable", "reason_code": "CONFIG_READ_FAILED", "config_path": str(path)}
-    if not isinstance(data, dict):
-        return {}, {"status": "unavailable", "reason_code": "CONFIG_NOT_OBJECT", "config_path": str(path)}
-    return data, {"status": "loaded", "reason_code": "CONFIG_LOADED", "config_path": str(path)}
-
-
-def _nested_config(data: Mapping[str, Any], name: str) -> Mapping[str, Any]:
-    raw = data.get(name)
-    return raw if isinstance(raw, Mapping) else {}
-
-
-def _runtime_config(data: Mapping[str, Any], load_status: Mapping[str, str]) -> dict[str, Any]:
-    kernel_memory = _nested_config(data, "kernel_memory")
-    plugins = _nested_config(data, "plugins")
-    brainstack = _nested_config(plugins, "brainstack") if isinstance(plugins, Mapping) else {}
-    mode = data.get("proactive_mode") or kernel_memory.get("proactive_mode") or brainstack.get("proactive_mode") or "dry_run"
-    kill_switch = data.get("proactive_kill_switch")
-    if kill_switch is None:
-        kill_switch = kernel_memory.get("proactive_kill_switch")
-    if kill_switch is None:
-        kill_switch = brainstack.get("proactive_kill_switch")
-    cooldown = data.get("proactive_cooldown_seconds")
-    if cooldown is None:
-        cooldown = kernel_memory.get("proactive_cooldown_seconds")
-    if cooldown is None:
-        cooldown = brainstack.get("proactive_cooldown_seconds")
-    return {
-        "status": str(load_status.get("status") or "unknown"),
-        "reason_code": str(load_status.get("reason_code") or ""),
-        "config_path": str(load_status.get("config_path") or ""),
-        "mode": str(mode or "unknown"),
-        "kill_switch": bool(kill_switch) if kill_switch is not None else False,
-        "cooldown_seconds": int(cooldown or 0) if str(cooldown or "").isdigit() else 0,
-    }
 
 
 def _pulse_summary(pulse: Mapping[str, Any]) -> dict[str, Any]:
@@ -106,8 +60,8 @@ def proactive_extension_doctor(
     evolver_health_file: Path | None = None,
     wake_state: HeartbeatWakeState | None = None,
 ) -> dict[str, Any]:
-    config_data, config_load = _load_config(hermes_home)
-    runtime_config = _runtime_config(config_data, config_load)
+    config_data, config_load = load_config_with_fallback(hermes_home)
+    runtime_config = runtime_config_from_data(config_data, config_load)
     pulse = produce_pulse(
         hermes_home=hermes_home,
         principal_scope_key="doctor",

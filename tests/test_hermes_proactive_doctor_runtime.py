@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from extensions.hermes_proactive.hermes_proactive.config import load_runtime_config
 from extensions.hermes_proactive.hermes_proactive.doctor import proactive_extension_doctor
 from scripts.verify_hermes_proactive_runtime_parity import build_proactive_runtime_parity_report
 
@@ -86,6 +87,30 @@ def test_proactive_doctor_reports_idle_active_paused_killed_and_malformed(tmp_pa
     assert malformed["proactive_status"] == "degraded"
     assert "EVOLVER_SIGNAL_MALFORMED" in malformed["issues"]
     assert malformed["wake"]["delivery_requested"] is True
+
+
+def test_proactive_config_fallback_preserves_explicit_top_level_mode_without_yaml(tmp_path: Path, monkeypatch) -> None:
+    import builtins
+
+    real_import = builtins.__import__
+
+    def import_without_yaml(name: str, *args: object, **kwargs: object) -> object:
+        if name == "yaml":
+            raise ImportError("blocked yaml for standalone runtime")
+        return real_import(name, *args, **kwargs)
+
+    hermes_home = _home(tmp_path, config_text="proactive_mode: live\nproactive_kill_switch: false\n")
+    monkeypatch.setattr(builtins, "__import__", import_without_yaml)
+
+    runtime_config = load_runtime_config(hermes_home)
+    doctor = proactive_extension_doctor(hermes_home=hermes_home)
+
+    assert runtime_config["status"] == "fallback_loaded"
+    assert runtime_config["reason_code"] == "CONFIG_LINE_FALLBACK_LOADED"
+    assert runtime_config["mode"] == "live"
+    assert runtime_config["kill_switch"] is False
+    assert doctor["status"] == "pass"
+    assert doctor["config"]["mode"] == "live"
 
 
 def test_proactive_runtime_parity_report_is_public_safe_and_checks_payload() -> None:
