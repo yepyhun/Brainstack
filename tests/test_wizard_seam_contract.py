@@ -194,10 +194,13 @@ def test_core_host_patch_mode_applies_discord_typing_backoff(tmp_path: Path) -> 
 
     assert actions == [
         "discord_typing:rate_limit_state",
-        "discord_typing:rate_limit_aware_loop",
+        "discord_typing:opt_in_loop",
     ]
+    assert "self._typing_endpoint_enabled" in text
     assert "self._typing_backoff_until" in text
-    assert "rate-limit-aware persistent typing indicator" in text
+    assert "Discord edit-streaming is the primary liveness channel" in text
+    assert "HERMES_DISCORD_TYPING_ENDPOINT_ENABLED" in text
+    assert "if not self._typing_endpoint_enabled or not self._client" in text
     assert "if not existing.done()" in text
     assert "asyncio.shield(task)" in text
 

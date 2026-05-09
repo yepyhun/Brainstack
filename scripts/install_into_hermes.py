@@ -4450,6 +4450,10 @@ def _patch_discord_typing_backoff(path: Path, dry_run: bool) -> list[str]:
     )
     typing_state_replacement = (
         typing_state_anchor +
+        "        self._typing_endpoint_enabled = os.getenv(\n"
+        "            \"HERMES_DISCORD_TYPING_ENDPOINT_ENABLED\",\n"
+        "            \"false\",\n"
+        "        ).lower() in {\"1\", \"true\", \"yes\", \"on\"}\n"
         "        self._typing_backoff_until: Dict[str, float] = {}\n"
         "        self._typing_interval_seconds = max(\n"
         "            10.0,\n"
@@ -4469,6 +4473,20 @@ def _patch_discord_typing_backoff(path: Path, dry_run: bool) -> list[str]:
             path=path,
         )
         applied.append("discord_typing:rate_limit_state")
+
+    if "self._typing_endpoint_enabled" not in text:
+        text = _replace_once(
+            text,
+            "        self._typing_backoff_until: Dict[str, float] = {}\n",
+            "        self._typing_endpoint_enabled = os.getenv(\n"
+            "            \"HERMES_DISCORD_TYPING_ENDPOINT_ENABLED\",\n"
+            "            \"false\",\n"
+            "        ).lower() in {\"1\", \"true\", \"yes\", \"on\"}\n"
+            "        self._typing_backoff_until: Dict[str, float] = {}\n",
+            label="Discord typing endpoint opt-in state",
+            path=path,
+        )
+        applied.append("discord_typing:opt_in_state")
 
     old_send_typing = '''    async def send_typing(self, chat_id: str, metadata=None) -> None:
         """Start a persistent typing indicator for a channel.
@@ -4514,7 +4532,7 @@ def _patch_discord_typing_backoff(path: Path, dry_run: bool) -> list[str]:
             except (asyncio.CancelledError, Exception):
                 pass
 '''
-    new_send_typing = '''    async def send_typing(self, chat_id: str, metadata=None) -> None:
+    rate_limit_send_typing = '''    async def send_typing(self, chat_id: str, metadata=None) -> None:
         """Start a rate-limit-aware persistent typing indicator for a channel."""
         if not self._client:
             return
@@ -4576,15 +4594,83 @@ def _patch_discord_typing_backoff(path: Path, dry_run: bool) -> list[str]:
             if task.done():
                 self._typing_tasks.pop(chat_id, None)
 '''
-    if "rate-limit-aware persistent typing indicator" not in text:
-        text = _replace_once(
-            text,
-            old_send_typing,
-            new_send_typing,
-            label="Discord typing rate-limit-aware loop",
-            path=path,
-        )
-        applied.append("discord_typing:rate_limit_aware_loop")
+    opt_in_send_typing = '''    async def send_typing(self, chat_id: str, metadata=None) -> None:
+        """Start an optional rate-limit-aware typing indicator for a channel.
+
+        Discord edit-streaming is the primary liveness channel. The typing
+        endpoint is disabled by default because Discord can log and retry 429s
+        inside the HTTP client before adapter-level backoff can react.
+        """
+        if not self._typing_endpoint_enabled or not self._client:
+            return
+
+        now = time.monotonic()
+        if now < float(self._typing_backoff_until.get(chat_id, 0.0) or 0.0):
+            return
+
+        existing = self._typing_tasks.get(chat_id)
+        if existing is not None:
+            if not existing.done():
+                return
+            self._typing_tasks.pop(chat_id, None)
+
+        async def _typing_loop() -> None:
+            try:
+                while True:
+                    try:
+                        route = discord.http.Route(
+                            "POST", "/channels/{channel_id}/typing",
+                            channel_id=chat_id,
+                        )
+                        await self._client.http.request(route)
+                        self._typing_backoff_until.pop(chat_id, None)
+                    except asyncio.CancelledError:
+                        return
+                    except Exception as e:
+                        message = str(e).lower()
+                        if "429" in message or "rate limit" in message or "too many requests" in message:
+                            self._typing_backoff_until[chat_id] = (
+                                time.monotonic() + self._typing_rate_limit_backoff_seconds
+                            )
+                            logger.debug("Discord typing indicator rate-limited for %s: %s", chat_id, e)
+                        else:
+                            logger.debug("Discord typing indicator failed for %s: %s", chat_id, e)
+                        return
+                    await asyncio.sleep(self._typing_interval_seconds)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                current = self._typing_tasks.get(chat_id)
+                if current is task:
+                    self._typing_tasks.pop(chat_id, None)
+
+        task = asyncio.create_task(_typing_loop())
+        self._typing_tasks[chat_id] = task
+
+    async def stop_typing(self, chat_id: str) -> None:
+        """Stop the persistent typing indicator for a channel."""
+        task = self._typing_tasks.get(chat_id)
+        if task:
+            task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            except Exception:
+                pass
+            if task.done():
+                self._typing_tasks.pop(chat_id, None)
+'''
+    if "Discord edit-streaming is the primary liveness channel" not in text:
+        replaced = False
+        for candidate in (rate_limit_send_typing, old_send_typing):
+            if candidate in text:
+                text = text.replace(candidate, opt_in_send_typing, 1)
+                replaced = True
+                break
+        if not replaced:
+            raise RuntimeError(f"Could not find Discord send_typing block in {path}")
+        applied.append("discord_typing:opt_in_loop")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
