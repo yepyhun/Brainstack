@@ -71,6 +71,8 @@ PROACTIVE_CRON_JOB_NAME = "Brainstack Proactive Pulse"
 PROACTIVE_CRON_GATE_SCRIPT_NAME = "brainstack_proactive_pulse_gate.py"
 SESSION_SEARCH_TOTAL_TIMEOUT_SECONDS = 20
 SESSION_SEARCH_MAX_CONCURRENCY = 1
+DISCORD_STREAMING_EDIT_INTERVAL_SECONDS = 3.0
+DISCORD_STREAMING_BUFFER_THRESHOLD = 200
 
 HOST_PATCH_MODE_CATEGORIES: dict[str, set[str]] = {
     "core": {"required_seam", "core_hygiene"},
@@ -133,6 +135,16 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "category": "required_seam",
         "owner": "host-tool-hotfix",
         "removal_condition": "Hermes session_search natively enforces a tool-level total deadline below gateway idle timeout.",
+    },
+    "_patch_discord_typing_backoff": {
+        "category": "required_seam",
+        "owner": "host-discord-runtime",
+        "removal_condition": "Hermes Discord adapter natively keeps typing indicators rate-limit aware and prevents overlapping stale typing loops.",
+    },
+    "_patch_run_agent_ebadf_transport_recovery": {
+        "category": "required_seam",
+        "owner": "host-provider-runtime",
+        "removal_condition": "Hermes provider transport recovery natively handles EBADF closed-file-descriptor failures by rebuilding the request client once.",
     },
     "_patch_credential_pool": {
         "category": "compat_hotfix",
@@ -393,6 +405,22 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_modes": ("source", "docker"),
         "purpose": "Keep Hermes session_search bounded so long summarization cannot outlive the gateway turn timeout.",
         "why": "Session search can otherwise spend several per-session retry windows inside the tool and leave the agent stuck until the gateway kills the turn.",
+    },
+    {
+        "patcher": "_patch_discord_typing_backoff",
+        "target": "gateway/platforms/discord.py",
+        "scope": "discord-visibility-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Keep Discord typing visibility useful without letting stale overlapping typing loops hammer the channel typing endpoint.",
+        "why": "Long Hermes turns should show safe liveness, but Discord typing is optional and must back off instead of producing repeated 429 retries.",
+    },
+    {
+        "patcher": "_patch_run_agent_ebadf_transport_recovery",
+        "target": "run_agent.py",
+        "scope": "provider-transport-recovery-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Recover once from closed-file-descriptor provider transport failures by rebuilding the active OpenAI-wire client.",
+        "why": "Long-lived gateway and cron jobs can hit stale closed descriptors; one transport rebuild is safer than failing a large background run immediately.",
     },
     {
         "patcher": "_patch_credential_pool",
@@ -4411,6 +4439,196 @@ def _patch_session_search_total_deadline(path: Path, dry_run: bool) -> list[str]
     return applied
 
 
+def _patch_discord_typing_backoff(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    typing_state_anchor = (
+        "        # Persistent typing indicator loops per channel (DMs don't reliably\n"
+        "        # show the standard typing gateway event for bots)\n"
+        "        self._typing_tasks: Dict[str, asyncio.Task] = {}\n"
+    )
+    typing_state_replacement = (
+        typing_state_anchor +
+        "        self._typing_backoff_until: Dict[str, float] = {}\n"
+        "        self._typing_interval_seconds = max(\n"
+        "            10.0,\n"
+        "            float(os.getenv(\"HERMES_DISCORD_TYPING_INTERVAL_SECONDS\", \"12\")),\n"
+        "        )\n"
+        "        self._typing_rate_limit_backoff_seconds = max(\n"
+        "            10.0,\n"
+        "            float(os.getenv(\"HERMES_DISCORD_TYPING_RATE_LIMIT_BACKOFF_SECONDS\", \"30\")),\n"
+        "        )\n"
+    )
+    if "self._typing_backoff_until" not in text:
+        text = _replace_once(
+            text,
+            typing_state_anchor,
+            typing_state_replacement,
+            label="Discord typing rate-limit state",
+            path=path,
+        )
+        applied.append("discord_typing:rate_limit_state")
+
+    old_send_typing = '''    async def send_typing(self, chat_id: str, metadata=None) -> None:
+        """Start a persistent typing indicator for a channel.
+
+        Discord's TYPING_START gateway event is unreliable in DMs for bots.
+        Instead, start a background loop that hits the typing endpoint every
+        8 seconds (typing indicator lasts ~10s).  The loop is cancelled when
+        stop_typing() is called (after the response is sent).
+        """
+        if not self._client:
+            return
+        # Don't start a duplicate loop
+        if chat_id in self._typing_tasks:
+            return
+
+        async def _typing_loop() -> None:
+            try:
+                while True:
+                    try:
+                        route = discord.http.Route(
+                            "POST", "/channels/{channel_id}/typing",
+                            channel_id=chat_id,
+                        )
+                        await self._client.http.request(route)
+                    except asyncio.CancelledError:
+                        return
+                    except Exception as e:
+                        logger.debug("Discord typing indicator failed for %s: %s", chat_id, e)
+                        return
+                    await asyncio.sleep(8)
+            except asyncio.CancelledError:
+                pass
+
+        self._typing_tasks[chat_id] = asyncio.create_task(_typing_loop())
+
+    async def stop_typing(self, chat_id: str) -> None:
+        """Stop the persistent typing indicator for a channel."""
+        task = self._typing_tasks.pop(chat_id, None)
+        if task:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+'''
+    new_send_typing = '''    async def send_typing(self, chat_id: str, metadata=None) -> None:
+        """Start a rate-limit-aware persistent typing indicator for a channel."""
+        if not self._client:
+            return
+
+        now = time.monotonic()
+        if now < float(self._typing_backoff_until.get(chat_id, 0.0) or 0.0):
+            return
+
+        existing = self._typing_tasks.get(chat_id)
+        if existing is not None:
+            if not existing.done():
+                return
+            self._typing_tasks.pop(chat_id, None)
+
+        async def _typing_loop() -> None:
+            try:
+                while True:
+                    try:
+                        route = discord.http.Route(
+                            "POST", "/channels/{channel_id}/typing",
+                            channel_id=chat_id,
+                        )
+                        await self._client.http.request(route)
+                        self._typing_backoff_until.pop(chat_id, None)
+                    except asyncio.CancelledError:
+                        return
+                    except Exception as e:
+                        message = str(e).lower()
+                        if "429" in message or "rate limit" in message or "too many requests" in message:
+                            self._typing_backoff_until[chat_id] = (
+                                time.monotonic() + self._typing_rate_limit_backoff_seconds
+                            )
+                            logger.debug("Discord typing indicator rate-limited for %s: %s", chat_id, e)
+                        else:
+                            logger.debug("Discord typing indicator failed for %s: %s", chat_id, e)
+                        return
+                    await asyncio.sleep(self._typing_interval_seconds)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                current = self._typing_tasks.get(chat_id)
+                if current is task:
+                    self._typing_tasks.pop(chat_id, None)
+
+        task = asyncio.create_task(_typing_loop())
+        self._typing_tasks[chat_id] = task
+
+    async def stop_typing(self, chat_id: str) -> None:
+        """Stop the persistent typing indicator for a channel."""
+        task = self._typing_tasks.get(chat_id)
+        if task:
+            task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            except Exception:
+                pass
+            if task.done():
+                self._typing_tasks.pop(chat_id, None)
+'''
+    if "rate-limit-aware persistent typing indicator" not in text:
+        text = _replace_once(
+            text,
+            old_send_typing,
+            new_send_typing,
+            label="Discord typing rate-limit-aware loop",
+            path=path,
+        )
+        applied.append("discord_typing:rate_limit_aware_loop")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_run_agent_ebadf_transport_recovery(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    old = (
+        "        # Only for transient transport errors\n"
+        "        error_type = type(api_error).__name__\n"
+        "        if error_type not in self._TRANSIENT_TRANSPORT_ERRORS:\n"
+        "            return False\n"
+    )
+    new = (
+        "        # Only for transient transport errors. EBADF is the closed-file-\n"
+        "        # descriptor variant seen when a long-lived provider transport is\n"
+        "        # stale or was closed under a background cron run; recover once by\n"
+        "        # rebuilding the client instead of failing a large job immediately.\n"
+        "        error_type = type(api_error).__name__\n"
+        "        is_ebadf_transport_error = False\n"
+        "        if isinstance(api_error, OSError):\n"
+        "            import errno as _errno\n"
+        "            is_ebadf_transport_error = getattr(api_error, \"errno\", None) == _errno.EBADF\n"
+        "        if error_type not in self._TRANSIENT_TRANSPORT_ERRORS and not is_ebadf_transport_error:\n"
+        "            return False\n"
+    )
+    if "is_ebadf_transport_error" not in text:
+        text = _replace_once(
+            text,
+            old,
+            new,
+            label="EBADF provider transport recovery",
+            path=path,
+        )
+        applied.append("run_agent:ebadf_transport_recovery")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -4637,6 +4855,69 @@ def _normalize_session_search_runtime_config(config: dict[str, Any]) -> dict[str
     }
 
 
+def _normalize_discord_visibility_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Enable bounded Discord response visibility without enabling noisy tool spam."""
+    changed: dict[str, Any] = {}
+
+    def _float(value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _int(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    streaming = config.setdefault("streaming", {})
+    if not isinstance(streaming, dict):
+        streaming = {}
+        config["streaming"] = streaming
+
+    if streaming.get("transport") not in (None, "edit"):
+        changed["previous_transport"] = streaming.get("transport")
+    streaming["transport"] = "edit"
+
+    edit_interval = _float(streaming.get("edit_interval"))
+    if edit_interval is None or edit_interval < DISCORD_STREAMING_EDIT_INTERVAL_SECONDS:
+        changed["previous_edit_interval"] = streaming.get("edit_interval")
+        streaming["edit_interval"] = DISCORD_STREAMING_EDIT_INTERVAL_SECONDS
+
+    buffer_threshold = _int(streaming.get("buffer_threshold"))
+    if buffer_threshold is None or buffer_threshold < DISCORD_STREAMING_BUFFER_THRESHOLD:
+        changed["previous_buffer_threshold"] = streaming.get("buffer_threshold")
+        streaming["buffer_threshold"] = DISCORD_STREAMING_BUFFER_THRESHOLD
+
+    display = config.setdefault("display", {})
+    if not isinstance(display, dict):
+        display = {}
+        config["display"] = display
+    platforms = display.setdefault("platforms", {})
+    if not isinstance(platforms, dict):
+        platforms = {}
+        display["platforms"] = platforms
+    discord_cfg = platforms.setdefault("discord", {})
+    if not isinstance(discord_cfg, dict):
+        discord_cfg = {}
+        platforms["discord"] = discord_cfg
+
+    if discord_cfg.get("streaming") is not True:
+        changed["previous_discord_streaming"] = discord_cfg.get("streaming")
+        discord_cfg["streaming"] = True
+
+    return {
+        "status": "normalized" if changed else "unchanged",
+        "discord_streaming": discord_cfg.get("streaming"),
+        "transport": streaming.get("transport"),
+        "edit_interval": streaming.get("edit_interval"),
+        "buffer_threshold": streaming.get("buffer_threshold"),
+        "changes": changed,
+        "secret_redacted": True,
+    }
+
+
 def _normalize_unbound_tier2_runtime(brainstack: dict[str, Any]) -> dict[str, Any]:
     """Migrate unsupported Tier-2 runtime pins to the bound internal extractor."""
     before = str(brainstack.get("tier2_runtime") or "").strip()
@@ -4705,6 +4986,7 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
         brainstack["tier2_hindsight_llm_base_url"] = ""
     tier2_runtime_hygiene = _normalize_unbound_tier2_runtime(brainstack)
     session_search_runtime_hygiene = _normalize_session_search_runtime_config(config)
+    discord_visibility_hygiene = _normalize_discord_visibility_runtime_config(config)
     brainstack.setdefault("tier2_hindsight_embeddings_provider", "tei")
     brainstack.setdefault("tier2_hindsight_embeddings_tei_url", "http://127.0.0.1:7997")
     brainstack.setdefault("tier2_hindsight_reranker_provider", "rrf")
@@ -4731,6 +5013,7 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
         "auxiliary_main_route_hygiene": auxiliary_main_route_hygiene,
         "tier2_runtime_hygiene": tier2_runtime_hygiene,
         "session_search_runtime_hygiene": session_search_runtime_hygiene,
+        "discord_visibility_hygiene": discord_visibility_hygiene,
         "gateway_timeout": agent.get("gateway_timeout"),
         "gateway_timeout_warning": agent.get("gateway_timeout_warning"),
         "proactive_runtime": proactive_runtime,
@@ -6178,6 +6461,8 @@ def main() -> int:
     host_patches.extend(_run_host_patch("_patch_cron_tests", target / "tests" / "cron" / "test_jobs.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_auxiliary_client", target / "agent" / "auxiliary_client.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_session_search_total_deadline", target / "tools" / "session_search_tool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_discord_typing_backoff", target / "gateway" / "platforms" / "discord.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_run_agent_ebadf_transport_recovery", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_credential_pool", target / "agent" / "credential_pool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_credential_pool_tests", target / "tests" / "agent" / "test_credential_pool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_memory_provider", target / "agent" / "memory_provider.py", args.dry_run, host_patch_mode=args.host_patch_mode))

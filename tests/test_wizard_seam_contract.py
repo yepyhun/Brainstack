@@ -130,6 +130,106 @@ def test_core_host_patch_mode_applies_auxiliary_main_model_inheritance(tmp_path:
     assert "_read_main_model() or None" in text
 
 
+def test_core_host_patch_mode_applies_discord_typing_backoff(tmp_path: Path) -> None:
+    discord_py = tmp_path / "discord.py"
+    discord_py.write_text(
+        "import asyncio\n"
+        "import os\n"
+        "import time\n"
+        "from typing import Dict\n\n"
+        "class DiscordAdapter:\n"
+        "    def __init__(self):\n"
+        "        # Persistent typing indicator loops per channel (DMs don't reliably\n"
+        "        # show the standard typing gateway event for bots)\n"
+        "        self._typing_tasks: Dict[str, asyncio.Task] = {}\n\n"
+        "    async def send_typing(self, chat_id: str, metadata=None) -> None:\n"
+        "        \"\"\"Start a persistent typing indicator for a channel.\n\n"
+        "        Discord's TYPING_START gateway event is unreliable in DMs for bots.\n"
+        "        Instead, start a background loop that hits the typing endpoint every\n"
+        "        8 seconds (typing indicator lasts ~10s).  The loop is cancelled when\n"
+        "        stop_typing() is called (after the response is sent).\n"
+        "        \"\"\"\n"
+        "        if not self._client:\n"
+        "            return\n"
+        "        # Don't start a duplicate loop\n"
+        "        if chat_id in self._typing_tasks:\n"
+        "            return\n\n"
+        "        async def _typing_loop() -> None:\n"
+        "            try:\n"
+        "                while True:\n"
+        "                    try:\n"
+        "                        route = discord.http.Route(\n"
+        "                            \"POST\", \"/channels/{channel_id}/typing\",\n"
+        "                            channel_id=chat_id,\n"
+        "                        )\n"
+        "                        await self._client.http.request(route)\n"
+        "                    except asyncio.CancelledError:\n"
+        "                        return\n"
+        "                    except Exception as e:\n"
+        "                        logger.debug(\"Discord typing indicator failed for %s: %s\", chat_id, e)\n"
+        "                        return\n"
+        "                    await asyncio.sleep(8)\n"
+        "            except asyncio.CancelledError:\n"
+        "                pass\n\n"
+        "        self._typing_tasks[chat_id] = asyncio.create_task(_typing_loop())\n\n"
+        "    async def stop_typing(self, chat_id: str) -> None:\n"
+        "        \"\"\"Stop the persistent typing indicator for a channel.\"\"\"\n"
+        "        task = self._typing_tasks.pop(chat_id, None)\n"
+        "        if task:\n"
+        "            task.cancel()\n"
+        "            try:\n"
+        "                await task\n"
+        "            except (asyncio.CancelledError, Exception):\n"
+        "                pass\n",
+        encoding="utf-8",
+    )
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_discord_typing_backoff",
+        discord_py,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    text = discord_py.read_text(encoding="utf-8")
+
+    assert actions == [
+        "discord_typing:rate_limit_state",
+        "discord_typing:rate_limit_aware_loop",
+    ]
+    assert "self._typing_backoff_until" in text
+    assert "rate-limit-aware persistent typing indicator" in text
+    assert "if not existing.done()" in text
+    assert "asyncio.shield(task)" in text
+
+
+def test_core_host_patch_mode_applies_ebadf_provider_transport_recovery(tmp_path: Path) -> None:
+    run_agent = tmp_path / "run_agent.py"
+    run_agent.write_text(
+        "class AIAgent:\n"
+        "    _TRANSIENT_TRANSPORT_ERRORS = frozenset({'ReadTimeout'})\n\n"
+        "    def _try_recover_primary_transport(self, api_error, *, retry_count, max_retries):\n"
+        "        # Only for transient transport errors\n"
+        "        error_type = type(api_error).__name__\n"
+        "        if error_type not in self._TRANSIENT_TRANSPORT_ERRORS:\n"
+        "            return False\n"
+        "        return True\n",
+        encoding="utf-8",
+    )
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_run_agent_ebadf_transport_recovery",
+        run_agent,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    text = run_agent.read_text(encoding="utf-8")
+
+    assert actions == ["run_agent:ebadf_transport_recovery"]
+    assert "is_ebadf_transport_error" in text
+    assert "_errno.EBADF" in text
+    assert "and not is_ebadf_transport_error" in text
+
+
 def test_core_run_agent_patch_closes_memory_provider_on_soft_cache_eviction(tmp_path: Path) -> None:
     run_agent = tmp_path / "run_agent.py"
     run_agent.write_text(

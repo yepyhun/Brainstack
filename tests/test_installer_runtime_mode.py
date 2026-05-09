@@ -209,6 +209,33 @@ def test_config_patch_bounds_dirty_session_search_runtime(tmp_path):
     assert hygiene["changes"]["previous_max_concurrency"] == 5
 
 
+def test_config_patch_enables_bounded_discord_streaming_visibility(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "display:\n"
+        "  platforms:\n"
+        "    discord:\n"
+        "      tool_progress: off\n"
+        "streaming:\n"
+        "  enabled: false\n"
+        "  edit_interval: 1\n"
+        "  buffer_threshold: 40\n",
+        encoding="utf-8",
+    )
+
+    result = install_into_hermes._patch_config(config, dry_run=False, embedding_runtime="none")
+    data = install_into_hermes._load_yaml(config)
+
+    assert data["display"]["platforms"]["discord"]["streaming"] is True
+    assert data["display"]["platforms"]["discord"]["tool_progress"] is False
+    assert data["streaming"]["transport"] == "edit"
+    assert data["streaming"]["edit_interval"] == 3.0
+    assert data["streaming"]["buffer_threshold"] == 200
+    hygiene = result["discord_visibility_hygiene"]
+    assert hygiene["status"] == "normalized"
+    assert hygiene["discord_streaming"] is True
+
+
 def test_config_patch_preserves_hermes_gateway_timeout_while_bounding_session_search(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text(
