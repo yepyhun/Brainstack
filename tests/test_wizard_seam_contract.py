@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 from pathlib import Path
 
@@ -128,6 +129,142 @@ def test_core_host_patch_mode_applies_auxiliary_main_model_inheritance(tmp_path:
     assert actions == ["auxiliary_client:inherit_main_model"]
     assert 'explicit_provider == "main"' in text
     assert "_read_main_model() or None" in text
+
+
+def test_core_host_patch_mode_evicts_closed_auxiliary_sync_client(tmp_path: Path) -> None:
+    auxiliary_client = tmp_path / "auxiliary_client.py"
+    auxiliary_client.write_text(
+        "from typing import Any, Dict, Optional, Tuple\n\n"
+        "created = []\n"
+        "_client_cache = {}\n\n"
+        "class _Lock:\n"
+        "    def __enter__(self):\n"
+        "        return self\n"
+        "    def __exit__(self, *args):\n"
+        "        return False\n\n"
+        "_client_cache_lock = _Lock()\n\n"
+        "class _RealClient:\n"
+        "    def __init__(self):\n"
+        "        self.closed = False\n"
+        "    def is_closed(self):\n"
+        "        return self.closed\n"
+        "    def close(self):\n"
+        "        self.closed = True\n\n"
+        "class _WrappedClient:\n"
+        "    def __init__(self):\n"
+        "        self._real_client = _RealClient()\n"
+        "    def close(self):\n"
+        "        self._real_client.close()\n\n"
+        "def _read_main_model():\n"
+        "    return 'gpt-main'\n\n"
+        "def _normalize_main_runtime(main_runtime):\n"
+        "    return main_runtime\n\n"
+        "def _client_cache_key(provider, *, async_mode=False, base_url=None, api_key=None, api_mode=None, main_runtime=None, is_vision=False):\n"
+        "    return (provider, async_mode, base_url or '', api_key or '', api_mode or '', is_vision)\n\n"
+        "def _force_close_async_httpx(client):\n"
+        "    client.force_closed = True\n\n"
+        "def resolve_provider_client(provider, model=None, async_mode=False, explicit_base_url=None, explicit_api_key=None, api_mode=None, main_runtime=None, is_vision=False):\n"
+        "    cfg_provider = provider\n"
+        "    cfg_model = None\n"
+        "    resolved_model = model or cfg_model\n"
+        "    client = _WrappedClient()\n"
+        "    created.append(client)\n"
+        "    return client, resolved_model or 'gpt-main'\n\n"
+        "def _cached_client_accepts_slash_models(client: Any, cached_default: Optional[str]) -> bool:\n"
+        "    return True\n\n"
+        "def _compat_model(client: Any, model: Optional[str], cached_default: Optional[str]) -> Optional[str]:\n"
+        "    if model and '/' in model and not _cached_client_accepts_slash_models(client, cached_default):\n"
+        "        return cached_default\n"
+        "    return model or cached_default\n\n"
+        "def _get_cached_client(\n"
+        "    provider: str,\n"
+        "    model: str = None,\n"
+        "    async_mode: bool = False,\n"
+        "    base_url: str = None,\n"
+        "    api_key: str = None,\n"
+        "    api_mode: str = None,\n"
+        "    main_runtime: Optional[Dict[str, Any]] = None,\n"
+        "    is_vision: bool = False,\n"
+        ") -> Tuple[Optional[Any], Optional[str]]:\n"
+        "    current_loop = None\n"
+        "    runtime = _normalize_main_runtime(main_runtime)\n"
+        "    cache_key = _client_cache_key(\n"
+        "        provider,\n"
+        "        async_mode=async_mode,\n"
+        "        base_url=base_url,\n"
+        "        api_key=api_key,\n"
+        "        api_mode=api_mode,\n"
+        "        main_runtime=main_runtime,\n"
+        "        is_vision=is_vision,\n"
+        "    )\n"
+        "    with _client_cache_lock:\n"
+        "        if cache_key in _client_cache:\n"
+        "            cached_client, cached_default, cached_loop = _client_cache[cache_key]\n"
+        "            if async_mode:\n"
+        "                loop_ok = (\n"
+        "                    cached_loop is not None\n"
+        "                    and cached_loop is current_loop\n"
+        "                    and not cached_loop.is_closed()\n"
+        "                )\n"
+        "                if loop_ok:\n"
+        "                    effective = _compat_model(cached_client, model, cached_default)\n"
+        "                    return cached_client, effective\n"
+        "                _force_close_async_httpx(cached_client)\n"
+        "                del _client_cache[cache_key]\n"
+        "            else:\n"
+        "                effective = _compat_model(cached_client, model, cached_default)\n"
+        "                return cached_client, effective\n"
+        "    client, default_model = resolve_provider_client(\n"
+        "        provider,\n"
+        "        model,\n"
+        "        async_mode,\n"
+        "        explicit_base_url=base_url,\n"
+        "        explicit_api_key=api_key,\n"
+        "        api_mode=api_mode,\n"
+        "        main_runtime=runtime,\n"
+        "        is_vision=is_vision,\n"
+        "    )\n"
+        "    with _client_cache_lock:\n"
+        "        _client_cache[cache_key] = (client, default_model, current_loop)\n"
+        "    return client, default_model\n",
+        encoding="utf-8",
+    )
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_auxiliary_client",
+        auxiliary_client,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    text = auxiliary_client.read_text(encoding="utf-8")
+
+    assert actions == [
+        "auxiliary_client:inherit_main_model",
+        "auxiliary_client:closed_sync_cache_helper",
+        "auxiliary_client:evict_closed_sync_cache",
+    ]
+    assert "def _brainstack_auxiliary_client_is_closed" in text
+    assert "_brainstack_auxiliary_client_is_closed(cached_client)" in text
+
+    spec = importlib.util.spec_from_file_location("patched_auxiliary_client", auxiliary_client)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    first_client, _ = module._get_cached_client("openai-codex", model="gpt-5.5", base_url="https://example.test")
+    first_client.close()
+    second_client, _ = module._get_cached_client("openai-codex", model="gpt-5.5", base_url="https://example.test")
+
+    assert first_client is not second_client
+    assert len(module.created) == 2
+
+    repeated_actions = install_into_hermes._run_host_patch(
+        "_patch_auxiliary_client",
+        auxiliary_client,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    assert repeated_actions == []
 
 
 def test_core_host_patch_mode_applies_discord_typing_backoff(tmp_path: Path) -> None:

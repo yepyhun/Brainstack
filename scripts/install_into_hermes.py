@@ -129,7 +129,7 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
     "_patch_auxiliary_client": {
         "category": "required_seam",
         "owner": "host-provider-hotfix",
-        "removal_condition": "Hermes auxiliary task resolver natively supports provider=main model inheritance.",
+        "removal_condition": "Hermes auxiliary task resolver natively supports provider=main model inheritance and evicts closed cached sync clients.",
     },
     "_patch_session_search_total_deadline": {
         "category": "required_seam",
@@ -4390,6 +4390,74 @@ def _patch_auxiliary_client(path: Path, dry_run: bool) -> list[str]:
             path=path,
         )
         applied.append("auxiliary_client:inherit_main_model")
+
+    closed_helper = (
+        "\n\n"
+        "def _brainstack_auxiliary_client_is_closed(client: Any) -> bool:\n"
+        "    \"\"\"Return True when a cached sync auxiliary client is no longer usable.\"\"\"\n"
+        "    candidates = [client]\n"
+        "    real_client = getattr(client, \"_real_client\", None)\n"
+        "    if real_client is not None:\n"
+        "        candidates.append(real_client)\n"
+        "        inner = getattr(real_client, \"_client\", None)\n"
+        "        if inner is not None:\n"
+        "            candidates.append(inner)\n"
+        "    direct_inner = getattr(client, \"_client\", None)\n"
+        "    if direct_inner is not None:\n"
+        "        candidates.append(direct_inner)\n"
+        "    for candidate in candidates:\n"
+        "        closed = getattr(candidate, \"is_closed\", None)\n"
+        "        try:\n"
+        "            if callable(closed):\n"
+        "                if closed():\n"
+        "                    return True\n"
+        "            elif closed is True:\n"
+        "                return True\n"
+        "        except Exception:\n"
+        "            return True\n"
+        "    return False\n"
+    )
+    if "def _brainstack_auxiliary_client_is_closed" not in text and "def _get_cached_client(" in text:
+        text = _replace_once(
+            text,
+            "\n\ndef _get_cached_client(",
+            closed_helper + "\n\ndef _get_cached_client(",
+            label="auxiliary_client closed sync cache helper",
+            path=path,
+        )
+        applied.append("auxiliary_client:closed_sync_cache_helper")
+
+    old_sync_cache_hit = (
+        "            else:\n"
+        "                effective = _compat_model(cached_client, model, cached_default)\n"
+        "                return cached_client, effective\n"
+    )
+    new_sync_cache_hit = (
+        "            else:\n"
+        "                if _brainstack_auxiliary_client_is_closed(cached_client):\n"
+        "                    close_fn = getattr(cached_client, \"close\", None)\n"
+        "                    if callable(close_fn):\n"
+        "                        try:\n"
+        "                            close_fn()\n"
+        "                        except Exception:\n"
+        "                            pass\n"
+        "                    del _client_cache[cache_key]\n"
+        "                else:\n"
+        "                    effective = _compat_model(cached_client, model, cached_default)\n"
+        "                    return cached_client, effective\n"
+    )
+    if (
+        "def _get_cached_client(" in text
+        and "_brainstack_auxiliary_client_is_closed(cached_client)" not in text
+    ):
+        text = _replace_once(
+            text,
+            old_sync_cache_hit,
+            new_sync_cache_hit,
+            label="auxiliary_client evict closed sync cache",
+            path=path,
+        )
+        applied.append("auxiliary_client:evict_closed_sync_cache")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")

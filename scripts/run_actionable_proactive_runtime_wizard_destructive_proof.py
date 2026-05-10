@@ -50,11 +50,54 @@ def _wizard_patch_reproduction_report() -> dict[str, Any]:
         root = Path(raw)
         auxiliary_client = root / "auxiliary_client.py"
         auxiliary_client.write_text(
+            "from typing import Any, Dict, Optional, Tuple\n\n"
             "def resolve_provider_client(provider=None, model=None):\n"
             "    cfg_provider = provider\n"
             "    cfg_model = None\n"
             "    resolved_model = model or cfg_model\n"
-            "    return provider, resolved_model\n",
+            "    return provider, resolved_model\n"
+            "\n"
+            "_client_cache = {}\n"
+            "_client_cache_lock = None\n\n"
+            "def _client_cache_key(provider, *, async_mode=False, base_url=None, api_key=None, api_mode=None, main_runtime=None, is_vision=False):\n"
+            "    return (provider, async_mode, base_url or '', api_key or '', api_mode or '', is_vision)\n\n"
+            "def _normalize_main_runtime(main_runtime):\n"
+            "    return main_runtime\n\n"
+            "def _force_close_async_httpx(client):\n"
+            "    pass\n\n"
+            "def _compat_model(client: Any, model: Optional[str], cached_default: Optional[str]) -> Optional[str]:\n"
+            "    return model or cached_default\n\n"
+            "def _get_cached_client(\n"
+            "    provider: str,\n"
+            "    model: str = None,\n"
+            "    async_mode: bool = False,\n"
+            "    base_url: str = None,\n"
+            "    api_key: str = None,\n"
+            "    api_mode: str = None,\n"
+            "    main_runtime: Optional[Dict[str, Any]] = None,\n"
+            "    is_vision: bool = False,\n"
+            ") -> Tuple[Optional[Any], Optional[str]]:\n"
+            "    current_loop = None\n"
+            "    runtime = _normalize_main_runtime(main_runtime)\n"
+            "    cache_key = _client_cache_key(provider, async_mode=async_mode, base_url=base_url, api_key=api_key, api_mode=api_mode, main_runtime=main_runtime, is_vision=is_vision)\n"
+            "    with _client_cache_lock:\n"
+            "        if cache_key in _client_cache:\n"
+            "            cached_client, cached_default, cached_loop = _client_cache[cache_key]\n"
+            "            if async_mode:\n"
+            "                loop_ok = (\n"
+            "                    cached_loop is not None\n"
+            "                    and cached_loop is current_loop\n"
+            "                    and not cached_loop.is_closed()\n"
+            "                )\n"
+            "                if loop_ok:\n"
+            "                    effective = _compat_model(cached_client, model, cached_default)\n"
+            "                    return cached_client, effective\n"
+            "                _force_close_async_httpx(cached_client)\n"
+            "                del _client_cache[cache_key]\n"
+            "            else:\n"
+            "                effective = _compat_model(cached_client, model, cached_default)\n"
+            "                return cached_client, effective\n"
+            "    return None, None\n",
             encoding="utf-8",
         )
         session_search_tool = root / "session_search_tool.py"
@@ -107,9 +150,12 @@ def _wizard_patch_reproduction_report() -> dict[str, Any]:
         auxiliary_text = auxiliary_client.read_text(encoding="utf-8")
         session_text = session_search_tool.read_text(encoding="utf-8")
     checks = {
-        "auxiliary_main_model_inheritance_patch_applied": auxiliary_actions == ["auxiliary_client:inherit_main_model"],
+        "auxiliary_main_model_inheritance_patch_applied": "auxiliary_client:inherit_main_model" in auxiliary_actions,
         "auxiliary_inherits_provider_main": 'explicit_provider == "main"' in auxiliary_text
         and "_read_main_model() or None" in auxiliary_text,
+        "auxiliary_closed_sync_cache_patch_applied": "auxiliary_client:evict_closed_sync_cache" in auxiliary_actions,
+        "auxiliary_evicts_closed_sync_client": "def _brainstack_auxiliary_client_is_closed" in auxiliary_text
+        and "_brainstack_auxiliary_client_is_closed(cached_client)" in auxiliary_text,
         "session_search_deadline_patch_applied": session_search_actions
         == [
             "session_search:total_deadline_helper",
