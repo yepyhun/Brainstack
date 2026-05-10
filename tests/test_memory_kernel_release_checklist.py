@@ -29,6 +29,7 @@ from scripts.run_memory_kernel_release_checklist import (
     _check_tier2_truthful_diagnostics,
     _check_tier2_extraction_quality,
     _check_version_metadata_parity,
+    _count_log_needles,
     _count_python_hermes_coredumps,
     _git_hygiene_from_lists,
     _live_crash_regression_summary,
@@ -452,6 +453,20 @@ def test_live_crash_regression_guard_summary_passes_clean_runtime() -> None:
     assert summary["issue_count"] == 0
     assert summary["logs_crash_markers_zero"] is True
     assert summary["public_safe"] is True
+
+
+def test_live_crash_regression_log_scan_ignores_terminal_tool_payload_errors() -> None:
+    log_text = (
+        'WARNING run_agent: Tool terminal returned error (0.23s): {"output": "Traceback '
+        '(most recent call last):\\nModuleNotFoundError: No module named yaml", "exit_code": 1}\n'
+        "Traceback (most recent call last): runtime crash\n"
+        "ModuleNotFoundError: No module named runtime_dependency\n"
+    )
+
+    counts = _count_log_needles(log_text)
+
+    assert counts["Traceback"] == 1
+    assert counts["ModuleNotFoundError"] == 1
 
 
 def test_live_crash_regression_guard_summary_blocks_native_crash_markers() -> None:

@@ -69,21 +69,6 @@ def _bounded_json_count(path: Path, *, limit: int = 1000) -> tuple[int, bool]:
     return count, False
 
 
-def _bounded_json_count(path: Path, *, limit: int = 1000) -> tuple[int, bool]:
-    if not path.exists() or not path.is_dir():
-        return 0, False
-    count = 0
-    try:
-        for item in path.glob("*.json"):
-            if not item.is_file():
-                continue
-            count += 1
-            if count >= limit:
-                return count, True
-    except OSError:
-        return count, True
-    return count, False
-
 def _runtime_handoff_summary(hermes_home: Path) -> dict[str, int | bool]:
     base = _brainstack_home(hermes_home)
     inbox_count, inbox_truncated = _bounded_json_count(base / "inbox")

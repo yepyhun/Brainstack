@@ -5221,68 +5221,87 @@ for candidate in (
 ):
     _prepend(candidate)
 
+from hermes_proactive.config import load_runtime_config  # noqa: E402
 from hermes_proactive.pulse_producer import classify_pulse_wake, produce_pulse, project_pulse_output  # noqa: E402
+from hermes_proactive.workrun import checkpoint_workrun, finish_workrun, prune_completed_workruns, start_workrun  # noqa: E402
 
 
 def _runtime_config() -> dict[str, object]:
-    path = HERMES_HOME / "config.yaml"
-    if not path.exists():
-        return {{"mode": "dry_run", "kill_switch": False}}
-    try:
-        import yaml  # type: ignore[import-untyped]
-
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {{}}
-    except Exception:
-        return {{"mode": "dry_run", "kill_switch": False}}
-    if not isinstance(data, dict):
-        return {{"mode": "dry_run", "kill_switch": False}}
-    kernel_memory = data.get("kernel_memory") if isinstance(data.get("kernel_memory"), dict) else {{}}
-    plugins = data.get("plugins") if isinstance(data.get("plugins"), dict) else {{}}
-    brainstack = plugins.get("brainstack") if isinstance(plugins.get("brainstack"), dict) else {{}}
-    mode = data.get("proactive_mode") or kernel_memory.get("proactive_mode") or brainstack.get("proactive_mode") or "dry_run"
-    kill_switch = data.get("proactive_kill_switch")
-    if kill_switch is None:
-        kill_switch = kernel_memory.get("proactive_kill_switch")
-    if kill_switch is None:
-        kill_switch = brainstack.get("proactive_kill_switch")
-    return {{"mode": str(mode or "dry_run"), "kill_switch": bool(kill_switch)}}
+    return load_runtime_config(HERMES_HOME)
 
 
 def main() -> int:
-    cfg = _runtime_config()
-    output = produce_pulse(
+    workrun = start_workrun(
         hermes_home=HERMES_HOME,
-        principal_scope_key="runtime:brainstack",
-        workspace_scope_key="workspace:default",
-        stale_inbox_threshold=1,
+        source_kind="proactive_pulse",
+        source_id="brainstack_proactive_pulse_gate",
+        objective="Inspect proactive runtime signals and surface safe recovery candidates.",
+        recovery_policy="rerun pulse in dry-run and inspect recovery candidates before retrying delivery",
+        side_effect_risk="none",
+        next_safe_action="rerun proactive pulse gate or inspect listed recovery candidates",
+        metadata={{"runtime": "cron_gate"}},
     )
-    mode = str(cfg.get("mode") or "dry_run")
-    live_delivery = mode == "live" and not bool(cfg.get("kill_switch"))
-    projection = None
-    wake = classify_pulse_wake(output, create_outbox=False)
-    db_path = HERMES_HOME / "brainstack" / "brainstack.db"
-    if live_delivery and db_path.exists():
-        projection = project_pulse_output(db_path=db_path, output=output, create_outbox=True)
-        wake = projection.get("wake") or wake
-    summary = {{
-        "schema": "brainstack.proactive_cron_gate.v1",
-        "mode": mode,
-        "kill_switch": bool(cfg.get("kill_switch")),
-        "pulse_status": output.get("status"),
-        "task_count": len([item for item in output.get("tasks") or [] if isinstance(item, dict)]),
-        "event_count": len([item for item in output.get("events") or [] if isinstance(item, dict)]),
-        "delivery_requested": bool(wake.get("delivery_requested")),
-        "wake_decision": wake.get("decision"),
-        "wake_reason_code": wake.get("reason_code"),
-        "projection_written_count": int((projection or {{}}).get("written_count") or 0),
-        "projection_outbox_count": int((projection or {{}}).get("outbox_count") or 0),
-        "provider_calls": 0,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-    }}
-    print(json.dumps(summary, ensure_ascii=True, sort_keys=True))
-    print(json.dumps({{"wakeAgent": bool(wake.get("delivery_requested"))}}, ensure_ascii=True, sort_keys=True))
-    return 0
+    try:
+        cfg = _runtime_config()
+        output = produce_pulse(
+            hermes_home=HERMES_HOME,
+            principal_scope_key="runtime:brainstack",
+            workspace_scope_key="workspace:default",
+            stale_inbox_threshold=1,
+        )
+        checkpoint_workrun(
+            hermes_home=HERMES_HOME,
+            run_id=str(workrun["run_id"]),
+            checkpoint_ref=str(output.get("run_id") or "pulse_output"),
+            next_safe_action="project pulse output only if delivery policy allows it",
+        )
+        mode = str(cfg.get("mode") or "dry_run")
+        live_delivery = mode == "live" and not bool(cfg.get("kill_switch"))
+        projection = None
+        wake = classify_pulse_wake(output, create_outbox=False)
+        db_path = HERMES_HOME / "brainstack" / "brainstack.db"
+        if live_delivery and db_path.exists():
+            projection = project_pulse_output(db_path=db_path, output=output, create_outbox=True)
+            wake = projection.get("wake") or wake
+        finish_workrun(
+            hermes_home=HERMES_HOME,
+            run_id=str(workrun["run_id"]),
+            status="completed",
+            output_ref=str(output.get("run_id") or ""),
+            next_safe_action="none",
+        )
+        prune_completed_workruns(hermes_home=HERMES_HOME, keep_completed=200)
+        summary = {{
+            "schema": "brainstack.proactive_cron_gate.v1",
+            "mode": mode,
+            "kill_switch": bool(cfg.get("kill_switch")),
+            "config_status": cfg.get("status"),
+            "config_reason_code": cfg.get("reason_code"),
+            "pulse_status": output.get("status"),
+            "task_count": len([item for item in output.get("tasks") or [] if isinstance(item, dict)]),
+            "event_count": len([item for item in output.get("events") or [] if isinstance(item, dict)]),
+            "delivery_requested": bool(wake.get("delivery_requested")),
+            "wake_decision": wake.get("decision"),
+            "wake_reason_code": wake.get("reason_code"),
+            "projection_written_count": int((projection or {{}}).get("written_count") or 0),
+            "projection_outbox_count": int((projection or {{}}).get("outbox_count") or 0),
+            "workrun_id": workrun.get("run_id"),
+            "provider_calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+        }}
+        print(json.dumps(summary, ensure_ascii=True, sort_keys=True))
+        print(json.dumps({{"wakeAgent": bool(wake.get("delivery_requested"))}}, ensure_ascii=True, sort_keys=True))
+        return 0
+    except BaseException as exc:
+        finish_workrun(
+            hermes_home=HERMES_HOME,
+            run_id=str(workrun["run_id"]),
+            status="interrupted",
+            error_summary=str(exc),
+            next_safe_action="inspect the last checkpoint and rerun pulse if safe",
+        )
+        raise
 
 
 if __name__ == "__main__":

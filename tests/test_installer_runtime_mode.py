@@ -3,6 +3,8 @@ from __future__ import annotations
 from argparse import Namespace
 from pathlib import Path
 import json
+import os
+import subprocess
 import sys
 
 from scripts import brainstack_doctor
@@ -332,6 +334,45 @@ def test_installer_writes_safe_proactive_cron_runtime(tmp_path):
     assert job["state"] == "scheduled"
     assert job["script"] == "brainstack_proactive_pulse_gate.py"
     assert job["deliver"] == "local"
+
+
+def test_installer_proactive_cron_gate_uses_config_fallback_and_workrun_spine(tmp_path):
+    runtime_home = tmp_path / "hermes-config" / "bestie"
+    runtime_home.mkdir(parents=True)
+    (runtime_home / "config.yaml").write_text("proactive_mode: live\nproactive_kill_switch: false\n", encoding="utf-8")
+    target = tmp_path / "hermes"
+    extension_target = target / "extensions" / "hermes_proactive"
+    extension_target.parent.mkdir(parents=True)
+    extension_target.symlink_to(Path("extensions/hermes_proactive").resolve(), target_is_directory=True)
+    fake_yaml = tmp_path / "fake-yaml"
+    fake_yaml.mkdir()
+    (fake_yaml / "yaml.py").write_text('raise ImportError("blocked yaml")\n', encoding="utf-8")
+
+    install_into_hermes._write_hermes_proactive_cron_gate_script(runtime_home, target, dry_run=False)
+
+    env = {**os.environ, "PYTHONPATH": f"{fake_yaml}:{Path.cwd()}"}
+    proc = subprocess.run(
+        [sys.executable, str(runtime_home / "scripts" / "brainstack_proactive_pulse_gate.py")],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    lines = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+    summary = lines[0]
+    assert summary["mode"] == "live"
+    assert summary["kill_switch"] is False
+    assert summary["config_reason_code"] == "CONFIG_LINE_FALLBACK_LOADED"
+    assert summary["workrun_id"]
+    assert lines[1] == {"wakeAgent": False}
+    workruns = list((runtime_home / "home" / "brainstack" / "workruns").glob("*.json"))
+    assert len(workruns) == 1
+    record = json.loads(workruns[0].read_text(encoding="utf-8"))
+    assert record["state"] == "completed"
+    assert record["checkpoint_refs"]
 
 
 
