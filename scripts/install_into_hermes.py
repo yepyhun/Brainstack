@@ -1013,6 +1013,11 @@ def _patch_memory_manager_output_validation_seam(path: Path, dry_run: bool) -> l
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
 
+    typing_import = "from typing import Any, Dict, List, Optional"
+    if typing_import in text:
+        text = text.replace(typing_import, "from typing import Any, Dict, List, Mapping, Optional", 1)
+        applied.append("memory_manager:typing_mapping_import")
+
     if "def validate_assistant_output_all(" not in text:
         old_block = (
             "    def sync_all(self, user_content: str, assistant_content: str, *, session_id: str = \"\") -> None:\n"

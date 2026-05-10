@@ -1260,6 +1260,35 @@ class MemoryManager:
     assert "durable memory write receipt" in text
 
 
+def test_memory_manager_output_validation_patch_adds_mapping_import(tmp_path):
+    module = tmp_path / "memory_manager.py"
+    module.write_text(
+        '''
+from typing import Any, Dict, List, Optional
+
+class MemoryManager:
+    def sync_all(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+        """Sync a completed turn to all providers."""
+        for provider in self._providers:
+            try:
+                provider.sync_turn(user_content, assistant_content, session_id=session_id)
+            except Exception as e:
+                logger.warning(
+                    "Memory provider '%s' sync_turn failed: %s",
+                    provider.name, e,
+                )
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_memory_manager_output_validation_seam(module, dry_run=False)
+
+    text = module.read_text(encoding="utf-8")
+    assert "from typing import Any, Dict, List, Mapping, Optional" in text
+    assert "memory_manager:typing_mapping_import" in applied
+    assert "def validate_assistant_output_all(" in text
+
+
 def test_run_agent_memory_output_validation_patch_runs_before_persist(tmp_path):
     module = tmp_path / "run_agent.py"
     module.write_text(
