@@ -1,8 +1,8 @@
 diff --git a/gateway/platforms/whatsapp.py b/gateway/platforms/whatsapp.py
-index 921dd70d7..334e39e07 100644
+index 8e2173644..3baabceb4 100644
 --- a/gateway/platforms/whatsapp.py
 +++ b/gateway/platforms/whatsapp.py
-@@ -456,7 +456,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
+@@ -565,7 +565,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
                  ],
                  stdout=bridge_log_fh,
                  stderr=bridge_log_fh,
@@ -10,12 +10,12 @@ index 921dd70d7..334e39e07 100644
 +                start_new_session=False if _IS_WINDOWS else True,
                  env=bridge_env,
              )
-             
+             _write_bridge_pidfile(self._session_path, self._bridge_process.pid)
 diff --git a/tools/code_execution_tool.py b/tools/code_execution_tool.py
-index ffcf726fc..e78cd8f97 100644
+index 092f7e37e..d00e888f3 100644
 --- a/tools/code_execution_tool.py
 +++ b/tools/code_execution_tool.py
-@@ -1098,7 +1098,10 @@ def execute_code(
+@@ -1237,7 +1237,10 @@ def execute_code(
              stdout=subprocess.PIPE,
              stderr=subprocess.PIPE,
              stdin=subprocess.DEVNULL,
@@ -28,10 +28,10 @@ index ffcf726fc..e78cd8f97 100644
  
          # --- Poll loop: watch for exit, timeout, and interrupt ---
 diff --git a/tools/environments/base.py b/tools/environments/base.py
-index 3f21f1294..40304202f 100644
+index 8a53cefb5..466ee82f9 100644
 --- a/tools/environments/base.py
 +++ b/tools/environments/base.py
-@@ -298,6 +298,7 @@ class BaseEnvironment(ABC):
+@@ -319,6 +319,7 @@ class BaseEnvironment(ABC):
          self._cwd_file = f"{temp_dir}/hermes-cwd-{self._session_id}.txt"
          self._cwd_marker = _cwd_marker(self._session_id)
          self._snapshot_ready = False
@@ -39,7 +39,7 @@ index 3f21f1294..40304202f 100644
  
      # ------------------------------------------------------------------
      # Abstract methods
-@@ -725,44 +726,49 @@ class BaseEnvironment(ABC):
+@@ -782,44 +783,49 @@ class BaseEnvironment(ABC):
          stdin_data: str | None = None,
      ) -> dict:
          """Execute a command, return {"output": str, "returncode": int}."""
@@ -127,10 +127,10 @@ index 3f21f1294..40304202f 100644
      # ------------------------------------------------------------------
      # Shared helpers
 diff --git a/tools/environments/local.py b/tools/environments/local.py
-index 72d4f04d9..0bbcc69f8 100644
+index 985bf4bdc..fef11d9bb 100644
 --- a/tools/environments/local.py
 +++ b/tools/environments/local.py
-@@ -412,7 +412,10 @@ class LocalEnvironment(BaseEnvironment):
+@@ -469,7 +469,10 @@ class LocalEnvironment(BaseEnvironment):
              stdout=subprocess.PIPE,
              stderr=subprocess.STDOUT,
              stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
@@ -139,14 +139,14 @@ index 72d4f04d9..0bbcc69f8 100644
 +            # exposes start_new_session for this exact setsid use case without
 +            # running arbitrary Python in the forked child.
 +            start_new_session=False if _IS_WINDOWS else True,
-             cwd=self.cwd,
+             cwd=_popen_cwd,
          )
          if not _IS_WINDOWS:
 diff --git a/tools/process_registry.py b/tools/process_registry.py
-index 0fc312185..64f210162 100644
+index 260ba4739..29fde6a9d 100644
 --- a/tools/process_registry.py
 +++ b/tools/process_registry.py
-@@ -545,7 +545,7 @@ class ProcessRegistry:
+@@ -556,7 +556,7 @@ class ProcessRegistry:
              stdout=subprocess.PIPE,
              stderr=subprocess.STDOUT,
              stdin=subprocess.PIPE,

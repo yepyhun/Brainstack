@@ -2894,14 +2894,41 @@ def _patch_run_agent_memory_output_validation_seam(path: Path, dry_run: bool) ->
         "        # Persist session to both JSON log and SQLite\n"
         "        self._persist_session(messages, conversation_history)\n"
     )
+    normal_cleanup_anchor = (
+        "        # Persist session to both JSON log and SQLite only after private retry\n"
+        "        # scaffolding has been removed. Otherwise a later user \"continue\" turn\n"
+        "        # can replay assistant(\"(empty)\") / recovery nudges and fall into the\n"
+        "        # same empty-response loop again.\n"
+        "        self._drop_trailing_empty_response_scaffolding(messages)\n"
+        "        self._persist_session(messages, conversation_history)\n"
+    )
+    normal_cleanup_replacement = (
+        "        if final_response and not interrupted:\n"
+        "            final_response = self._validate_external_memory_final_response(\n"
+        "                original_user_message=original_user_message,\n"
+        "                final_response=final_response,\n"
+        "                interrupted=interrupted,\n"
+        "            )\n"
+        "            self._replace_last_assistant_response_content(messages, conversation_history, final_response)\n"
+        "\n"
+        "        # Persist session to both JSON log and SQLite only after private retry\n"
+        "        # scaffolding has been removed. Otherwise a later user \"continue\" turn\n"
+        "        # can replay assistant(\"(empty)\") / recovery nudges and fall into the\n"
+        "        # same empty-response loop again.\n"
+        "        self._drop_trailing_empty_response_scaffolding(messages)\n"
+        "        self._persist_session(messages, conversation_history)\n"
+    )
     if "        if final_response and not interrupted:\n            final_response = self._validate_external_memory_final_response(\n                original_user_message=original_user_message,\n                final_response=final_response,\n                interrupted=interrupted,\n            )" not in text:
-        text = _replace_once(
-            text,
-            normal_anchor,
-            normal_replacement,
-            label="run_agent normal memory output validation",
-            path=path,
-        )
+        if normal_anchor in text:
+            text = text.replace(normal_anchor, normal_replacement, 1)
+        else:
+            text = _replace_once(
+                text,
+                normal_cleanup_anchor,
+                normal_cleanup_replacement,
+                label="run_agent normal memory output validation",
+                path=path,
+            )
         applied.append("run_agent:normal_memory_output_validation")
 
     delivery_anchor = (
@@ -2938,6 +2965,16 @@ def _patch_run_agent_terminal_final_guard_seam(path: Path, dry_run: bool) -> lis
 
     if "def _terminal_tool_final_guard_nudge(" not in text:
         helper_anchor = "    def _replace_last_assistant_response_content(\n"
+        if helper_anchor not in text:
+            helper_anchor = (
+                "    def _sync_external_memory_for_turn(\n"
+                "        self,\n"
+                "        *,\n"
+                "        original_user_message: Any,\n"
+                "        final_response: Any,\n"
+                "        interrupted: bool,\n"
+                "    ) -> None:\n"
+            )
         helper_block = (
             "    @staticmethod\n"
             "    def _terminal_guard_text(value: Any) -> str:\n"
@@ -3266,13 +3303,32 @@ def _patch_run_agent_terminal_final_guard_seam(path: Path, dry_run: bool) -> lis
             "                pass\n"
             "            else:\n"
         )
-        text = _replace_once(
-            text,
-            sequential_anchor,
-            sequential_replacement,
-            label="run_agent sequential terminal implicit URL fetch block",
-            path=path,
+        sequential_guardrail_anchor = (
+            "            _guardrail_block_decision: ToolGuardrailDecision | None = None\n"
+            "            if _block_msg is None:\n"
+            "                guardrail_decision = self._tool_guardrails.before_call(function_name, function_args)\n"
         )
+        sequential_guardrail_replacement = (
+            "            if _block_msg is None:\n"
+            "                try:\n"
+            "                    _block_msg = self._terminal_url_fetch_block_message(function_name, function_args, messages)\n"
+            "                except Exception:\n"
+            "                    pass\n"
+            "\n"
+            "            _guardrail_block_decision: ToolGuardrailDecision | None = None\n"
+            "            if _block_msg is None:\n"
+            "                guardrail_decision = self._tool_guardrails.before_call(function_name, function_args)\n"
+        )
+        if sequential_anchor in text:
+            text = text.replace(sequential_anchor, sequential_replacement, 1)
+        else:
+            text = _replace_once(
+                text,
+                sequential_guardrail_anchor,
+                sequential_guardrail_replacement,
+                label="run_agent sequential terminal implicit URL fetch block",
+                path=path,
+            )
         applied.append("run_agent:terminal_url_fetch_guard_sequential")
 
     if "_terminal_tool_guard_nudge = self._terminal_tool_final_guard_nudge(" not in text:
@@ -3314,6 +3370,14 @@ def _patch_run_agent_terminal_final_guard_seam(path: Path, dry_run: bool) -> lis
             "            )\n"
             "            self._replace_last_assistant_response_content(messages, conversation_history, final_response)\n"
         )
+        validation_cleanup_anchor = (
+            "        # Persist session to both JSON log and SQLite only after private retry\n"
+            "        # scaffolding has been removed. Otherwise a later user \"continue\" turn\n"
+            "        # can replay assistant(\"(empty)\") / recovery nudges and fall into the\n"
+            "        # same empty-response loop again.\n"
+            "        self._drop_trailing_empty_response_scaffolding(messages)\n"
+            "        self._persist_session(messages, conversation_history)\n"
+        )
         validation_replacement = (
             "            final_response = self._validate_external_memory_final_response(\n"
             "                original_user_message=original_user_message,\n"
@@ -3328,13 +3392,33 @@ def _patch_run_agent_terminal_final_guard_seam(path: Path, dry_run: bool) -> lis
             "            )\n"
             "            self._replace_last_assistant_response_content(messages, conversation_history, final_response)\n"
         )
-        text = _replace_once(
-            text,
-            validation_anchor,
-            validation_replacement,
-            label="run_agent terminal final response validation",
-            path=path,
+        validation_cleanup_replacement = (
+            "        if final_response and not interrupted:\n"
+            "            final_response = self._validate_terminal_final_response(\n"
+            "                original_user_message=original_user_message,\n"
+            "                final_response=final_response,\n"
+            "                messages=messages,\n"
+            "                interrupted=interrupted,\n"
+            "            )\n"
+            "            self._replace_last_assistant_response_content(messages, conversation_history, final_response)\n"
+            "\n"
+            "        # Persist session to both JSON log and SQLite only after private retry\n"
+            "        # scaffolding has been removed. Otherwise a later user \"continue\" turn\n"
+            "        # can replay assistant(\"(empty)\") / recovery nudges and fall into the\n"
+            "        # same empty-response loop again.\n"
+            "        self._drop_trailing_empty_response_scaffolding(messages)\n"
+            "        self._persist_session(messages, conversation_history)\n"
         )
+        if validation_anchor in text:
+            text = text.replace(validation_anchor, validation_replacement, 1)
+        else:
+            text = _replace_once(
+                text,
+                validation_cleanup_anchor,
+                validation_cleanup_replacement,
+                label="run_agent terminal final response validation",
+                path=path,
+            )
         applied.append("run_agent:terminal_final_response_validation")
 
     if applied and not dry_run:
@@ -6044,11 +6128,16 @@ def _patch_dockerfile_backend_dependencies(path: Path, dry_run: bool) -> list[st
         if not dry_run:
             path.write_text(text, encoding="utf-8")
         return ["dockerfile:install_runtime_dependencies"]
-    anchor = '    uv pip install --no-cache-dir -e ".[all]"\n'
-    if anchor not in text:
+    anchors = (
+        '    uv pip install --no-cache-dir -e ".[all]"\n',
+        "RUN uv sync --frozen --no-install-project --extra all\n",
+    )
+    for anchor in anchors:
+        if anchor in text:
+            text = text.replace(anchor, anchor + f"RUN {install_line}\n", 1)
+            break
+    else:
         raise RuntimeError(f"Installer patch anchor missing for docker backend deps in {path}")
-    replacement = anchor + f"RUN {install_line}\n"
-    text = text.replace(anchor, replacement, 1)
     if not dry_run:
         path.write_text(text, encoding="utf-8")
     return ["dockerfile:install_backend_dependencies"]
