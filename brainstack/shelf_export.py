@@ -126,6 +126,33 @@ def _fetch_rows(store: BrainstackStore, query: str, params: tuple[Any, ...] = ()
     return [_row_to_dict(row) for row in store.conn.execute(query, params).fetchall()]
 
 
+def _metadata_scope(value: Any) -> str:
+    metadata = _json_or_text(value)
+    if not isinstance(metadata, Mapping):
+        return ""
+    direct = str(metadata.get("principal_scope_key") or "").strip()
+    if direct:
+        return direct
+    nested = metadata.get("principal_scope")
+    if isinstance(nested, Mapping):
+        parts = []
+        for key in ("platform", "user_id", "agent_identity", "agent_workspace", "chat_type", "chat_id", "thread_id"):
+            item = str(nested.get(key) or "").strip()
+            if item:
+                parts.append(f"{key}:{item}")
+        if parts:
+            return "|".join(parts)
+    return ""
+
+
+def _scope_matches(metadata_json: Any, principal_scope_key: str) -> bool:
+    requested = str(principal_scope_key or "").strip()
+    if not requested:
+        return True
+    scope = _metadata_scope(metadata_json)
+    return scope == requested
+
+
 def _export_profile(store: BrainstackStore, principal_scope_key: str) -> list[dict[str, Any]]:
     rows = _fetch_rows(
         store,
@@ -183,29 +210,33 @@ def _export_task(store: BrainstackStore, principal_scope_key: str) -> list[dict[
 
 
 def _export_graph(store: BrainstackStore, principal_scope_key: str) -> dict[str, list[dict[str, Any]]]:
-    del principal_scope_key
-    return {
-        "entities": _fetch_rows(
-            store,
-            "SELECT id, canonical_name, normalized_name, created_at, updated_at FROM graph_entities ORDER BY id",
-        ),
-        "relations": _fetch_rows(
+    relations = [
+        row
+        for row in _fetch_rows(
             store,
             """
             SELECT id, subject_entity_id, predicate, object_entity_id, object_text, source, metadata_json, created_at, active
             FROM graph_relations
             ORDER BY id
             """,
-        ),
-        "states": _fetch_rows(
+        )
+        if _scope_matches(row.get("metadata_json"), principal_scope_key)
+    ]
+    states = [
+        row
+        for row in _fetch_rows(
             store,
             """
             SELECT id, entity_id, attribute, value_text, source, metadata_json, valid_from, valid_to, is_current
             FROM graph_states
             ORDER BY id
             """,
-        ),
-        "conflicts": _fetch_rows(
+        )
+        if _scope_matches(row.get("metadata_json"), principal_scope_key)
+    ]
+    conflicts = [
+        row
+        for row in _fetch_rows(
             store,
             """
             SELECT id, entity_id, attribute, current_state_id, candidate_value_text, candidate_source,
@@ -213,29 +244,57 @@ def _export_graph(store: BrainstackStore, principal_scope_key: str) -> dict[str,
             FROM graph_conflicts
             ORDER BY id
             """,
-        ),
+        )
+        if _scope_matches(row.get("metadata_json"), principal_scope_key)
+    ]
+    entity_ids = {int(row.get("entity_id") or 0) for row in states + conflicts}
+    entity_ids.update(int(row.get("subject_entity_id") or 0) for row in relations)
+    entity_ids.update(int(row.get("object_entity_id") or 0) for row in relations if int(row.get("object_entity_id") or 0))
+    entities = [
+        row
+        for row in _fetch_rows(
+            store,
+            "SELECT id, canonical_name, normalized_name, created_at, updated_at FROM graph_entities ORDER BY id",
+        )
+        if not principal_scope_key or int(row.get("id") or 0) in entity_ids
+    ]
+    return {
+        "entities": entities,
+        "relations": relations,
+        "states": states,
+        "conflicts": conflicts,
     }
 
 
 def _export_corpus(store: BrainstackStore, principal_scope_key: str) -> dict[str, list[dict[str, Any]]]:
-    del principal_scope_key
-    return {
-        "documents": _fetch_rows(
+    documents = [
+        row
+        for row in _fetch_rows(
             store,
             """
             SELECT id, stable_key, title, doc_kind, source, metadata_json, created_at, updated_at, active
             FROM corpus_documents
             ORDER BY stable_key
             """,
-        ),
-        "sections": _fetch_rows(
+        )
+        if _scope_matches(row.get("metadata_json"), principal_scope_key)
+    ]
+    document_ids = {int(row.get("id") or 0) for row in documents}
+    sections = [
+        row
+        for row in _fetch_rows(
             store,
             """
             SELECT document_id, section_index, heading, content, token_estimate, metadata_json, created_at
             FROM corpus_sections
             ORDER BY document_id, section_index
             """,
-        ),
+        )
+        if not principal_scope_key or int(row.get("document_id") or 0) in document_ids
+    ]
+    return {
+        "documents": documents,
+        "sections": sections,
     }
 
 

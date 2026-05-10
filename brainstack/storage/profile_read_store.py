@@ -224,7 +224,11 @@ class ProfileReadStoreMixin(StoreRuntimeBase):
         candidates: List[Dict[str, Any]] = []
         for candidate_row in candidate_rows:
             item = _profile_row_to_dict(candidate_row)
-            if _annotate_principal_scope(item, principal_scope_key=principal_scope_key):
+            if _annotate_principal_scope(
+                item,
+                principal_scope_key=principal_scope_key,
+                allow_personal_scope_fallback=False,
+            ):
                 candidates.append(item)
         if not candidates:
             return None
@@ -275,7 +279,11 @@ class ProfileReadStoreMixin(StoreRuntimeBase):
         candidates: List[Dict[str, Any]] = []
         for candidate_row in candidate_rows:
             item = _behavior_contract_row_to_dict(candidate_row)
-            if _annotate_principal_scope(item, principal_scope_key=requested_scope_key):
+            if _annotate_principal_scope(
+                item,
+                principal_scope_key=requested_scope_key,
+                allow_personal_scope_fallback=False,
+            ):
                 candidates.append(item)
         if not candidates:
             projection = self._profile_style_contract_behavior_projection(  # type: ignore[attr-defined]

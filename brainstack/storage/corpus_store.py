@@ -12,6 +12,8 @@ from .store_runtime import (
     _locked,
     _principal_scope_key_from_metadata,
     _profile_storage_key,
+    _storage_key_for_metadata_scoped_upsert,
+    _storage_key_for_principal_scoped_upsert,
     build_write_decision_trace,
     corpus_ingest_versions,
     enrich_metadata_with_literal_sidecar,
@@ -34,11 +36,20 @@ class CorpusStoreMixin(StoreRuntimeBase):
         active: bool = True,
     ) -> int:
         now = utc_now_iso()
+        logical_stable_key = str(stable_key or "").strip()
+        principal_scope_key = _principal_scope_key_from_metadata(metadata)
+        storage_key = _storage_key_for_metadata_scoped_upsert(
+            self.conn,
+            table="corpus_documents",
+            stable_key=logical_stable_key,
+            principal_scope_key=principal_scope_key,
+        )
         enriched_metadata = _enrich_record_metadata_with_literals(metadata, text=title)
+        enriched_metadata.setdefault("logical_stable_key", logical_stable_key)
         meta_json = json.dumps(enriched_metadata, ensure_ascii=True, sort_keys=True)
         existing = self.conn.execute(
             "SELECT id FROM corpus_documents WHERE stable_key = ?",
-            (stable_key,),
+            (storage_key,),
         ).fetchone()
         if existing:
             row_id = int(existing["id"])
@@ -59,7 +70,7 @@ class CorpusStoreMixin(StoreRuntimeBase):
                 stable_key, title, doc_kind, source, metadata_json, created_at, updated_at, active
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (stable_key, title, doc_kind, source, meta_json, now, now, 1 if active else 0),
+            (storage_key, title, doc_kind, source, meta_json, now, now, 1 if active else 0),
         )
         self.conn.commit()
         return _cursor_lastrowid(cur)
@@ -203,13 +214,25 @@ class CorpusStoreMixin(StoreRuntimeBase):
             where = "stable_key = ?"
             params = (storage_key,)
         elif normalized_target == "operating":
+            storage_key = _storage_key_for_principal_scoped_upsert(
+                self.conn,
+                table="operating_records",
+                stable_key=normalized_key,
+                principal_scope_key=str(principal_scope_key or "").strip(),
+            )
             table = "operating_records"
             where = "stable_key = ?"
-            params = (normalized_key,)
+            params = (storage_key,)
         elif normalized_target == "task":
+            storage_key = _storage_key_for_principal_scoped_upsert(
+                self.conn,
+                table="task_items",
+                stable_key=normalized_key,
+                principal_scope_key=str(principal_scope_key or "").strip(),
+            )
             table = "task_items"
             where = "stable_key = ?"
-            params = (normalized_key,)
+            params = (storage_key,)
         else:
             return False
 
@@ -260,6 +283,14 @@ class CorpusStoreMixin(StoreRuntimeBase):
     @_locked
     def ingest_corpus_source(self, source_payload: Mapping[str, Any]) -> Dict[str, Any]:
         normalized = normalize_corpus_source(source_payload)
+        logical_stable_key = str(normalized.get("stable_key") or "").strip()
+        principal_scope_key = _principal_scope_key_from_metadata(normalized.get("metadata"))
+        storage_key = _storage_key_for_metadata_scoped_upsert(
+            self.conn,
+            table="corpus_documents",
+            stable_key=logical_stable_key,
+            principal_scope_key=principal_scope_key,
+        )
         write_contract_trace = build_write_decision_trace(
             lane="corpus",
             accepted=True,
@@ -267,12 +298,14 @@ class CorpusStoreMixin(StoreRuntimeBase):
             authority_class="corpus",
             canonical=False,
             source_present=bool(str(normalized.get("source_id") or normalized.get("source") or "").strip()),
-            stable_key=str(normalized.get("stable_key") or ""),
+            stable_key=logical_stable_key,
         )
         normalized["metadata"] = {
             **dict(normalized.get("metadata") or {}),
+            "logical_stable_key": logical_stable_key,
             "write_contract_trace": dict(write_contract_trace),
         }
+        normalized["stable_key"] = storage_key
         existing = self.conn.execute(
             "SELECT id, metadata_json FROM corpus_documents WHERE stable_key = ?",
             (normalized["stable_key"],),

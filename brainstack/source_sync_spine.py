@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from .db_row_codecs import decode_json_array, decode_json_object
 from .file_corpus_source import FileCorpusSourceConfig, collect_file_corpus_sources
+from .source_integrity import build_source_integrity_envelope, public_source_integrity_status
 
 
 SOURCE_SYNC_SCHEMA = "brainstack.source_sync_spine.v1"
@@ -151,6 +152,14 @@ def _prepare_source_payloads(config: SourceSyncConfig, *, root: Path, source_set
                 "max_tokens": 800,
             },
         }
+        source_integrity = build_source_integrity_envelope(
+            source_handle=handle,
+            source_adapter=config.source_adapter,
+            source_scope=config.principal_scope_key,
+            content_hash=content_hash,
+            truth_eligible=False,
+        )
+        source_sync["source_integrity"] = public_source_integrity_status(source_integrity)
         sections = []
         for section in source.get("sections") or []:
             if not isinstance(section, Mapping):
@@ -406,6 +415,7 @@ def run_source_sync(store: Any, config: SourceSyncConfig) -> dict[str, Any]:
             "schema": SOURCE_SYNC_RUN_SCHEMA,
             "public_safe": True,
             "raw_private_source_in_status": False,
+            "principal_scope_key": _compact_text(config.principal_scope_key),
             "allow_pattern_count": len(config.allow_patterns),
         },
     )
@@ -439,6 +449,7 @@ def build_source_sync_status(
 ) -> dict[str, Any]:
     _ensure_source_sync_schema(store)
     requested_source = _compact_text(source_set_id)
+    requested_scope = _compact_text(principal_scope_key)
     params: tuple[Any, ...]
     where = ""
     if requested_source:
@@ -446,17 +457,27 @@ def build_source_sync_status(
         params = (requested_source,)
     else:
         params = ()
-    rows = store.conn.execute(
+    candidate_limit = 50 if requested_scope else 5
+    candidate_rows = store.conn.execute(
         f"""
         SELECT run_id, source_set_id, connector, mode, deletion_policy, status, cursor, fingerprint,
                counts_json, issue_json, metadata_json, created_at
         FROM source_sync_runs
         {where}
         ORDER BY created_at DESC, id DESC
-        LIMIT 5
+        LIMIT ?
         """,
-        params,
+        (*params, candidate_limit),
     ).fetchall()
+    rows = []
+    for row in candidate_rows:
+        if requested_scope:
+            metadata = decode_json_object(row["metadata_json"])
+            if _compact_text(metadata.get("principal_scope_key")) != requested_scope:
+                continue
+        rows.append(row)
+        if len(rows) >= 5:
+            break
     latest = rows[0] if rows else None
     if latest is not None:
         active_docs = _active_synced_documents(

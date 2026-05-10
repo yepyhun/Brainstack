@@ -17,6 +17,7 @@ from .store_runtime import (
     _extract_query_terms,
     _locked,
     _merge_record_metadata,
+    _storage_key_for_principal_scoped_upsert,
     _scoped_row_priority,
     _task_match_score,
     _task_row_to_dict,
@@ -45,21 +46,29 @@ class TaskStoreMixin(StoreRuntimeBase):
         metadata: Dict[str, Any] | None = None,
     ) -> int:
         now = utc_now_iso()
+        logical_stable_key = str(stable_key or "").strip()
+        storage_key = _storage_key_for_principal_scoped_upsert(
+            self.conn,
+            table="task_items",
+            stable_key=logical_stable_key,
+            principal_scope_key=principal_scope_key,
+        )
         existing = self.conn.execute(
             "SELECT id, metadata_json FROM task_items WHERE stable_key = ?",
-            (str(stable_key or "").strip(),),
+            (storage_key,),
         ).fetchone()
         merged_metadata = _merge_record_metadata(
             existing["metadata_json"] if existing else None,
             _enrich_record_metadata_with_literals(metadata, text=title),
             source=source,
         )
+        merged_metadata.setdefault("logical_stable_key", logical_stable_key)
         merged_metadata = guard_and_normalize_durable_truth_metadata(
             shelf="task",
             source=source,
             metadata=merged_metadata,
             record_type=str(item_type or "").strip(),
-            slot=str(stable_key or "").strip(),
+            slot=logical_stable_key,
         )
         meta_json = json.dumps(
             merged_metadata,
@@ -110,7 +119,7 @@ class TaskStoreMixin(StoreRuntimeBase):
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                str(stable_key or "").strip(),
+                storage_key,
                 str(principal_scope_key or "").strip(),
                 str(item_type or "").strip(),
                 str(title or "").strip(),

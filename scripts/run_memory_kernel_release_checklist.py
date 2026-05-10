@@ -1524,6 +1524,124 @@ def _check_retrieval_packet_source_destructive_proof(tmp: Path) -> CheckResult:
     )
 
 
+def _check_source_integrity_spine(tmp: Path) -> CheckResult:
+    out = tmp / "source_integrity_spine.json"
+    command = [sys.executable, "scripts/verify_source_integrity_spine.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    required_flags = (
+        "source_sync_attaches_integrity_envelope",
+        "source_update_does_not_write_truth",
+        "drift_blocks_truth_until_readmission",
+        "missing_fingerprint_not_answerable",
+        "agent_facing_status_public_safe",
+        "source_sync_second_run_changed",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("issues") == []
+        and all(proof.get(flag) is True for flag in required_flags)
+    )
+    return CheckResult(
+        name="source_integrity_spine",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": len(data.get("issues") or []),
+            "public_safe": data.get("public_safe"),
+            "proof": {flag: proof.get(flag) for flag in required_flags},
+            "transition_reason_code": data.get("transition_reason_code"),
+        },
+    )
+
+
+def _check_memory_write_collision_contract(tmp: Path) -> CheckResult:
+    out = tmp / "memory_write_collision_contract.json"
+    command = [sys.executable, "scripts/verify_memory_write_collision_contract.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    required_flags = (
+        "initial_style_contract_materialized",
+        "unsafe_shrink_gets_structured_collision",
+        "unsafe_shrink_is_not_final_success",
+        "active_card_preserved_after_small_write",
+        "source_integrity_collision_has_next_action",
+        "non_collision_receipt_keeps_success_semantics",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("issues") == []
+        and all(proof.get(flag) is True for flag in required_flags)
+    )
+    return CheckResult(
+        name="memory_write_collision_contract",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": len(data.get("issues") or []),
+            "public_safe": data.get("public_safe"),
+            "proof": {flag: proof.get(flag) for flag in required_flags},
+            "collision_codes": data.get("collision_codes"),
+        },
+    )
+
+
+def _check_multi_profile_shared_backend(tmp: Path) -> CheckResult:
+    out = tmp / "multi_profile_shared_backend.json"
+    command = [sys.executable, "scripts/verify_multi_profile_shared_backend.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    verdict = data.get("support_verdict") if isinstance(data.get("support_verdict"), Mapping) else {}
+    required_flags = (
+        "three_profiles_have_distinct_principal_scopes",
+        "missing_profile_identity_degraded",
+        "behavior_contract_no_cross_profile_fallback",
+        "continuity_no_cross_profile_bleed",
+        "current_truth_l0_no_cross_profile_bleed",
+        "operating_same_logical_key_no_cross_profile_overwrite",
+        "task_same_logical_key_no_cross_profile_overwrite",
+        "graph_export_no_cross_profile_bleed",
+        "corpus_same_logical_key_no_cross_profile_overwrite",
+        "proactive_no_cross_profile_bleed",
+        "source_sync_status_no_cross_profile_bleed",
+        "conflict_primitive_blocks_current_truth",
+        "agent_facing_certified_verdict",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("issues") == []
+        and all(proof.get(flag) is True for flag in required_flags)
+        and verdict.get("status") == "certified"
+    )
+    return CheckResult(
+        name="multi_profile_shared_backend",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": len(data.get("issues") or []),
+            "public_safe": data.get("public_safe"),
+            "proof": {flag: proof.get(flag) for flag in required_flags},
+            "support_status": verdict.get("status"),
+            "certified_shelves": verdict.get("certified_shelves"),
+        },
+    )
+
+
 def _check_actionable_proactive_runtime_wizard_destructive_proof(tmp: Path) -> CheckResult:
     out = tmp / "actionable_proactive_runtime_wizard_destructive_proof.json"
     command = [
@@ -2637,6 +2755,9 @@ def run_checklist(
             _check_store_concurrency_contract(tmp),
             _check_enterprise_release_compliance(tmp),
             _check_retrieval_packet_source_destructive_proof(tmp),
+            _check_source_integrity_spine(tmp),
+            _check_memory_write_collision_contract(tmp),
+            _check_multi_profile_shared_backend(tmp),
             _check_installer_gateway_timeout_boundary(tmp),
             _check_actionable_proactive_runtime_wizard_destructive_proof(tmp),
             _check_proactive_agent_facing_wake_contract(tmp),

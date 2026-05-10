@@ -718,6 +718,48 @@ def _apply_adaptive_route_overrides(
     policy.semantic_evidence_reason = str(semantic.get("reason") or "").strip() or "route_gated"
 
 
+def _adaptive_route_plan_with_effective_limits(
+    plan: Mapping[str, Any],
+    policy: WorkingMemoryPolicy,
+) -> dict[str, Any]:
+    """Return a public route plan whose shelf limits match the effective runtime policy."""
+
+    updated = dict(plan)
+    shelf_budget = dict(plan.get("shelf_budget") if isinstance(plan.get("shelf_budget"), Mapping) else {})
+    shelf_limits = dict(shelf_budget.get("shelf_limits") if isinstance(shelf_budget.get("shelf_limits"), Mapping) else {})
+    effective_limits = {
+        "profile": int(policy.profile_limit),
+        "continuity_match": int(policy.continuity_match_limit),
+        "continuity_recent": int(policy.continuity_recent_limit),
+        "transcript": int(policy.transcript_limit),
+        "operating": int(policy.operating_limit),
+        "graph": int(policy.graph_limit),
+        "corpus": int(policy.corpus_limit),
+    }
+    shelf_limits.update(effective_limits)
+    if int(shelf_limits.get("semantic_evidence") or 0) > 0:
+        shelf_limits["semantic_evidence"] = max(int(policy.evidence_item_budget) * 4, 16)
+    backend_call_budget = dict(
+        shelf_budget.get("backend_call_budget") if isinstance(shelf_budget.get("backend_call_budget"), Mapping) else {}
+    )
+    backend_call_budget.update(
+        {
+            "profile": 1 if effective_limits["profile"] > 0 else 0,
+            "continuity": 2 if effective_limits["continuity_match"] > 0 or effective_limits["continuity_recent"] > 0 else 0,
+            "transcript": 2 if effective_limits["transcript"] > 0 else 0,
+            "operating": 1 if effective_limits["operating"] > 0 else 0,
+            "graph": 2 if effective_limits["graph"] > 0 else 0,
+            "corpus": 2 if effective_limits["corpus"] > 0 else 0,
+            "semantic_evidence": 1 if int(shelf_limits.get("semantic_evidence") or 0) > 0 else 0,
+        }
+    )
+    shelf_budget["shelf_limits"] = shelf_limits
+    shelf_budget["backend_call_budget"] = backend_call_budget
+    shelf_budget["backend_call_budget_total"] = sum(int(value or 0) for value in backend_call_budget.values())
+    updated["shelf_budget"] = shelf_budget
+    return updated
+
+
 def build_working_memory_packet(
     store: BrainstackStore,
     *,
@@ -793,8 +835,6 @@ def build_working_memory_packet(
         current_truth_view=current_truth_view,
         backend_health=_store_backend_health(store),
     )
-    retrieval_control_plan = retrieval_control_plan_from_adaptive_plan(adaptive_route_plan)
-    adaptive_route_plan["plan_id"] = retrieval_control_plan.plan_id
     _apply_adaptive_route_overrides(
         policy,
         adaptive_route_plan,
@@ -811,6 +851,9 @@ def build_working_memory_packet(
             "evidence_item_budget": evidence_item_budget,
         },
     )
+    adaptive_route_plan = _adaptive_route_plan_with_effective_limits(adaptive_route_plan, policy)
+    retrieval_control_plan = retrieval_control_plan_from_adaptive_plan(adaptive_route_plan)
+    adaptive_route_plan["plan_id"] = retrieval_control_plan.plan_id
     policy.retrieval_control_plan = retrieval_control_plan.to_public_dict()
 
     effective_route_resolver = route_resolver

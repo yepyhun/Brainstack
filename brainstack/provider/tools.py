@@ -9,6 +9,7 @@ from ..memory_write_receipts import (
     commitment_guard_trace,
     compute_receipt_coverage,
 )
+from ..memory_write_collision import attach_write_collision_if_any
 from ..profile_contract import normalize_profile_slot
 from ..proactive_agent_contract import (
     build_proactive_status,
@@ -444,6 +445,7 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             allow_operator_source_role=bool(trusted_operator_origin),
         )
         if rejection is not None:
+            rejection = attach_write_collision_if_any(rejection)
             self._last_write_receipt = dict(rejection)
             self._set_memory_operation_trace(
                 surface="explicit_capture_rejected",
@@ -587,6 +589,7 @@ class ProviderToolsMixin(ProviderRuntimeBase):
                 receipt=receipt,
                 trusted_operator_origin=trusted_operator_origin,
             )
+        receipt = attach_write_collision_if_any(receipt)
         return receipt
 
     def _materialize_style_contract_from_profile_capture(

@@ -437,6 +437,47 @@ def _profile_storage_key(*, stable_key: str, category: str = "", principal_scope
     return f"{logical_key}{PROFILE_SCOPE_DELIMITER}{scope_key}"
 
 
+def _principal_scoped_storage_key(*, stable_key: str, principal_scope_key: str = "") -> str:
+    logical_key = str(stable_key or "").strip()
+    scope_key = str(principal_scope_key or "").strip()
+    if PROFILE_SCOPE_DELIMITER in logical_key:
+        return logical_key
+    if not logical_key or not scope_key:
+        return logical_key
+    return f"{logical_key}{PROFILE_SCOPE_DELIMITER}{scope_key}"
+
+
+def _storage_key_for_principal_scoped_upsert(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    stable_key: str,
+    principal_scope_key: str = "",
+) -> str:
+    logical_key = str(stable_key or "").strip()
+    scope_key = str(principal_scope_key or "").strip()
+    if PROFILE_SCOPE_DELIMITER in logical_key:
+        return logical_key
+    if not logical_key or not scope_key:
+        return logical_key
+    scoped_key = _principal_scoped_storage_key(stable_key=logical_key, principal_scope_key=scope_key)
+    scoped_existing = conn.execute(
+        f"SELECT id FROM {table} WHERE stable_key = ?",
+        (scoped_key,),
+    ).fetchone()
+    if scoped_existing is not None:
+        return scoped_key
+    existing = conn.execute(
+        f"SELECT principal_scope_key FROM {table} WHERE stable_key = ?",
+        (logical_key,),
+    ).fetchone()
+    if existing is None:
+        return logical_key
+    if str(existing["principal_scope_key"] or "").strip() == scope_key:
+        return logical_key
+    return scoped_key
+
+
 def _split_profile_storage_key(storage_key: str) -> tuple[str, str]:
     raw_key = str(storage_key or "").strip()
     if PROFILE_SCOPE_DELIMITER not in raw_key:
@@ -528,6 +569,38 @@ def _principal_scope_key_from_metadata(metadata: Mapping[str, Any] | None) -> st
                     return scoped
         return ""
     return _scope_key_from_payload(nested, fields=PRINCIPAL_SCOPE_KEY_FIELDS)
+
+
+def _storage_key_for_metadata_scoped_upsert(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    stable_key: str,
+    principal_scope_key: str = "",
+) -> str:
+    logical_key = str(stable_key or "").strip()
+    scope_key = str(principal_scope_key or "").strip()
+    if PROFILE_SCOPE_DELIMITER in logical_key:
+        return logical_key
+    if not logical_key or not scope_key:
+        return logical_key
+    scoped_key = _principal_scoped_storage_key(stable_key=logical_key, principal_scope_key=scope_key)
+    scoped_existing = conn.execute(
+        f"SELECT id FROM {table} WHERE stable_key = ?",
+        (scoped_key,),
+    ).fetchone()
+    if scoped_existing is not None:
+        return scoped_key
+    existing = conn.execute(
+        f"SELECT metadata_json FROM {table} WHERE stable_key = ?",
+        (logical_key,),
+    ).fetchone()
+    if existing is None:
+        return logical_key
+    existing_scope = _principal_scope_key_from_metadata(_decode_json_object(existing["metadata_json"]))
+    if existing_scope == scope_key:
+        return logical_key
+    return scoped_key
 
 
 def _enrich_record_metadata_with_literals(
