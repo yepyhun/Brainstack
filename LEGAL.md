@@ -1,4 +1,4 @@
-# Brainstack Legal Terms
+# Brainstack Proprietary Source-Available Terms
 
 Copyright (c) 2026 LauraTom / yepyhun. All rights reserved.
 
@@ -76,11 +76,11 @@ contribution does not grant you commercial rights to Brainstack.
 Do not submit code, documentation, data, or other material unless you have the
 right to submit it under these terms.
 
-## All Rights Reserved
+## Proprietary Source-Available Terms
 
-No public reuse licence is granted unless a future version of this repository
-explicitly includes a different written licence and explicitly supersedes these
-terms.
+All rights are reserved. No public reuse rights are granted unless a future
+version of this repository explicitly includes different written terms and
+explicitly supersedes these terms.
 
 Publication of the source code does not grant permission to copy, modify,
 redistribute, sublicense, sell, host, commercialize, or create public derivative
