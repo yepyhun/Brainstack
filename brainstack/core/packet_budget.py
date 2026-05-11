@@ -114,13 +114,13 @@ def is_authority_critical(candidate: Mapping[str, Any]) -> bool:
 
 
 def _fingerprint_key(candidate: Mapping[str, Any]) -> str:
-    stable_key = _text(candidate.get("stable_key"))
-    if stable_key:
-        return stable_key
     target_slot = _text(candidate.get("target_slot"))
     fingerprint = _text(candidate.get("value_fingerprint"))
     if target_slot and fingerprint:
         return f"{target_slot}:{fingerprint}"
+    stable_key = _text(candidate.get("stable_key"))
+    if stable_key:
+        return stable_key
     return ""
 
 
@@ -308,7 +308,11 @@ def apply_packet_budget(
     pre_dropped = [item for item in copied if _decision(item) in _DROPPED_DECISIONS]
     active = [item for item in copied if _decision(item) not in _DROPPED_DECISIONS]
     duplicate_ids = _duplicate_lower_authority_ids(active)
-    protected = [item for item in active if is_authority_critical(item)]
+    protected = [
+        item
+        for item in active
+        if is_authority_critical(item) and _text(item.get("candidate_id")) not in duplicate_ids
+    ]
     authority_minimum_tokens = sum(_token_estimate(item) for item in protected)
 
     selected: list[dict[str, Any]] = []
@@ -325,7 +329,17 @@ def apply_packet_budget(
         )
         protected_ids = {_text(item.get("candidate_id")) for item in protected}
         for item in active:
-            if _text(item.get("candidate_id")) in protected_ids:
+            candidate_id = _text(item.get("candidate_id"))
+            if candidate_id in protected_ids:
+                continue
+            if candidate_id in duplicate_ids:
+                dropped.append(
+                    _copy_with_decision(
+                        item,
+                        decision=DECISION_DROPPED,
+                        reason_code=_drop_reason(item, duplicate_lower_authority=True),
+                    )
+                )
                 continue
             dropped.append(
                 _copy_with_decision(

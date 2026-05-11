@@ -1720,6 +1720,45 @@ def _check_model_facing_recall_budget(tmp: Path) -> CheckResult:
     )
 
 
+def _check_duplicate_strength_consolidation(tmp: Path) -> CheckResult:
+    out = tmp / "duplicate_strength_consolidation.json"
+    command = [sys.executable, "scripts/verify_duplicate_strength_consolidation.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    required_flags = (
+        "dirty_live_shaped_profile_duplicate_fixture",
+        "exact_duplicate_selected_once",
+        "exact_duplicate_rendered_once",
+        "exact_duplicate_budget_drop_reported",
+        "answer_evidence_preserved",
+        "bloat_reports_duplicate_strength",
+        "dry_run_reports_review_only_duplicate",
+        "unsafe_apply_rejected_without_mutation",
+        "near_duplicate_not_auto_merged",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("issues") == []
+        and all(proof.get(flag) is True for flag in required_flags)
+    )
+    return CheckResult(
+        name="duplicate_strength_consolidation",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": len(data.get("issues") or []),
+            "public_safe": data.get("public_safe"),
+            "proof": {flag: proof.get(flag) for flag in required_flags},
+            "diagnostics": data.get("diagnostics") if isinstance(data.get("diagnostics"), Mapping) else {},
+        },
+    )
+
+
 def _check_actionable_proactive_runtime_wizard_destructive_proof(tmp: Path) -> CheckResult:
     out = tmp / "actionable_proactive_runtime_wizard_destructive_proof.json"
     command = [
@@ -2838,6 +2877,7 @@ def run_checklist(
             _check_multi_profile_shared_backend(tmp),
             _check_phase_quality_contract(tmp),
             _check_model_facing_recall_budget(tmp),
+            _check_duplicate_strength_consolidation(tmp),
             _check_installer_gateway_timeout_boundary(tmp),
             _check_actionable_proactive_runtime_wizard_destructive_proof(tmp),
             _check_proactive_agent_facing_wake_contract(tmp),

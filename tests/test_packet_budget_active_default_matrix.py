@@ -180,6 +180,45 @@ def test_build_working_memory_packet_uses_active_default_without_explicit_mode(t
         store.close()
 
 
+def test_build_working_memory_packet_drops_exact_duplicate_profile_strength(tmp_path: Path) -> None:
+    store = BrainstackStore(str(tmp_path / "brainstack.sqlite3"), graph_backend="sqlite", corpus_backend="sqlite")
+    store.open()
+    try:
+        scope = "principal:m007:s03:duplicate-strength"
+        session = "session:m007:s03:duplicate-strength"
+        for stable_key in ("preference:duplicate:a", "preference:duplicate:b"):
+            store.upsert_profile_item(
+                stable_key=stable_key,
+                category="preference",
+                content="Duplicate exact proof user prefers compact memory.",
+                source="duplicate-strength.fixture",
+                confidence=0.99,
+                metadata={"principal_scope_key": scope, "truth_eligible": True},
+            )
+
+        packet = build_working_memory_packet(
+            store,
+            query="compact memory preference duplicate exact proof",
+            session_id=session,
+            principal_scope_key=scope,
+            **_packet_defaults(),
+        )
+
+        decisions = {item["candidate_id"]: item for item in packet["packet_budget"]["budget_decisions"]}
+        duplicate_drops = [
+            item
+            for item in decisions.values()
+            if item["reason_code"] == "dropped_budget_duplicate_lower_authority"
+        ]
+
+        assert len(packet["profile_items"]) == 1
+        assert packet["block"].count("Duplicate exact proof") == 1
+        assert len(duplicate_drops) == 1
+        assert packet["packet_budget"]["answer_evidence_preserved"] is True
+    finally:
+        store.close()
+
+
 def test_provider_supported_path_uses_active_default_without_config(tmp_path: Path) -> None:
     provider = BrainstackMemoryProvider(
         {

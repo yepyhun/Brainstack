@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import hashlib
 import json
 import re
 from typing import Any, Callable, Dict, Mapping
@@ -485,6 +486,36 @@ def _packet_budget_token_estimate(row: Mapping[str, Any]) -> int:
     return max(1, (len(text) + 3) // 4)
 
 
+def _packet_budget_target_slot(channel: str, row: Mapping[str, Any]) -> str:
+    return str(
+        row.get("target_slot")
+        or row.get("category")
+        or row.get("record_type")
+        or row.get("row_type")
+        or channel
+        or ""
+    ).strip()
+
+
+def _packet_budget_value_fingerprint(row: Mapping[str, Any]) -> str:
+    existing = str(row.get("value_fingerprint") or row.get("content_hash") or row.get("section_hash") or "").strip()
+    if existing:
+        return existing
+    value = str(
+        row.get("content")
+        or row.get("object_value")
+        or row.get("value_text")
+        or row.get("summary")
+        or row.get("title")
+        or row.get("heading")
+        or ""
+    )
+    normalized = " ".join(value.split())
+    if not normalized:
+        return ""
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+
+
 def _packet_budget_candidate(
     *,
     channel: str,
@@ -494,10 +525,15 @@ def _packet_budget_candidate(
     authority: str,
 ) -> dict[str, Any]:
     candidate_id = f"{channel}:{row.get('id') or row.get('row_id') or row.get('stable_key') or index}"
+    target_slot = _packet_budget_target_slot(channel, row)
+    value_fingerprint = _packet_budget_value_fingerprint(row)
     return {
         "candidate_id": candidate_id,
         "evidence_id": candidate_id,
         "channel": channel,
+        "stable_key": row.get("stable_key") or row.get("storage_key") or "",
+        "target_slot": target_slot,
+        "value_fingerprint": value_fingerprint,
         "authority": authority,
         "decision": "selected",
         "source_role": row.get("source_role") or row.get("source") or "memory",

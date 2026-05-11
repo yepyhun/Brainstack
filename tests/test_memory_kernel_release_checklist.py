@@ -11,6 +11,7 @@ from scripts.run_memory_kernel_release_checklist import (
     _check_actionable_proactive_runtime_wizard_destructive_proof,
     _check_benchmark_transparency,
     _check_behavior_card_destructive_proof,
+    _check_duplicate_strength_consolidation,
     _check_packet_budget_active_default,
     _check_adaptive_evidence_kernel,
     _check_adaptive_evidence_performance_completion,
@@ -175,6 +176,21 @@ def test_model_facing_recall_budget_release_check_passes(tmp_path: Path) -> None
     assert result.summary["proof"]["inspect_retains_literal_tokens"] is True
     assert result.summary["proof"]["inspect_retains_explicit_truth_parity"] is True
     assert result.summary["proof"]["answerability_preserved"] is True
+
+
+def test_duplicate_strength_consolidation_release_check_passes(tmp_path: Path) -> None:
+    result = _check_duplicate_strength_consolidation(tmp_path)
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["proof"]["dirty_live_shaped_profile_duplicate_fixture"] is True
+    assert result.summary["proof"]["exact_duplicate_selected_once"] is True
+    assert result.summary["proof"]["exact_duplicate_budget_drop_reported"] is True
+    assert result.summary["proof"]["answer_evidence_preserved"] is True
+    assert result.summary["proof"]["dry_run_reports_review_only_duplicate"] is True
+    assert result.summary["proof"]["unsafe_apply_rejected_without_mutation"] is True
+    assert result.summary["proof"]["near_duplicate_not_auto_merged"] is True
 
 
 def test_release_report_fails_adaptive_evidence_kernel_even_in_dev_mode() -> None:

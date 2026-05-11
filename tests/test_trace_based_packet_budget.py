@@ -13,6 +13,7 @@ from brainstack.core.packet_budget import (
 )
 from brainstack.core.reason_codes import ReasonCode
 from brainstack.core.trace import (
+    AUTHORITY_DURABLE_TRUTH,
     AUTHORITY_RECEIPT_BACKED,
     AUTHORITY_SUPPORT_ONLY,
     DECISION_SELECTED,
@@ -27,11 +28,17 @@ from scripts.run_public_memory_kernel_fixtures import (
 FIXTURE_DIR = Path("tests/fixtures/public_memory_kernel")
 
 
-def _receipt_candidate(candidate_id: str, token_estimate: int = 8) -> dict[str, object]:
+def _receipt_candidate(
+    candidate_id: str,
+    token_estimate: int = 8,
+    *,
+    target_slot: str = "identity.preferred_address_name",
+    raw_value: object = "Alex",
+) -> dict[str, object]:
     return make_evidence_candidate(
         candidate_id=candidate_id,
         shelf="profile",
-        target_slot="identity.preferred_address_name",
+        target_slot=target_slot,
         source_role="user",
         authority=AUTHORITY_RECEIPT_BACKED,
         decision=DECISION_SELECTED,
@@ -44,7 +51,7 @@ def _receipt_candidate(candidate_id: str, token_estimate: int = 8) -> dict[str, 
         truth_eligible=True,
         model_facing_allowed=True,
         answer_evidence_allowed=True,
-        raw_value="Alex",
+        raw_value=raw_value,
         token_estimate=token_estimate,
     )
 
@@ -88,8 +95,8 @@ def test_packet_budget_preserves_receipt_backed_evidence_under_pressure() -> Non
 
 def test_packet_budget_fails_closed_when_authority_minimum_exceeds_cap() -> None:
     candidates = [
-        _receipt_candidate("ev_receipt_a", token_estimate=8),
-        _receipt_candidate("ev_receipt_b", token_estimate=8),
+        _receipt_candidate("ev_receipt_a", token_estimate=8, raw_value="Alex A"),
+        _receipt_candidate("ev_receipt_b", token_estimate=8, raw_value="Alex B"),
         _support_candidate("ev_support", token_estimate=4),
     ]
 
@@ -104,6 +111,37 @@ def test_packet_budget_fails_closed_when_authority_minimum_exceeds_cap() -> None
     assert selected == ["ev_receipt_a", "ev_receipt_b"]
     dropped = {item["candidate_id"]: item["reason_code"] for item in result.candidates if item["decision"] == "dropped"}
     assert dropped["ev_support"] == ReasonCode.BUDGET_INSUFFICIENT_FOR_AUTHORITY_MINIMUM.value
+
+
+def test_packet_budget_drops_exact_duplicate_protected_truth_before_authority_minimum() -> None:
+    candidates = [
+        _receipt_candidate("ev_receipt_a", token_estimate=8, raw_value="Alex"),
+        _receipt_candidate("ev_receipt_b", token_estimate=8, raw_value="Alex"),
+        make_evidence_candidate(
+            candidate_id="ev_durable_duplicate",
+            shelf="profile",
+            target_slot="identity.preferred_address_name",
+            source_role="memory",
+            authority=AUTHORITY_DURABLE_TRUTH,
+            decision=DECISION_SELECTED,
+            reason_code=ReasonCode.SELECTED_RECEIPT_BACKED_FACT.value,
+            truth_eligible=True,
+            model_facing_allowed=True,
+            answer_evidence_allowed=True,
+            raw_value="Alex",
+            token_estimate=8,
+        ),
+    ]
+
+    result = apply_packet_budget(candidates, PacketBudgetPolicy(max_candidate_tokens=8))
+
+    selected = [item["candidate_id"] for item in result.candidates if item["decision"] == "selected"]
+    dropped = {item["candidate_id"]: item["reason_code"] for item in result.candidates if item["decision"] == "dropped"}
+
+    assert selected == ["ev_receipt_a"]
+    assert dropped["ev_receipt_b"] == ReasonCode.DROPPED_BUDGET_DUPLICATE_LOWER_AUTHORITY.value
+    assert dropped["ev_durable_duplicate"] == ReasonCode.DROPPED_BUDGET_DUPLICATE_LOWER_AUTHORITY.value
+    assert result.authority_minimum_tokens == 8
 
 
 def test_budgeted_trace_keeps_audit_completeness_and_budget_decisions() -> None:
@@ -158,7 +196,11 @@ def test_packet_budget_stress_never_drops_protected_evidence() -> None:
         protected_count = rng.randint(1, 4)
         support_count = rng.randint(0, 8)
         protected = [
-            _receipt_candidate(f"ev_p_{index}_{inner}", token_estimate=rng.randint(3, 12))
+            _receipt_candidate(
+                f"ev_p_{index}_{inner}",
+                token_estimate=rng.randint(3, 12),
+                raw_value=f"Alex {index}-{inner}",
+            )
             for inner in range(protected_count)
         ]
         support = [
