@@ -88,14 +88,19 @@ works beyond the limited personal, non-commercial use described above.
 
 ## No Warranty
 
-Brainstack is provided "as is" and "as available", without warranties of any
-kind, express or implied. To the maximum extent permitted by law, the copyright
-owner disclaims all warranties, including merchantability, fitness for a
-particular purpose, non-infringement, accuracy, availability, and security.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. To the maximum extent
+permitted by law, the copyright owner disclaims all other warranties,
+representations, guarantees, or conditions, whether express, implied, statutory,
+or otherwise.
 
 ## Limitation of Liability
 
-To the maximum extent permitted by law, the copyright owner is not liable for any
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE. To the maximum extent permitted by law, this includes
 direct, indirect, incidental, special, consequential, exemplary, punitive, or
 other damages arising from access to or use of Brainstack.
 
