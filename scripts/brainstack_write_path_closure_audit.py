@@ -87,6 +87,10 @@ def _classify(file: str, method: str, caller: str) -> tuple[str, str]:
         return "TEST_OR_CANARY_SEED", "trace-tiering verifier fixture seed"
     if file.startswith("scripts/verify_persistent_bloat_policy.py"):
         return "TEST_OR_CANARY_SEED", "persistent-bloat policy verifier fixture seed"
+    if file.startswith("scripts/verify_duplicate_strength_consolidation.py"):
+        return "TEST_OR_CANARY_SEED", "duplicate-strength verifier fixture seed"
+    if file.startswith("scripts/verify_live_memory_fitness_report.py"):
+        return "TEST_OR_CANARY_SEED", "live memory fitness verifier fixture seed"
     if file.startswith("scripts/verify_profile_scope_index.py"):
         return "TEST_OR_CANARY_SEED", "profile-scope index verifier fixture seed"
     if file.startswith("scripts/verify_behavior_card_delivery.py"):
