@@ -7,13 +7,20 @@ documentation, examples, scripts, releases, and related materials.
 
 ## Summary
 
-Brainstack is source-available for personal, non-commercial evaluation and local
-personal use only.
+Brainstack is proprietary source-available software. All rights are reserved.
+
+The only permission granted by this repository is narrow personal,
+non-commercial, local evaluation and local personal use.
 
 No commercial licence is granted by default. Commercial use, redistribution,
 hosted services, SaaS use, integrations, derivative products, model training,
 benchmark services, resale, sublicensing, or use inside a paid product or paid
 workflow requires prior written permission from the copyright owner.
+
+Public availability on GitHub does not grant any additional rights beyond the
+limited permission in these terms. Any rights GitHub itself provides for viewing
+or forking repositories through GitHub remain subject to GitHub's own terms and
+do not create a licence to use Brainstack outside these terms.
 
 This summary is not a separate licence. If there is any conflict, the full terms
 below control.
@@ -69,10 +76,11 @@ contribution does not grant you commercial rights to Brainstack.
 Do not submit code, documentation, data, or other material unless you have the
 right to submit it under these terms.
 
-## No Open Source Licence
+## All Rights Reserved
 
-Brainstack is not released under an open source licence unless a future version
-of this repository explicitly includes such a licence.
+No public reuse licence is granted unless a future version of this repository
+explicitly includes a different written licence and explicitly supersedes these
+terms.
 
 Publication of the source code does not grant permission to copy, modify,
 redistribute, sublicense, sell, host, commercialize, or create public derivative

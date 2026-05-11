@@ -397,4 +397,4 @@ The current corrective direction is narrow and concrete:
 
 ## License
 
-Brainstack is source-available for personal, non-commercial use only; commercial use, redistribution, hosted services, integrations, and derivative products require prior written permission. See [LEGAL.md](LEGAL.md).
+Brainstack is proprietary source-available software: only personal, non-commercial, local use is permitted by default; all commercial, company/internal, hosted, redistribution, integration, derivative-product, model-training, and sublicensing use requires prior written permission. See [LEGAL.md](LEGAL.md).

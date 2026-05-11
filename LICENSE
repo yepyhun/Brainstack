@@ -1,5 +1,14 @@
-Brainstack is not released under an open source licence.
+Brainstack is proprietary source-available software. All rights reserved.
 
-See LEGAL.md for the permitted personal, non-commercial use terms and the
-restrictions on commercial use, redistribution, hosted services, integrations,
-derivative products, model training, and sublicensing.
+No public reuse licence is granted.
+
+The only permission granted by this repository is the narrow personal,
+non-commercial, local evaluation/use permission described in LEGAL.md. Public
+availability on GitHub does not grant permission to copy, modify, redistribute,
+sublicense, host, commercialize, integrate, train models on, or create public or
+commercial derivative products from Brainstack.
+
+Any commercial use, company/internal use, hosted service, SaaS use,
+redistribution, integration, derivative product, model training, benchmarking
+service, resale, sublicensing, or third-party service use requires prior written
+permission from the copyright owner. Unauthorized use is not licensed.
