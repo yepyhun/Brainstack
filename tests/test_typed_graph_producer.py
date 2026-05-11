@@ -99,6 +99,11 @@ def test_source_backed_typed_relation_populates_graph_and_doctor_state(tmp_path:
         assert lineage["status"] == "active"
         assert lineage["source_kind"] == "turn"
         assert lineage["graph_kind"] == "relation"
+        admission = metadata["admission"]
+        assert admission["decision"] == "ACCEPT_DURABLE"
+        assert admission["truth_eligible"] is True
+        assert admission["source_event_id"]
+        assert admission["source_span_id"]
         assert metadata["tier2_decision_core"]["truth_eligible"] is True
 
         doctor = provider.memory_kernel_doctor(strict=True)
@@ -107,6 +112,45 @@ def test_source_backed_typed_relation_populates_graph_and_doctor_state(tmp_path:
         assert graph_producer["producer_state"] == "projected"
         assert graph_producer["reason_code"] == "GRAPH_PRODUCER_PROJECTED_TYPED_INPUT"
         assert graph_producer["graph_row_counts"]["relations"] == 1
+    finally:
+        provider.shutdown()
+
+
+def test_relation_like_raw_chat_without_typed_candidate_does_not_populate_graph(tmp_path: Path) -> None:
+    def extractor(*args, **kwargs):
+        return {
+            "profile_items": [],
+            "states": [],
+            "relations": [],
+            "inferred_relations": [],
+            "typed_entities": [],
+            "temporal_events": [],
+            "decisions": [],
+            "continuity_summary": "",
+            "_meta": {"json_parse_status": "ok", "parse_context": "test"},
+        }
+
+    provider = _provider(
+        tmp_path,
+        extractor,
+        transcript="User: System Alpha is inspired by Capability Atlas.",
+    )
+    try:
+        result = provider._run_tier2_batch(
+            session_id="typed-graph-session",
+            turn_number=1,
+            trigger_reason="typed_graph_raw_chat_fixture",
+        )
+
+        assert result["status"] == "ok"
+        assert result["writes_performed"] == 0
+        assert _active_graph_relations(provider) == []
+        doctor = provider.memory_kernel_doctor(strict=True)
+        graph_producer = doctor["capabilities"]["graph_producer"]
+        assert graph_producer["status"] == "active"
+        assert graph_producer["producer_state"] == "no_graph_candidates"
+        assert graph_producer["reason_code"] == "GRAPH_PRODUCER_NO_TYPED_GRAPH_CANDIDATES"
+        assert graph_producer["latest_graph_candidate_counts"]["total"] == 0
     finally:
         provider.shutdown()
 

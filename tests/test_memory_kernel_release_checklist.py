@@ -313,10 +313,14 @@ def test_typed_graph_producer_population_release_check_passes(tmp_path: Path) ->
     assert result.summary["issue_count"] == 0
     assert result.summary["projected_state"] == "projected"
     assert result.summary["projected_relation_count"] == 1
+    assert result.summary["projected_admission_decision"] == "ACCEPT_DURABLE"
+    assert result.summary["projected_lineage_status"] == "active"
     assert result.summary["rejected_state"] == "rejected"
     assert result.summary["rejected_relation_count"] == 0
     assert result.summary["empty_graph_status"] == "active"
     assert result.summary["empty_producer_state"] == "no_input"
+    assert result.summary["raw_chat_producer_state"] == "no_graph_candidates"
+    assert result.summary["raw_chat_relation_count"] == 0
 
 
 def test_tier2_graph_destructive_proof_release_check_passes(tmp_path: Path) -> None:

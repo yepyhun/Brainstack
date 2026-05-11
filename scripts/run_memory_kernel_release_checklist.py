@@ -1080,6 +1080,7 @@ def _check_typed_graph_producer_population(tmp: Path) -> CheckResult:
     projected = data.get("projected_probe") if isinstance(data.get("projected_probe"), dict) else {}
     rejected = data.get("rejected_probe") if isinstance(data.get("rejected_probe"), dict) else {}
     empty = data.get("empty_probe") if isinstance(data.get("empty_probe"), dict) else {}
+    raw_chat = data.get("raw_chat_probe") if isinstance(data.get("raw_chat_probe"), dict) else {}
     issues = data.get("issues") if isinstance(data.get("issues"), list) else []
     passed = (
         proc.returncode == 0
@@ -1088,10 +1089,17 @@ def _check_typed_graph_producer_population(tmp: Path) -> CheckResult:
         and issues == []
         and projected.get("producer_state") == "projected"
         and projected.get("relation_count") == 1
+        and projected.get("admission_decision") == "ACCEPT_DURABLE"
+        and projected.get("admission_truth_eligible") is True
+        and projected.get("admission_source_event_present") is True
+        and projected.get("lineage_status") == "active"
+        and projected.get("tier2_core_truth_eligible") is True
         and rejected.get("producer_state") == "rejected"
         and rejected.get("relation_count") == 0
         and empty.get("graph_status") == "active"
         and empty.get("producer_state") == "no_input"
+        and raw_chat.get("producer_state") == "no_graph_candidates"
+        and raw_chat.get("relation_count") == 0
     )
     return CheckResult(
         name="typed_graph_producer_population",
@@ -1104,10 +1112,14 @@ def _check_typed_graph_producer_population(tmp: Path) -> CheckResult:
             "issue_count": len(issues),
             "projected_state": projected.get("producer_state"),
             "projected_relation_count": projected.get("relation_count"),
+            "projected_admission_decision": projected.get("admission_decision"),
+            "projected_lineage_status": projected.get("lineage_status"),
             "rejected_state": rejected.get("producer_state"),
             "rejected_relation_count": rejected.get("relation_count"),
             "empty_graph_status": empty.get("graph_status"),
             "empty_producer_state": empty.get("producer_state"),
+            "raw_chat_producer_state": raw_chat.get("producer_state"),
+            "raw_chat_relation_count": raw_chat.get("relation_count"),
         },
     )
 
