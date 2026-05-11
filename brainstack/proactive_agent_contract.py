@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import Counter
 import os
 from pathlib import Path
+import sqlite3
 from typing import Any, Mapping
 
 from .core.proactive import ProactiveEventKind, ProactiveEventState, ProactiveReasonCode
@@ -56,6 +57,13 @@ PROACTIVE_ACTIVE_ITEM_STATES = {
     ProactiveEventState.BLOCKED.value,
 }
 KANBAN_BLOCKED_BOARD_ACTIONS = (
+    "write",
+    "claim",
+    "assign",
+    "complete",
+    "retry",
+    "reclaim",
+    "dispatch",
     "create_kanban_task",
     "claim_kanban_task",
     "assign_kanban_task",
@@ -63,6 +71,34 @@ KANBAN_BLOCKED_BOARD_ACTIONS = (
     "retry_kanban_task",
     "reclaim_kanban_task",
     "dispatch_kanban_worker",
+)
+KANBAN_VERDICT_ORDER = (
+    "not_installed",
+    "installed_only",
+    "cli_available",
+    "board_storage_accessible",
+    "tool_surface_exposed",
+    "board_write_certified",
+    "worker_lifecycle_certified",
+)
+KANBAN_WRITE_TOOL_NAMES = frozenset(
+    {
+        "kanban_create_task",
+        "kanban_list_tasks",
+        "kanban_claim_task",
+        "kanban_assign_task",
+        "kanban_complete_task",
+        "kanban_retry_task",
+        "kanban_reclaim_task",
+        "kanban_dispatch_worker",
+        "create_kanban_task",
+        "claim_kanban_task",
+        "assign_kanban_task",
+        "complete_kanban_task",
+        "retry_kanban_task",
+        "reclaim_kanban_task",
+        "dispatch_kanban_worker",
+    }
 )
 
 
@@ -265,6 +301,112 @@ def _extension_status(config: Mapping[str, Any] | None = None) -> dict[str, Any]
     }
 
 
+def _config_bool(config: Mapping[str, Any] | None, key: str) -> bool:
+    if not isinstance(config, Mapping):
+        return False
+    value = config.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _config_list(config: Mapping[str, Any] | None, key: str) -> list[str]:
+    if not isinstance(config, Mapping):
+        return []
+    value = config.get(key)
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def _sqlite_table_counts(db_path: Path) -> dict[str, int]:
+    wanted = ("tasks", "task_runs", "task_events")
+    if not db_path.exists():
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return {}
+    try:
+        rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        names = {str(row[0]) for row in rows}
+        counts: dict[str, int] = {}
+        for name in wanted:
+            if name not in names:
+                counts[name] = 0
+                continue
+            counts[name] = int(conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0])
+        return counts
+    except sqlite3.Error:
+        return {}
+    finally:
+        conn.close()
+
+
+def _kanban_board_counts(config: Mapping[str, Any] | None, root: Path | None) -> dict[str, Any]:
+    candidates: list[Path] = []
+    if isinstance(config, Mapping) and str(config.get("kanban_db_path") or "").strip():
+        candidates.append(Path(str(config["kanban_db_path"])).expanduser())
+    env_path = str(os.environ.get("HERMES_KANBAN_DB") or "").strip()
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+    if root is not None:
+        candidates.extend(
+            [
+                root / "kanban.db",
+                root.parent / "kanban.db",
+            ]
+        )
+    for candidate in candidates:
+        counts = _sqlite_table_counts(candidate)
+        if counts:
+            return {
+                "accessible": True,
+                "path_present": candidate.exists(),
+                "task_count": _safe_int(counts.get("tasks"), 0),
+                "task_run_count": _safe_int(counts.get("task_runs"), 0),
+                "task_event_count": _safe_int(counts.get("task_events"), 0),
+            }
+    return {
+        "accessible": False,
+        "path_present": any(candidate.exists() for candidate in candidates),
+        "task_count": 0,
+        "task_run_count": 0,
+        "task_event_count": 0,
+    }
+
+
+def _kanban_claim_guard(verdict: str, *, profile_count: int) -> dict[str, Any]:
+    level = KANBAN_VERDICT_ORDER.index(verdict) if verdict in KANBAN_VERDICT_ORDER else 0
+    write_level = KANBAN_VERDICT_ORDER.index("board_write_certified")
+    worker_level = KANBAN_VERDICT_ORDER.index("worker_lifecycle_certified")
+    forbidden = []
+    if level < write_level:
+        forbidden.extend(["I used Kanban", "cards were created", "Kanban can create cards"])
+    if level < worker_level:
+        forbidden.extend(["workers are running", "workers are working"])
+    if profile_count <= 1:
+        forbidden.append("multi-agent board")
+    safe_phrases = {
+        "not_installed": "Hermes Kanban is not detected in this runtime.",
+        "installed_only": "Hermes Kanban files are installed, but this agent has no certified board tools.",
+        "cli_available": "Hermes Kanban appears CLI-inspectable, but this agent has no certified board tools.",
+        "board_storage_accessible": "Hermes Kanban board storage is readable, but this agent is not certified to write cards.",
+        "tool_surface_exposed": "Hermes Kanban tools are exposed, but board writes are not certified.",
+        "board_write_certified": "Hermes Kanban board writes are certified for this runtime.",
+        "worker_lifecycle_certified": "Hermes Kanban worker lifecycle is certified for this runtime.",
+    }
+    return {
+        "claim_allowed": level >= write_level,
+        "safe_phrase": safe_phrases.get(verdict, safe_phrases["not_installed"]),
+        "forbidden_phrases": sorted(set(forbidden)),
+    }
+
+
 def _kanban_workstation_status(config: Mapping[str, Any] | None = None) -> dict[str, Any]:
     root = _resolve_hermes_root(config)
     evidence_paths: list[str] = []
@@ -276,18 +418,62 @@ def _kanban_workstation_status(config: Mapping[str, Any] | None = None) -> dict[
             root / "website" / "docs" / "user-guide" / "features" / "kanban.md",
         )
         evidence_paths = [str(path) for path in candidates if path.exists()]
-    available = len(evidence_paths) >= 2
+    installed = len(evidence_paths) >= 2
+    cli_available = installed and _config_bool(config, "kanban_cli_available")
+    exposed_tools = set(_config_list(config, "exposed_tool_names")) & KANBAN_WRITE_TOOL_NAMES
+    tool_surface_exposed = _config_bool(config, "kanban_tool_surface_exposed") or bool(exposed_tools)
+    board = _kanban_board_counts(config, root)
+    board_write_certified = tool_surface_exposed and _config_bool(config, "kanban_board_write_certified")
+    worker_lifecycle_certified = board_write_certified and _config_bool(config, "kanban_worker_lifecycle_certified")
+    profile_count = max(_safe_int(config.get("kanban_profile_count") if isinstance(config, Mapping) else 0, 0), 1)
+    local_artifact_path = (
+        Path(str(config.get("local_kanban_artifact_path"))).expanduser()
+        if isinstance(config, Mapping) and str(config.get("local_kanban_artifact_path") or "").strip()
+        else None
+    )
+    local_artifact_present = bool(local_artifact_path and local_artifact_path.exists())
+    if worker_lifecycle_certified:
+        verdict = "worker_lifecycle_certified"
+    elif board_write_certified:
+        verdict = "board_write_certified"
+    elif tool_surface_exposed:
+        verdict = "tool_surface_exposed"
+    elif board["accessible"]:
+        verdict = "board_storage_accessible"
+    elif cli_available:
+        verdict = "cli_available"
+    elif installed:
+        verdict = "installed_only"
+    else:
+        verdict = "not_installed"
+    can_write_board = verdict in {"board_write_certified", "worker_lifecycle_certified"}
+    reason_code = "HERMES_KANBAN_NOT_DETECTED" if verdict == "not_installed" else f"HERMES_KANBAN_{verdict.upper()}"
     payload = {
-        "available": available,
-        "can_write_board": False,
-        "reason_code": "HERMES_KANBAN_DETECTED" if available else "HERMES_KANBAN_NOT_DETECTED",
+        "schema": KANBAN_WORKSTATION_SCHEMA,
+        "available": installed,
+        "evidence_level": verdict,
+        "kanban_verdict": verdict,
+        "can_write_board": can_write_board,
+        "real_board_written": bool(board["task_count"] > 0),
+        "worker_lifecycle_certified": worker_lifecycle_certified,
+        "profile_count": profile_count,
+        "local_kanban_artifact_present": local_artifact_present,
+        "kanban_ready_graph_only": local_artifact_present and not can_write_board,
+        "board": board,
+        "tool_surface": {
+            "exposed": tool_surface_exposed,
+            "exposed_tool_count": len(exposed_tools),
+        },
+        "claim_guard": _kanban_claim_guard(verdict, profile_count=profile_count),
+        "reason_code": reason_code,
     }
-    if available:
+    if installed:
         payload.update(
             {
                 "owner": "hermes_kanban",
                 "proactive_role": "wake_surface_and_handoff_only",
-                "blocked_board_actions": ["write", "claim", "assign", "complete", "retry", "reclaim", "dispatch"],
+                "blocked_board_actions": [] if can_write_board else list(KANBAN_BLOCKED_BOARD_ACTIONS),
+                "evidence_paths": evidence_paths[:8],
             }
         )
     return payload
@@ -456,6 +642,16 @@ def _store_counts(store: Any, principal_scope_key: str) -> dict[str, Any]:
         if str(item.get("kind") or "") == ProactiveEventKind.HEARTBEAT_OK.value
     ]
     pending_outbox = store.list_pending_proactive_outbox(limit=200)
+    user_visible_pending_outbox = [
+        item
+        for item in pending_outbox
+        if str(item.get("principal_scope_key") or "") == str(principal_scope_key or "")
+    ]
+    runtime_scope_pending_outbox = [
+        item
+        for item in pending_outbox
+        if str(item.get("principal_scope_key") or "") != str(principal_scope_key or "")
+    ]
     latest = items[0] if items else {}
     actionable_substrate = _actionable_substrate_summary(store, principal_scope_key)
     counts: dict[str, Any] = {
@@ -463,6 +659,9 @@ def _store_counts(store: Any, principal_scope_key: str) -> dict[str, Any]:
         "candidate_item_count": len(candidate_items),
         "heartbeat_item_count": len(heartbeat_items),
         "pending_outbox_count": len(pending_outbox),
+        "user_visible_pending_outbox_count": len(user_visible_pending_outbox),
+        "runtime_scope_pending_outbox_count": len(runtime_scope_pending_outbox),
+        "outbox_scope_split_status": "split" if pending_outbox else "empty",
         "actionable_substrate": actionable_substrate,
         "pending_actionable_substrate_count": actionable_substrate.get("pending_count", 0),
     }

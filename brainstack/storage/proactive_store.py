@@ -567,7 +567,7 @@ class ProactiveStoreMixin(StoreRuntimeBase):
     def list_pending_proactive_outbox(self, *, limit: int = 50) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """
-            SELECT o.*, e.title, e.summary, e.kind, e.priority, e.evidence_json
+            SELECT o.*, e.title, e.summary, e.kind, e.priority, e.evidence_json, e.principal_scope_key
             FROM proactive_outbox o
             JOIN proactive_events e ON e.event_id = o.event_id
             WHERE o.delivery_state = 'pending'
@@ -591,6 +591,7 @@ class ProactiveStoreMixin(StoreRuntimeBase):
                 "summary": row["summary"],
                 "kind": row["kind"],
                 "priority": row["priority"],
+                "principal_scope_key": row["principal_scope_key"],
                 "evidence_ids": [str(item) for item in _decode_json_list(row["evidence_json"])],
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],

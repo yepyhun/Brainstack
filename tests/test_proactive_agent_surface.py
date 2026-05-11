@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sqlite3
 
 import yaml
 
@@ -271,9 +272,12 @@ def test_proactive_status_kanban_boundary_is_read_only_and_donor_owned(tmp_path:
         kanban = payload["workstation_integrations"]["kanban"]
 
         assert kanban["available"] is True
+        assert kanban["kanban_verdict"] == "installed_only"
         assert kanban["owner"] == "hermes_kanban"
         assert kanban["proactive_role"] == "wake_surface_and_handoff_only"
         assert kanban["can_write_board"] is False
+        assert kanban["claim_guard"]["claim_allowed"] is False
+        assert "I used Kanban" in kanban["claim_guard"]["forbidden_phrases"]
         assert "dispatch" in kanban["blocked_board_actions"]
         assert payload["operational_state"] == "ready_idle"
         assert after == before
@@ -288,8 +292,94 @@ def test_proactive_status_kanban_absent_does_not_degrade_ready_idle(tmp_path: Pa
         kanban = payload["workstation_integrations"]["kanban"]
 
         assert kanban["available"] is False
+        assert kanban["kanban_verdict"] == "not_installed"
         assert kanban["can_write_board"] is False
         assert payload["operational_state"] == "ready_idle"
+    finally:
+        provider.shutdown()
+
+
+def test_proactive_status_kanban_board_storage_does_not_certify_write_or_workers(tmp_path: Path) -> None:
+    hermes_root = tmp_path / "hermes_root"
+    (hermes_root / "tools").mkdir(parents=True)
+    (hermes_root / "hermes_cli").mkdir()
+    (hermes_root / "plugins" / "kanban").mkdir(parents=True)
+    (hermes_root / "tools" / "kanban_tools.py").write_text("# public fixture\n", encoding="utf-8")
+    (hermes_root / "hermes_cli" / "kanban_db.py").write_text("# public fixture\n", encoding="utf-8")
+    kanban_db = tmp_path / "kanban.db"
+    conn = sqlite3.connect(kanban_db)
+    try:
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE task_runs (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE task_events (id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO tasks (id) VALUES ('task-1')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    provider = _provider(tmp_path / "kanban-board", hermes_root=str(hermes_root))
+    provider._config["kanban_db_path"] = str(kanban_db)
+    try:
+        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
+        kanban = payload["workstation_integrations"]["kanban"]
+
+        assert kanban["kanban_verdict"] == "board_storage_accessible"
+        assert kanban["board"]["task_count"] == 1
+        assert kanban["real_board_written"] is True
+        assert kanban["can_write_board"] is False
+        assert kanban["worker_lifecycle_certified"] is False
+        assert "workers are running" in kanban["claim_guard"]["forbidden_phrases"]
+    finally:
+        provider.shutdown()
+
+
+def test_proactive_status_kanban_tool_surface_requires_write_certification(tmp_path: Path) -> None:
+    hermes_root = tmp_path / "hermes_root"
+    (hermes_root / "tools").mkdir(parents=True)
+    (hermes_root / "hermes_cli").mkdir()
+    (hermes_root / "plugins" / "kanban").mkdir(parents=True)
+    (hermes_root / "tools" / "kanban_tools.py").write_text("# public fixture\n", encoding="utf-8")
+    (hermes_root / "hermes_cli" / "kanban_db.py").write_text("# public fixture\n", encoding="utf-8")
+
+    provider = _provider(tmp_path / "kanban-tools", hermes_root=str(hermes_root))
+    provider._config["kanban_tool_surface_exposed"] = True
+    provider._config["kanban_profile_count"] = 1
+    try:
+        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
+        kanban = payload["workstation_integrations"]["kanban"]
+
+        assert kanban["kanban_verdict"] == "tool_surface_exposed"
+        assert kanban["tool_surface"]["exposed"] is True
+        assert kanban["can_write_board"] is False
+        assert "Kanban can create cards" in kanban["claim_guard"]["forbidden_phrases"]
+        assert "multi-agent board" in kanban["claim_guard"]["forbidden_phrases"]
+    finally:
+        provider.shutdown()
+
+
+def test_proactive_status_kanban_write_and_worker_lifecycle_are_explicit_certifications(tmp_path: Path) -> None:
+    hermes_root = tmp_path / "hermes_root"
+    (hermes_root / "tools").mkdir(parents=True)
+    (hermes_root / "hermes_cli").mkdir()
+    (hermes_root / "plugins" / "kanban").mkdir(parents=True)
+    (hermes_root / "tools" / "kanban_tools.py").write_text("# public fixture\n", encoding="utf-8")
+    (hermes_root / "hermes_cli" / "kanban_db.py").write_text("# public fixture\n", encoding="utf-8")
+
+    provider = _provider(tmp_path / "kanban-certified", hermes_root=str(hermes_root))
+    provider._config["kanban_tool_surface_exposed"] = True
+    provider._config["kanban_board_write_certified"] = True
+    provider._config["kanban_worker_lifecycle_certified"] = True
+    provider._config["kanban_profile_count"] = 3
+    try:
+        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
+        kanban = payload["workstation_integrations"]["kanban"]
+
+        assert kanban["kanban_verdict"] == "worker_lifecycle_certified"
+        assert kanban["can_write_board"] is True
+        assert kanban["worker_lifecycle_certified"] is True
+        assert kanban["claim_guard"]["claim_allowed"] is True
+        assert "I used Kanban" not in kanban["claim_guard"]["forbidden_phrases"]
+        assert "multi-agent board" not in kanban["claim_guard"]["forbidden_phrases"]
     finally:
         provider.shutdown()
 

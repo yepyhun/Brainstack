@@ -17,6 +17,7 @@ from scripts.run_memory_kernel_release_checklist import (
     _check_adaptive_evidence_performance_completion,
     _check_hermes_proactive_runtime_parity,
     _check_installer_gateway_timeout_boundary,
+    _check_kanban_capability_evidence_ladder,
     _check_live_memory_fitness_report,
     _check_model_facing_recall_budget,
     _check_phase_quality_contract,
@@ -205,6 +206,20 @@ def test_live_memory_fitness_report_release_check_passes(tmp_path: Path) -> None
     assert result.summary["proof_passed"] is True
     assert result.summary["severity_counts"]["LOW_HANGING_FRUIT"] == 1
     assert result.summary["severity_counts"]["HEALTHY_IDLE"] == 2
+
+
+def test_kanban_capability_evidence_ladder_release_check_passes(tmp_path: Path) -> None:
+    result = _check_kanban_capability_evidence_ladder(tmp_path)
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["read_only"] is True
+    assert result.summary["issue_count"] == 0
+    assert result.summary["proof_passed"] is True
+    assert result.summary["scenario_verdicts"]["installed_only"] == "installed_only"
+    assert result.summary["scenario_verdicts"]["tool_surface_exposed"] == "tool_surface_exposed"
+    assert result.summary["scenario_verdicts"]["worker_lifecycle_certified"] == "worker_lifecycle_certified"
 
 
 def test_release_report_fails_adaptive_evidence_kernel_even_in_dev_mode() -> None:

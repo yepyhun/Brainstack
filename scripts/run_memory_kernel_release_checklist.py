@@ -1813,6 +1813,46 @@ def _check_live_memory_fitness_report(tmp: Path) -> CheckResult:
     )
 
 
+def _check_kanban_capability_evidence_ladder(tmp: Path) -> CheckResult:
+    out = tmp / "kanban_capability_evidence_ladder.json"
+    command = [sys.executable, "scripts/verify_kanban_capability_evidence_ladder.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    scenario_verdicts = data.get("scenario_verdicts") if isinstance(data.get("scenario_verdicts"), Mapping) else {}
+    proof_keys = (
+        "not_installed_level",
+        "installed_only_blocks_write_claim",
+        "board_storage_does_not_certify_workers",
+        "local_artifact_not_real_kanban",
+        "tool_surface_without_write_cert_blocks_card_claim",
+        "worker_lifecycle_requires_explicit_certification",
+        "single_profile_blocks_multi_worker_claim",
+        "runtime_outbox_split_from_user_queue",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("read_only") is True
+        and all(proof.get(key) is True for key in proof_keys)
+    )
+    return CheckResult(
+        name="kanban_capability_evidence_ladder",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "read_only": data.get("read_only"),
+            "issue_count": len(data.get("issues") or []),
+            "scenario_verdicts": dict(scenario_verdicts),
+            "proof_passed": all(proof.get(key) is True for key in proof_keys),
+        },
+    )
+
+
 def _check_actionable_proactive_runtime_wizard_destructive_proof(tmp: Path) -> CheckResult:
     out = tmp / "actionable_proactive_runtime_wizard_destructive_proof.json"
     command = [
@@ -2933,6 +2973,7 @@ def run_checklist(
             _check_model_facing_recall_budget(tmp),
             _check_duplicate_strength_consolidation(tmp),
             _check_live_memory_fitness_report(tmp),
+            _check_kanban_capability_evidence_ladder(tmp),
             _check_installer_gateway_timeout_boundary(tmp),
             _check_actionable_proactive_runtime_wizard_destructive_proof(tmp),
             _check_proactive_agent_facing_wake_contract(tmp),
