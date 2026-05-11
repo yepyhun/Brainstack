@@ -16,6 +16,7 @@ from scripts.run_memory_kernel_release_checklist import (
     _check_adaptive_evidence_performance_completion,
     _check_hermes_proactive_runtime_parity,
     _check_installer_gateway_timeout_boundary,
+    _check_phase_quality_contract,
     _check_proactive_agent_facing_wake_contract,
     _check_persistent_bloat_rebuild,
     _check_projection_semantics_runtime_parity,
@@ -145,6 +146,18 @@ def test_adaptive_evidence_kernel_release_check_passes(tmp_path: Path) -> None:
     assert result.summary["protected_truth_drops"] == 0
     assert result.summary["tank_false_negative_misses"] == 0
     assert result.summary["public_safe"] is True
+
+
+def test_phase_quality_contract_release_check_passes(tmp_path: Path) -> None:
+    result = _check_phase_quality_contract(tmp_path)
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["proof"]["incomplete_risky_fixture_failed"] is True
+    assert result.summary["proof"]["low_risk_docs_only_allowed"] is True
+    assert result.summary["proof"]["side_issue_unclassified_failed"] is True
+    assert result.summary["proof"]["public_safe_output"] is True
 
 
 def test_release_report_fails_adaptive_evidence_kernel_even_in_dev_mode() -> None:
