@@ -34,6 +34,7 @@ from scripts.run_memory_kernel_release_checklist import (
     _check_tier2_truthful_diagnostics,
     _check_tier2_extraction_quality,
     _check_version_metadata_parity,
+    _check_wizard_capability_enablement_matrix,
     _count_log_needles,
     _count_python_hermes_coredumps,
     _git_hygiene_from_lists,
@@ -220,6 +221,19 @@ def test_kanban_capability_evidence_ladder_release_check_passes(tmp_path: Path) 
     assert result.summary["scenario_verdicts"]["installed_only"] == "installed_only"
     assert result.summary["scenario_verdicts"]["tool_surface_exposed"] == "tool_surface_exposed"
     assert result.summary["scenario_verdicts"]["worker_lifecycle_certified"] == "worker_lifecycle_certified"
+
+
+def test_wizard_capability_enablement_matrix_release_check_passes(tmp_path: Path) -> None:
+    result = _check_wizard_capability_enablement_matrix(tmp_path)
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["read_only"] is True
+    assert result.summary["issue_count"] == 0
+    assert result.summary["proof_passed"] is True
+    assert result.summary["default_summary"]["side_effectful_tools_enabled_by_default"] is False
+    assert result.summary["default_summary"]["kanban_default_action"] == "explicit_opt_in_required"
 
 
 def test_release_report_fails_adaptive_evidence_kernel_even_in_dev_mode() -> None:

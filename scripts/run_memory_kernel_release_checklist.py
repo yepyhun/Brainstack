@@ -1853,6 +1853,47 @@ def _check_kanban_capability_evidence_ladder(tmp: Path) -> CheckResult:
     )
 
 
+def _check_wizard_capability_enablement_matrix(tmp: Path) -> CheckResult:
+    out = tmp / "wizard_capability_enablement_matrix.json"
+    command = [sys.executable, "scripts/verify_wizard_capability_enablement_matrix.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    proof_keys = (
+        "matrix_has_required_fields",
+        "required_capabilities_enable_and_verify",
+        "side_effectful_default_not_enabled",
+        "default_install_does_not_add_kanban_toolset",
+        "existing_toolsets_preserved",
+        "kanban_opt_in_without_proof_fails",
+        "kanban_opt_in_with_tool_surface_proof_not_default",
+        "optional_failures_not_health_failures",
+    )
+    default_summary = data.get("default_summary") if isinstance(data.get("default_summary"), Mapping) else {}
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("read_only") is True
+        and all(proof.get(key) is True for key in proof_keys)
+    )
+    return CheckResult(
+        name="wizard_capability_enablement_matrix",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "read_only": data.get("read_only"),
+            "issue_count": len(data.get("issues") or []),
+            "capability_count": data.get("capability_count"),
+            "default_summary": dict(default_summary),
+            "proof_passed": all(proof.get(key) is True for key in proof_keys),
+        },
+    )
+
+
 def _check_actionable_proactive_runtime_wizard_destructive_proof(tmp: Path) -> CheckResult:
     out = tmp / "actionable_proactive_runtime_wizard_destructive_proof.json"
     command = [
@@ -2974,6 +3015,7 @@ def run_checklist(
             _check_duplicate_strength_consolidation(tmp),
             _check_live_memory_fitness_report(tmp),
             _check_kanban_capability_evidence_ladder(tmp),
+            _check_wizard_capability_enablement_matrix(tmp),
             _check_installer_gateway_timeout_boundary(tmp),
             _check_actionable_proactive_runtime_wizard_destructive_proof(tmp),
             _check_proactive_agent_facing_wake_contract(tmp),

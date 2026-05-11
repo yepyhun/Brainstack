@@ -33,6 +33,10 @@ from brainstack.background_task_binding import (  # noqa: E402
     install_default_background_task_bindings,
     resolve_auxiliary_route_readiness,
 )
+from brainstack.capability_enablement import (  # noqa: E402
+    build_enablement_plan,
+    summarize_enablement_plan,
+)
 from brainstack.tier2_runtime_spine import (  # noqa: E402
     TIER2_HINDSIGHT_PUBLIC_API_BRIDGE,
     TIER2_INTERNAL_EXTRACTOR,
@@ -6522,6 +6526,17 @@ def main() -> int:
         help="Deprecated no-op: the Hermes proactive runtime extension is installed by default in safe dry-run form.",
     )
     parser.add_argument(
+        "--enable-kanban-workstation",
+        action="store_true",
+        help="Request explicit Hermes Kanban workstation opt-in. Fails closed unless a tool-surface proof level is supplied.",
+    )
+    parser.add_argument(
+        "--kanban-tool-surface-proof",
+        choices=("none", "tool_surface_exposed", "board_write_certified", "worker_lifecycle_certified"),
+        default="none",
+        help="Evidence level for explicit Hermes Kanban opt-in. Default install never enables Kanban write/worker tools.",
+    )
+    parser.add_argument(
         "--check-release-hygiene",
         action="store_true",
         help="Fail if tracked or staged files include private runtime paths or high-confidence secrets.",
@@ -6535,6 +6550,16 @@ def main() -> int:
             values = release_hygiene.get(key) or []
             if values:
                 print(f"  {key}: {', '.join(values[:12])}", file=sys.stderr)
+        return 2
+
+    capability_enablement = build_enablement_plan(
+        enable_kanban_workstation=bool(args.enable_kanban_workstation),
+        kanban_tool_surface_proof=str(args.kanban_tool_surface_proof),
+    )
+    if capability_enablement["status"] != "pass":
+        print("FAIL capability enablement policy:", file=sys.stderr)
+        for failure in capability_enablement.get("optional_failures") or []:
+            print(f"  {failure.get('capability')}: {failure.get('reason_code')}", file=sys.stderr)
         return 2
 
     target = Path(args.target).expanduser().resolve()
@@ -6772,6 +6797,7 @@ def main() -> int:
         "host_patches": host_patches,
         "host_patch_inventory": _selected_host_patch_inventory(args.runtime, args.host_patch_mode),
         "hermes_gateway_patches": hermes_gateway_patches,
+        "capability_enablement": capability_enablement,
         "release_hygiene": release_hygiene,
         "generated_files": generated_files,
         "config_path": str(config_path) if config_path is not None else None,
@@ -6788,6 +6814,13 @@ def main() -> int:
     print(f"{action} helper files: {len(helper_files)}")
     print(f"{action} Hermes proactive extension: {hermes_proactive_extension.get('status')}")
     print(f"{action} Hermes proactive runtime: {proactive_runtime.get('status')}")
+    capability_summary = summarize_enablement_plan(capability_enablement)
+    print(
+        f"{action} capability policy: {capability_summary['status']} "
+        f"(required_enabled={capability_summary['required_enabled_count']}, "
+        f"side_effectful_default={capability_summary['side_effectful_tools_enabled_by_default']}, "
+        f"kanban={capability_summary['kanban_status']})"
+    )
     inventory = _selected_host_patch_inventory(args.runtime, args.host_patch_mode)
     selected_inventory = [item for item in inventory if item.get("selected")]
     skipped_inventory = [item for item in inventory if not item.get("selected")]

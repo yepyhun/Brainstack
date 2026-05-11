@@ -131,6 +131,24 @@ def test_config_patch_embedding_none_makes_corpus_explicitly_unavailable(tmp_pat
     assert data["auxiliary"]["session_search"]["timeout"] == 15
     assert data["proactive_mode"] == "dry_run"
     assert data["proactive_kill_switch"] is False
+    assert "kanban" not in data.get("toolsets", [])
+
+
+def test_wizard_capability_policy_blocks_kanban_opt_in_without_tool_surface_proof() -> None:
+    blocked = install_into_hermes.build_enablement_plan(
+        enable_kanban_workstation=True,
+        kanban_tool_surface_proof="none",
+    )
+    proofed = install_into_hermes.build_enablement_plan(
+        enable_kanban_workstation=True,
+        kanban_tool_surface_proof="tool_surface_exposed",
+    )
+
+    assert blocked["status"] == "fail"
+    assert blocked["kanban"]["status"] == "blocked_missing_tool_surface_proof"
+    assert proofed["status"] == "pass"
+    assert proofed["kanban"]["status"] == "opt_in_ready_for_operator_config"
+    assert proofed["side_effectful_tools_enabled_by_default"] is False
 
 
 def test_config_patch_clears_stale_main_auxiliary_models_that_active_provider_cannot_run(tmp_path):
