@@ -24,6 +24,23 @@ PATCH_SCHEMA = "brainstack.hermes_gateway_patch_bundle.v1"
 SOURCE_PATCH_NAMES = (
     "003-tool-runtime-spawn-hardening.patch",
 )
+GATEWAY_PATCH_DRY_RUN_COPY_IGNORE_PATTERNS = (
+    ".git",
+    ".venv",
+    "__pycache__",
+    ".pytest_cache",
+    "node_modules",
+    "hermes-config",
+    "runtime",
+    "sessions",
+    "memories",
+    "artifacts",
+    "logs",
+    "state.db*",
+    "kanban.db",
+    "auth.json*",
+    ".brainstack-install-manifest.json",
+)
 
 UPSTREAM_TRACKING = [
     {
@@ -368,16 +385,7 @@ def apply_gateway_patch_bundle(target: Path, *, dry_run: bool) -> dict[str, Any]
             shutil.copytree(
                 target,
                 probe_target,
-                ignore=shutil.ignore_patterns(
-                    ".git",
-                    ".venv",
-                    "__pycache__",
-                    ".pytest_cache",
-                    "node_modules",
-                    "runtime",
-                    "sessions",
-                    "memories",
-                ),
+                ignore=shutil.ignore_patterns(*GATEWAY_PATCH_DRY_RUN_COPY_IGNORE_PATTERNS),
             )
             simulated = apply_gateway_patch_bundle(probe_target, dry_run=False)
             simulated["dry_run"] = True

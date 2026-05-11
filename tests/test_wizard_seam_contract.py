@@ -592,3 +592,12 @@ def test_gateway_patch_probes_enforce_boost_only_toolloader_contract() -> None:
     assert "start_new_session=False if _IS_WINDOWS else True" in probes["tools/code_execution_tool.py"]
     assert "start_new_session=False if _IS_WINDOWS else True" in probes["tools/process_registry.py"]
     assert "start_new_session=False if _IS_WINDOWS else True" in probes["gateway/platforms/whatsapp.py"]
+
+
+def test_gateway_patch_dry_run_copy_ignores_runtime_state() -> None:
+    ignored = set(hermes_gateway_patch_support.GATEWAY_PATCH_DRY_RUN_COPY_IGNORE_PATTERNS)
+
+    assert "hermes-config" in ignored
+    assert "runtime" in ignored
+    assert "state.db*" in ignored
+    assert "auth.json*" in ignored
