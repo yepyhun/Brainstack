@@ -9,6 +9,7 @@ import sys
 
 from scripts import brainstack_doctor
 from scripts import install_into_hermes
+from scripts import verify_fresh_hermes_brainstack_install
 
 
 def test_installer_main_invokes_capability_preserving_patches() -> None:
@@ -56,6 +57,8 @@ def test_generated_docker_compose_includes_local_tei_jina_runtime(tmp_path):
     assert "PYTHONPATH: /opt/hermes/plugins/memory" in text
     assert 'DISCORD_ALLOW_BOTS: "mentions"' in text
     assert "TERMINAL_CWD: /workspace" in text
+    assert "PATH: /opt/hermes/.venv/bin:/opt/data/bin:" in text
+    assert "- ./runtime/workspace:/workspace" in text
     assert "BRAINSTACK_TIER2_MODE: shadow" in text
     assert "BRAINSTACK_TIER2_HINDSIGHT_MODE: local_embedded" in text
     assert "BRAINSTACK_TIER2_HINDSIGHT_LLM_PROVIDER: hermes_managed" in text
@@ -752,9 +755,90 @@ services:
     applied = install_into_hermes._patch_compose_terminal_workspace_cwd(compose, dry_run=False)
 
     text = compose.read_text(encoding="utf-8")
-    assert applied == ["compose:terminal_cwd_workspace"]
+    assert applied == [
+        "compose:terminal_cwd_workspace",
+        "compose:terminal_path_hermes_venv",
+        "compose:workspace_mount",
+    ]
     assert "TERMINAL_CWD: /workspace" in text
+    assert "PATH: /opt/hermes/.venv/bin:/opt/data/bin:" in text
+    assert "- ./runtime/workspace:/workspace" in text
     assert text.index("DISCORD_ALLOW_BOTS") < text.index("TERMINAL_CWD")
+
+
+def test_compose_terminal_workspace_patch_repairs_existing_cwd_without_mount_or_path(tmp_path):
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        """
+services:
+  hermes-bestie:
+    environment:
+      HERMES_HOME: /opt/data
+      TERMINAL_CWD: /workspace
+""",
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_compose_terminal_workspace_cwd(compose, dry_run=False)
+
+    text = compose.read_text(encoding="utf-8")
+    assert applied == ["compose:terminal_path_hermes_venv", "compose:workspace_mount"]
+    assert "TERMINAL_CWD: /workspace" in text
+    assert "PATH: /opt/hermes/.venv/bin:/opt/data/bin:" in text
+    assert "- ./runtime/workspace:/workspace" in text
+
+
+def test_compose_terminal_workspace_patch_refuses_incompatible_existing_path(tmp_path):
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        """
+services:
+  hermes-bestie:
+    environment:
+      HERMES_HOME: /opt/data
+      PATH: /custom/bin:/usr/bin
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        install_into_hermes._patch_compose_terminal_workspace_cwd(compose, dry_run=False)
+    except RuntimeError as exc:
+        assert "Refusing to overwrite existing compose PATH" in str(exc)
+    else:
+        raise AssertionError("expected incompatible PATH to fail loudly")
+
+
+def test_fresh_install_compose_checks_fail_when_workspace_contract_is_half_wired(tmp_path):
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        """
+services:
+  hermes-bestie:
+    network_mode: host
+    environment:
+      BRAINSTACK_EMBEDDINGS_URL: http://127.0.0.1:7997/embed
+      BRAINSTACK_TIER2_HINDSIGHT_EMBEDDINGS_TEI_URL: http://127.0.0.1:7997
+      TERMINAL_CWD: /workspace
+  tei-jina:
+    image: tei
+    command:
+      - jinaai/jina-embeddings-v5-text-small-retrieval
+    healthcheck:
+      test: ["CMD", "true"]
+    depends_on:
+      condition: service_healthy
+""",
+        encoding="utf-8",
+    )
+
+    checks = verify_fresh_hermes_brainstack_install._compose_checks(tmp_path)
+
+    assert checks["terminal_cwd_workspace"] is True
+    assert checks["workspace_mount"] is False
+    assert checks["terminal_path_has_hermes_venv"] is False
+    assert checks["workstation_contract"]["status"] == "fail"
+    assert checks["status"] == "fail"
 
 
 def test_compose_cleanup_removes_obsolete_forced_heavy_profile(tmp_path):

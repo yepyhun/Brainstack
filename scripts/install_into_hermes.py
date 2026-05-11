@@ -5687,6 +5687,7 @@ services:
       HERMES_GID: "${{HERMES_GID:-1000}}"
       DISCORD_ALLOW_BOTS: "mentions"
       TERMINAL_CWD: /workspace
+      PATH: /opt/hermes/.venv/bin:/opt/data/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 {tier2_hindsight_environment}
 {tei_environment}
     volumes:
@@ -5866,8 +5867,8 @@ def _patch_compose_terminal_workspace_cwd(path: Path, dry_run: bool) -> list[str
     if not path.exists():
         return []
     text = path.read_text(encoding="utf-8")
-    if _compose_env_present(text, "TERMINAL_CWD"):
-        return []
+    original = text
+    patches: list[str] = []
     text, inserted = _compose_ensure_env(
         text,
         "TERMINAL_CWD",
@@ -5875,9 +5876,52 @@ def _patch_compose_terminal_workspace_cwd(path: Path, dry_run: bool) -> list[str
         list_value="/workspace",
         after_keys=("DISCORD_ALLOW_BOTS",),
     )
-    if inserted and not dry_run:
+    if inserted:
+        patches.append("compose:terminal_cwd_workspace")
+
+    if _compose_env_present(text, "PATH") and "/opt/hermes/.venv/bin" not in text:
+        raise RuntimeError(f"Refusing to overwrite existing compose PATH in {path}")
+    text, inserted_path = _compose_ensure_env(
+        text,
+        "PATH",
+        "/opt/hermes/.venv/bin:/opt/data/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        list_value="/opt/hermes/.venv/bin:/opt/data/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        after_keys=("TERMINAL_CWD",),
+    )
+    if inserted_path:
+        patches.append("compose:terminal_path_hermes_venv")
+
+    text, inserted_mount = _compose_ensure_workspace_mount(text)
+    if inserted_mount:
+        patches.append("compose:workspace_mount")
+
+    if text != original and not dry_run:
         path.write_text(text, encoding="utf-8")
-    return ["compose:terminal_cwd_workspace"] if inserted else []
+    return patches
+
+
+def _compose_has_workspace_mount(text: str) -> bool:
+    return bool(
+        re.search(r"(?m)^\s*-\s+[^#\n]+:/workspace\s*$", text)
+        or re.search(r"(?m)^\s*target:\s*/workspace\s*$", text)
+    )
+
+
+def _compose_ensure_workspace_mount(text: str) -> tuple[str, bool]:
+    if _compose_has_workspace_mount(text):
+        return text, False
+
+    mount_line = "      - ./runtime/workspace:/workspace\n"
+    service_volumes = re.search(r"(?m)^    volumes:\n", text)
+    if service_volumes:
+        return text[: service_volumes.end()] + mount_line + text[service_volumes.end() :], True
+
+    environment_block = re.search(r"(?ms)^    environment:\n(?:^      .+\n)+", text)
+    if environment_block:
+        volumes_block = "    volumes:\n" + mount_line
+        return text[: environment_block.end()] + volumes_block + text[environment_block.end() :], True
+
+    raise RuntimeError("Installer patch anchor missing for compose workspace mount")
 
 
 def _patch_compose_hindsight_local_tier2_runtime(path: Path, dry_run: bool) -> list[str]:

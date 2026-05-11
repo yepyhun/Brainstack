@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.hermes_gateway_patch_support import inspect_gateway_patch_support
+from scripts.hermes_gateway_patch_support import inspect_gateway_patch_support  # noqa: E402
 
 SCHEMA = "brainstack.fresh_hermes_brainstack_install_proof.v1"
 
@@ -106,6 +106,10 @@ def _compose_candidates(target: Path) -> list[Path]:
 def _compose_checks(target: Path) -> dict[str, Any]:
     candidates = _compose_candidates(target)
     text = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in candidates)
+    terminal_cwd_workspace = "TERMINAL_CWD: /workspace" in text or "- TERMINAL_CWD=/workspace" in text
+    workspace_mount = ":/workspace" in text or "target: /workspace" in text
+    path_has_hermes_venv = "/opt/hermes/.venv/bin" in text
+    path_has_data_bin = "/opt/data/bin" in text
     checks = {
         "compose_file_count": len(candidates),
         "tei_jina_service": "tei-jina:" in text,
@@ -115,8 +119,31 @@ def _compose_checks(target: Path) -> dict[str, Any]:
         and "http://127.0.0.1:7997" in text,
         "host_network": "network_mode: host" in text,
         "service_health_dependency": "condition: service_healthy" in text,
+        "terminal_cwd_workspace": terminal_cwd_workspace,
+        "workspace_mount": workspace_mount,
+        "terminal_path_has_hermes_venv": path_has_hermes_venv,
+        "terminal_path_has_data_bin": path_has_data_bin,
+        "workstation_contract": {
+            "status": "pass"
+            if terminal_cwd_workspace and workspace_mount and path_has_hermes_venv and path_has_data_bin
+            else "fail",
+            "cwd": "/workspace exists" if workspace_mount else "/workspace missing",
+            "python_authority": "hermes_venv" if path_has_hermes_venv else "broken",
+            "hermes_cli": "on_path" if path_has_hermes_venv else "missing",
+            "imports": "probe_required_at_runtime",
+        },
     }
-    checks["status"] = "pass" if all(value is True for key, value in checks.items() if key != "compose_file_count") and candidates else "fail"
+    checks["status"] = (
+        "pass"
+        if all(
+            value is True
+            for key, value in checks.items()
+            if key not in {"compose_file_count", "workstation_contract"}
+        )
+        and checks["workstation_contract"]["status"] == "pass"
+        and candidates
+        else "fail"
+    )
     return checks
 
 
