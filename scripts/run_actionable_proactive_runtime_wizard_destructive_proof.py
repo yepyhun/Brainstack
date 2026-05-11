@@ -153,9 +153,8 @@ def _wizard_patch_reproduction_report() -> dict[str, Any]:
         "auxiliary_main_model_inheritance_patch_applied": "auxiliary_client:inherit_main_model" in auxiliary_actions,
         "auxiliary_inherits_provider_main": 'explicit_provider == "main"' in auxiliary_text
         and "_read_main_model() or None" in auxiliary_text,
-        "auxiliary_closed_sync_cache_patch_applied": "auxiliary_client:evict_closed_sync_cache" in auxiliary_actions,
-        "auxiliary_evicts_closed_sync_client": "def _brainstack_auxiliary_client_is_closed" in auxiliary_text
-        and "_brainstack_auxiliary_client_is_closed(cached_client)" in auxiliary_text,
+        "auxiliary_cache_poisoning_left_to_upstream": "def _brainstack_auxiliary_client_is_closed" not in auxiliary_text
+        and "auxiliary_client:evict_closed_sync_cache" not in auxiliary_actions,
         "session_search_deadline_patch_applied": session_search_actions
         == [
             "session_search:total_deadline_helper",
