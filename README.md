@@ -394,3 +394,7 @@ The current corrective direction is narrow and concrete:
 - make backend degradation, runtime handoff, and recall packet selection inspectable before claiming confidence
 - keep exact-fact, recent-work, and stale-residue handling universal rather than live-case-specific
 - keep recent-work authority scoped by workstream instead of promoting unscoped idle summaries as canonical truth
+
+## License
+
+Brainstack is source-available for personal, non-commercial use only; commercial use, redistribution, hosted services, integrations, and derivative products require prior written permission. See [LEGAL.md](LEGAL.md).

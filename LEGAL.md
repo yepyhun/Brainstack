@@ -1,0 +1,96 @@
+# Brainstack Legal Terms
+
+Copyright (c) 2026 LauraTom / yepyhun. All rights reserved.
+
+These terms govern access to and use of the Brainstack repository, source code,
+documentation, examples, scripts, releases, and related materials.
+
+## Summary
+
+Brainstack is source-available for personal, non-commercial evaluation and local
+personal use only.
+
+No commercial licence is granted by default. Commercial use, redistribution,
+hosted services, SaaS use, integrations, derivative products, model training,
+benchmark services, resale, sublicensing, or use inside a paid product or paid
+workflow requires prior written permission from the copyright owner.
+
+This summary is not a separate licence. If there is any conflict, the full terms
+below control.
+
+## Permitted Use
+
+You may:
+
+- read the source code;
+- clone the repository;
+- run Brainstack locally for personal, non-commercial evaluation;
+- run Brainstack locally for personal, non-commercial use;
+- make private local modifications for that permitted personal use.
+
+## Prohibited Use Without Prior Written Permission
+
+You may not, without prior written permission from the copyright owner:
+
+- use Brainstack commercially;
+- use Brainstack in a company, business, client project, paid workflow, paid
+  product, internal commercial tool, SaaS product, hosted service, or managed
+  service;
+- redistribute Brainstack or modified versions of Brainstack;
+- sublicense, sell, rent, lease, package, bundle, or resell Brainstack;
+- publish, release, or distribute derivative works based on Brainstack;
+- integrate Brainstack into another public or commercial product;
+- use Brainstack to provide memory-kernel, agent-memory, AI-agent, automation,
+  consulting, hosting, or infrastructure services to third parties;
+- use Brainstack output, source, documentation, design, or architecture to train,
+  fine-tune, evaluate, benchmark, or improve a commercial model, agent system,
+  dataset, or competing product;
+- remove or obscure copyright, authorship, legal, attribution, or repository
+  notices.
+
+## Commercial Licensing
+
+Commercial rights are available only under a separate written agreement signed or
+otherwise explicitly approved in writing by the copyright owner.
+
+That agreement may require a licence fee, royalty, revenue share, usage-based
+fee, attribution, audit rights, reporting, or other commercial terms.
+
+Unauthorized commercial use is not licensed. If you use Brainstack commercially
+without permission, no licence is granted for that use, and the copyright owner
+reserves all rights and remedies available under applicable law.
+
+## Contributions
+
+Unless a separate written agreement says otherwise, any contribution you submit
+to this repository is offered for inclusion under these same terms. Submitting a
+contribution does not grant you commercial rights to Brainstack.
+
+Do not submit code, documentation, data, or other material unless you have the
+right to submit it under these terms.
+
+## No Open Source Licence
+
+Brainstack is not released under an open source licence unless a future version
+of this repository explicitly includes such a licence.
+
+Publication of the source code does not grant permission to copy, modify,
+redistribute, sublicense, sell, host, commercialize, or create public derivative
+works beyond the limited personal, non-commercial use described above.
+
+## No Warranty
+
+Brainstack is provided "as is" and "as available", without warranties of any
+kind, express or implied. To the maximum extent permitted by law, the copyright
+owner disclaims all warranties, including merchantability, fitness for a
+particular purpose, non-infringement, accuracy, availability, and security.
+
+## Limitation of Liability
+
+To the maximum extent permitted by law, the copyright owner is not liable for any
+direct, indirect, incidental, special, consequential, exemplary, punitive, or
+other damages arising from access to or use of Brainstack.
+
+## Reservation of Rights
+
+All rights not expressly granted in these terms are reserved.
