@@ -17,6 +17,7 @@ from scripts.run_memory_kernel_release_checklist import (
     _check_adaptive_evidence_performance_completion,
     _check_hermes_proactive_runtime_parity,
     _check_installer_gateway_timeout_boundary,
+    _check_live_memory_fitness_report,
     _check_model_facing_recall_budget,
     _check_phase_quality_contract,
     _check_proactive_agent_facing_wake_contract,
@@ -191,6 +192,19 @@ def test_duplicate_strength_consolidation_release_check_passes(tmp_path: Path) -
     assert result.summary["proof"]["dry_run_reports_review_only_duplicate"] is True
     assert result.summary["proof"]["unsafe_apply_rejected_without_mutation"] is True
     assert result.summary["proof"]["near_duplicate_not_auto_merged"] is True
+
+
+def test_live_memory_fitness_report_release_check_passes(tmp_path: Path) -> None:
+    result = _check_live_memory_fitness_report(tmp_path)
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["read_only"] is True
+    assert result.summary["release_blocked"] is False
+    assert result.summary["proof_passed"] is True
+    assert result.summary["severity_counts"]["LOW_HANGING_FRUIT"] == 1
+    assert result.summary["severity_counts"]["HEALTHY_IDLE"] == 2
 
 
 def test_release_report_fails_adaptive_evidence_kernel_even_in_dev_mode() -> None:

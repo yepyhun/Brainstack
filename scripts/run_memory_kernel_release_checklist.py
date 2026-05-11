@@ -1771,6 +1771,48 @@ def _check_duplicate_strength_consolidation(tmp: Path) -> CheckResult:
     )
 
 
+def _check_live_memory_fitness_report(tmp: Path) -> CheckResult:
+    out = tmp / "live_memory_fitness_report.json"
+    command = [sys.executable, "scripts/verify_live_memory_fitness_report.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    summary = data.get("summary") if isinstance(data.get("summary"), Mapping) else {}
+    proof_keys = (
+        "read_only_table_counts_unchanged",
+        "duplicate_strength_classified_not_all_good",
+        "healthy_proactive_idle_not_failure",
+        "kanban_detected_not_write_certified",
+        "invalid_workspace_is_high",
+        "release_blocks_only_brainstack_high",
+        "public_safe_output",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("read_only") is True
+        and data.get("public_safe") is True
+        and data.get("bounded_model_facing") is True
+        and data.get("release_blocked") is False
+        and all(proof.get(key) is True for key in proof_keys)
+    )
+    return CheckResult(
+        name="live_memory_fitness_report",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "read_only": data.get("read_only"),
+            "release_blocked": data.get("release_blocked"),
+            "finding_count": summary.get("finding_count"),
+            "severity_counts": summary.get("severity_counts"),
+            "proof_passed": all(proof.get(key) is True for key in proof_keys),
+        },
+    )
+
+
 def _check_actionable_proactive_runtime_wizard_destructive_proof(tmp: Path) -> CheckResult:
     out = tmp / "actionable_proactive_runtime_wizard_destructive_proof.json"
     command = [
@@ -2890,6 +2932,7 @@ def run_checklist(
             _check_phase_quality_contract(tmp),
             _check_model_facing_recall_budget(tmp),
             _check_duplicate_strength_consolidation(tmp),
+            _check_live_memory_fitness_report(tmp),
             _check_installer_gateway_timeout_boundary(tmp),
             _check_actionable_proactive_runtime_wizard_destructive_proof(tmp),
             _check_proactive_agent_facing_wake_contract(tmp),
