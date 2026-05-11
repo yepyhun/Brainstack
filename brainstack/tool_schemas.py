@@ -20,9 +20,10 @@ def recall_tool_schema() -> Dict[str, Any]:
     return {
         "name": "brainstack_recall",
         "description": (
-            "Recall scoped Brainstack memory evidence for a query. "
+            "Recall scoped Brainstack memory evidence for a query as a compact model-facing packet. "
             "Read-only; use final_packet.preview as the primary answer source. "
-            "Selected evidence is diagnostic support and cannot prove current assignment unless explicitly flagged."
+            "Selected evidence is bounded diagnostic support with inspect handles; use brainstack_inspect for full detail. "
+            "Selected evidence cannot prove current assignment unless explicitly flagged."
         ),
         "x_brainstack_tool_class": "read_only_memory",
         "parameters": {
@@ -43,6 +44,7 @@ def inspect_tool_schema() -> Dict[str, Any]:
         "description": (
             "Inspect Brainstack retrieval for a query with channels, routing, selected evidence, "
             "suppressed evidence, final packet metadata, and active behavior-card delivery health. "
+            "Use this explicit diagnostic route when brainstack_recall reports omitted detail or an inspect handle. "
             "Read-only; it can explain when behavior/profile source rows are suppressed and whether "
             "an explicit user style contract must be saved before claiming the behavior card is fixed. "
             "It also reports a non-spamming behavior-card size warning when the active card becomes large."

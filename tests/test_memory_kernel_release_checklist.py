@@ -16,6 +16,7 @@ from scripts.run_memory_kernel_release_checklist import (
     _check_adaptive_evidence_performance_completion,
     _check_hermes_proactive_runtime_parity,
     _check_installer_gateway_timeout_boundary,
+    _check_model_facing_recall_budget,
     _check_phase_quality_contract,
     _check_proactive_agent_facing_wake_contract,
     _check_persistent_bloat_rebuild,
@@ -158,6 +159,22 @@ def test_phase_quality_contract_release_check_passes(tmp_path: Path) -> None:
     assert result.summary["proof"]["low_risk_docs_only_allowed"] is True
     assert result.summary["proof"]["side_issue_unclassified_failed"] is True
     assert result.summary["proof"]["public_safe_output"] is True
+
+
+def test_model_facing_recall_budget_release_check_passes(tmp_path: Path) -> None:
+    result = _check_model_facing_recall_budget(tmp_path)
+
+    assert result.status == "pass"
+    assert result.summary["status"] == "pass"
+    assert result.summary["public_safe"] is True
+    assert result.summary["proof"]["bounded_model_facing"] is True
+    assert result.summary["proof"]["budget_contract_exported"] is True
+    assert result.summary["proof"]["budget_basis_declared"] is True
+    assert result.summary["proof"]["literal_tokens_omitted_from_recall"] is True
+    assert result.summary["proof"]["explicit_truth_parity_omitted_from_recall"] is True
+    assert result.summary["proof"]["inspect_retains_literal_tokens"] is True
+    assert result.summary["proof"]["inspect_retains_explicit_truth_parity"] is True
+    assert result.summary["proof"]["answerability_preserved"] is True
 
 
 def test_release_report_fails_adaptive_evidence_kernel_even_in_dev_mode() -> None:

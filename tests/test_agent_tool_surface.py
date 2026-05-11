@@ -132,6 +132,11 @@ def test_brainstack_recall_tool_returns_evidence_without_mutating_profile(tmp_pa
         assert dict(before) == dict(after)
         assert payload["schema"] == "brainstack.tool_recall.v1"
         assert payload["read_only"] is True
+        assert payload["bounded_model_facing"] is True
+        assert payload["detail_level"] == "compact"
+        assert payload["budget_contract"]["schema"] == "brainstack.recall_detail_budget.v1"
+        assert payload["budget_contract"]["budget_basis"] == "existing_recall_preview_compatibility_default"
+        assert payload["budget_contract"]["inspect_tool"] == "brainstack_inspect"
         assert payload["model_use_contract"]["primary_answer_source"] == "final_packet.preview"
         assert "current_assignment_authority=true" in payload["model_use_contract"]["current_assignment_rule"]
         assert "Do not determine active work" in payload["model_use_contract"]["current_assignment_negative_rule"]
@@ -145,12 +150,17 @@ def test_brainstack_recall_tool_returns_evidence_without_mutating_profile(tmp_pa
         assert payload["memory_answerability"]["can_answer"] is True
         assert payload["memory_answerability"]["max_claim_strength"] == "memory_truth"
         assert payload["diagnostic_detail_tool"] == "brainstack_inspect"
+        assert payload["inspect_route"]["tool"] == "brainstack_inspect"
         assert payload["selected_evidence"]["profile"]
         assert payload["selected_evidence"]["profile"][0]["current_assignment_authority"] is False
+        assert payload["selected_evidence"]["profile"][0]["inspect"]["tool"] == "brainstack_inspect"
         assert "suppressed_evidence" not in payload
         assert "retrieval_candidates" not in payload
+        rendered = json.dumps(payload, ensure_ascii=False)
+        assert '"literal_tokens"' not in rendered
+        assert '"explicit_truth_parity"' not in rendered
         assert "global_allocator_shadow" not in payload
-        assert len(json.dumps(payload, ensure_ascii=False)) < 7000
+        assert len(rendered) < 7000
         assert "ExampleUser" in payload["final_packet"]["preview"]
         raw_payload = provider.handle_tool_call("brainstack_recall", {"query": "ExampleUser memory kernel"})
         assert raw_payload.index('"final_packet"') < raw_payload.index('"selected_evidence"')

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from .answerability import build_memory_answerability
@@ -8,6 +9,44 @@ from .authority_policy import is_current_assignment_authority
 from .diagnostics import build_memory_kernel_doctor, build_query_inspect
 from .persistent_bloat import PERSISTENT_BLOAT_REPORT_SCHEMA
 from .tier2_runtime_spine import build_tier2_runtime_route_status
+
+@dataclass(frozen=True)
+class RecallDetailBudget:
+    """Agent-facing recall contract; inspect keeps the full diagnostic payload."""
+
+    detail_level: str
+    budget_basis: str
+    preview_char_limit: int
+    evidence_excerpt_char_limit: int
+    semantic_anchor_char_limit: int
+    evidence_per_shelf_limit: int
+    inspect_tool: str
+
+
+MODEL_FACING_RECALL_BUDGET = RecallDetailBudget(
+    detail_level="compact",
+    budget_basis="existing_recall_preview_compatibility_default",
+    preview_char_limit=1200,
+    evidence_excerpt_char_limit=180,
+    semantic_anchor_char_limit=120,
+    evidence_per_shelf_limit=2,
+    inspect_tool="brainstack_inspect",
+)
+
+_INSPECT_GRADE_EVIDENCE_KEYS = frozenset(
+    {
+        "literal_tokens",
+        "explicit_truth_parity",
+        "source_envelope",
+        "raw_source_envelope",
+        "retrieval_candidates",
+        "candidate_trace",
+        "raw_metadata",
+        "metadata_json",
+        "full_text",
+        "raw_text",
+    }
+)
 
 
 def _normalize_compact_text(value: Any) -> str:
@@ -19,6 +58,15 @@ def _trim_compact_text(value: Any, *, limit: int = 180) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _omit_empty_compact_values(data: Mapping[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key, value in data.items():
+        if value in ("", None, [], {}):
+            continue
+        compact[str(key)] = value
+    return compact
 
 
 def _compact_channel_cards(channels: list[Any], *, limit: int = 8) -> list[dict[str, Any]]:
@@ -41,6 +89,48 @@ def _is_current_assignment_authority(item: Mapping[str, Any]) -> bool:
     return is_current_assignment_authority(item)
 
 
+def _compact_inspect_handle(item: Mapping[str, Any]) -> str:
+    for key in ("evidence_key", "citation_id", "stable_key", "id", "event_id"):
+        value = _normalize_compact_text(item.get(key))
+        if value:
+            return value
+    shelf = _normalize_compact_text(item.get("shelf"))
+    row_type = _normalize_compact_text(item.get("row_type") or item.get("record_type"))
+    return ":".join(part for part in (shelf, row_type, "unkeyed") if part)
+
+
+def _compact_evidence_identity_values(item: Mapping[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for key in ("evidence_key", "citation_id", "stable_key", "id", "event_id"):
+        value = _normalize_compact_text(item.get(key))
+        if value:
+            values.add(value)
+    return values
+
+
+def _compact_source_status(item: Mapping[str, Any]) -> dict[str, Any]:
+    parity = item.get("explicit_truth_parity") if isinstance(item.get("explicit_truth_parity"), Mapping) else {}
+    status = {
+        "projection_status": _normalize_compact_text(item.get("projection_status") or parity.get("projection_status")),
+        "divergence_status": _normalize_compact_text(item.get("divergence_status") or parity.get("divergence_status")),
+        "parity_observable": _normalize_compact_text(item.get("parity_observable") or parity.get("parity_observable")),
+        "event_type": _normalize_compact_text(item.get("event_type") or parity.get("event_type")),
+        "parity_detail_available": bool(parity),
+    }
+    return _omit_empty_compact_values(status)
+
+
+def _has_inspect_grade_evidence_detail(item: Mapping[str, Any]) -> bool:
+    for key in _INSPECT_GRADE_EVIDENCE_KEYS:
+        value = item.get(key)
+        if value not in (None, "", [], {}):
+            return True
+    return (
+        len(_normalize_compact_text(item.get("semantic_anchor_text")))
+        > MODEL_FACING_RECALL_BUDGET.semantic_anchor_char_limit
+    )
+
+
 def _compact_evidence_card(item: Mapping[str, Any]) -> dict[str, Any]:
     """Return model-facing recall evidence, not inspect-grade diagnostics."""
     runtime_state_only = bool(item.get("runtime_state_only"))
@@ -48,7 +138,7 @@ def _compact_evidence_card(item: Mapping[str, Any]) -> dict[str, Any]:
     current_assignment_authority = _is_current_assignment_authority(
         {**dict(item), "supporting_evidence_only": supporting_evidence_only}
     )
-    return {
+    card = {
         "evidence_key": _normalize_compact_text(item.get("evidence_key")),
         "shelf": _normalize_compact_text(item.get("shelf")),
         "row_type": _normalize_compact_text(item.get("row_type") or item.get("record_type")),
@@ -65,27 +155,47 @@ def _compact_evidence_card(item: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "citation_id": _normalize_compact_text(item.get("citation_id")),
         "created_at": _normalize_compact_text(item.get("created_at")),
-        "excerpt": _trim_compact_text(item.get("excerpt"), limit=180),
-        "literal_tokens": list(item.get("literal_tokens") or [])[:6],
-        "semantic_anchor_text": _trim_compact_text(item.get("semantic_anchor_text"), limit=140),
-        "explicit_truth_parity": dict(item.get("explicit_truth_parity") or {}),
+        "excerpt": _trim_compact_text(item.get("excerpt"), limit=MODEL_FACING_RECALL_BUDGET.evidence_excerpt_char_limit),
+        "semantic_anchor_preview": _trim_compact_text(
+            item.get("semantic_anchor_text"), limit=MODEL_FACING_RECALL_BUDGET.semantic_anchor_char_limit
+        ),
         "projection_status": _normalize_compact_text(item.get("projection_status")),
         "divergence_status": _normalize_compact_text(item.get("divergence_status")),
         "parity_observable": _normalize_compact_text(item.get("parity_observable")),
         "event_type": _normalize_compact_text(item.get("event_type")),
         "bounded_scope_only": bool(item.get("bounded_scope_only")),
+        "source_status": _compact_source_status(item),
+        "inspect": {
+            "tool": MODEL_FACING_RECALL_BUDGET.inspect_tool,
+            "handle": _compact_inspect_handle(item),
+            "detail_omitted": _has_inspect_grade_evidence_detail(item),
+        },
     }
+    return _omit_empty_compact_values(card)
 
 
-def _compact_selected_evidence(selected: Mapping[str, Any], *, per_shelf_limit: int = 3) -> dict[str, list[dict[str, Any]]]:
+def _compact_selected_evidence(
+    selected: Mapping[str, Any],
+    *,
+    answer_evidence_ids: set[str] | None = None,
+    per_shelf_limit: int = MODEL_FACING_RECALL_BUDGET.evidence_per_shelf_limit,
+) -> dict[str, list[dict[str, Any]]]:
+    protected_answer_ids = set(answer_evidence_ids or set())
     compact: dict[str, list[dict[str, Any]]] = {}
     for shelf, raw_rows in selected.items():
         rows = raw_rows if isinstance(raw_rows, list) else []
-        compact[str(shelf)] = [
-            _compact_evidence_card(row)
-            for row in rows[: max(0, per_shelf_limit)]
-            if isinstance(row, Mapping)
-        ]
+        chosen: list[Mapping[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            if protected_answer_ids & _compact_evidence_identity_values(row):
+                chosen.append(row)
+        for row in rows:
+            if len(chosen) >= max(0, per_shelf_limit):
+                break
+            if isinstance(row, Mapping) and row not in chosen:
+                chosen.append(row)
+        compact[str(shelf)] = [_compact_evidence_card(row) for row in chosen]
     return compact
 
 
@@ -276,7 +386,6 @@ def handle_brainstack_recall(
     diagnostic_evidence_count = sum(len(rows or []) for rows in selected.values()) if isinstance(selected, Mapping) else 0
     raw_packet = report.get("final_packet")
     packet: Mapping[str, Any] = raw_packet if isinstance(raw_packet, Mapping) else {}
-    compact_selected = _compact_selected_evidence(selected)
     raw_answerability = report.get("memory_answerability")
     answerability: Mapping[str, Any] = (
         raw_answerability
@@ -288,11 +397,26 @@ def handle_brainstack_recall(
             packet_text=str(packet.get("preview") or ""),
         )
     )
+    answer_evidence_ids = {str(value) for value in list(answerability.get("answer_evidence_ids") or []) if value}
+    compact_selected = _compact_selected_evidence(selected, answer_evidence_ids=answer_evidence_ids)
     answerable_evidence_count = len(list(answerability.get("answer_evidence_ids") or []))
     return {
         "schema": "brainstack.tool_recall.v1",
         "tool_name": "brainstack_recall",
         "read_only": True,
+        "bounded_model_facing": True,
+        "detail_level": MODEL_FACING_RECALL_BUDGET.detail_level,
+        "budget_contract": {
+            "schema": "brainstack.recall_detail_budget.v1",
+            "detail_level": MODEL_FACING_RECALL_BUDGET.detail_level,
+            "budget_basis": MODEL_FACING_RECALL_BUDGET.budget_basis,
+            "preview_char_limit": MODEL_FACING_RECALL_BUDGET.preview_char_limit,
+            "evidence_excerpt_char_limit": MODEL_FACING_RECALL_BUDGET.evidence_excerpt_char_limit,
+            "semantic_anchor_char_limit": MODEL_FACING_RECALL_BUDGET.semantic_anchor_char_limit,
+            "evidence_per_shelf_limit": MODEL_FACING_RECALL_BUDGET.evidence_per_shelf_limit,
+            "inspect_tool": MODEL_FACING_RECALL_BUDGET.inspect_tool,
+            "rationale": "normal recall is answer context; explicit inspect owns raw diagnostic detail",
+        },
         "model_use_contract": {
             "primary_answer_source": "final_packet.preview",
             "selected_evidence_use": "diagnostic support only; do not override final_packet authority notes",
@@ -325,15 +449,22 @@ def handle_brainstack_recall(
         "final_packet": {
             "sections": list(packet.get("sections") or []),
             "char_count": int(packet.get("char_count") or 0),
-            "preview": _trim_compact_text(packet.get("preview"), limit=1200),
-            "explicit_truth_parity": list(packet.get("explicit_truth_parity") or [])[:8],
+            "preview": _trim_compact_text(packet.get("preview"), limit=MODEL_FACING_RECALL_BUDGET.preview_char_limit),
+            "preview_char_limit": MODEL_FACING_RECALL_BUDGET.preview_char_limit,
+            "detail_omitted": bool(packet.get("explicit_truth_parity")),
         },
         "memory_answerability": dict(answerability),
         "selected_evidence": compact_selected,
         "diagnostic_evidence_count": diagnostic_evidence_count,
         "answerable_evidence_count": answerable_evidence_count,
         "evidence_card_count": sum(len(rows) for rows in compact_selected.values()),
-        "diagnostic_detail_tool": "brainstack_inspect",
+        "diagnostic_detail_tool": MODEL_FACING_RECALL_BUDGET.inspect_tool,
+        "inspect_route": {
+            "tool": MODEL_FACING_RECALL_BUDGET.inspect_tool,
+            "query": query,
+            "detail_level": "diagnostic",
+            "returns": "full query_inspect report for this scoped query",
+        },
     }
 
 

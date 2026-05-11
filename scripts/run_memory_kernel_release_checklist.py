@@ -1677,6 +1677,49 @@ def _check_phase_quality_contract(tmp: Path) -> CheckResult:
     )
 
 
+def _check_model_facing_recall_budget(tmp: Path) -> CheckResult:
+    out = tmp / "model_facing_recall_budget.json"
+    command = [sys.executable, "scripts/verify_model_facing_recall_budget.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    required_flags = (
+        "bounded_model_facing",
+        "budget_contract_exported",
+        "budget_basis_declared",
+        "compact_under_budget",
+        "preview_under_budget",
+        "literal_tokens_omitted_from_recall",
+        "explicit_truth_parity_omitted_from_recall",
+        "inspect_handle_present",
+        "source_conflict_status_visible",
+        "inspect_retains_literal_tokens",
+        "inspect_retains_explicit_truth_parity",
+        "answerability_preserved",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("issues") == []
+        and all(proof.get(flag) is True for flag in required_flags)
+    )
+    return CheckResult(
+        name="model_facing_recall_budget",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": len(data.get("issues") or []),
+            "public_safe": data.get("public_safe"),
+            "recall_bytes": data.get("recall_bytes"),
+            "inspect_bytes": data.get("inspect_bytes"),
+            "proof": {flag: proof.get(flag) for flag in required_flags},
+        },
+    )
+
+
 def _check_actionable_proactive_runtime_wizard_destructive_proof(tmp: Path) -> CheckResult:
     out = tmp / "actionable_proactive_runtime_wizard_destructive_proof.json"
     command = [
@@ -2794,6 +2837,7 @@ def run_checklist(
             _check_memory_write_collision_contract(tmp),
             _check_multi_profile_shared_backend(tmp),
             _check_phase_quality_contract(tmp),
+            _check_model_facing_recall_budget(tmp),
             _check_installer_gateway_timeout_boundary(tmp),
             _check_actionable_proactive_runtime_wizard_destructive_proof(tmp),
             _check_proactive_agent_facing_wake_contract(tmp),

@@ -199,7 +199,7 @@ def test_pending_projection_barrier_degrades_answerability(tmp_path: Path) -> No
         store.close()
 
 
-def test_recall_tool_surfaces_explicit_truth_parity(tmp_path: Path) -> None:
+def test_recall_tool_keeps_explicit_truth_parity_behind_inspect_route(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     try:
         provider.on_memory_write(
@@ -209,10 +209,18 @@ def test_recall_tool_surfaces_explicit_truth_parity(tmp_path: Path) -> None:
             metadata={"host_receipt_id": "host-recall", "principal_scope_key": provider._principal_scope_key},
         )
         payload = json.loads(provider.handle_tool_call("brainstack_recall", {"query": "recall parity cards"}))
+        inspect = json.loads(provider.handle_tool_call("brainstack_inspect", {"query": "recall parity cards"}))
         profile_rows = payload["selected_evidence"]["profile"]
 
         assert profile_rows
-        assert profile_rows[0]["explicit_truth_parity"]["host_receipt_id"] == "host-recall"
-        assert payload["final_packet"]["explicit_truth_parity"][0]["host_receipt_id"] == "host-recall"
+        rendered = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        assert '"explicit_truth_parity"' not in rendered
+        assert profile_rows[0]["source_status"]["parity_detail_available"] is True
+        assert profile_rows[0]["inspect"]["tool"] == "brainstack_inspect"
+        assert profile_rows[0]["inspect"]["detail_omitted"] is True
+        assert payload["final_packet"]["detail_omitted"] is True
+        inspect_profile_rows = inspect["report"]["selected_evidence"]["profile"]
+        assert inspect_profile_rows[0]["explicit_truth_parity"]["host_receipt_id"] == "host-recall"
+        assert inspect["report"]["final_packet"]["explicit_truth_parity"][0]["host_receipt_id"] == "host-recall"
     finally:
         provider.shutdown()
