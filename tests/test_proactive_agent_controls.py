@@ -135,6 +135,38 @@ def test_agent_status_list_and_inspect_surface_evolver_wake_context(tmp_path: Pa
         provider.shutdown()
 
 
+def test_runtime_scope_outbox_does_not_mark_user_visible_status_wake_queued(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    assert provider._store is not None
+    try:
+        event = provider._store.upsert_proactive_event(
+            source="runtime",
+            kind=ProactiveEventKind.FOLLOW_UP.value,
+            principal_scope_key="runtime:brainstack",
+            title="Runtime scoped wake",
+            summary="Runtime outbox should not look like a user-visible queued item.",
+            priority="normal",
+            intended_next_action=ProactiveIntendedNextAction.REQUEST_INPUT.value,
+            idempotency_key="runtime:test-wake",
+        )
+        provider._store.create_proactive_outbox(
+            event_id=str(event["event_id"]),
+            delivery_target="proactive_runtime",
+            idempotency_key="runtime:test-wake:outbox",
+            intended_next_action=ProactiveIntendedNextAction.REQUEST_INPUT.value,
+        )
+
+        status = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
+
+        assert status["counts"]["pending_outbox_count"] == 1
+        assert status["counts"]["runtime_scope_pending_outbox_count"] == 1
+        assert status["counts"]["user_visible_pending_outbox_count"] == 0
+        assert status["operational_state"] == "ready_idle"
+        assert status["agent_interpretation"] == "Proactive is ready and idle; no work is pending."
+    finally:
+        provider.shutdown()
+
+
 def test_pause_resume_and_cooldown_controls_require_explicit_request(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     try:

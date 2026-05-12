@@ -487,6 +487,23 @@ def _packet_budget_token_estimate(row: Mapping[str, Any]) -> int:
 
 
 def _packet_budget_target_slot(channel: str, row: Mapping[str, Any]) -> str:
+    if channel == "graph_rows":
+        graph_subject = str(row.get("subject") or row.get("subject_name") or "").strip()
+        graph_predicate = str(row.get("predicate") or row.get("attribute") or "").strip()
+        graph_row_type = str(row.get("row_type") or "").strip()
+        graph_fact_class = str(row.get("fact_class") or "").strip()
+        if graph_subject or graph_predicate:
+            return ":".join(
+                part
+                for part in (
+                    "graph",
+                    graph_row_type,
+                    graph_fact_class,
+                    graph_subject,
+                    graph_predicate,
+                )
+                if part
+            )
     return str(
         row.get("target_slot")
         or row.get("category")

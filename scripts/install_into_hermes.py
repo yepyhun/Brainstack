@@ -125,6 +125,11 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "owner": "build-seam",
         "removal_condition": "Hermes Docker images expose `python` as a stable workstation command natively.",
     },
+    "_patch_dockerfile_workstation_hermes_cli": {
+        "category": "required_seam",
+        "owner": "build-seam",
+        "removal_condition": "Hermes Docker images expose `hermes` as a stable workstation command natively.",
+    },
     "_patch_dockerignore": {
         "category": "core_hygiene",
         "owner": "source-hygiene",
@@ -646,6 +651,14 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_modes": ("docker",),
         "purpose": "Expose `python` for agent terminal/tool sessions even when login shells reset PATH.",
         "why": "The container process PATH can be correct while login shells still fall back to /usr/local/bin:/usr/bin without a `python` command.",
+    },
+    {
+        "patcher": "_patch_dockerfile_workstation_hermes_cli",
+        "target": "Dockerfile",
+        "scope": "docker-workstation-seam",
+        "runtime_modes": ("docker",),
+        "purpose": "Expose `hermes` for agent terminal/tool sessions even when login shells reset PATH.",
+        "why": "Kanban/profile/tool-surface checks need a real Hermes CLI command; relying on shell-specific PATH creates false no-access diagnostics.",
     },
     {
         "patcher": "_patch_docker_entrypoint",
@@ -5191,6 +5204,7 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
     brainstack.setdefault("tier2_session_end_flush_enabled", True)
     auxiliary_main_route_hygiene = _normalize_hermes_native_auxiliary_main_routes(config)
     background_task_status = install_default_background_task_bindings(config)
+    kanban_toolset_hygiene = _enable_default_kanban_toolset(config)
     config.setdefault("agent", {})
     if not isinstance(config["agent"], dict):
         raise RuntimeError("config.yaml has non-object `agent` section")
@@ -5208,9 +5222,53 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
         "tier2_runtime_hygiene": tier2_runtime_hygiene,
         "session_search_runtime_hygiene": session_search_runtime_hygiene,
         "discord_visibility_hygiene": discord_visibility_hygiene,
+        "kanban_toolset_hygiene": kanban_toolset_hygiene,
         "gateway_timeout": agent.get("gateway_timeout"),
         "gateway_timeout_warning": agent.get("gateway_timeout_warning"),
         "proactive_runtime": proactive_runtime,
+    }
+
+
+def _append_unique_string(value: Any, item: str, *, label: str) -> tuple[list[str], bool]:
+    if value is None:
+        return [item], True
+    if not isinstance(value, list):
+        raise RuntimeError(f"config.yaml has non-list `{label}` section")
+    values = [str(existing) for existing in value]
+    if item in values:
+        return values, False
+    return [*values, item], True
+
+
+def _enable_default_kanban_toolset(config: dict[str, Any]) -> dict[str, Any]:
+    root_was_absent = config.get("toolsets") is None
+    toolsets, root_added = _append_unique_string(config.get("toolsets"), "kanban", label="toolsets")
+    if root_was_absent and "hermes-cli" not in toolsets:
+        toolsets.insert(0, "hermes-cli")
+    config["toolsets"] = toolsets
+
+    platform_toolsets = config.setdefault("platform_toolsets", {})
+    if not isinstance(platform_toolsets, dict):
+        raise RuntimeError("config.yaml has non-object `platform_toolsets` section")
+    discord_was_absent = platform_toolsets.get("discord") is None
+    discord_toolsets, discord_added = _append_unique_string(
+        platform_toolsets.get("discord"),
+        "kanban",
+        label="platform_toolsets.discord",
+    )
+    if discord_was_absent and "hermes-discord" not in discord_toolsets:
+        discord_toolsets.insert(0, "hermes-discord")
+    platform_toolsets["discord"] = discord_toolsets
+
+    return {
+        "status": "enabled_by_default",
+        "root_toolset_added": root_added,
+        "discord_toolset_added": discord_added,
+        "root_toolset_present": "kanban" in toolsets,
+        "discord_toolset_present": "kanban" in discord_toolsets,
+        "root_default_toolset_preserved": "hermes-cli" in toolsets,
+        "discord_default_toolset_preserved": "hermes-discord" in discord_toolsets,
+        "claim_boundary": "toolset_enabled_is_not_worker_lifecycle_certification",
     }
 
 
@@ -6276,6 +6334,34 @@ def _patch_dockerfile_workstation_python_alias(path: Path, dry_run: bool) -> lis
     return ["dockerfile:workstation_python_alias"]
 
 
+def _patch_dockerfile_workstation_hermes_cli(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    wrapper_line = (
+        "RUN printf '%s\\n' '#!/bin/sh' 'exec /opt/hermes/.venv/bin/hermes \"$@\"' "
+        "> /usr/local/bin/hermes && chmod 0755 /usr/local/bin/hermes\n"
+    )
+    if wrapper_line in text:
+        return []
+    anchors = (
+        "RUN printf '%s\\n' '#!/bin/sh' 'exec /opt/hermes/.venv/bin/python \"$@\"' "
+        "> /usr/local/bin/python && chmod 0755 /usr/local/bin/python\n",
+        'RUN uv pip install --no-cache-dir --no-deps -e "."\n',
+        '    uv pip install --no-cache-dir -e ".[all]"\n',
+        "RUN uv sync --frozen --no-install-project --extra all\n",
+    )
+    for anchor in anchors:
+        if anchor in text:
+            text = text.replace(anchor, anchor + wrapper_line, 1)
+            break
+    else:
+        raise RuntimeError(f"Installer patch anchor missing for Docker Hermes CLI in {path}")
+    if not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return ["dockerfile:workstation_hermes_cli"]
+
+
 def _patch_docker_entrypoint(path: Path, dry_run: bool) -> list[str]:
     if not path.exists():
         return []
@@ -6587,13 +6673,13 @@ def main() -> int:
     parser.add_argument(
         "--enable-kanban-workstation",
         action="store_true",
-        help="Request explicit Hermes Kanban workstation opt-in. Fails closed unless a tool-surface proof level is supplied.",
+        help="Deprecated no-op: Hermes Kanban workstation toolset is enabled by default.",
     )
     parser.add_argument(
         "--kanban-tool-surface-proof",
         choices=("none", "tool_surface_exposed", "board_write_certified", "worker_lifecycle_certified"),
         default="none",
-        help="Evidence level for explicit Hermes Kanban opt-in. Default install never enables Kanban write/worker tools.",
+        help="Optional evidence level for post-install Hermes Kanban tool-surface certification.",
     )
     parser.add_argument(
         "--check-release-hygiene",
@@ -6612,7 +6698,7 @@ def main() -> int:
         return 2
 
     capability_enablement = build_enablement_plan(
-        enable_kanban_workstation=bool(args.enable_kanban_workstation),
+        enable_kanban_workstation=True,
         kanban_tool_surface_proof=str(args.kanban_tool_surface_proof),
     )
     if capability_enablement["status"] != "pass":
@@ -6816,6 +6902,7 @@ def main() -> int:
         host_patches.extend(_run_host_patch("_patch_dockerignore", target / ".dockerignore", args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_dockerfile_backend_dependencies", target / "Dockerfile", args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_dockerfile_workstation_python_alias", target / "Dockerfile", args.dry_run, host_patch_mode=args.host_patch_mode))
+        host_patches.extend(_run_host_patch("_patch_dockerfile_workstation_hermes_cli", target / "Dockerfile", args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_docker_entrypoint", target / "docker" / "entrypoint.sh", args.dry_run, host_patch_mode=args.host_patch_mode))
 
     if gateway_patch_mode != "skip" and not args.dry_run:

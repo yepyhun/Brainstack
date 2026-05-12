@@ -1864,10 +1864,12 @@ def _check_wizard_capability_enablement_matrix(tmp: Path) -> CheckResult:
         "matrix_has_required_fields",
         "required_capabilities_enable_and_verify",
         "side_effectful_default_not_enabled",
-        "default_install_does_not_add_kanban_toolset",
+        "default_install_adds_kanban_toolset",
+        "missing_root_toolsets_preserves_native_default",
+        "missing_discord_platform_preserves_native_default",
         "existing_toolsets_preserved",
-        "kanban_opt_in_without_proof_fails",
-        "kanban_opt_in_with_tool_surface_proof_not_default",
+        "default_kanban_pending_proof_does_not_certify_workers",
+        "kanban_with_tool_surface_proof_is_runtime_proofed",
         "optional_failures_not_health_failures",
     )
     default_summary = data.get("default_summary") if isinstance(data.get("default_summary"), Mapping) else {}

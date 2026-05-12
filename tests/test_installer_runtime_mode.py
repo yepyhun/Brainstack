@@ -120,6 +120,30 @@ RUN uv pip install --no-cache-dir --no-deps -e "."
     assert install_into_hermes._patch_dockerfile_workstation_python_alias(dockerfile, dry_run=False) == []
 
 
+def test_dockerfile_patch_adds_global_hermes_cli_after_workstation_python_alias(tmp_path):
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(
+        """
+FROM debian:13
+RUN uv pip install --no-cache-dir --no-deps -e "."
+RUN printf '%s\\n' '#!/bin/sh' 'exec /opt/hermes/.venv/bin/python "$@"' > /usr/local/bin/python && chmod 0755 /usr/local/bin/python
+""",
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_dockerfile_workstation_hermes_cli(dockerfile, dry_run=False)
+
+    text = dockerfile.read_text(encoding="utf-8")
+    assert applied == ["dockerfile:workstation_hermes_cli"]
+    assert (
+        "RUN printf '%s\\n' '#!/bin/sh' 'exec /opt/hermes/.venv/bin/python \"$@\"' "
+        "> /usr/local/bin/python && chmod 0755 /usr/local/bin/python\n"
+        "RUN printf '%s\\n' '#!/bin/sh' 'exec /opt/hermes/.venv/bin/hermes \"$@\"' "
+        "> /usr/local/bin/hermes && chmod 0755 /usr/local/bin/hermes\n"
+    ) in text
+    assert install_into_hermes._patch_dockerfile_workstation_hermes_cli(dockerfile, dry_run=False) == []
+
+
 def test_dockerfile_patch_replaces_legacy_system_python_alias(tmp_path):
     dockerfile = tmp_path / "Dockerfile"
     dockerfile.write_text(
@@ -167,7 +191,7 @@ def test_config_patch_embedding_none_makes_corpus_explicitly_unavailable(tmp_pat
     config = tmp_path / "config.yaml"
     config.write_text("{}", encoding="utf-8")
 
-    install_into_hermes._patch_config(config, dry_run=False, embedding_runtime="none")
+    result = install_into_hermes._patch_config(config, dry_run=False, embedding_runtime="none")
 
     data = install_into_hermes._load_yaml(config)
     brainstack = data["plugins"]["brainstack"]
@@ -195,23 +219,28 @@ def test_config_patch_embedding_none_makes_corpus_explicitly_unavailable(tmp_pat
     assert data["auxiliary"]["session_search"]["timeout"] == 15
     assert data["proactive_mode"] == "dry_run"
     assert data["proactive_kill_switch"] is False
-    assert "kanban" not in data.get("toolsets", [])
+    assert "kanban" in data.get("toolsets", [])
+    assert "hermes-cli" in data.get("toolsets", [])
+    assert "kanban" in data.get("platform_toolsets", {}).get("discord", [])
+    assert "hermes-discord" in data.get("platform_toolsets", {}).get("discord", [])
+    assert result["kanban_toolset_hygiene"]["status"] == "enabled_by_default"
+    assert result["kanban_toolset_hygiene"]["root_default_toolset_preserved"] is True
+    assert result["kanban_toolset_hygiene"]["discord_default_toolset_preserved"] is True
+    assert result["kanban_toolset_hygiene"]["claim_boundary"] == "toolset_enabled_is_not_worker_lifecycle_certification"
 
 
-def test_wizard_capability_policy_blocks_kanban_opt_in_without_tool_surface_proof() -> None:
-    blocked = install_into_hermes.build_enablement_plan(
-        enable_kanban_workstation=True,
-        kanban_tool_surface_proof="none",
-    )
+def test_wizard_capability_policy_enables_kanban_by_default_without_worker_claim() -> None:
+    default = install_into_hermes.build_enablement_plan()
     proofed = install_into_hermes.build_enablement_plan(
         enable_kanban_workstation=True,
         kanban_tool_surface_proof="tool_surface_exposed",
     )
 
-    assert blocked["status"] == "fail"
-    assert blocked["kanban"]["status"] == "blocked_missing_tool_surface_proof"
+    assert default["status"] == "pass"
+    assert default["kanban"]["enabled_by_default"] is True
+    assert default["kanban"]["status"] == "default_enabled_pending_runtime_proof"
     assert proofed["status"] == "pass"
-    assert proofed["kanban"]["status"] == "opt_in_ready_for_operator_config"
+    assert proofed["kanban"]["status"] == "default_enabled_runtime_proofed"
     assert proofed["side_effectful_tools_enabled_by_default"] is False
 
 

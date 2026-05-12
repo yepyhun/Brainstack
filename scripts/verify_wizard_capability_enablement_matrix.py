@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from brainstack.capability_enablement import (  # noqa: E402
+    ENABLE_PENDING_RUNTIME_PROOF,
     ENABLE_AND_VERIFY,
     EXPLICIT_OPT_IN_REQUIRED,
     OPTIONAL_SIDE_EFFECTFUL_HERMES_NATIVE,
@@ -55,13 +56,22 @@ def _default_install_manifest(root: Path) -> dict[str, Any]:
     }
 
 
+def _empty_config_install_manifest(root: Path) -> dict[str, Any]:
+    _target(root / "empty")
+    config = root / "empty" / "config.yaml"
+    config.write_text("{}", encoding="utf-8")
+    result = install_into_hermes._patch_config(config, dry_run=False, embedding_runtime="none")
+    data = install_into_hermes._load_yaml(config)
+    return {"patch_result": result, "config": data}
+
+
 def build_report() -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="brainstack-capability-matrix-") as tmpdir:
         root = Path(tmpdir)
         default_manifest = _default_install_manifest(root)
+        empty_manifest = _empty_config_install_manifest(root)
     matrix = capability_matrix()
     default_plan = build_enablement_plan()
-    blocked_kanban = build_enablement_plan(enable_kanban_workstation=True, kanban_tool_surface_proof="none")
     proofed_kanban = build_enablement_plan(
         enable_kanban_workstation=True,
         kanban_tool_surface_proof="tool_surface_exposed",
@@ -72,6 +82,11 @@ def build_report() -> dict[str, Any]:
         str(item)
         for item in (config.get("platform_toolsets") or {}).get("discord", [])
     ]
+    empty_discord_toolsets = [
+        str(item)
+        for item in (empty_manifest["config"].get("platform_toolsets") or {}).get("discord", [])
+    ]
+    empty_root_toolsets = [str(item) for item in empty_manifest["config"].get("toolsets") or []]
     side_effectful = [
         item for item in matrix if item["class"] == OPTIONAL_SIDE_EFFECTFUL_HERMES_NATIVE
     ]
@@ -81,19 +96,26 @@ def build_report() -> dict[str, Any]:
             for item in matrix
         ),
         "required_capabilities_enable_and_verify": all(
-            item["default_action"] == ENABLE_AND_VERIFY
+            item["default_action"] in {ENABLE_AND_VERIFY, ENABLE_PENDING_RUNTIME_PROOF}
             for item in matrix
             if item["class"].startswith("required_")
         ),
         "side_effectful_default_not_enabled": default_plan.get("side_effectful_tools_enabled_by_default") is False
         and all(item["default_action"] == EXPLICIT_OPT_IN_REQUIRED for item in side_effectful),
-        "default_install_does_not_add_kanban_toolset": "kanban" not in root_toolsets
-        and "kanban" not in platform_toolsets,
+        "default_install_adds_kanban_toolset": "kanban" in root_toolsets
+        and "kanban" in platform_toolsets,
+        "missing_root_toolsets_preserves_native_default": "kanban" in empty_root_toolsets
+        and "hermes-cli" in empty_root_toolsets
+        and empty_manifest["patch_result"]["kanban_toolset_hygiene"]["root_default_toolset_preserved"] is True,
+        "missing_discord_platform_preserves_native_default": "kanban" in empty_discord_toolsets
+        and "hermes-discord" in empty_discord_toolsets
+        and empty_manifest["patch_result"]["kanban_toolset_hygiene"]["discord_default_toolset_preserved"] is True,
         "existing_toolsets_preserved": "hermes-cli" in root_toolsets and "memory" in platform_toolsets,
-        "kanban_opt_in_without_proof_fails": blocked_kanban["status"] == "fail"
-        and blocked_kanban["kanban"]["status"] == "blocked_missing_tool_surface_proof",
-        "kanban_opt_in_with_tool_surface_proof_not_default": proofed_kanban["status"] == "pass"
-        and proofed_kanban["kanban"]["status"] == "opt_in_ready_for_operator_config"
+        "default_kanban_pending_proof_does_not_certify_workers": default_plan["status"] == "pass"
+        and default_plan["kanban"]["enabled_by_default"] is True
+        and default_plan["kanban"]["status"] == "default_enabled_pending_runtime_proof",
+        "kanban_with_tool_surface_proof_is_runtime_proofed": proofed_kanban["status"] == "pass"
+        and proofed_kanban["kanban"]["status"] == "default_enabled_runtime_proofed"
         and proofed_kanban["side_effectful_tools_enabled_by_default"] is False,
         "optional_failures_not_health_failures": default_plan["optional_failures_are_health_failures"] is False,
     }

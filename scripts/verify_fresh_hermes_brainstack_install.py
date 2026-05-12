@@ -155,6 +155,7 @@ def _dockerfile_checks(target: Path) -> dict[str, Any]:
             "missing": sorted(REQUIRED_DOCKERFILE_DEPENDENCIES),
             "dockerfile_present": False,
             "workstation_python_alias": "missing",
+            "workstation_hermes_cli": "missing",
         }
     text = dockerfile.read_text(encoding="utf-8", errors="replace")
     missing = sorted(dep for dep in REQUIRED_DOCKERFILE_DEPENDENCIES if dep not in text)
@@ -165,11 +166,19 @@ def _dockerfile_checks(target: Path) -> dict[str, Any]:
         if "ln -sf /usr/bin/python3 /usr/local/bin/python" in text
         else "missing"
     )
+    workstation_hermes_cli = (
+        "venv_wrapper" if 'exec /opt/hermes/.venv/bin/hermes "$@"' in text else "missing"
+    )
     return {
-        "status": "pass" if not missing and workstation_python_alias == "venv_wrapper" else "fail",
+        "status": "pass"
+        if not missing
+        and workstation_python_alias == "venv_wrapper"
+        and workstation_hermes_cli == "venv_wrapper"
+        else "fail",
         "dockerfile_present": True,
         "missing": missing,
         "workstation_python_alias": workstation_python_alias,
+        "workstation_hermes_cli": workstation_hermes_cli,
     }
 
 

@@ -755,7 +755,7 @@ def _build_operational_verdict(
     config_status = str(runtime_config.get("status") or "")
     mode = str(runtime_config.get("mode") or "")
     substrate = _mapping(counts.get("actionable_substrate"))
-    pending_outbox_count = _safe_int(counts.get("pending_outbox_count"), 0)
+    user_visible_pending_outbox_count = _safe_int(counts.get("user_visible_pending_outbox_count"), 0)
     pending_actionable_count = _safe_int(counts.get("pending_actionable_substrate_count"), 0)
     candidate_item_count = _safe_int(counts.get("candidate_item_count"), 0)
     state = "ready_idle"
@@ -769,7 +769,7 @@ def _build_operational_verdict(
         state = "degraded"
     elif config_status == "loaded" and mode not in PROACTIVE_MODE_VALUES:
         state = "degraded"
-    elif pending_outbox_count > 0:
+    elif user_visible_pending_outbox_count > 0:
         state = "wake_queued"
     elif pending_actionable_count > 0 or candidate_item_count > 0:
         state = "candidate_available"

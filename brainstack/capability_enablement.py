@@ -15,6 +15,7 @@ EXTERNAL_OWNER = "external_owner"
 ENABLE_AND_VERIFY = "enable_and_verify"
 DETECT_AND_REPORT = "detect_and_report"
 EXPLICIT_OPT_IN_REQUIRED = "explicit_opt_in_required"
+ENABLE_PENDING_RUNTIME_PROOF = "enable_pending_runtime_proof"
 
 
 CAPABILITY_MATRIX: tuple[dict[str, Any], ...] = (
@@ -84,11 +85,11 @@ CAPABILITY_MATRIX: tuple[dict[str, Any], ...] = (
     {
         "capability": "hermes_native_kanban_write_and_workers",
         "owner": "hermes_kanban",
-        "class": OPTIONAL_SIDE_EFFECTFUL_HERMES_NATIVE,
-        "default_action": EXPLICIT_OPT_IN_REQUIRED,
+        "class": REQUIRED_PROOF_WORKSTATION,
+        "default_action": ENABLE_PENDING_RUNTIME_PROOF,
         "config_seam": "Hermes profile/toolsets kanban",
         "proof_command": "kanban_capability_evidence_ladder",
-        "side_effect_risk": "creates_routes_or_executes_work",
+        "side_effect_risk": "local_durable_board_handoff_only_until_worker_lifecycle_certified",
     },
 )
 
@@ -99,7 +100,7 @@ def capability_matrix() -> list[dict[str, Any]]:
 
 def build_enablement_plan(
     *,
-    enable_kanban_workstation: bool = False,
+    enable_kanban_workstation: bool = True,
     kanban_tool_surface_proof: str = "",
 ) -> dict[str, Any]:
     matrix = capability_matrix()
@@ -107,7 +108,7 @@ def build_enablement_plan(
     enabled_by_default = [
         item["capability"]
         for item in matrix
-        if item["default_action"] == ENABLE_AND_VERIFY
+        if item["default_action"] in {ENABLE_AND_VERIFY, ENABLE_PENDING_RUNTIME_PROOF}
     ]
     side_effectful_enabled_by_default = [
         item["capability"]
@@ -119,26 +120,45 @@ def build_enablement_plan(
     kanban_status = {
         "capability": kanban["capability"],
         "default_action": kanban["default_action"],
-        "enabled_by_default": False,
-        "operator_opt_in_requested": bool(enable_kanban_workstation),
+        "enabled_by_default": bool(enable_kanban_workstation),
+        "operator_opt_in_requested": False,
         "tool_surface_proof": str(kanban_tool_surface_proof or "none"),
         "status": "not_requested",
     }
     if enable_kanban_workstation:
-        if kanban_tool_surface_proof not in {
+        if kanban_tool_surface_proof in {
             "tool_surface_exposed",
             "board_write_certified",
             "worker_lifecycle_certified",
         }:
-            kanban_status["status"] = "blocked_missing_tool_surface_proof"
+            kanban_status["status"] = "default_enabled_runtime_proofed"
+        elif not kanban_tool_surface_proof or kanban_tool_surface_proof == "none":
+            kanban_status["status"] = "default_enabled_pending_runtime_proof"
+        else:
+            kanban_status["status"] = "blocked_invalid_tool_surface_proof"
             optional_failures.append(
                 {
                     "capability": kanban["capability"],
-                    "reason_code": "KANBAN_OPT_IN_REQUIRES_TOOL_SURFACE_PROOF",
+                    "reason_code": "KANBAN_DEFAULT_ENABLEMENT_INVALID_TOOL_SURFACE_PROOF",
+                }
+            )
+    else:
+        if kanban_tool_surface_proof not in {
+            "",
+            "none",
+            "tool_surface_exposed",
+            "board_write_certified",
+            "worker_lifecycle_certified",
+        }:
+            kanban_status["status"] = "blocked_invalid_tool_surface_proof"
+            optional_failures.append(
+                {
+                    "capability": kanban["capability"],
+                    "reason_code": "KANBAN_DISABLED_INVALID_TOOL_SURFACE_PROOF",
                 }
             )
         else:
-            kanban_status["status"] = "opt_in_ready_for_operator_config"
+            kanban_status["status"] = "disabled_by_operator"
     return {
         "schema": CAPABILITY_MATRIX_SCHEMA,
         "matrix": matrix,

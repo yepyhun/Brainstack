@@ -68,6 +68,7 @@ services:
         """
 RUN pip install kuzu chromadb openai croniter
 RUN printf '%s\\n' '#!/bin/sh' 'exec /opt/hermes/.venv/bin/python "$@"' > /usr/local/bin/python && chmod 0755 /usr/local/bin/python
+RUN printf '%s\\n' '#!/bin/sh' 'exec /opt/hermes/.venv/bin/hermes "$@"' > /usr/local/bin/hermes && chmod 0755 /usr/local/bin/hermes
 """,
         encoding="utf-8",
     )
@@ -103,6 +104,7 @@ fi
     assert report["compose"]["status"] == "pass"
     assert report["dockerfile"]["status"] == "pass"
     assert report["dockerfile"]["workstation_python_alias"] == "venv_wrapper"
+    assert report["dockerfile"]["workstation_hermes_cli"] == "venv_wrapper"
     assert report["start_script"]["status"] == "pass"
     assert report["gateway_patch_status"] == "pass"
 
@@ -162,5 +164,6 @@ services:
 
     assert report["status"] == "fail"
     assert report["dockerfile"]["workstation_python_alias"] == "legacy_system_python"
+    assert report["dockerfile"]["workstation_hermes_cli"] == "missing"
     assert report["start_script"]["status"] == "fail"
     assert report["start_script"]["first_service_naive"] is True

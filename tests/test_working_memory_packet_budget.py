@@ -116,3 +116,41 @@ def test_working_memory_packet_budget_active_fails_closed_for_tiny_budget(tmp_pa
         assert active["packet_budget"]["fail_closed"] is True
     finally:
         store.close()
+
+
+def test_working_memory_packet_budget_does_not_collapse_distinct_graph_subjects(tmp_path: Path) -> None:
+    store = BrainstackStore(str(tmp_path / "brainstack.sqlite3"), graph_backend="sqlite", corpus_backend="sqlite")
+    store.open()
+    try:
+        scope = "principal:budget-graph-distinct-subjects"
+        session = "session:budget-graph-distinct-subjects"
+        for subject in ("Budget Graph Alpha", "Budget Graph Beta"):
+            store.upsert_graph_state(
+                subject_name=subject,
+                attribute="status",
+                value_text="active",
+                source="budget-graph.fixture",
+                metadata={"principal_scope_key": scope},
+            )
+
+        active = build_working_memory_packet(
+            store,
+            query="Budget Graph status active",
+            session_id=session,
+            principal_scope_key=scope,
+            packet_budget_mode="active",
+            packet_budget_max_candidate_tokens=120,
+            **_packet_defaults(),
+        )
+
+        subjects = {row["subject"] for row in active["graph_rows"]}
+        duplicate_drops = [
+            item
+            for item in active["packet_budget"]["budget_decisions"]
+            if item["reason_code"] == "dropped_budget_duplicate_lower_authority"
+        ]
+
+        assert subjects == {"Budget Graph Alpha", "Budget Graph Beta"}
+        assert duplicate_drops == []
+    finally:
+        store.close()

@@ -234,7 +234,8 @@ def test_wizard_capability_enablement_matrix_release_check_passes(tmp_path: Path
     assert result.summary["issue_count"] == 0
     assert result.summary["proof_passed"] is True
     assert result.summary["default_summary"]["side_effectful_tools_enabled_by_default"] is False
-    assert result.summary["default_summary"]["kanban_default_action"] == "explicit_opt_in_required"
+    assert result.summary["default_summary"]["kanban_default_action"] == "enable_pending_runtime_proof"
+    assert result.summary["default_summary"]["kanban_status"] == "default_enabled_pending_runtime_proof"
 
 
 def test_release_report_fails_adaptive_evidence_kernel_even_in_dev_mode() -> None:
