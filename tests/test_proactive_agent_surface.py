@@ -311,6 +311,78 @@ def test_proactive_status_default_keeps_kanban_summary_model_bounded(tmp_path: P
         provider.shutdown()
 
 
+def test_proactive_status_default_stays_bounded_with_live_loop_diagnostics(tmp_path: Path) -> None:
+    hermes_root = tmp_path / "hermes_root"
+    (hermes_root / "tools").mkdir(parents=True)
+    (hermes_root / "hermes_cli").mkdir()
+    (hermes_root / "plugins" / "kanban").mkdir(parents=True)
+    (hermes_root / "tools" / "kanban_tools.py").write_text("# public fixture\n", encoding="utf-8")
+    (hermes_root / "hermes_cli" / "kanban_db.py").write_text("# public fixture\n", encoding="utf-8")
+    kanban_db = tmp_path / "kanban-live.db"
+    conn = sqlite3.connect(kanban_db)
+    try:
+        conn.execute(
+            "CREATE TABLE tasks ("
+            "id TEXT PRIMARY KEY, status TEXT, assignee TEXT, title TEXT, "
+            "created_at INTEGER, started_at INTEGER, completed_at INTEGER, current_run_id INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE task_runs ("
+            "id INTEGER PRIMARY KEY, task_id TEXT, status TEXT, outcome TEXT, "
+            "summary TEXT, output_path TEXT, completed_at INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE task_events ("
+            "id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT, created_at INTEGER, run_id INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO tasks (id, status, assignee, title, created_at) VALUES "
+            "('task-ready', 'ready', 'missing-profile', 'Needs dispatch', 1)"
+        )
+        conn.execute(
+            "INSERT INTO task_events (task_id, kind, created_at) VALUES "
+            "('task-ready', 'spawn_failed', 2)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    provider = _provider(tmp_path / "kanban-live-compact", hermes_root=str(hermes_root))
+    provider._config.update(
+        {
+            "kanban_db_path": str(kanban_db),
+            "kanban_profile_names": ["default", "reviewer"],
+            "kanban_max_spawn": 2,
+            "scheduler_jobs": [
+                {
+                    "id": "signal-bus",
+                    "lane": "signal",
+                    "last_run_at": "2026-05-12T10:00:00Z",
+                    "next_run_at": "2026-05-12T10:01:00Z",
+                }
+            ],
+            "signal_bus": {"fresh": False, "stale": True},
+            "executor": {"fresh": False, "stale": True},
+            "builder": {"fresh": True},
+            "next_action": {"exists": False},
+        }
+    )
+    try:
+        rendered = provider.handle_tool_call("brainstack_proactive_status", {})
+        payload = json.loads(rendered)
+        kanban = payload["workstation_integrations"]["kanban"]
+
+        assert payload["detail_level"] == "compact"
+        assert len(rendered.encode("utf-8")) < 3000
+        assert kanban["kanban_verdict"] == "board_storage_accessible"
+        assert kanban["blocked_unknown_assignee_count"] == 1
+        assert payload["operating_loop"]["verdict"] in {"critical", "degraded"}
+        assert "schema" not in kanban
+        assert "lane_freshness" not in payload["operating_loop"]
+    finally:
+        provider.shutdown()
+
+
 def test_proactive_status_kanban_absent_does_not_degrade_ready_idle(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     try:

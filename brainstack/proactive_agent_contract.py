@@ -724,7 +724,6 @@ def _compact_kanban_workstation_status(status: Mapping[str, Any]) -> dict[str, A
     runtime_snapshot = _mapping(status.get("runtime_snapshot"))
     last_e2e = _mapping(runtime_snapshot.get("last_e2e_proof"))
     payload: dict[str, Any] = {
-        "schema": KANBAN_WORKSTATION_SCHEMA,
         "available": bool(status.get("available")),
         "evidence_level": str(status.get("evidence_level") or ""),
         "kanban_verdict": str(status.get("kanban_verdict") or ""),
@@ -741,7 +740,6 @@ def _compact_kanban_workstation_status(status: Mapping[str, Any]) -> dict[str, A
         "reason_code": str(status.get("reason_code") or ""),
         "detail_level": "compact",
         "detail_omitted": True,
-        "detail_hint": "Use detail_level=full for Kanban diagnostics.",
     }
     owner = str(status.get("owner") or "")
     proactive_role = str(status.get("proactive_role") or "")
@@ -750,6 +748,66 @@ def _compact_kanban_workstation_status(status: Mapping[str, Any]) -> dict[str, A
     if proactive_role:
         payload["proactive_role"] = proactive_role
     return payload
+
+
+def _compact_runtime_config_summary(runtime_config: Mapping[str, Any]) -> dict[str, Any]:
+    payload = {
+        "status": str(runtime_config.get("status") or ""),
+        "reason_code": str(runtime_config.get("reason_code") or ""),
+        "mode": str(runtime_config.get("mode") or ""),
+        "kill_switch": bool(runtime_config.get("kill_switch")),
+        "cooldown_seconds": _safe_int(runtime_config.get("cooldown_seconds"), 0),
+    }
+    for key in ("kernel_memory_mode", "brainstack_plugin_mode", "plugin_mode"):
+        value = str(runtime_config.get(key) or "")
+        if value:
+            payload[key] = value
+    return payload
+
+
+def _compact_operational_verdict(operational_verdict: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "operational_state": str(operational_verdict.get("operational_state") or ""),
+        "reason_code": str(operational_verdict.get("reason_code") or ""),
+        "agent_interpretation": str(operational_verdict.get("agent_interpretation") or ""),
+    }
+
+
+def _compact_scheduler_lane_health(scheduler_health: Mapping[str, Any]) -> dict[str, Any]:
+    lane_states = _mapping(scheduler_health.get("lane_states"))
+    jobs = scheduler_health.get("jobs") if isinstance(scheduler_health.get("jobs"), list) else []
+    return {
+        "verdict": str(scheduler_health.get("verdict") or ""),
+        "starvation_risk": bool(scheduler_health.get("starvation_risk")),
+        "reason_codes": [str(item) for item in scheduler_health.get("reason_codes") or [] if str(item)],
+        "lane_state_count": len(lane_states),
+        "job_count": len(jobs),
+    }
+
+
+def _compact_operating_loop_verdict(operating_loop: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "verdict": str(operating_loop.get("verdict") or ""),
+        "reason_codes": [str(item) for item in operating_loop.get("reason_codes") or [] if str(item)],
+        "split_brain_detected": bool(operating_loop.get("split_brain_detected")),
+        "has_frontier": bool(operating_loop.get("has_frontier")),
+        "blockers": [str(item) for item in operating_loop.get("blockers") or [] if str(item)],
+        "warnings": [str(item) for item in operating_loop.get("warnings") or [] if str(item)],
+        "agent_claim": str(operating_loop.get("agent_claim") or ""),
+    }
+
+
+def _compact_workstream_controller_status(workstream_controller: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "status": str(workstream_controller.get("status") or ""),
+        "agent_claim": str(workstream_controller.get("agent_claim") or ""),
+    }
+
+
+def _compact_agent_use_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "state_instruction": str(contract.get("state_instruction") or ""),
+    }
 
 
 def _normalize_proactive_status_detail_level(value: Any) -> str:
@@ -1202,9 +1260,6 @@ def _compact_readiness_probe(probe: Mapping[str, Any]) -> dict[str, Any]:
     intake = _mapping(probe.get("candidate_intake"))
     return {
         "status": str(probe.get("status") or ""),
-        "synthetic": bool(probe.get("synthetic")),
-        "read_only": bool(probe.get("read_only")),
-        "side_effect": bool(probe.get("side_effect")),
         "live_delivery": bool(probe.get("live_delivery")),
         "zero_side_effects": bool(probe.get("zero_side_effects")),
         "candidate_classification": str(intake.get("classification") or ""),
@@ -1250,7 +1305,25 @@ def build_proactive_status(
         "kanban": kanban_status if normalized_detail_level == "full" else _compact_kanban_workstation_status(kanban_status),
     }
     workstream_controller = controller_status([])
+    model_use_contract = _agent_use_contract(str(operational_verdict["operational_state"]))
+    if normalized_detail_level == "compact":
+        config_payload = _compact_runtime_config_summary(runtime_config)
+        scheduler_health_payload = _compact_scheduler_lane_health(scheduler_health)
+        operating_loop_payload = _compact_operating_loop_verdict(operating_loop)
+        workstream_controller_payload = _compact_workstream_controller_status(workstream_controller)
+        model_use_contract_payload = _compact_agent_use_contract(model_use_contract)
+    else:
+        config_payload = runtime_config
+        scheduler_health_payload = scheduler_health
+        operating_loop_payload = operating_loop
+        workstream_controller_payload = workstream_controller
+        model_use_contract_payload = model_use_contract
     readiness_probe = _compact_readiness_probe(_readiness_probe(runtime_config, counts))
+    operational_verdict_payload = (
+        operational_verdict
+        if normalized_detail_level == "full"
+        else _compact_operational_verdict(operational_verdict)
+    )
     return {
         "schema": PROACTIVE_AGENT_CONTRACT_SCHEMA,
         "operation": "status",
@@ -1259,22 +1332,22 @@ def build_proactive_status(
         "side_effect": False,
         "bounded_model_facing": True,
         "operational_state": operational_verdict["operational_state"],
-        "operational_verdict": operational_verdict,
+        "operational_verdict": operational_verdict_payload,
         "agent_interpretation": operational_verdict["agent_interpretation"],
         "idle_is_failure": operational_verdict["idle_is_failure"],
         "can_receive_candidates": operational_verdict["can_receive_candidates"],
         "can_wake_agent_when_candidate_exists": operational_verdict["can_wake_agent_when_candidate_exists"],
         "blocked_actions_mean_safety_boundary": operational_verdict["blocked_actions_mean_safety_boundary"],
-        "config": runtime_config,
+        "config": config_payload,
         "counts": counts,
         "readiness_probe": readiness_probe,
         "workstation_integrations": workstation_integrations,
-        "workstream_controller": workstream_controller,
-        "scheduler_lane_health": scheduler_health,
-        "operating_loop": operating_loop,
+        "workstream_controller": workstream_controller_payload,
+        "scheduler_lane_health": scheduler_health_payload,
+        "operating_loop": operating_loop_payload,
         "blocked_actions": list(PROACTIVE_BLOCKED_ACTIONS),
         "current_assignment_authority": False,
-        "model_use_contract": _agent_use_contract(str(operational_verdict["operational_state"])),
+        "model_use_contract": model_use_contract_payload,
         "reason_code": "PROACTIVE_STATUS_TOOL_BACKED_COMPACT",
     }
 
