@@ -5,6 +5,7 @@ from pathlib import Path
 
 from extensions.hermes_proactive.hermes_proactive.config import load_runtime_config
 from extensions.hermes_proactive.hermes_proactive.doctor import proactive_extension_doctor
+from extensions.hermes_proactive.hermes_proactive.workrun import start_workrun, workrun_dir
 from scripts.verify_hermes_proactive_runtime_parity import build_proactive_runtime_parity_report
 
 
@@ -111,6 +112,73 @@ def test_proactive_config_fallback_preserves_explicit_top_level_mode_without_yam
     assert runtime_config["kill_switch"] is False
     assert doctor["status"] == "pass"
     assert doctor["config"]["mode"] == "live"
+
+
+def test_proactive_state_base_can_be_isolated_by_extension_config(tmp_path: Path) -> None:
+    isolated = tmp_path / "isolated-state"
+    hermes_home = _home(
+        tmp_path,
+        config_text=(
+            "proactive_mode: live\n"
+            "proactive_kill_switch: false\n"
+            "extensions:\n"
+            "  hermes_proactive:\n"
+            f"    state_base_dir: {isolated}\n"
+        ),
+    )
+
+    runtime_config = load_runtime_config(hermes_home)
+    doctor = proactive_extension_doctor(hermes_home=hermes_home)
+
+    assert runtime_config["state_base_dir"] == str(isolated)
+    assert runtime_config["state_base_source"] == "extensions.hermes_proactive.state_base_dir"
+    assert doctor["state_base"]["state_base_dir"] == str(isolated)
+    assert doctor["state_base"]["explicit_state_base"] is True
+    assert "PARTIAL_ISOLATION_SHARED_PROACTIVE_RUNTIME" not in doctor["issues"]
+
+
+def test_proactive_doctor_warns_when_path_override_lacks_extension_state_base(tmp_path: Path) -> None:
+    hermes_home = _home(
+        tmp_path,
+        config_text=(
+            "proactive_mode: live\n"
+            "proactive_kill_switch: false\n"
+            "plugins:\n"
+            "  brainstack:\n"
+            f"    db_path: {tmp_path / 'profile' / 'brainstack.db'}\n"
+            f"    graph_db_path: {tmp_path / 'profile' / 'brainstack.kuzu'}\n"
+            f"    corpus_db_path: {tmp_path / 'profile' / 'brainstack.chroma'}\n"
+        ),
+    )
+
+    doctor = proactive_extension_doctor(hermes_home=hermes_home)
+
+    assert doctor["status"] == "degraded"
+    assert doctor["state_base"]["status"] == "partial_isolation_shared_proactive_runtime"
+    assert "PARTIAL_ISOLATION_SHARED_PROACTIVE_RUNTIME" in doctor["issues"]
+
+
+def test_workrun_spine_uses_configured_proactive_state_base(tmp_path: Path) -> None:
+    state_base = tmp_path / "profile" / "brainstack" / "proactive_runtime"
+    hermes_home = _home(
+        tmp_path,
+        config_text=(
+            "proactive_mode: live\n"
+            "extensions:\n"
+            "  hermes_proactive:\n"
+            f"    state_base_dir: {state_base}\n"
+        ),
+    )
+
+    run = start_workrun(
+        hermes_home=hermes_home,
+        source_kind="proactive_pulse",
+        source_id="test",
+        objective="state base proof",
+    )
+
+    assert workrun_dir(hermes_home) == state_base / "workruns"
+    assert (state_base / "workruns" / f"{run['run_id']}.json").exists()
 
 
 def test_proactive_runtime_parity_report_is_public_safe_and_checks_payload() -> None:

@@ -14,6 +14,8 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
+from .config import proactive_state_base_dir
+
 
 WORKRUN_SCHEMA = "hermes_proactive.workrun.v1"
 WORKRUN_RECOVERY_CANDIDATE_SCHEMA = "hermes_proactive.workrun_recovery_candidate.v1"
@@ -63,7 +65,7 @@ def _digest(payload: Mapping[str, Any]) -> str:
 
 
 def workrun_dir(hermes_home: Path) -> Path:
-    return hermes_home / "home" / "brainstack" / "workruns"
+    return proactive_state_base_dir(hermes_home) / "workruns"
 
 
 def _path_for(hermes_home: Path, run_id: str) -> Path:
