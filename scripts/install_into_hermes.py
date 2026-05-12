@@ -74,6 +74,7 @@ PROACTIVE_RUNTIME_MODES = {"disabled", "dry_run", "live"}
 DEFAULT_PROACTIVE_RUNTIME_MODE = "dry_run"
 PROACTIVE_CRON_JOB_NAME = "Brainstack Proactive Pulse"
 PROACTIVE_CRON_GATE_SCRIPT_NAME = "brainstack_proactive_pulse_gate.py"
+PROFILE_ISOLATION_MODES = {"shared-scoped", "full-home", "path-override"}
 SESSION_SEARCH_TOTAL_TIMEOUT_SECONDS = 20
 SESSION_SEARCH_MAX_CONCURRENCY = 1
 COMPRESSION_AUXILIARY_MIN_TIMEOUT_SECONDS = 120
@@ -5424,6 +5425,140 @@ def _generated_compose_path(target: Path, config_path: Path) -> Path:
     return target / f"docker-compose.{_sanitize_compose_slug(runtime_home.name)}.yml"
 
 
+def _profile_config_path(target: Path, profile_name: str) -> Path:
+    cleaned = str(profile_name or "").strip()
+    if not cleaned or cleaned in {".", ".."} or "/" in cleaned or "\\" in cleaned:
+        raise RuntimeError("--profile must be a simple Hermes profile directory name")
+    return target / "hermes-config" / cleaned / "config.yaml"
+
+
+def _ensure_profile_config(config_path: Path, *, dry_run: bool) -> dict[str, Any]:
+    if config_path.exists():
+        return {"status": "exists", "config_path": str(config_path)}
+    if dry_run:
+        return {"status": "planned_create", "config_path": str(config_path)}
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("{}\n", encoding="utf-8")
+    return {"status": "created", "config_path": str(config_path)}
+
+
+def _backup_config_for_profile_isolation(config_path: Path, *, dry_run: bool) -> dict[str, Any]:
+    if not config_path.exists():
+        return {"status": "skipped", "reason": "config_missing", "config_path": str(config_path)}
+    backup = config_path.with_suffix(config_path.suffix + ".brainstack-profile-isolation.bak")
+    if backup.exists():
+        return {"status": "exists", "backup_path": str(backup)}
+    if dry_run:
+        return {"status": "planned", "backup_path": str(backup)}
+    shutil.copy2(config_path, backup)
+    return {"status": "created", "backup_path": str(backup)}
+
+
+def _profile_isolation_paths(config_path: Path, mode: str) -> dict[str, Any]:
+    profile_home = config_path.expanduser().resolve().parent
+    profile_brainstack_dir = default_profile_brainstack_dir(config_path)
+    if mode == "full-home":
+        brainstack_dir = Path("$HERMES_HOME") / "brainstack"
+        proactive_state_base = Path("$HERMES_HOME") / "home" / "brainstack"
+        physical_verdict = "full_physical_isolation"
+        requires_effective_home = str(profile_home)
+    elif mode == "path-override":
+        brainstack_dir = profile_brainstack_dir
+        proactive_state_base = profile_brainstack_dir / "proactive_runtime"
+        physical_verdict = "full_physical_isolation"
+        requires_effective_home = ""
+    else:
+        brainstack_dir = Path("$HERMES_HOME") / "brainstack"
+        proactive_state_base = Path("$HERMES_HOME") / "home" / "brainstack"
+        physical_verdict = "shared_backend_scoped"
+        requires_effective_home = ""
+    return {
+        "sqlite_path": str(brainstack_dir / "brainstack.db"),
+        "kuzu_path": str(brainstack_dir / "brainstack.kuzu"),
+        "chroma_path": str(brainstack_dir / "brainstack.chroma"),
+        "proactive_db_state_path": str(brainstack_dir / "brainstack.db"),
+        "proactive_extension_state_base_dir": str(proactive_state_base),
+        "profile_home": str(profile_home),
+        "requires_effective_hermes_home": requires_effective_home,
+        "physical_verdict": physical_verdict,
+    }
+
+
+def _apply_profile_isolation_config(
+    config_path: Path,
+    *,
+    mode: str,
+    profile_name: str = "",
+    dry_run: bool,
+) -> dict[str, Any]:
+    if mode not in PROFILE_ISOLATION_MODES:
+        raise RuntimeError(f"Unsupported isolation mode: {mode}")
+    config = _load_yaml(config_path) if config_path.exists() else {}
+    if not isinstance(config, dict):
+        config = {}
+    paths = _profile_isolation_paths(config_path, mode)
+    backup = _backup_config_for_profile_isolation(config_path, dry_run=dry_run)
+    changed: dict[str, Any] = {}
+
+    config.setdefault("plugins", {})
+    if not isinstance(config["plugins"], dict):
+        raise RuntimeError("config.yaml has non-object `plugins` section")
+    brainstack = config["plugins"].setdefault("brainstack", {})
+    if not isinstance(brainstack, dict):
+        raise RuntimeError("config.yaml has non-object `plugins.brainstack` section")
+
+    def set_if_changed(section: dict[str, Any], key: str, value: Any) -> None:
+        if section.get(key) != value:
+            changed[key] = {"previous": section.get(key), "next": value}
+            section[key] = value
+
+    if mode == "shared-scoped":
+        # Keep backend paths on the normal HERMES_HOME defaults; scope isolation
+        # is provided by Brainstack principal/workspace scope keys.
+        set_if_changed(brainstack, "db_path", "$HERMES_HOME/brainstack/brainstack.db")
+        set_if_changed(brainstack, "graph_backend", "kuzu")
+        set_if_changed(brainstack, "graph_db_path", "$HERMES_HOME/brainstack/brainstack.kuzu")
+        set_if_changed(brainstack, "corpus_backend", "chroma")
+        set_if_changed(brainstack, "corpus_db_path", "$HERMES_HOME/brainstack/brainstack.chroma")
+    else:
+        set_if_changed(brainstack, "db_path", paths["sqlite_path"])
+        set_if_changed(brainstack, "graph_backend", "kuzu")
+        set_if_changed(brainstack, "graph_db_path", paths["kuzu_path"])
+        set_if_changed(brainstack, "corpus_backend", "chroma")
+        set_if_changed(brainstack, "corpus_db_path", paths["chroma_path"])
+
+    extensions = config.setdefault("extensions", {})
+    if not isinstance(extensions, dict):
+        raise RuntimeError("config.yaml has non-object `extensions` section")
+    proactive = extensions.setdefault("hermes_proactive", {})
+    if not isinstance(proactive, dict):
+        raise RuntimeError("config.yaml has non-object `extensions.hermes_proactive` section")
+    set_if_changed(proactive, "state_base_dir", paths["proactive_extension_state_base_dir"])
+
+    if mode != "shared-scoped" and not dry_run:
+        Path(paths["sqlite_path"].replace("$HERMES_HOME", str(config_path.parent))).expanduser().parent.mkdir(parents=True, exist_ok=True)
+        Path(paths["proactive_extension_state_base_dir"].replace("$HERMES_HOME", str(config_path.parent))).expanduser().mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        _write_yaml(config_path, config)
+    return {
+        "schema": "brainstack.profile_isolation_report.v1",
+        "status": "planned" if dry_run else "applied",
+        "profile": profile_name,
+        "mode": mode,
+        "config_path": str(config_path),
+        "backup": backup,
+        "changed": changed,
+        "paths": paths,
+        "verdict": paths["physical_verdict"],
+        "full_isolation_certified": paths["physical_verdict"] == "full_physical_isolation",
+        "warnings": [
+            "full-home mode requires the runtime effective HERMES_HOME to be the profile home"
+        ]
+        if mode == "full-home"
+        else [],
+    }
+
+
 def _normalize_proactive_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
     raw_mode = str(config.get("proactive_mode") or "").strip().lower()
     if raw_mode in PROACTIVE_RUNTIME_MODES:
@@ -7142,6 +7277,7 @@ def _resolve_enabled_runtime_contract(args: argparse.Namespace) -> str | None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Install Brainstack into a target Hermes checkout.")
     parser.add_argument("target", help="Path to target Hermes checkout")
+    parser.add_argument("--profile", help="Hermes profile name under hermes-config/<profile>/config.yaml")
     parser.add_argument("--config", type=Path, help="Path to Hermes config.yaml")
     parser.add_argument("--compose-file", type=Path, help="Path to Docker compose file for doctor checks")
     parser.add_argument("--desktop-launcher", type=Path, help="Path to desktop launcher for doctor checks")
@@ -7162,6 +7298,17 @@ def main() -> int:
         "--enable",
         action="store_true",
         help="Patch config.yaml to enable Brainstack while keeping Hermes builtin memory and user profile enabled",
+    )
+    parser.add_argument(
+        "--isolate-brainstack",
+        action="store_true",
+        help="Write official Brainstack profile-isolation path overrides for the selected config/profile.",
+    )
+    parser.add_argument(
+        "--isolation-mode",
+        choices=tuple(sorted(PROFILE_ISOLATION_MODES)),
+        default="full-home",
+        help="Brainstack profile isolation mode used with --isolate-brainstack.",
     )
     parser.add_argument("--skip-deps", action="store_true", help="Skip installing missing kuzu/chromadb into the target Hermes Python")
     parser.add_argument("--doctor", action="store_true", help="Run brainstack_doctor after install")
@@ -7247,7 +7394,12 @@ def main() -> int:
         return 2
     config_path: Path | None
     try:
-        config_path = args.config.expanduser().resolve() if args.config else _default_config_path(target)
+        if args.config:
+            config_path = args.config.expanduser().resolve()
+        elif args.profile:
+            config_path = _profile_config_path(target, str(args.profile)).resolve()
+        else:
+            config_path = _default_config_path(target)
     except RuntimeError as exc:
         config_path = None
         if args.enable or args.doctor or args.runtime == "docker":
@@ -7257,7 +7409,10 @@ def main() -> int:
             "INFO no Hermes agent config found; continuing in source-only install mode "
             "(payload + host patches only, no config enablement, runtime canonicalization, or doctor)."
         )
-    if config_path is not None and not config_path.exists():
+    profile_config_setup: dict[str, Any] = {"status": "skipped"}
+    if config_path is not None and args.profile and (args.isolate_brainstack or args.enable):
+        profile_config_setup = _ensure_profile_config(config_path, dry_run=args.dry_run)
+    if config_path is not None and not config_path.exists() and not args.dry_run:
         print(
             f"FAIL config not found: {config_path}. Create or select an agent first, then rerun the installer.",
             file=sys.stderr,
@@ -7347,6 +7502,17 @@ def main() -> int:
     if args.enable:
         assert config_path is not None
         config_result = _patch_config(config_path, args.dry_run, embedding_runtime=args.embedding_runtime)
+    profile_isolation: dict[str, Any] = {"status": "skipped", "reason": "not_requested"}
+    if args.isolate_brainstack:
+        if config_path is None:
+            print("FAIL --isolate-brainstack requires --config or --profile.", file=sys.stderr)
+            return 2
+        profile_isolation = _apply_profile_isolation_config(
+            config_path,
+            mode=str(args.isolation_mode),
+            profile_name=str(args.profile or config_path.parent.name),
+            dry_run=args.dry_run,
+        )
     deps_result = _ensure_backend_dependencies(selected_python, dry_run=args.dry_run, skip_deps=args.skip_deps)
 
     host_helper_files: list[dict[str, str]] = []
@@ -7481,6 +7647,8 @@ def main() -> int:
         "release_hygiene": release_hygiene,
         "generated_files": generated_files,
         "config_path": str(config_path) if config_path is not None else None,
+        "profile_config_setup": profile_config_setup,
+        "profile_isolation": profile_isolation,
         "config": config_result,
         "dependency_install": deps_result,
         "runtime_state_canonicalization": runtime_state_canonicalization,
@@ -7494,6 +7662,7 @@ def main() -> int:
     print(f"{action} helper files: {len(helper_files)}")
     print(f"{action} Hermes proactive extension: {hermes_proactive_extension.get('status')}")
     print(f"{action} Hermes proactive runtime: {proactive_runtime.get('status')}")
+    print(f"{action} profile isolation: {profile_isolation.get('status')} ({profile_isolation.get('mode', profile_isolation.get('reason', 'n/a'))})")
     capability_summary = summarize_enablement_plan(capability_enablement)
     print(
         f"{action} capability policy: {capability_summary['status']} "

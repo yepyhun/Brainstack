@@ -485,6 +485,75 @@ def test_context_compressor_patch_bounds_summary_and_preserves_fallback(tmp_path
     assert "Summary generation was unavailable" not in text
 
 
+def test_profile_isolation_path_override_writes_flat_paths_and_backup(tmp_path):
+    target = tmp_path / "hermes"
+    config = target / "hermes-config" / "titans-agent" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("plugins:\n  brainstack:\n    profile_prompt_limit: 3\n", encoding="utf-8")
+
+    report = install_into_hermes._apply_profile_isolation_config(
+        config,
+        mode="path-override",
+        profile_name="titans-agent",
+        dry_run=False,
+    )
+    data = install_into_hermes._load_yaml(config)
+    brainstack = data["plugins"]["brainstack"]
+
+    assert report["status"] == "applied"
+    assert report["profile"] == "titans-agent"
+    assert report["full_isolation_certified"] is True
+    assert config.with_suffix(".yaml.brainstack-profile-isolation.bak").exists()
+    assert brainstack["profile_prompt_limit"] == 3
+    assert brainstack["db_path"].endswith("hermes-config/titans-agent/brainstack/brainstack.db")
+    assert brainstack["graph_db_path"].endswith("hermes-config/titans-agent/brainstack/brainstack.kuzu")
+    assert brainstack["corpus_db_path"].endswith("hermes-config/titans-agent/brainstack/brainstack.chroma")
+    assert data["extensions"]["hermes_proactive"]["state_base_dir"].endswith(
+        "hermes-config/titans-agent/brainstack/proactive_runtime"
+    )
+
+
+def test_profile_isolation_full_home_uses_hermes_home_defaults(tmp_path):
+    config = tmp_path / "hermes" / "hermes-config" / "titans-agent" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("{}\n", encoding="utf-8")
+
+    report = install_into_hermes._apply_profile_isolation_config(
+        config,
+        mode="full-home",
+        profile_name="titans-agent",
+        dry_run=False,
+    )
+    data = install_into_hermes._load_yaml(config)
+
+    assert report["paths"]["requires_effective_hermes_home"] == str(config.parent.resolve())
+    assert data["plugins"]["brainstack"]["db_path"] == "$HERMES_HOME/brainstack/brainstack.db"
+    assert data["plugins"]["brainstack"]["graph_db_path"] == "$HERMES_HOME/brainstack/brainstack.kuzu"
+    assert data["plugins"]["brainstack"]["corpus_db_path"] == "$HERMES_HOME/brainstack/brainstack.chroma"
+    assert data["extensions"]["hermes_proactive"]["state_base_dir"] == "$HERMES_HOME/home/brainstack"
+
+
+def test_profile_config_helper_creates_missing_profile_config(tmp_path):
+    target = tmp_path / "hermes"
+    config = install_into_hermes._profile_config_path(target, "titans-agent")
+
+    report = install_into_hermes._ensure_profile_config(config, dry_run=False)
+
+    assert report["status"] == "created"
+    assert config.exists()
+    assert config.read_text(encoding="utf-8") == "{}\n"
+
+
+def test_profile_config_helper_dry_run_does_not_create_files(tmp_path):
+    target = tmp_path / "hermes"
+    config = install_into_hermes._profile_config_path(target, "titans-agent")
+
+    report = install_into_hermes._ensure_profile_config(config, dry_run=True)
+
+    assert report["status"] == "planned_create"
+    assert not config.exists()
+
+
 def test_config_patch_enables_bounded_discord_streaming_visibility(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text(
