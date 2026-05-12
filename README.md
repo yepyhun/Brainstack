@@ -136,6 +136,10 @@ python install_into_hermes.py /path/to/hermes-agent --enable --doctor --runtime 
 
 After install, run the doctor and confirm that Brainstack is the active memory provider.
 
+For profile isolation, supported config shapes, and the optional proactive
+extension state paths, see
+[Install And Profile Isolation](docs/INSTALL_AND_PROFILE_ISOLATION.md).
+
 ## Donor boundaries
 
 The donor base is important, but the product value is the integration boundary: Hermes sees one memory kernel, while Brainstack keeps the underlying jobs separate.
