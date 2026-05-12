@@ -22,7 +22,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from brainstack.background_task_binding import REQUIRED_BACKGROUND_TASK_BINDINGS
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from brainstack.background_task_binding import REQUIRED_BACKGROUND_TASK_BINDINGS  # noqa: E402
 
 try:
     from hermes_gateway_patch_support import inspect_gateway_patch_support

@@ -4922,18 +4922,22 @@ def _default_compose_path(target: Path, config_path: Path | None = None) -> Path
 
 
 def _docker_runtime_home_dir(target: Path, config_path: Path) -> Path:
+    hermes_config = target / "hermes-config"
     try:
-        rel = config_path.relative_to(target / "hermes-config")
+        rel = config_path.relative_to(hermes_config)
     except ValueError as exc:
-        raise RuntimeError(
-            "Docker runtime requires an agent home like hermes-config/<agent>/config.yaml. "
-            "Root-level config.yaml is fine for local mode, but Docker needs a dedicated agent directory."
-        ) from exc
+        try:
+            rel = config_path.relative_to(hermes_config.resolve())
+        except ValueError:
+            raise RuntimeError(
+                "Docker runtime requires an agent home like hermes-config/<agent>/config.yaml. "
+                "Root-level config.yaml is fine for local mode, but Docker needs a dedicated agent directory."
+            ) from exc
     if len(rel.parts) < 2:
         raise RuntimeError(
             "Docker runtime requires an agent home like hermes-config/<agent>/config.yaml."
         )
-    return target / "hermes-config" / rel.parts[0]
+    return hermes_config / rel.parts[0]
 
 
 def _sanitize_compose_slug(name: str) -> str:

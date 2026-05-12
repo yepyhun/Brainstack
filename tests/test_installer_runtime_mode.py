@@ -74,6 +74,20 @@ def test_generated_docker_compose_includes_local_tei_jina_runtime(tmp_path):
     assert "HERMES_DISCORD_TOOL_PROFILE" not in text
 
 
+def test_docker_runtime_home_accepts_symlinked_hermes_config(tmp_path):
+    target = tmp_path / "hermes"
+    runtime_root = tmp_path / "runtime-home"
+    config = runtime_root / "bestie" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("{}", encoding="utf-8")
+    target.mkdir()
+    (target / "hermes-config").symlink_to(runtime_root, target_is_directory=True)
+
+    runtime_home = install_into_hermes._docker_runtime_home_dir(target, config.resolve())
+
+    assert runtime_home == target / "hermes-config" / "bestie"
+
+
 def test_generated_docker_start_script_targets_hermes_service_when_tei_is_first(tmp_path):
     target = tmp_path / "hermes"
     config = target / "hermes-config" / "bestie" / "config.yaml"
