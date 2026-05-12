@@ -13,6 +13,12 @@ import sqlite3
 from typing import Any, Mapping
 
 from .core.proactive import ProactiveEventKind, ProactiveEventState, ProactiveReasonCode
+from .operating_loop import (
+    build_kanban_recovery_candidates,
+    build_operating_loop_verdict,
+    build_scheduler_lane_health,
+    recovery_summary,
+)
 from .workstream_controller import controller_status
 
 
@@ -532,6 +538,7 @@ def _kanban_runtime_snapshot(
                 conn.close()
     running_count = len(running_rows)
     wait_reasons: list[dict[str, Any]] = []
+    running_tasks: list[dict[str, Any]] = []
     blocked_unknown_assignee_count = 0
     blocked_unknown_assignees: dict[str, int] = {}
     for row in ready_rows[:12]:
@@ -552,6 +559,15 @@ def _kanban_runtime_snapshot(
                 "status": status or "unknown",
                 "assignee": assignee,
                 "reason_code": reason,
+            }
+        )
+    for row in running_rows[:12]:
+        running_tasks.append(
+            {
+                "task_id": str(row.get("id") or ""),
+                "status": "running",
+                "assignee": str(row.get("assignee") or ""),
+                "started_at": _safe_int(row.get("started_at"), 0),
             }
         )
     dispatcher_state = "unknown"
@@ -578,6 +594,7 @@ def _kanban_runtime_snapshot(
         "dispatch_interval_seconds": dispatch_interval_seconds,
         "running_worker_count": running_count,
         "ready_task_count": len(ready_rows),
+        "running_tasks": running_tasks,
         "wait_reasons": wait_reasons,
         "blocked_unknown_assignee_count": blocked_unknown_assignee_count,
         "blocked_unknown_assignees": dict(sorted(blocked_unknown_assignees.items())) if blocked_unknown_assignees else {},
@@ -637,6 +654,8 @@ def _kanban_workstation_status(config: Mapping[str, Any] | None = None) -> dict[
     tool_surface_exposed = _config_bool(config, "kanban_tool_surface_exposed") or bool(exposed_tools)
     board = _kanban_board_counts(config, root, hermes_home)
     runtime_snapshot = _kanban_runtime_snapshot(config, root, board, hermes_home)
+    recovery_candidates = build_kanban_recovery_candidates(runtime_snapshot)
+    recovery = recovery_summary(recovery_candidates)
     board_write_certified = tool_surface_exposed and _config_bool(config, "kanban_board_write_certified")
     worker_lifecycle_certified = board_write_certified and _config_bool(config, "kanban_worker_lifecycle_certified")
     profile_count = max(
@@ -679,6 +698,8 @@ def _kanban_workstation_status(config: Mapping[str, Any] | None = None) -> dict[
         "kanban_ready_graph_only": local_artifact_present and not can_write_board,
         "board": board,
         "runtime_snapshot": runtime_snapshot,
+        "recovery": recovery,
+        "recovery_candidates": recovery_candidates[:8],
         "tool_surface": {
             "exposed": tool_surface_exposed,
             "exposed_tool_count": len(exposed_tools),
@@ -714,6 +735,8 @@ def _compact_kanban_workstation_status(status: Mapping[str, Any]) -> dict[str, A
         "dispatcher_state": str(runtime_snapshot.get("dispatcher_state") or ""),
         "ready_task_count": _safe_int(runtime_snapshot.get("ready_task_count"), 0),
         "running_worker_count": _safe_int(runtime_snapshot.get("running_worker_count"), 0),
+        "blocked_unknown_assignee_count": _safe_int(runtime_snapshot.get("blocked_unknown_assignee_count"), 0),
+        "recovery_candidate_count": _safe_int(_mapping(status.get("recovery")).get("candidate_count"), 0),
         "last_e2e_proof_status": str(last_e2e.get("status") or ""),
         "reason_code": str(status.get("reason_code") or ""),
         "detail_level": "compact",
@@ -734,6 +757,15 @@ def _normalize_proactive_status_detail_level(value: Any) -> str:
     if normalized in PROACTIVE_STATUS_DETAIL_LEVELS:
         return normalized
     return "compact"
+
+
+def _scheduler_jobs_from_config(config: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
+    if not isinstance(config, Mapping):
+        return []
+    value = config.get("scheduler_jobs") or config.get("proactive_scheduler_jobs")
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, Mapping)]
 
 
 def _agent_item_summary(item: Mapping[str, Any]) -> dict[str, Any]:
@@ -1202,6 +1234,18 @@ def build_proactive_status(
         extension=extension,
     )
     kanban_status = _kanban_workstation_status(config)
+    scheduler_health = build_scheduler_lane_health(_scheduler_jobs_from_config(config))
+    kanban_runtime = _mapping(kanban_status.get("runtime_snapshot"))
+    operating_loop = build_operating_loop_verdict(
+        {
+            "kanban_runtime_snapshot": kanban_runtime,
+            "scheduler_lane_health": scheduler_health,
+            "signal_bus": _mapping(config.get("signal_bus") if isinstance(config, Mapping) else {}),
+            "executor": _mapping(config.get("executor") if isinstance(config, Mapping) else {}),
+            "builder": _mapping(config.get("builder") if isinstance(config, Mapping) else {}),
+            "next_action": _mapping(config.get("next_action") if isinstance(config, Mapping) else {}),
+        }
+    )
     workstation_integrations = {
         "kanban": kanban_status if normalized_detail_level == "full" else _compact_kanban_workstation_status(kanban_status),
     }
@@ -1226,6 +1270,8 @@ def build_proactive_status(
         "readiness_probe": readiness_probe,
         "workstation_integrations": workstation_integrations,
         "workstream_controller": workstream_controller,
+        "scheduler_lane_health": scheduler_health,
+        "operating_loop": operating_loop,
         "blocked_actions": list(PROACTIVE_BLOCKED_ACTIONS),
         "current_assignment_authority": False,
         "model_use_contract": _agent_use_contract(str(operational_verdict["operational_state"])),

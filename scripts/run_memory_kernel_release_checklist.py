@@ -2022,6 +2022,156 @@ def _check_workstream_controller_contract(tmp: Path) -> CheckResult:
     )
 
 
+def _check_operating_loop_liveness_contract(tmp: Path) -> CheckResult:
+    out = tmp / "operating_loop_liveness_contract.json"
+    command = [sys.executable, "scripts/verify_operating_loop_liveness_contract.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    proof_keys = (
+        "healthy_requires_frontier_and_fresh_lanes",
+        "split_brain_is_critical_not_healthy",
+        "intentional_stop_is_not_critical",
+        "empty_evidence_is_not_healthy",
+        "fresh_artifact_cannot_mask_stale_loop",
+        "read_only_side_effect_free",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("read_only") is True
+        and data.get("side_effect_free") is True
+        and all(proof.get(key) is True for key in proof_keys)
+    )
+    return CheckResult(
+        name="operating_loop_liveness_contract",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "issue_count": len(data.get("issues") or []),
+            "scenario_verdicts": data.get("scenario_verdicts"),
+            "proof_passed": all(proof.get(key) is True for key in proof_keys),
+        },
+    )
+
+
+def _check_kanban_recovery_candidate_contract(tmp: Path) -> CheckResult:
+    out = tmp / "kanban_recovery_candidate_contract.json"
+    command = [sys.executable, "scripts/verify_kanban_recovery_candidate_contract.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    proof_keys = (
+        "unknown_assignee_candidate_present",
+        "fan_in_candidate_present",
+        "failure_wave_candidate_present",
+        "stale_running_candidate_present",
+        "does_not_auto_reassign_default",
+        "does_not_auto_unblock_or_retry",
+        "summary_is_agent_facing",
+        "read_only_side_effect_free",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("read_only") is True
+        and data.get("side_effect_free") is True
+        and all(proof.get(key) is True for key in proof_keys)
+    )
+    return CheckResult(
+        name="kanban_recovery_candidate_contract",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "issue_count": len(data.get("issues") or []),
+            "candidate_count": data.get("candidate_count"),
+            "proof_passed": all(proof.get(key) is True for key in proof_keys),
+        },
+    )
+
+
+def _check_scheduler_lane_health_contract(tmp: Path) -> CheckResult:
+    out = tmp / "scheduler_lane_health_contract.json"
+    command = [sys.executable, "scripts/verify_scheduler_lane_health_contract.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    proof_keys = (
+        "healthy_lanes_pass",
+        "heavy_job_plus_stale_lane_is_critical",
+        "missed_runs_are_not_healthy",
+        "empty_evidence_is_not_healthy",
+        "controller_substitute_classified",
+        "read_only_side_effect_free",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("read_only") is True
+        and data.get("side_effect_free") is True
+        and all(proof.get(key) is True for key in proof_keys)
+    )
+    return CheckResult(
+        name="scheduler_lane_health_contract",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "issue_count": len(data.get("issues") or []),
+            "scenario_verdicts": data.get("scenario_verdicts"),
+            "proof_passed": all(proof.get(key) is True for key in proof_keys),
+        },
+    )
+
+
+def _check_hermes_auxiliary_compression_guard(tmp: Path) -> CheckResult:
+    out = tmp / "hermes_auxiliary_compression_guard.json"
+    command = [sys.executable, "scripts/verify_hermes_auxiliary_compression_guard.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    proof_keys = (
+        "incident_detector_catches_bad_fd",
+        "owner_classified_as_hermes",
+        "overlap_timeout_and_bad_fd_are_separate_signals",
+        "clean_compression_passes",
+        "read_only_public_safe",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("read_only") is True
+        and data.get("side_effect_free") is True
+        and all(proof.get(key) is True for key in proof_keys)
+    )
+    return CheckResult(
+        name="hermes_auxiliary_compression_guard",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "issue_count": len(data.get("issues") or []),
+            "incident_guard_status": data.get("incident_guard_status"),
+            "clean_guard_status": data.get("clean_guard_status"),
+            "proof_passed": all(proof.get(key) is True for key in proof_keys),
+        },
+    )
+
+
 def _check_proactive_kanban_control_plane_soak(tmp: Path) -> CheckResult:
     out = tmp / "proactive_kanban_control_plane_soak.json"
     command = [sys.executable, "scripts/verify_proactive_kanban_control_plane_soak.py", "--out", str(out)]
@@ -2036,6 +2186,10 @@ def _check_proactive_kanban_control_plane_soak(tmp: Path) -> CheckResult:
         "event_replay_is_deterministic",
         "host_tool_context_pressure_guarded",
         "queue_liveness_guarded",
+        "operating_loop_split_brain_guarded",
+        "kanban_recovery_candidates_guarded",
+        "scheduler_starvation_guarded",
+        "compression_bad_fd_guarded",
     )
     passed = (
         proc.returncode == 0
@@ -3183,6 +3337,10 @@ def run_checklist(
             _check_wizard_capability_enablement_matrix(tmp),
             _check_live_safe_kanban_gauntlet(tmp),
             _check_workstream_controller_contract(tmp),
+            _check_operating_loop_liveness_contract(tmp),
+            _check_kanban_recovery_candidate_contract(tmp),
+            _check_scheduler_lane_health_contract(tmp),
+            _check_hermes_auxiliary_compression_guard(tmp),
             _check_proactive_kanban_control_plane_soak(tmp),
             _check_installer_gateway_timeout_boundary(tmp),
             _check_actionable_proactive_runtime_wizard_destructive_proof(tmp),
