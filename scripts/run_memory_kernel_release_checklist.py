@@ -1870,6 +1870,9 @@ def _check_kanban_capability_evidence_ladder(tmp: Path) -> CheckResult:
         "worker_lifecycle_requires_explicit_certification",
         "single_profile_blocks_multi_worker_claim",
         "runtime_outbox_split_from_user_queue",
+        "dispatcher_snapshot_reports_wait_reasons",
+        "dispatcher_snapshot_reports_e2e_final_state",
+        "dispatcher_snapshot_reports_recent_failures",
     )
     passed = (
         proc.returncode == 0
@@ -1932,6 +1935,124 @@ def _check_wizard_capability_enablement_matrix(tmp: Path) -> CheckResult:
             "issue_count": len(data.get("issues") or []),
             "capability_count": data.get("capability_count"),
             "default_summary": dict(default_summary),
+            "proof_passed": all(proof.get(key) is True for key in proof_keys),
+        },
+    )
+
+
+def _check_live_safe_kanban_gauntlet(tmp: Path) -> CheckResult:
+    out = tmp / "live_safe_kanban_gauntlet.json"
+    command = [sys.executable, "scripts/verify_live_safe_kanban_gauntlet.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    proof_keys = (
+        "wizard_default_exposes_kanban_workstation",
+        "wizard_preserves_existing_toolsets",
+        "wizard_default_does_not_certify_workers",
+        "disposable_completed_task_reaches_final_state",
+        "disposable_completed_task_certifies_worker_lifecycle",
+        "controlled_block_is_not_false_success",
+        "blocked_case_does_not_claim_can_write_workers",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("read_only") is True
+        and all(proof.get(key) is True for key in proof_keys)
+    )
+    return CheckResult(
+        name="live_safe_kanban_gauntlet",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "read_only": data.get("read_only"),
+            "issue_count": len(data.get("issues") or []),
+            "completed_verdict": data.get("completed_verdict"),
+            "blocked_verdict": data.get("blocked_verdict"),
+            "proof_passed": all(proof.get(key) is True for key in proof_keys),
+        },
+    )
+
+
+def _check_workstream_controller_contract(tmp: Path) -> CheckResult:
+    out = tmp / "workstream_controller_contract.json"
+    command = [sys.executable, "scripts/verify_workstream_controller_contract.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    proof_keys = (
+        "no_change_waits_without_work",
+        "high_risk_requires_approval",
+        "high_value_completed_parent_allows_kanban_handoff",
+        "duplicate_event_is_idempotent_wait",
+        "budget_exhausted_stops",
+        "replay_is_deterministic",
+        "replay_duplicate_second_decision_waits",
+        "status_is_agent_facing_and_compact",
+        "heartbeat_remains_scheduled_not_brain",
+        "fixed_cadence_work_generator_requires_controller",
+        "event_reader_is_change_gated",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("read_only") is True
+        and data.get("side_effect_free") is True
+        and all(proof.get(key) is True for key in proof_keys)
+    )
+    return CheckResult(
+        name="workstream_controller_contract",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "read_only": data.get("read_only"),
+            "side_effect_free": data.get("side_effect_free"),
+            "issue_count": len(data.get("issues") or []),
+            "proof_passed": all(proof.get(key) is True for key in proof_keys),
+        },
+    )
+
+
+def _check_proactive_kanban_control_plane_soak(tmp: Path) -> CheckResult:
+    out = tmp / "proactive_kanban_control_plane_soak.json"
+    command = [sys.executable, "scripts/verify_proactive_kanban_control_plane_soak.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    proof_keys = (
+        "runtime_truth_snapshot_present",
+        "no_foreground_wait_guard_present",
+        "kanban_usefulness_gauntlet_present",
+        "controller_contract_blocks_filler",
+        "event_replay_is_deterministic",
+        "host_tool_context_pressure_guarded",
+        "queue_liveness_guarded",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and all(proof.get(key) is True for key in proof_keys)
+    )
+    return CheckResult(
+        name="proactive_kanban_control_plane_soak",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "issue_count": len(data.get("issues") or []),
+            "component_statuses": data.get("component_statuses"),
             "proof_passed": all(proof.get(key) is True for key in proof_keys),
         },
     )
@@ -3060,6 +3181,9 @@ def run_checklist(
             _check_live_memory_fitness_report(tmp),
             _check_kanban_capability_evidence_ladder(tmp),
             _check_wizard_capability_enablement_matrix(tmp),
+            _check_live_safe_kanban_gauntlet(tmp),
+            _check_workstream_controller_contract(tmp),
+            _check_proactive_kanban_control_plane_soak(tmp),
             _check_installer_gateway_timeout_boundary(tmp),
             _check_actionable_proactive_runtime_wizard_destructive_proof(tmp),
             _check_proactive_agent_facing_wake_contract(tmp),

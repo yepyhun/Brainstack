@@ -1784,9 +1784,12 @@ class AIAgent:
     ]
     assert "def _terminal_tool_final_guard_nudge(" in text
     assert "def _terminal_url_fetch_block_message(" in text
+    assert "def _terminal_foreground_wait_block_message(" in text
     assert "Implicit terminal URL fetch blocked" in text
-    assert "block_message = self._terminal_url_fetch_block_message(function_name, function_args, messages)" in text
-    assert "_block_msg = self._terminal_url_fetch_block_message(function_name, function_args, messages)" in text
+    assert "Foreground orchestration wait blocked" in text
+    assert "block_message = self._terminal_foreground_wait_block_message(function_name, function_args)" in text
+    assert "_block_msg = self._terminal_foreground_wait_block_message(function_name, function_args)" in text
+    assert "_terminal_url_fetch_block_message(function_name, function_args, messages)" in text
     assert "def _validate_terminal_final_response(" in text
     assert "_terminal_tool_guard_nudge = self._terminal_tool_final_guard_nudge(" in text
     assert "final_response = self._validate_terminal_final_response(" in text

@@ -75,6 +75,68 @@ def _seed_board_db(path: Path, *, task_count: int = 0, run_count: int = 0, event
         conn.close()
 
 
+def _seed_dispatcher_snapshot_db(path: Path) -> None:
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE tasks ("
+            "id TEXT PRIMARY KEY, "
+            "status TEXT, "
+            "assignee TEXT, "
+            "title TEXT, "
+            "current_run_id TEXT"
+            ")"
+        )
+        conn.execute(
+            "CREATE TABLE task_runs ("
+            "id TEXT PRIMARY KEY, "
+            "task_id TEXT, "
+            "status TEXT, "
+            "outcome TEXT, "
+            "summary TEXT"
+            ")"
+        )
+        conn.execute(
+            "CREATE TABLE task_events ("
+            "id TEXT PRIMARY KEY, "
+            "task_id TEXT, "
+            "run_id TEXT, "
+            "kind TEXT, "
+            "created_at INTEGER"
+            ")"
+        )
+        conn.executemany(
+            "INSERT INTO tasks (id, status, assignee, title, current_run_id) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("t-running", "running", "worker-a", "running smoke", "r-1"),
+                ("t-ready", "ready", "worker-b", "ready smoke", None),
+                ("t-missing-profile", "ready", "missing-worker", "missing profile smoke", None),
+                ("t-parent", "todo", "worker-a", "parent wait smoke", None),
+                ("t-done", "done", "worker-a", "done smoke", "r-2"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO task_runs (id, task_id, status, outcome, summary) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("r-1", "t-running", "running", "", ""),
+                ("r-2", "t-done", "completed", "done", "persisted smoke output"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO task_events (id, task_id, run_id, kind, created_at) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("e-created", "t-done", "r-2", "created", 1),
+                ("e-claimed", "t-done", "r-2", "claimed", 2),
+                ("e-spawned", "t-done", "r-2", "spawned", 3),
+                ("e-completed", "t-done", "r-2", "completed", 4),
+                ("e-spawn-failed", "t-old", "", "spawn_failed", 5),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _status(provider: BrainstackMemoryProvider) -> dict[str, Any]:
     return json.loads(provider.handle_tool_call("brainstack_proactive_status", {"detail_level": "full"}))
 
@@ -152,6 +214,28 @@ def _scenario_worker_certified(root: Path) -> dict[str, Any]:
         provider.shutdown()
 
 
+def _scenario_dispatcher_snapshot(root: Path) -> dict[str, Any]:
+    hermes_root = root / "hermes-dispatcher"
+    _seed_kanban_files(hermes_root)
+    db_path = root / "kanban-dispatcher.db"
+    _seed_dispatcher_snapshot_db(db_path)
+    provider = _provider(root / "dispatcher-snapshot", hermes_root=hermes_root)
+    provider._config["kanban_db_path"] = str(db_path)
+    provider._config["kanban_tool_surface_exposed"] = True
+    provider._config["kanban_board_write_certified"] = True
+    provider._config["kanban_worker_lifecycle_certified"] = True
+    provider._config["kanban_profile_names"] = ["worker-a", "worker-b"]
+    provider._config["kanban_profile_count"] = 2
+    provider._config["kanban_max_spawn"] = 1
+    provider._config["kanban_dispatch_interval_seconds"] = 60
+    provider._config["kanban_last_dispatch_tick_at"] = "2026-05-12T09:16:17Z"
+    provider._config["kanban_next_dispatch_tick_at"] = "2026-05-12T09:17:17Z"
+    try:
+        return _kanban(provider)
+    finally:
+        provider.shutdown()
+
+
 def _scenario_runtime_outbox_split(root: Path) -> dict[str, Any]:
     provider = _provider(root / "outbox-split")
     assert provider._store is not None
@@ -186,6 +270,7 @@ def build_report() -> dict[str, Any]:
             "local_artifact_only": _scenario_local_artifact(root),
             "tool_surface_exposed": _scenario_tool_surface(root),
             "worker_lifecycle_certified": _scenario_worker_certified(root),
+            "dispatcher_snapshot": _scenario_dispatcher_snapshot(root),
         }
         outbox_split = _scenario_runtime_outbox_split(root)
 
@@ -214,6 +299,24 @@ def build_report() -> dict[str, Any]:
         "runtime_outbox_split_from_user_queue": outbox_split.get("pending_outbox_count") == 1
         and outbox_split.get("runtime_scope_pending_outbox_count") == 1
         and outbox_split.get("user_visible_pending_outbox_count") == 0,
+        "dispatcher_snapshot_reports_wait_reasons": scenarios["dispatcher_snapshot"].get("runtime_snapshot", {}).get("dispatcher_state")
+        == "workers_running"
+        and scenarios["dispatcher_snapshot"].get("runtime_snapshot", {}).get("ready_task_count") == 3
+        and {
+            item.get("reason_code")
+            for item in scenarios["dispatcher_snapshot"].get("runtime_snapshot", {}).get("wait_reasons", [])
+        }
+        >= {"waiting_for_worker_capacity", "waiting_for_parent_promotion_or_recompute"},
+        "dispatcher_snapshot_reports_e2e_final_state": scenarios["dispatcher_snapshot"].get("runtime_snapshot", {})
+        .get("last_e2e_proof", {})
+        .get("status")
+        == "complete"
+        and scenarios["dispatcher_snapshot"].get("runtime_snapshot", {})
+        .get("last_e2e_proof", {})
+        .get("output_persisted")
+        is True,
+        "dispatcher_snapshot_reports_recent_failures": "spawn_failed"
+        in scenarios["dispatcher_snapshot"].get("runtime_snapshot", {}).get("recent_failure_event_kinds", []),
     }
     issues = sorted(key for key, value in proof.items() if value is not True)
     return {

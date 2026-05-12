@@ -13,6 +13,7 @@ import sqlite3
 from typing import Any, Mapping
 
 from .core.proactive import ProactiveEventKind, ProactiveEventState, ProactiveReasonCode
+from .workstream_controller import controller_status
 
 
 PROACTIVE_AGENT_CONTRACT_SCHEMA = "brainstack.proactive_agent_surface.v1"
@@ -22,6 +23,7 @@ PROACTIVE_OPERATIONAL_VERDICT_SCHEMA = "brainstack.proactive_operational_verdict
 PROACTIVE_READINESS_PROBE_SCHEMA = "brainstack.proactive_readiness_probe.v1"
 PROACTIVE_CANDIDATE_INTAKE_SCHEMA = "brainstack.proactive_candidate_intake.v1"
 KANBAN_WORKSTATION_SCHEMA = "brainstack.workstation_integration.kanban.v1"
+KANBAN_RUNTIME_SNAPSHOT_SCHEMA = "brainstack.workstation_integration.kanban_runtime_snapshot.v1"
 PROACTIVE_STATUS_DETAIL_LEVELS = ("compact", "full")
 
 PROACTIVE_ALLOWED_READ_ACTIONS = ("status", "doctor", "list", "inspect")
@@ -101,6 +103,8 @@ KANBAN_WRITE_TOOL_NAMES = frozenset(
         "dispatch_kanban_worker",
     }
 )
+KANBAN_TERMINAL_EVENT_KINDS = frozenset({"completed", "blocked", "crashed", "timed_out", "spawn_failed", "auto_blocked"})
+KANBAN_FAILURE_EVENT_KINDS = frozenset({"blocked", "crashed", "timed_out", "spawn_failed", "auto_blocked"})
 
 
 def proactive_capability_card() -> dict[str, Any]:
@@ -348,13 +352,24 @@ def _sqlite_table_counts(db_path: Path) -> dict[str, int]:
         conn.close()
 
 
-def _kanban_board_counts(config: Mapping[str, Any] | None, root: Path | None) -> dict[str, Any]:
+def _kanban_db_candidates(
+    config: Mapping[str, Any] | None,
+    root: Path | None,
+    hermes_home: Path | None = None,
+) -> list[Path]:
     candidates: list[Path] = []
     if isinstance(config, Mapping) and str(config.get("kanban_db_path") or "").strip():
         candidates.append(Path(str(config["kanban_db_path"])).expanduser())
     env_path = str(os.environ.get("HERMES_KANBAN_DB") or "").strip()
     if env_path:
         candidates.append(Path(env_path).expanduser())
+    if hermes_home is not None:
+        candidates.extend(
+            [
+                hermes_home / "kanban.db",
+                hermes_home / "kanban" / "kanban.db",
+            ]
+        )
     if root is not None:
         candidates.extend(
             [
@@ -362,12 +377,22 @@ def _kanban_board_counts(config: Mapping[str, Any] | None, root: Path | None) ->
                 root.parent / "kanban.db",
             ]
         )
+    return candidates
+
+
+def _kanban_board_counts(
+    config: Mapping[str, Any] | None,
+    root: Path | None,
+    hermes_home: Path | None = None,
+) -> dict[str, Any]:
+    candidates = _kanban_db_candidates(config, root, hermes_home)
     for candidate in candidates:
         counts = _sqlite_table_counts(candidate)
         if counts:
             return {
                 "accessible": True,
                 "path_present": candidate.exists(),
+                "path": str(candidate),
                 "task_count": _safe_int(counts.get("tasks"), 0),
                 "task_run_count": _safe_int(counts.get("task_runs"), 0),
                 "task_event_count": _safe_int(counts.get("task_events"), 0),
@@ -375,9 +400,169 @@ def _kanban_board_counts(config: Mapping[str, Any] | None, root: Path | None) ->
     return {
         "accessible": False,
         "path_present": any(candidate.exists() for candidate in candidates),
+        "path": "",
         "task_count": 0,
         "task_run_count": 0,
         "task_event_count": 0,
+    }
+
+
+def _sqlite_table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return set()
+    return {str(row[1]) for row in rows}
+
+
+def _sqlite_select_rows(conn: sqlite3.Connection, table: str, columns: set[str], wanted: tuple[str, ...], *, limit: int = 25) -> list[dict[str, Any]]:
+    selected = [name for name in wanted if name in columns]
+    if not selected:
+        return []
+    query = f"SELECT {', '.join(selected)} FROM {table} LIMIT ?"
+    try:
+        rows = conn.execute(query, (max(1, min(limit, 100)),)).fetchall()
+    except sqlite3.Error:
+        return []
+    return [
+        {
+            key: value
+            for key, value in zip(selected, row, strict=False)
+        }
+        for row in rows
+    ]
+
+
+def _kanban_runtime_snapshot(config: Mapping[str, Any] | None, root: Path | None, board: Mapping[str, Any]) -> dict[str, Any]:
+    db_path = Path(str(board.get("path") or "")).expanduser() if str(board.get("path") or "").strip() else None
+    profile_names = set(_config_list(config, "kanban_profile_names")) or set(_config_list(config, "kanban_profiles"))
+    profile_count = max(_safe_int(config.get("kanban_profile_count") if isinstance(config, Mapping) else 0, 0), len(profile_names), 1)
+    max_spawn = _safe_int(config.get("kanban_max_spawn") if isinstance(config, Mapping) else 0, 0)
+    dispatch_interval_seconds = _safe_int(config.get("kanban_dispatch_interval_seconds") if isinstance(config, Mapping) else 60, 60)
+    last_tick_at = str(config.get("kanban_last_dispatch_tick_at") or "") if isinstance(config, Mapping) else ""
+    next_tick_at = str(config.get("kanban_next_dispatch_tick_at") or "") if isinstance(config, Mapping) else ""
+    running_rows: list[dict[str, Any]] = []
+    ready_rows: list[dict[str, Any]] = []
+    terminal_events: list[str] = []
+    failure_events: list[str] = []
+    last_e2e_proof: dict[str, Any] = {
+        "status": "unavailable",
+        "reason_code": "KANBAN_BOARD_STORAGE_UNAVAILABLE",
+        "created": False,
+        "claimed": False,
+        "spawned": False,
+        "completed": False,
+        "output_persisted": False,
+    }
+    if db_path is not None and db_path.exists():
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        except sqlite3.Error:
+            conn = None
+        if conn is not None:
+            try:
+                task_columns = _sqlite_table_columns(conn, "tasks")
+                event_columns = _sqlite_table_columns(conn, "task_events")
+                run_columns = _sqlite_table_columns(conn, "task_runs")
+                tasks = _sqlite_select_rows(
+                    conn,
+                    "tasks",
+                    task_columns,
+                    ("id", "status", "assignee", "title", "created_at", "started_at", "completed_at", "current_run_id"),
+                    limit=50,
+                )
+                for row in tasks:
+                    status = str(row.get("status") or "").lower()
+                    if status == "running":
+                        running_rows.append(row)
+                    if status in {"ready", "todo"}:
+                        ready_rows.append(row)
+                event_rows = _sqlite_select_rows(
+                    conn,
+                    "task_events",
+                    event_columns,
+                    ("kind", "created_at", "run_id", "task_id"),
+                    limit=100,
+                )
+                event_kinds = {str(row.get("kind") or "") for row in event_rows}
+                terminal_events = sorted(event_kinds & KANBAN_TERMINAL_EVENT_KINDS)
+                failure_events = sorted(event_kinds & KANBAN_FAILURE_EVENT_KINDS)
+                run_rows = _sqlite_select_rows(
+                    conn,
+                    "task_runs",
+                    run_columns,
+                    ("id", "status", "outcome", "summary", "output_path", "completed_at", "task_id"),
+                    limit=50,
+                )
+                created = bool(tasks) or "created" in event_kinds
+                claimed = "claimed" in event_kinds or any(row.get("current_run_id") for row in tasks)
+                spawned = "spawned" in event_kinds or bool(run_rows)
+                completed = "completed" in event_kinds or any(str(row.get("status") or "").lower() in {"done", "completed"} for row in tasks)
+                output_persisted = any(str(row.get("summary") or row.get("output_path") or "").strip() for row in run_rows)
+                last_e2e_proof = {
+                    "status": "complete" if all((created, claimed, spawned, completed)) else "partial",
+                    "reason_code": "KANBAN_E2E_PROOF_COMPLETE" if all((created, claimed, spawned, completed)) else "KANBAN_E2E_PROOF_PARTIAL",
+                    "created": created,
+                    "claimed": claimed,
+                    "spawned": spawned,
+                    "completed": completed,
+                    "output_persisted": output_persisted,
+                    "terminal_event_kinds": terminal_events,
+                    "run_count_sampled": len(run_rows),
+                }
+            finally:
+                conn.close()
+    running_count = len(running_rows)
+    wait_reasons: list[dict[str, Any]] = []
+    for row in ready_rows[:12]:
+        status = str(row.get("status") or "").lower()
+        assignee = str(row.get("assignee") or "")
+        reason = "spawnable_pending_dispatch_tick"
+        if status == "todo":
+            reason = "waiting_for_parent_promotion_or_recompute"
+        elif max_spawn and running_count >= max_spawn:
+            reason = "waiting_for_worker_capacity"
+        elif assignee and profile_names and assignee not in profile_names:
+            reason = "waiting_for_assignee_profile"
+        wait_reasons.append(
+            {
+                "task_id": str(row.get("id") or ""),
+                "status": status or "unknown",
+                "assignee": assignee,
+                "reason_code": reason,
+            }
+        )
+    dispatcher_state = "unknown"
+    if board.get("accessible") is not True:
+        dispatcher_state = "unavailable"
+    elif running_count:
+        dispatcher_state = "workers_running"
+    elif wait_reasons:
+        dispatcher_state = "ready_waiting"
+    elif board.get("task_count"):
+        dispatcher_state = "idle_with_board"
+    else:
+        dispatcher_state = "ready_idle"
+    return {
+        "schema": KANBAN_RUNTIME_SNAPSHOT_SCHEMA,
+        "read_only": True,
+        "source": "hermes_kanban_board_readonly",
+        "board_accessible": bool(board.get("accessible")),
+        "dispatcher_state": dispatcher_state,
+        "last_dispatch_tick_at": last_tick_at,
+        "next_dispatch_tick_at": next_tick_at,
+        "dispatch_interval_seconds": dispatch_interval_seconds,
+        "running_worker_count": running_count,
+        "ready_task_count": len(ready_rows),
+        "wait_reasons": wait_reasons,
+        "worker_capacity": {
+            "configured_max_spawn": max_spawn,
+            "running_count": running_count,
+            "profile_count": profile_count,
+            "profile_names": sorted(profile_names)[:12],
+        },
+        "recent_failure_event_kinds": failure_events,
+        "last_e2e_proof": last_e2e_proof,
     }
 
 
@@ -410,6 +595,7 @@ def _kanban_claim_guard(verdict: str, *, profile_count: int) -> dict[str, Any]:
 
 def _kanban_workstation_status(config: Mapping[str, Any] | None = None) -> dict[str, Any]:
     root = _resolve_hermes_root(config)
+    hermes_home = _resolve_hermes_home(config)
     evidence_paths: list[str] = []
     if root is not None:
         candidates = (
@@ -423,7 +609,8 @@ def _kanban_workstation_status(config: Mapping[str, Any] | None = None) -> dict[
     cli_available = installed and _config_bool(config, "kanban_cli_available")
     exposed_tools = set(_config_list(config, "exposed_tool_names")) & KANBAN_WRITE_TOOL_NAMES
     tool_surface_exposed = _config_bool(config, "kanban_tool_surface_exposed") or bool(exposed_tools)
-    board = _kanban_board_counts(config, root)
+    board = _kanban_board_counts(config, root, hermes_home)
+    runtime_snapshot = _kanban_runtime_snapshot(config, root, board)
     board_write_certified = tool_surface_exposed and _config_bool(config, "kanban_board_write_certified")
     worker_lifecycle_certified = board_write_certified and _config_bool(config, "kanban_worker_lifecycle_certified")
     profile_count = max(_safe_int(config.get("kanban_profile_count") if isinstance(config, Mapping) else 0, 0), 1)
@@ -461,6 +648,7 @@ def _kanban_workstation_status(config: Mapping[str, Any] | None = None) -> dict[
         "local_kanban_artifact_present": local_artifact_present,
         "kanban_ready_graph_only": local_artifact_present and not can_write_board,
         "board": board,
+        "runtime_snapshot": runtime_snapshot,
         "tool_surface": {
             "exposed": tool_surface_exposed,
             "exposed_tool_count": len(exposed_tools),
@@ -482,6 +670,8 @@ def _kanban_workstation_status(config: Mapping[str, Any] | None = None) -> dict[
 
 def _compact_kanban_workstation_status(status: Mapping[str, Any]) -> dict[str, Any]:
     claim_guard = status.get("claim_guard") if isinstance(status.get("claim_guard"), Mapping) else {}
+    runtime_snapshot = _mapping(status.get("runtime_snapshot"))
+    last_e2e = _mapping(runtime_snapshot.get("last_e2e_proof"))
     payload: dict[str, Any] = {
         "schema": KANBAN_WORKSTATION_SCHEMA,
         "available": bool(status.get("available")),
@@ -491,10 +681,14 @@ def _compact_kanban_workstation_status(status: Mapping[str, Any]) -> dict[str, A
         "worker_lifecycle_certified": bool(status.get("worker_lifecycle_certified")),
         "profile_count": _safe_int(status.get("profile_count"), 0),
         "claim_allowed": bool(claim_guard.get("claim_allowed")),
+        "dispatcher_state": str(runtime_snapshot.get("dispatcher_state") or ""),
+        "ready_task_count": _safe_int(runtime_snapshot.get("ready_task_count"), 0),
+        "running_worker_count": _safe_int(runtime_snapshot.get("running_worker_count"), 0),
+        "last_e2e_proof_status": str(last_e2e.get("status") or ""),
         "reason_code": str(status.get("reason_code") or ""),
         "detail_level": "compact",
         "detail_omitted": True,
-        "detail_hint": "Use detail_level=full for Kanban board/tool/claim diagnostics.",
+        "detail_hint": "Use detail_level=full for Kanban diagnostics.",
     }
     owner = str(status.get("owner") or "")
     proactive_role = str(status.get("proactive_role") or "")
@@ -981,6 +1175,7 @@ def build_proactive_status(
     workstation_integrations = {
         "kanban": kanban_status if normalized_detail_level == "full" else _compact_kanban_workstation_status(kanban_status),
     }
+    workstream_controller = controller_status([])
     readiness_probe = _compact_readiness_probe(_readiness_probe(runtime_config, counts))
     return {
         "schema": PROACTIVE_AGENT_CONTRACT_SCHEMA,
@@ -1000,6 +1195,7 @@ def build_proactive_status(
         "counts": counts,
         "readiness_probe": readiness_probe,
         "workstation_integrations": workstation_integrations,
+        "workstream_controller": workstream_controller,
         "blocked_actions": list(PROACTIVE_BLOCKED_ACTIONS),
         "current_assignment_authority": False,
         "model_use_contract": _agent_use_contract(str(operational_verdict["operational_state"])),

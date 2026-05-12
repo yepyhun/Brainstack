@@ -3147,6 +3147,35 @@ def _patch_run_agent_terminal_final_guard_seam(path: Path, dry_run: bool) -> lis
             "        )\n"
             "\n"
             "    @staticmethod\n"
+            "    def _terminal_foreground_wait_block_message(function_name: str, function_args: dict[str, Any]) -> str | None:\n"
+            "        if function_name != \"terminal\" or not isinstance(function_args, dict):\n"
+            "            return None\n"
+            "        command = str(function_args.get(\"command\") or function_args.get(\"cmd\") or \"\")\n"
+            "        if not command:\n"
+            "            return None\n"
+            "        wait_match = re.search(r\"(?:^|[;&|]\\\\s*)sleep\\\\s+([0-9]+)\", command)\n"
+            "        if not wait_match:\n"
+            "            return None\n"
+            "        try:\n"
+            "            seconds = int(wait_match.group(1))\n"
+            "        except Exception:\n"
+            "            seconds = 0\n"
+            "        if seconds < 15:\n"
+            "            return None\n"
+            "        lowered = command.lower()\n"
+            "        orchestration_markers = (\n"
+            "            \"hermes kanban\", \"kanban dispatch\", \"kanban show\", \"kanban list\", \"kanban log\",\n"
+            "            \"brainstack_proactive_pulse\", \"hermes_proactive_pulse\", \"proactive_pulse\",\n"
+            "        )\n"
+            "        if not any(marker in lowered for marker in orchestration_markers):\n"
+            "            return None\n"
+            "        return (\n"
+            "            \"Foreground orchestration wait blocked: this terminal command sleeps while polling Kanban/proactive state. \"\n"
+            "            \"Start durable background work or use a bounded read-only status command instead. \"\n"
+            "            \"Do not block the user-facing turn waiting for workers.\"\n"
+            "        )\n"
+            "\n"
+            "    @staticmethod\n"
             "    def _terminal_success_claim_present(response_text: str, command: str) -> bool:\n"
             "        lower = response_text.lower()\n"
             "        if any(marker in lower for marker in (\"executed successfully\", \"deleted\")):\n"
@@ -3268,6 +3297,35 @@ def _patch_run_agent_terminal_final_guard_seam(path: Path, dry_run: bool) -> lis
             "            \"Terminal remains available when the user explicitly asks to run a shell command.\"\n"
             "        )\n"
             "\n"
+            "    @staticmethod\n"
+            "    def _terminal_foreground_wait_block_message(function_name: str, function_args: dict[str, Any]) -> str | None:\n"
+            "        if function_name != \"terminal\" or not isinstance(function_args, dict):\n"
+            "            return None\n"
+            "        command = str(function_args.get(\"command\") or function_args.get(\"cmd\") or \"\")\n"
+            "        if not command:\n"
+            "            return None\n"
+            "        wait_match = re.search(r\"(?:^|[;&|]\\\\s*)sleep\\\\s+([0-9]+)\", command)\n"
+            "        if not wait_match:\n"
+            "            return None\n"
+            "        try:\n"
+            "            seconds = int(wait_match.group(1))\n"
+            "        except Exception:\n"
+            "            seconds = 0\n"
+            "        if seconds < 15:\n"
+            "            return None\n"
+            "        lowered = command.lower()\n"
+            "        orchestration_markers = (\n"
+            "            \"hermes kanban\", \"kanban dispatch\", \"kanban show\", \"kanban list\", \"kanban log\",\n"
+            "            \"brainstack_proactive_pulse\", \"hermes_proactive_pulse\", \"proactive_pulse\",\n"
+            "        )\n"
+            "        if not any(marker in lowered for marker in orchestration_markers):\n"
+            "            return None\n"
+            "        return (\n"
+            "            \"Foreground orchestration wait blocked: this terminal command sleeps while polling Kanban/proactive state. \"\n"
+            "            \"Start durable background work or use a bounded read-only status command instead. \"\n"
+            "            \"Do not block the user-facing turn waiting for workers.\"\n"
+            "        )\n"
+            "\n"
         )
         text = _replace_once(
             text,
@@ -3277,6 +3335,48 @@ def _patch_run_agent_terminal_final_guard_seam(path: Path, dry_run: bool) -> lis
             path=path,
         )
         applied.append("run_agent:terminal_url_fetch_guard_helpers")
+
+    if "def _terminal_foreground_wait_block_message(" not in text:
+        helper_anchor = "    def _terminal_url_fetch_block_message(self, function_name: str, function_args: dict[str, Any], messages: Any) -> str | None:\n"
+        helper_block = (
+            "    @staticmethod\n"
+            "    def _terminal_foreground_wait_block_message(function_name: str, function_args: dict[str, Any]) -> str | None:\n"
+            "        if function_name != \"terminal\" or not isinstance(function_args, dict):\n"
+            "            return None\n"
+            "        command = str(function_args.get(\"command\") or function_args.get(\"cmd\") or \"\")\n"
+            "        if not command:\n"
+            "            return None\n"
+            "        wait_match = re.search(r\"(?:^|[;&|]\\\\s*)sleep\\\\s+([0-9]+)\", command)\n"
+            "        if not wait_match:\n"
+            "            return None\n"
+            "        try:\n"
+            "            seconds = int(wait_match.group(1))\n"
+            "        except Exception:\n"
+            "            seconds = 0\n"
+            "        if seconds < 15:\n"
+            "            return None\n"
+            "        lowered = command.lower()\n"
+            "        orchestration_markers = (\n"
+            "            \"hermes kanban\", \"kanban dispatch\", \"kanban show\", \"kanban list\", \"kanban log\",\n"
+            "            \"brainstack_proactive_pulse\", \"hermes_proactive_pulse\", \"proactive_pulse\",\n"
+            "        )\n"
+            "        if not any(marker in lowered for marker in orchestration_markers):\n"
+            "            return None\n"
+            "        return (\n"
+            "            \"Foreground orchestration wait blocked: this terminal command sleeps while polling Kanban/proactive state. \"\n"
+            "            \"Start durable background work or use a bounded read-only status command instead. \"\n"
+            "            \"Do not block the user-facing turn waiting for workers.\"\n"
+            "        )\n"
+            "\n"
+        )
+        text = _replace_once(
+            text,
+            helper_anchor,
+            helper_block + helper_anchor,
+            label="run_agent terminal foreground wait guard helpers",
+            path=path,
+        )
+        applied.append("run_agent:terminal_foreground_wait_guard_helpers")
 
     if (
         "but the final answer claimed a command result without a terminal tool result in this turn." in text
@@ -3316,6 +3416,11 @@ def _patch_run_agent_terminal_final_guard_seam(path: Path, dry_run: bool) -> lis
         concurrent_replacement = (
             "        if block_message is None:\n"
             "            try:\n"
+            "                block_message = self._terminal_foreground_wait_block_message(function_name, function_args)\n"
+            "            except Exception:\n"
+            "                pass\n"
+            "        if block_message is None:\n"
+            "            try:\n"
             "                block_message = self._terminal_url_fetch_block_message(function_name, function_args, messages)\n"
             "            except Exception:\n"
             "                pass\n"
@@ -3330,6 +3435,15 @@ def _patch_run_agent_terminal_final_guard_seam(path: Path, dry_run: bool) -> lis
             path=path,
         )
         applied.append("run_agent:terminal_url_fetch_guard_concurrent")
+    elif "_terminal_foreground_wait_block_message(function_name, function_args)" not in text:
+        text = text.replace(
+            "                block_message = self._terminal_url_fetch_block_message(function_name, function_args, messages)\n",
+            "                block_message = self._terminal_foreground_wait_block_message(function_name, function_args)\n"
+            "                if block_message is None:\n"
+            "                    block_message = self._terminal_url_fetch_block_message(function_name, function_args, messages)\n",
+            1,
+        )
+        applied.append("run_agent:terminal_foreground_wait_guard_concurrent")
 
     if "_terminal_url_fetch_block_message(function_name, function_args, messages)" not in text.split("def _execute_tool_calls_sequential", 1)[-1]:
         sequential_anchor = (
@@ -3340,6 +3454,12 @@ def _patch_run_agent_terminal_final_guard_seam(path: Path, dry_run: bool) -> lis
             "            else:\n"
         )
         sequential_replacement = (
+            "            if _block_msg is None:\n"
+            "                try:\n"
+            "                    _block_msg = self._terminal_foreground_wait_block_message(function_name, function_args)\n"
+            "                except Exception:\n"
+            "                    pass\n"
+            "\n"
             "            if _block_msg is None:\n"
             "                try:\n"
             "                    _block_msg = self._terminal_url_fetch_block_message(function_name, function_args, messages)\n"
@@ -3358,6 +3478,12 @@ def _patch_run_agent_terminal_final_guard_seam(path: Path, dry_run: bool) -> lis
             "                guardrail_decision = self._tool_guardrails.before_call(function_name, function_args)\n"
         )
         sequential_guardrail_replacement = (
+            "            if _block_msg is None:\n"
+            "                try:\n"
+            "                    _block_msg = self._terminal_foreground_wait_block_message(function_name, function_args)\n"
+            "                except Exception:\n"
+            "                    pass\n"
+            "\n"
             "            if _block_msg is None:\n"
             "                try:\n"
             "                    _block_msg = self._terminal_url_fetch_block_message(function_name, function_args, messages)\n"
@@ -3379,6 +3505,15 @@ def _patch_run_agent_terminal_final_guard_seam(path: Path, dry_run: bool) -> lis
                 path=path,
             )
         applied.append("run_agent:terminal_url_fetch_guard_sequential")
+    elif "_terminal_foreground_wait_block_message(function_name, function_args)" not in text.split("def _execute_tool_calls_sequential", 1)[-1]:
+        text = text.replace(
+            "                    _block_msg = self._terminal_url_fetch_block_message(function_name, function_args, messages)\n",
+            "                    _block_msg = self._terminal_foreground_wait_block_message(function_name, function_args)\n"
+            "                    if _block_msg is None:\n"
+            "                        _block_msg = self._terminal_url_fetch_block_message(function_name, function_args, messages)\n",
+            1,
+        )
+        applied.append("run_agent:terminal_foreground_wait_guard_sequential")
 
     if "_terminal_tool_guard_nudge = self._terminal_tool_final_guard_nudge(" not in text:
         nudge_anchor = (
