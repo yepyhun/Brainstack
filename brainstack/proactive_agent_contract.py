@@ -421,11 +421,25 @@ def _sqlite_table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in rows}
 
 
-def _sqlite_select_rows(conn: sqlite3.Connection, table: str, columns: set[str], wanted: tuple[str, ...], *, limit: int = 25) -> list[dict[str, Any]]:
+def _sqlite_select_rows(
+    conn: sqlite3.Connection,
+    table: str,
+    columns: set[str],
+    wanted: tuple[str, ...],
+    *,
+    limit: int = 25,
+    where: str = "",
+    order_by: str = "",
+) -> list[dict[str, Any]]:
     selected = [name for name in wanted if name in columns]
     if not selected:
         return []
-    query = f"SELECT {', '.join(selected)} FROM {table} LIMIT ?"
+    query = f"SELECT {', '.join(selected)} FROM {table}"
+    if where:
+        query += f" WHERE {where}"
+    if order_by:
+        query += f" ORDER BY {order_by}"
+    query += " LIMIT ?"
     try:
         rows = conn.execute(query, (max(1, min(limit, 100)),)).fetchall()
     except sqlite3.Error:
@@ -437,6 +451,23 @@ def _sqlite_select_rows(conn: sqlite3.Connection, table: str, columns: set[str],
         }
         for row in rows
     ]
+
+
+def _sqlite_status_counts(conn: sqlite3.Connection, table: str, columns: set[str]) -> dict[str, int]:
+    if "status" not in columns:
+        return {}
+    try:
+        rows = conn.execute(f"SELECT lower(status), COUNT(*) FROM {table} GROUP BY lower(status)").fetchall()
+    except sqlite3.Error:
+        return {}
+    return {str(status or "unknown"): int(count) for status, count in rows}
+
+
+def _sqlite_order_by(columns: set[str], preferred: tuple[str, ...]) -> str:
+    parts = [f"{name} DESC" for name in preferred if name in columns]
+    if "id" in columns:
+        parts.append("id DESC")
+    return ", ".join(parts)
 
 
 def _kanban_profile_names(config: Mapping[str, Any] | None, hermes_home: Path | None) -> set[str]:
@@ -488,13 +519,28 @@ def _kanban_runtime_snapshot(
                 task_columns = _sqlite_table_columns(conn, "tasks")
                 event_columns = _sqlite_table_columns(conn, "task_events")
                 run_columns = _sqlite_table_columns(conn, "task_runs")
-                tasks = _sqlite_select_rows(
-                    conn,
-                    "tasks",
-                    task_columns,
-                    ("id", "status", "assignee", "title", "created_at", "started_at", "completed_at", "current_run_id"),
-                    limit=50,
-                )
+                status_counts = _sqlite_status_counts(conn, "tasks", task_columns)
+                task_wanted = ("id", "status", "assignee", "title", "created_at", "started_at", "completed_at", "current_run_id")
+                task_order = _sqlite_order_by(task_columns, ("created_at", "started_at", "completed_at"))
+                if "status" in task_columns:
+                    tasks = _sqlite_select_rows(
+                        conn,
+                        "tasks",
+                        task_columns,
+                        task_wanted,
+                        limit=100,
+                        where="lower(status) IN ('running', 'ready', 'todo')",
+                        order_by=task_order,
+                    )
+                else:
+                    tasks = _sqlite_select_rows(
+                        conn,
+                        "tasks",
+                        task_columns,
+                        task_wanted,
+                        limit=50,
+                        order_by=task_order,
+                    )
                 for row in tasks:
                     status = str(row.get("status") or "").lower()
                     if status == "running":
@@ -507,6 +553,7 @@ def _kanban_runtime_snapshot(
                     event_columns,
                     ("kind", "created_at", "run_id", "task_id"),
                     limit=100,
+                    order_by=_sqlite_order_by(event_columns, ("created_at",)),
                 )
                 event_kinds = {str(row.get("kind") or "") for row in event_rows}
                 terminal_events = sorted(event_kinds & KANBAN_TERMINAL_EVENT_KINDS)
@@ -517,11 +564,16 @@ def _kanban_runtime_snapshot(
                     run_columns,
                     ("id", "status", "outcome", "summary", "output_path", "completed_at", "task_id"),
                     limit=50,
+                    order_by=_sqlite_order_by(run_columns, ("completed_at",)),
                 )
                 created = bool(tasks) or "created" in event_kinds
                 claimed = "claimed" in event_kinds or any(row.get("current_run_id") for row in tasks)
                 spawned = "spawned" in event_kinds or bool(run_rows)
-                completed = "completed" in event_kinds or any(str(row.get("status") or "").lower() in {"done", "completed"} for row in tasks)
+                completed = (
+                    "completed" in event_kinds
+                    or _safe_int(status_counts.get("done"), 0) > 0
+                    or any(str(row.get("status") or "").lower() in {"done", "completed"} for row in tasks)
+                )
                 output_persisted = any(str(row.get("summary") or row.get("output_path") or "").strip() for row in run_rows)
                 last_e2e_proof = {
                     "status": "complete" if all((created, claimed, spawned, completed)) else "partial",
@@ -534,9 +586,13 @@ def _kanban_runtime_snapshot(
                     "terminal_event_kinds": terminal_events,
                     "run_count_sampled": len(run_rows),
                 }
+                if status_counts:
+                    board["status_counts"] = status_counts
             finally:
                 conn.close()
-    running_count = len(running_rows)
+    status_counts = _mapping(board.get("status_counts"))
+    running_count = _safe_int(status_counts.get("running"), len(running_rows))
+    ready_pending_count = _safe_int(status_counts.get("ready"), 0) + _safe_int(status_counts.get("todo"), 0)
     wait_reasons: list[dict[str, Any]] = []
     running_tasks: list[dict[str, Any]] = []
     blocked_unknown_assignee_count = 0
@@ -593,7 +649,9 @@ def _kanban_runtime_snapshot(
         "next_dispatch_tick_at": next_tick_at,
         "dispatch_interval_seconds": dispatch_interval_seconds,
         "running_worker_count": running_count,
-        "ready_task_count": len(ready_rows),
+        "ready_task_count": ready_pending_count if status_counts else len(ready_rows),
+        "status_counts": dict(status_counts) if status_counts else {},
+        "blocked_task_count": _safe_int(status_counts.get("blocked"), 0),
         "running_tasks": running_tasks,
         "wait_reasons": wait_reasons,
         "blocked_unknown_assignee_count": blocked_unknown_assignee_count,

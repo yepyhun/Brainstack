@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from brainstack.proactive_agent_contract import _kanban_board_counts
+from brainstack.proactive_agent_contract import _kanban_board_counts, _kanban_runtime_snapshot
 from scripts.verify_kanban_capability_evidence_ladder import build_report
 
 
@@ -48,3 +48,78 @@ def test_kanban_board_counts_reads_default_hermes_home_db(tmp_path) -> None:
     assert counts["accessible"] is True
     assert counts["path"] == str(db_path)
     assert counts["task_count"] == 1
+
+
+def test_kanban_runtime_snapshot_finds_active_tasks_beyond_old_done_sample(tmp_path) -> None:
+    db_path = tmp_path / "kanban.db"
+    hermes_home = tmp_path / "hermes-home"
+    (hermes_home / "profiles" / "builder").mkdir(parents=True)
+    (hermes_home / "profiles" / "reviewer").mkdir(parents=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE tasks ("
+            "id TEXT PRIMARY KEY, "
+            "status TEXT, "
+            "assignee TEXT, "
+            "title TEXT, "
+            "created_at INTEGER, "
+            "started_at INTEGER, "
+            "completed_at INTEGER, "
+            "current_run_id TEXT"
+            ")"
+        )
+        conn.execute(
+            "CREATE TABLE task_runs ("
+            "id TEXT PRIMARY KEY, "
+            "task_id TEXT, "
+            "status TEXT, "
+            "outcome TEXT, "
+            "summary TEXT, "
+            "output_path TEXT, "
+            "completed_at INTEGER"
+            ")"
+        )
+        conn.execute(
+            "CREATE TABLE task_events ("
+            "id TEXT PRIMARY KEY, "
+            "task_id TEXT, "
+            "run_id TEXT, "
+            "kind TEXT, "
+            "created_at INTEGER"
+            ")"
+        )
+        for index in range(60):
+            conn.execute(
+                "INSERT INTO tasks (id, status, assignee, title, created_at, completed_at, current_run_id) "
+                "VALUES (?, 'done', 'builder', ?, ?, ?, ?)",
+                (f"old-done-{index}", "old done", index, index + 1, f"old-run-{index}"),
+            )
+        conn.executemany(
+            "INSERT INTO tasks (id, status, assignee, title, created_at, started_at, current_run_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("active-running", "running", "builder", "active running", 10_000, 10_010, "run-active"),
+                ("active-ready", "ready", "builder", "active ready", 10_020, None, None),
+                ("active-todo", "todo", "reviewer", "active todo", 10_030, None, None),
+                ("blocked-debt", "blocked", "missing-worker", "blocked debt", 10_040, None, None),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    snapshot = _kanban_runtime_snapshot(
+        {"kanban_profile_names": ["builder", "reviewer"], "kanban_max_spawn": 4},
+        None,
+        {"accessible": True, "path": str(db_path), "task_count": 64},
+        hermes_home,
+    )
+
+    assert snapshot["dispatcher_state"] == "workers_running"
+    assert snapshot["running_worker_count"] == 1
+    assert snapshot["ready_task_count"] == 2
+    assert snapshot["blocked_task_count"] == 1
+    assert snapshot["status_counts"]["blocked"] == 1
+    assert {task["task_id"] for task in snapshot["running_tasks"]} == {"active-running"}
+    assert {item["task_id"] for item in snapshot["wait_reasons"]} == {"active-ready", "active-todo"}

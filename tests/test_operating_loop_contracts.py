@@ -4,6 +4,7 @@ from scripts.verify_hermes_auxiliary_compression_guard import build_report as bu
 from scripts.verify_kanban_recovery_candidate_contract import build_report as build_recovery_report
 from scripts.verify_operating_loop_liveness_contract import build_report as build_liveness_report
 from scripts.verify_scheduler_lane_health_contract import build_report as build_scheduler_report
+from brainstack.operating_loop import build_operating_loop_verdict
 
 
 def _assert_report_passes(report: dict) -> None:
@@ -21,6 +22,26 @@ def test_operating_loop_liveness_contract_blocks_split_brain() -> None:
     _assert_report_passes(report)
     assert report["scenario_verdicts"]["split_brain"] == "critical"
     assert report["scenario_verdicts"]["artifact_only"] == "critical"
+
+
+def test_operating_loop_with_active_frontier_and_recent_failures_is_degraded() -> None:
+    verdict = build_operating_loop_verdict(
+        {
+            "kanban_required": True,
+            "kanban_runtime_snapshot": {
+                "dispatcher_state": "workers_running",
+                "running_worker_count": 2,
+                "ready_task_count": 0,
+                "recent_failure_event_kinds": ["crashed", "blocked"],
+            },
+            "signal_bus": {"status": "ok"},
+            "executor": {"status": "ok"},
+            "next_action": {"exists": True, "requires_kanban": True},
+        }
+    )
+
+    assert verdict["verdict"] == "degraded"
+    assert "recent_kanban_failures" in verdict["warnings"]
 
 
 def test_kanban_recovery_candidate_contract_is_read_only() -> None:
@@ -44,4 +65,3 @@ def test_hermes_auxiliary_compression_guard_detects_bad_fd_incident() -> None:
     _assert_report_passes(report)
     assert report["incident_guard_status"] == "fail"
     assert report["clean_guard_status"] == "pass"
-
