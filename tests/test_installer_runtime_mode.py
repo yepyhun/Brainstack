@@ -257,6 +257,7 @@ def test_config_patch_embedding_none_makes_corpus_explicitly_unavailable(tmp_pat
     assert data["auxiliary"]["session_search"]["total_timeout"] == 20
     assert data["auxiliary"]["session_search"]["max_concurrency"] == 1
     assert data["auxiliary"]["session_search"]["timeout"] == 15
+    assert data["auxiliary"]["compression"]["timeout"] == 120
     assert data["proactive_mode"] == "dry_run"
     assert data["proactive_kill_switch"] is False
     assert "kanban" in data.get("toolsets", [])
@@ -363,6 +364,43 @@ def test_config_patch_bounds_dirty_session_search_runtime(tmp_path):
     assert hygiene["status"] == "normalized"
     assert hygiene["changes"]["previous_total_timeout"] == 90
     assert hygiene["changes"]["previous_max_concurrency"] == 5
+
+
+def test_config_patch_repairs_too_low_auxiliary_compression_timeout(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "auxiliary:\n"
+        "  compression:\n"
+        "    provider: main\n"
+        "    model: ''\n"
+        "    timeout: 20\n",
+        encoding="utf-8",
+    )
+
+    result = install_into_hermes._patch_config(config, dry_run=False, embedding_runtime="none")
+    data = install_into_hermes._load_yaml(config)
+
+    assert data["auxiliary"]["compression"]["timeout"] == 120
+    assert result["compression_runtime_hygiene"]["status"] == "normalized"
+    assert result["compression_runtime_hygiene"]["changes"]["previous_timeout"] == 20
+
+
+def test_config_patch_preserves_generous_auxiliary_compression_timeout(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "auxiliary:\n"
+        "  compression:\n"
+        "    provider: main\n"
+        "    model: ''\n"
+        "    timeout: 240\n",
+        encoding="utf-8",
+    )
+
+    result = install_into_hermes._patch_config(config, dry_run=False, embedding_runtime="none")
+    data = install_into_hermes._load_yaml(config)
+
+    assert data["auxiliary"]["compression"]["timeout"] == 240
+    assert result["compression_runtime_hygiene"]["status"] == "unchanged"
 
 
 def test_config_patch_enables_bounded_discord_streaming_visibility(tmp_path):

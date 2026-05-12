@@ -75,6 +75,7 @@ PROACTIVE_CRON_JOB_NAME = "Brainstack Proactive Pulse"
 PROACTIVE_CRON_GATE_SCRIPT_NAME = "brainstack_proactive_pulse_gate.py"
 SESSION_SEARCH_TOTAL_TIMEOUT_SECONDS = 20
 SESSION_SEARCH_MAX_CONCURRENCY = 1
+COMPRESSION_AUXILIARY_MIN_TIMEOUT_SECONDS = 120
 DISCORD_STREAMING_EDIT_INTERVAL_SECONDS = 3.0
 DISCORD_STREAMING_BUFFER_THRESHOLD = 200
 
@@ -5144,6 +5145,38 @@ def _normalize_session_search_runtime_config(config: dict[str, Any]) -> dict[str
     }
 
 
+def _normalize_compression_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Keep context compression long enough to summarize large protected-tail sessions."""
+    auxiliary = config.setdefault("auxiliary", {})
+    if not isinstance(auxiliary, dict):
+        raise RuntimeError("config.yaml has non-object `auxiliary` section")
+    entry = auxiliary.setdefault("compression", {})
+    if not isinstance(entry, dict):
+        entry = {}
+        auxiliary["compression"] = entry
+
+    changed: dict[str, Any] = {}
+
+    def _number(value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    timeout = _number(entry.get("timeout"))
+    if timeout is None or timeout < COMPRESSION_AUXILIARY_MIN_TIMEOUT_SECONDS:
+        changed["previous_timeout"] = entry.get("timeout")
+        entry["timeout"] = COMPRESSION_AUXILIARY_MIN_TIMEOUT_SECONDS
+
+    return {
+        "status": "normalized" if changed else "unchanged",
+        "timeout": entry.get("timeout"),
+        "minimum_timeout": COMPRESSION_AUXILIARY_MIN_TIMEOUT_SECONDS,
+        "changes": changed,
+        "secret_redacted": True,
+    }
+
+
 def _normalize_discord_visibility_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
     """Enable bounded Discord response visibility without enabling noisy tool spam."""
     changed: dict[str, Any] = {}
@@ -5275,6 +5308,7 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
         brainstack["tier2_hindsight_llm_base_url"] = ""
     tier2_runtime_hygiene = _normalize_unbound_tier2_runtime(brainstack)
     session_search_runtime_hygiene = _normalize_session_search_runtime_config(config)
+    compression_runtime_hygiene = _normalize_compression_runtime_config(config)
     discord_visibility_hygiene = _normalize_discord_visibility_runtime_config(config)
     brainstack.setdefault("tier2_hindsight_embeddings_provider", "tei")
     brainstack.setdefault("tier2_hindsight_embeddings_tei_url", "http://127.0.0.1:7997")
@@ -5303,6 +5337,7 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
         "auxiliary_main_route_hygiene": auxiliary_main_route_hygiene,
         "tier2_runtime_hygiene": tier2_runtime_hygiene,
         "session_search_runtime_hygiene": session_search_runtime_hygiene,
+        "compression_runtime_hygiene": compression_runtime_hygiene,
         "discord_visibility_hygiene": discord_visibility_hygiene,
         "kanban_toolset_hygiene": kanban_toolset_hygiene,
         "gateway_timeout": agent.get("gateway_timeout"),
