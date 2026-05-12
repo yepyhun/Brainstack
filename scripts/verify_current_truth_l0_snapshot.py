@@ -11,9 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from brainstack.db import BrainstackStore
-from brainstack.canonical_memory_event import validate_canonical_memory_event
-from scripts.verify_current_truth_view import FIXED_REBUILT_AT, _baseline_events
+from brainstack.db import BrainstackStore  # noqa: E402
+from brainstack.canonical_memory_event import validate_canonical_memory_event  # noqa: E402
+from scripts.verify_current_truth_view import FIXED_REBUILT_AT, _baseline_events  # noqa: E402
 
 
 def build_report() -> dict:

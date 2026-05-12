@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from brainstack.db import BrainstackStore
+from brainstack.db import BrainstackStore  # noqa: E402
 
 
 def build_report(*, principal_count: int = 1000) -> dict:

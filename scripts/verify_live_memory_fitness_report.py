@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from brainstack import BrainstackMemoryProvider  # noqa: E402
 from brainstack.product_contracts import assess_workspace_contract  # noqa: E402
+from scripts.verify_duplicate_strength_consolidation import build_proof as build_duplicate_strength_proof  # noqa: E402
 
 
 REPORT_SCHEMA = "brainstack.live_memory_fitness_report.v1"
@@ -131,6 +132,7 @@ def classify_memory_fitness(
     proactive_status: Mapping[str, Any],
     graph_producer: Mapping[str, Any],
     workspace_contract: Mapping[str, Any],
+    duplicate_strength_control: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     compact_stats = _compact_stats(stats)
@@ -147,16 +149,38 @@ def classify_memory_fitness(
         )
     bloat_issues = set(compact_stats["persistent_bloat_issues"])
     if any(issue.startswith("DUPLICATE_STRENGTH_INFLATION") for issue in bloat_issues):
-        findings.append(
-            _finding(
-                code="duplicate_strength_quality_debt",
-                severity="LOW_HANGING_FRUIT",
-                owner="brainstack",
-                title="Duplicate truth rows can inflate perceived memory strength if not budgeted.",
-                next_action="Run duplicate-strength verifier and safe maintenance dry-run; do not auto-merge truth.",
-                evidence={"issues": sorted(bloat_issues)},
-            )
+        control = duplicate_strength_control if isinstance(duplicate_strength_control, Mapping) else {}
+        control_proof = control.get("proof") if isinstance(control.get("proof"), Mapping) else {}
+        controlled = (
+            control.get("status") == "pass"
+            and control_proof.get("exact_duplicate_selected_once") is True
+            and control_proof.get("exact_duplicate_budget_drop_reported") is True
+            and control_proof.get("dry_run_reports_review_only_duplicate") is True
+            and control_proof.get("unsafe_apply_rejected_without_mutation") is True
+            and control_proof.get("near_duplicate_not_auto_merged") is True
         )
+        if controlled:
+            findings.append(
+                _finding(
+                    code="duplicate_strength_budgeted_review_only",
+                    severity="CONTROLLED_QUALITY_SIGNAL",
+                    owner="brainstack",
+                    title="Duplicate truth rows are detected, budgeted, and guarded behind review-only maintenance.",
+                    next_action="No release repair. Use explicit operator review if the duplicate rows should be consolidated.",
+                    evidence={"issues": sorted(bloat_issues), "control_status": str(control.get("status") or "")},
+                )
+            )
+        else:
+            findings.append(
+                _finding(
+                    code="duplicate_strength_quality_debt",
+                    severity="LOW_HANGING_FRUIT",
+                    owner="brainstack",
+                    title="Duplicate truth rows can inflate perceived memory strength if not budgeted.",
+                    next_action="Run duplicate-strength verifier and safe maintenance dry-run; do not auto-merge truth.",
+                    evidence={"issues": sorted(bloat_issues), "control_status": str(control.get("status") or "missing")},
+                )
+            )
     producer_state = str(graph_producer.get("producer_state") or "")
     if producer_state in {"no_input", "no_graph_candidates"}:
         findings.append(
@@ -244,17 +268,20 @@ def build_report() -> dict[str, Any]:
             graph_producer = doctor.get("capabilities", {}).get("graph_producer", {})
             workspace = assess_workspace_contract(workspace_root).to_dict()
             invalid_workspace = assess_workspace_contract(invalid_workspace_root).to_dict()
+            duplicate_strength_control = build_duplicate_strength_proof()
             findings = classify_memory_fitness(
                 stats=stats,
                 proactive_status=proactive,
                 graph_producer=graph_producer if isinstance(graph_producer, Mapping) else {},
                 workspace_contract=workspace,
+                duplicate_strength_control=duplicate_strength_control,
             )
             invalid_workspace_findings = classify_memory_fitness(
                 stats=stats,
                 proactive_status=proactive,
                 graph_producer=graph_producer if isinstance(graph_producer, Mapping) else {},
                 workspace_contract=invalid_workspace,
+                duplicate_strength_control=duplicate_strength_control,
             )
             after_counts = _table_counts(provider)
         finally:
@@ -262,7 +289,16 @@ def build_report() -> dict[str, Any]:
 
     proof = {
         "read_only_table_counts_unchanged": before_counts == after_counts,
-        "duplicate_strength_classified_not_all_good": any(item["code"] == "duplicate_strength_quality_debt" for item in findings),
+        "duplicate_strength_classified_not_all_good": any(
+            item["code"] in {"duplicate_strength_quality_debt", "duplicate_strength_budgeted_review_only"}
+            for item in findings
+        ),
+        "duplicate_strength_controlled_not_low_hanging": any(
+            item["code"] == "duplicate_strength_budgeted_review_only"
+            and item["severity"] == "CONTROLLED_QUALITY_SIGNAL"
+            for item in findings
+        )
+        and not any(item["code"] == "duplicate_strength_quality_debt" for item in findings),
         "healthy_proactive_idle_not_failure": any(item["code"] == "proactive_ready_idle" for item in findings),
         "kanban_detected_not_write_certified": any(
             item["code"] == "kanban_detected_not_agent_write_certified" for item in findings
@@ -286,6 +322,10 @@ def build_report() -> dict[str, Any]:
             "top_next_actions": [str(item["next_action"]) for item in findings[:5]],
         },
         "findings": findings,
+        "duplicate_strength_control": {
+            "status": str(duplicate_strength_control.get("status") or ""),
+            "public_safe": bool(duplicate_strength_control.get("public_safe")),
+        },
         "proof": proof,
         "issues": issues,
     }

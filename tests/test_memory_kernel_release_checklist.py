@@ -205,7 +205,8 @@ def test_live_memory_fitness_report_release_check_passes(tmp_path: Path) -> None
     assert result.summary["read_only"] is True
     assert result.summary["release_blocked"] is False
     assert result.summary["proof_passed"] is True
-    assert result.summary["severity_counts"]["LOW_HANGING_FRUIT"] == 1
+    assert result.summary["severity_counts"]["CONTROLLED_QUALITY_SIGNAL"] == 1
+    assert "LOW_HANGING_FRUIT" not in result.summary["severity_counts"]
     assert result.summary["severity_counts"]["HEALTHY_IDLE"] == 2
 
 

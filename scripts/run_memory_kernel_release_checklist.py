@@ -1781,6 +1781,7 @@ def _check_live_memory_fitness_report(tmp: Path) -> CheckResult:
     proof_keys = (
         "read_only_table_counts_unchanged",
         "duplicate_strength_classified_not_all_good",
+        "duplicate_strength_controlled_not_low_hanging",
         "healthy_proactive_idle_not_failure",
         "kanban_detected_not_write_certified",
         "invalid_workspace_is_high",

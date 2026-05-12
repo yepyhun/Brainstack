@@ -11,9 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from brainstack.db import BrainstackStore
-from brainstack.persistent_bloat_rebuild import verify_persistent_bloat_rebuild
-from scripts.run_persistent_bloat_soak import seed_persistent_bloat_soak
+from brainstack.db import BrainstackStore  # noqa: E402
+from brainstack.persistent_bloat_rebuild import verify_persistent_bloat_rebuild  # noqa: E402
+from scripts.run_persistent_bloat_soak import seed_persistent_bloat_soak  # noqa: E402
 
 
 def build_report(*, db_path: Path | None = None, iterations: int = 24) -> dict[str, object]:

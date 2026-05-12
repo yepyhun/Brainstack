@@ -12,13 +12,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from brainstack import BrainstackMemoryProvider
-from brainstack.active_preference_contract import (
+from brainstack import BrainstackMemoryProvider  # noqa: E402
+from brainstack.active_preference_contract import (  # noqa: E402
     DELIVERY_REASON_PROMPT_REBUILD_AFTER_COMPACTION,
     DELIVERY_REASON_SESSION_START,
 )
-from brainstack.retrieval import build_system_prompt_projection
-from brainstack.style_contract import STYLE_CONTRACT_SLOT, list_style_contract_rules
+from brainstack.retrieval import build_system_prompt_projection  # noqa: E402
+from brainstack.style_contract import STYLE_CONTRACT_SLOT, list_style_contract_rules  # noqa: E402
 
 
 REPORT_SCHEMA = "brainstack.behavior_card_destructive_proof.v1"

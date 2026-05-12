@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from brainstack.background_task_binding import (
+from brainstack.background_task_binding import (  # noqa: E402
     CAPTURE_UNDERSTANDING_HERMES_TASK_SLOT,
     QUERY_UNDERSTANDING_HERMES_TASK_SLOT,
     install_default_background_task_bindings,

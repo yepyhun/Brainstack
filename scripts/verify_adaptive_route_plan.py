@@ -11,7 +11,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from brainstack.adaptive_route_plan import build_adaptive_route_plan, route_plan_limit_overrides, validate_route_plan_public_safety
+from brainstack.adaptive_route_plan import (  # noqa: E402
+    build_adaptive_route_plan,
+    route_plan_limit_overrides,
+    validate_route_plan_public_safety,
+)
 
 BASELINE_FANOUT = {
     "no_memory_minimal": 8,
