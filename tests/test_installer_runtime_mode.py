@@ -113,7 +113,7 @@ def test_generated_docker_start_script_targets_hermes_service_when_tei_is_first(
     assert "print $1; exit" not in text
 
 
-def test_generated_docker_start_script_keeps_symlinked_config_absolute(tmp_path):
+def test_generated_docker_start_script_keeps_symlinked_config_repo_relative(tmp_path):
     target = tmp_path / "hermes"
     runtime_root = tmp_path / "runtime-home"
     config = runtime_root / "bestie" / "config.yaml"
@@ -133,7 +133,7 @@ def test_generated_docker_start_script_keeps_symlinked_config_absolute(tmp_path)
     script = install_into_hermes._write_docker_start_script(target, config.resolve(), compose, dry_run=False)
 
     text = script.read_text(encoding="utf-8")
-    assert f'CONFIG_FILE="${{HERMES_CONFIG_FILE:-{config.resolve()}}}"' in text
+    assert 'CONFIG_FILE="${HERMES_CONFIG_FILE:-$REPO_ROOT/hermes-config/bestie/config.yaml}"' in text
     assert "$REPO_ROOT//" not in text
 
 
@@ -1228,6 +1228,74 @@ def test_gateway_background_process_output_boundary_is_required_core_host_seam()
     assert seam["selected"] is True
     assert seam["category"] == "required_seam"
     assert seam["owner"] == "host-output-seam"
+
+
+def test_tool_result_budget_config_is_required_core_host_seam() -> None:
+    inventory = {
+        item["patcher"]: item
+        for item in install_into_hermes._selected_host_patch_inventory(
+            "docker",
+            host_patch_mode="core",
+        )
+    }
+
+    seam = inventory["_patch_tool_result_budget_config"]
+    assert seam["selected"] is True
+    assert seam["category"] == "required_seam"
+    assert seam["owner"] == "host-output-seam"
+
+
+def test_tool_result_budget_config_patch_installs_bounded_defaults(tmp_path) -> None:
+    module = tmp_path / "budget_config.py"
+    module.write_text(
+        '''
+from dataclasses import dataclass, field
+from typing import Dict
+
+PINNED_THRESHOLDS: Dict[str, float] = {
+    "read_file": float("inf"),
+}
+
+DEFAULT_RESULT_SIZE_CHARS: int = 100_000
+DEFAULT_TURN_BUDGET_CHARS: int = 200_000
+DEFAULT_PREVIEW_SIZE_CHARS: int = 1_500
+
+@dataclass(frozen=True)
+class BudgetConfig:
+    default_result_size: int = DEFAULT_RESULT_SIZE_CHARS
+    turn_budget: int = DEFAULT_TURN_BUDGET_CHARS
+    preview_size: int = DEFAULT_PREVIEW_SIZE_CHARS
+    tool_overrides: Dict[str, int] = field(default_factory=dict)
+
+    def resolve_threshold(self, tool_name: str) -> int | float:
+        if tool_name in PINNED_THRESHOLDS:
+            return PINNED_THRESHOLDS[tool_name]
+        if tool_name in self.tool_overrides:
+            return self.tool_overrides[tool_name]
+        return self.default_result_size
+
+DEFAULT_BUDGET = BudgetConfig()
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_tool_result_budget_config(module, dry_run=False)
+    text = module.read_text(encoding="utf-8")
+    namespace: dict[str, object] = {}
+    exec(compile(text, str(module), "exec"), namespace)
+    default_budget = namespace["DEFAULT_BUDGET"]
+
+    assert applied == [
+        "tool_result_budget:constants",
+        "tool_result_budget:remove_read_file_inf_pin",
+        "tool_result_budget:default_overrides",
+    ]
+    assert namespace["PINNED_THRESHOLDS"] == {}
+    assert default_budget.resolve_threshold("skill_view") == 32_000
+    assert default_budget.resolve_threshold("read_file") == 32_000
+    assert default_budget.resolve_threshold("brainstack_recall") == 12_000
+    assert default_budget.resolve_threshold("unknown_tool") == 100_000
+    assert "not tool capability limits" in text
 
 
 def test_gateway_background_process_output_boundary_compacts_large_output(tmp_path, monkeypatch) -> None:

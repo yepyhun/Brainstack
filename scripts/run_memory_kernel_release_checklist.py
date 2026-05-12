@@ -1732,6 +1732,46 @@ def _check_model_facing_recall_budget(tmp: Path) -> CheckResult:
     )
 
 
+def _check_host_tool_result_budget(tmp: Path) -> CheckResult:
+    out = tmp / "host_tool_result_budget.json"
+    command = [sys.executable, "scripts/verify_host_tool_result_budget.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    proof_keys = (
+        "installer_registers_required_core_host_seam",
+        "wizard_patches_budget_config",
+        "observed_context_heavy_tools_covered",
+        "read_file_no_longer_infinite_pinned",
+        "skill_view_86k_would_not_inline",
+        "brainstack_inspect_95k_would_not_inline",
+        "full_output_artifact_contract_present",
+        "no_blind_drop_contract",
+        "public_safe",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("issues") == []
+        and all(proof.get(key) is True for key in proof_keys)
+    )
+    return CheckResult(
+        name="host_tool_result_budget",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "issue_count": len(data.get("issues") or []),
+            "public_safe": data.get("public_safe"),
+            "source_mode": data.get("source_mode"),
+            "thresholds": data.get("thresholds"),
+            "proof": {key: proof.get(key) for key in proof_keys},
+        },
+    )
+
+
 def _check_duplicate_strength_consolidation(tmp: Path) -> CheckResult:
     out = tmp / "duplicate_strength_consolidation.json"
     command = [sys.executable, "scripts/verify_duplicate_strength_consolidation.py", "--out", str(out)]
@@ -3015,6 +3055,7 @@ def run_checklist(
             _check_multi_profile_shared_backend(tmp),
             _check_phase_quality_contract(tmp),
             _check_model_facing_recall_budget(tmp),
+            _check_host_tool_result_budget(tmp),
             _check_duplicate_strength_consolidation(tmp),
             _check_live_memory_fitness_report(tmp),
             _check_kanban_capability_evidence_ladder(tmp),

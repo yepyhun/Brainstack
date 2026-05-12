@@ -105,6 +105,11 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "owner": "host-output-seam",
         "removal_condition": "Hermes natively stores large background-process output as artifacts and injects only bounded summaries into chat/model context.",
     },
+    "_patch_tool_result_budget_config": {
+        "category": "required_seam",
+        "owner": "host-output-seam",
+        "removal_condition": "Hermes natively applies bounded model-facing tool-result budgets for large native/plugin tool outputs while preserving full artifacts.",
+    },
     "_patch_memory_provider": {
         "category": "compat_hotfix",
         "owner": "host-seam",
@@ -491,6 +496,14 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_modes": ("source", "docker"),
         "purpose": "Keep large background-process/watch output out of user-facing and model-facing chat context while preserving full output as an artifact.",
         "why": "Raw process output injected through watch/queue messages can force repeated compression and make queued work look frozen.",
+    },
+    {
+        "patcher": "_patch_tool_result_budget_config",
+        "target": "tools/budget_config.py",
+        "scope": "host-output-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Lower model-facing inline budgets for observed context-heavy tool results and remove the read_file persistence escape hatch.",
+        "why": "Hermes already preserves oversized outputs as artifacts, but the 100k default lets 80k+ skill/tool payloads enter the protected context tail and repeatedly break compression.",
     },
     {
         "patcher": "_patch_gateway_turn_profiles_capability_preserving_default",
@@ -3778,6 +3791,71 @@ print(json.dumps(result, ensure_ascii=False))
     return payload
 
 
+def _patch_tool_result_budget_config(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    if "BRAINSTACK_MODEL_FACING_TOOL_THRESHOLDS" not in text:
+        anchor = "DEFAULT_PREVIEW_SIZE_CHARS: int = 1_500\n"
+        insert = (
+            "DEFAULT_PREVIEW_SIZE_CHARS: int = 1_500\n"
+            "\n"
+            "# Brainstack host-output seam: these are model-facing inline budgets,\n"
+            "# not tool capability limits. Oversized results keep the full payload in\n"
+            "# Hermes' existing persisted-output artifact path; the model receives a\n"
+            "# bounded preview plus instructions to read explicit chunks. The 32k cap is\n"
+            "# high enough for normal diagnostic/tool summaries while keeping repeated\n"
+            "# protected-tail tool results below compression-failure pressure.\n"
+            "BRAINSTACK_MODEL_FACING_INLINE_CHARS: int = 32_000\n"
+            "BRAINSTACK_MODEL_FACING_TOOL_THRESHOLDS: Dict[str, int] = {\n"
+            '    "brainstack_inspect": BRAINSTACK_MODEL_FACING_INLINE_CHARS,\n'
+            '    "brainstack_recall": 12_000,\n'
+            '    "browser_navigate": 12_000,\n'
+            '    "delegate_task": BRAINSTACK_MODEL_FACING_INLINE_CHARS,\n'
+            '    "execute_code": BRAINSTACK_MODEL_FACING_INLINE_CHARS,\n'
+            '    "process": BRAINSTACK_MODEL_FACING_INLINE_CHARS,\n'
+            '    "read_file": BRAINSTACK_MODEL_FACING_INLINE_CHARS,\n'
+            '    "search_files": BRAINSTACK_MODEL_FACING_INLINE_CHARS,\n'
+            '    "skill_view": BRAINSTACK_MODEL_FACING_INLINE_CHARS,\n'
+            '    "skills_list": 12_000,\n'
+            '    "terminal": BRAINSTACK_MODEL_FACING_INLINE_CHARS,\n'
+            "}\n"
+        )
+        text = _replace_once(text, anchor, insert, label="tool result model-facing budget constants", path=path)
+        applied.append("tool_result_budget:constants")
+
+    pinned_block = (
+        'PINNED_THRESHOLDS: Dict[str, float] = {\n'
+        '    "read_file": float("inf"),\n'
+        '}\n'
+    )
+    if pinned_block in text:
+        text = _replace_once(
+            text,
+            pinned_block,
+            "PINNED_THRESHOLDS: Dict[str, float] = {\n}\n",
+            label="tool result remove read_file infinite pin",
+            path=path,
+        )
+        applied.append("tool_result_budget:remove_read_file_inf_pin")
+
+    if "DEFAULT_BUDGET = BudgetConfig()\n" in text:
+        text = _replace_once(
+            text,
+            "DEFAULT_BUDGET = BudgetConfig()\n",
+            "DEFAULT_BUDGET = BudgetConfig(tool_overrides=BRAINSTACK_MODEL_FACING_TOOL_THRESHOLDS)\n",
+            label="tool result default budget overrides",
+            path=path,
+        )
+        applied.append("tool_result_budget:default_overrides")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
 def _patch_gateway_background_process_output_boundary(path: Path, dry_run: bool) -> list[str]:
     if not path.exists():
         return []
@@ -5500,7 +5578,17 @@ def _relative_to_target_or_absolute(target: Path, path: Path) -> str:
     try:
         return str(path.relative_to(target))
     except ValueError:
-        return str(path)
+        pass
+    for symlinked_root_name in ("hermes-config",):
+        symlinked_root = target / symlinked_root_name
+        if not symlinked_root.exists():
+            continue
+        try:
+            rel = path.resolve().relative_to(symlinked_root.resolve())
+        except ValueError:
+            continue
+        return str(Path(symlinked_root_name) / rel)
+    return str(path)
 
 
 def _start_script_default_path_expr(target: Path, path: Path) -> str:
@@ -6880,6 +6968,7 @@ def main() -> int:
     host_patches.extend(_run_host_patch("_patch_deferred_tool_loader_contract", target / "hermes_deferred_tools.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_memory_answer_renderer_language", target / "gateway" / "memory_answer_renderer.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_terminal_tool_result_hygiene", target / "tools" / "terminal_tool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_tool_result_budget_config", target / "tools" / "budget_config.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_prompt_builder", target / "agent" / "prompt_builder.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_cron_jobs", target / "cron" / "jobs.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_cron_scheduler", target / "cron" / "scheduler.py", args.dry_run, host_patch_mode=args.host_patch_mode))
