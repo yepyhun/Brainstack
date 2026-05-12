@@ -220,11 +220,13 @@ def _scenario_dispatcher_snapshot(root: Path) -> dict[str, Any]:
     db_path = root / "kanban-dispatcher.db"
     _seed_dispatcher_snapshot_db(db_path)
     provider = _provider(root / "dispatcher-snapshot", hermes_root=hermes_root)
+    hermes_home = root / "dispatcher-snapshot" / "hermes_home"
+    (hermes_home / "profiles" / "worker-a").mkdir(parents=True, exist_ok=True)
+    (hermes_home / "profiles" / "worker-b").mkdir(parents=True, exist_ok=True)
     provider._config["kanban_db_path"] = str(db_path)
     provider._config["kanban_tool_surface_exposed"] = True
     provider._config["kanban_board_write_certified"] = True
     provider._config["kanban_worker_lifecycle_certified"] = True
-    provider._config["kanban_profile_names"] = ["worker-a", "worker-b"]
     provider._config["kanban_profile_count"] = 2
     provider._config["kanban_max_spawn"] = 1
     provider._config["kanban_dispatch_interval_seconds"] = 60

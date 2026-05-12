@@ -433,9 +433,27 @@ def _sqlite_select_rows(conn: sqlite3.Connection, table: str, columns: set[str],
     ]
 
 
-def _kanban_runtime_snapshot(config: Mapping[str, Any] | None, root: Path | None, board: Mapping[str, Any]) -> dict[str, Any]:
-    db_path = Path(str(board.get("path") or "")).expanduser() if str(board.get("path") or "").strip() else None
+def _kanban_profile_names(config: Mapping[str, Any] | None, hermes_home: Path | None) -> set[str]:
     profile_names = set(_config_list(config, "kanban_profile_names")) or set(_config_list(config, "kanban_profiles"))
+    if hermes_home is not None and hermes_home.exists():
+        profile_names.add("default")
+        profiles_dir = hermes_home / "profiles"
+        if profiles_dir.exists():
+            try:
+                profile_names.update(path.name for path in profiles_dir.iterdir() if path.is_dir())
+            except OSError:
+                pass
+    return {name for name in profile_names if name}
+
+
+def _kanban_runtime_snapshot(
+    config: Mapping[str, Any] | None,
+    root: Path | None,
+    board: Mapping[str, Any],
+    hermes_home: Path | None = None,
+) -> dict[str, Any]:
+    db_path = Path(str(board.get("path") or "")).expanduser() if str(board.get("path") or "").strip() else None
+    profile_names = _kanban_profile_names(config, hermes_home)
     profile_count = max(_safe_int(config.get("kanban_profile_count") if isinstance(config, Mapping) else 0, 0), len(profile_names), 1)
     max_spawn = _safe_int(config.get("kanban_max_spawn") if isinstance(config, Mapping) else 0, 0)
     dispatch_interval_seconds = _safe_int(config.get("kanban_dispatch_interval_seconds") if isinstance(config, Mapping) else 60, 60)
@@ -618,10 +636,14 @@ def _kanban_workstation_status(config: Mapping[str, Any] | None = None) -> dict[
     exposed_tools = set(_config_list(config, "exposed_tool_names")) & KANBAN_WRITE_TOOL_NAMES
     tool_surface_exposed = _config_bool(config, "kanban_tool_surface_exposed") or bool(exposed_tools)
     board = _kanban_board_counts(config, root, hermes_home)
-    runtime_snapshot = _kanban_runtime_snapshot(config, root, board)
+    runtime_snapshot = _kanban_runtime_snapshot(config, root, board, hermes_home)
     board_write_certified = tool_surface_exposed and _config_bool(config, "kanban_board_write_certified")
     worker_lifecycle_certified = board_write_certified and _config_bool(config, "kanban_worker_lifecycle_certified")
-    profile_count = max(_safe_int(config.get("kanban_profile_count") if isinstance(config, Mapping) else 0, 0), 1)
+    profile_count = max(
+        _safe_int(config.get("kanban_profile_count") if isinstance(config, Mapping) else 0, 0),
+        _safe_int(_mapping(runtime_snapshot.get("worker_capacity")).get("profile_count"), 0),
+        1,
+    )
     local_artifact_path = (
         Path(str(config.get("local_kanban_artifact_path"))).expanduser()
         if isinstance(config, Mapping) and str(config.get("local_kanban_artifact_path") or "").strip()

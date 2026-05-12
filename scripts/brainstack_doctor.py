@@ -15,6 +15,7 @@ import importlib
 import inspect
 import json
 import os
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -1211,8 +1212,7 @@ def _check_desktop_launcher(target: Path, launcher: Path | None, runtime: str) -
         checks.append(Check("desktop_launcher", "warn", f"Desktop launcher not found: {launcher}"))
         return checks
     text = _read(launcher)
-    target_str = str(target)
-    if target_str in text or str(target / "scripts") in text:
+    if _launcher_points_to_target_start_script(text, target):
         checks.append(Check("desktop_launcher_target", "pass", "Desktop launcher points at this Hermes checkout"))
     elif runtime == "docker":
         checks.append(Check("desktop_launcher_target", "fail", "Desktop launcher points at a different checkout or script"))
@@ -1220,8 +1220,7 @@ def _check_desktop_launcher(target: Path, launcher: Path | None, runtime: str) -
         checks.append(Check("desktop_launcher_target", "warn", "Desktop launcher target is not explicit; manual local start may still be valid"))
 
     if runtime == "docker":
-        start_script = str(target / "scripts" / "hermes-brainstack-start.sh")
-        if start_script in text or "docker compose" in text.lower():
+        if _launcher_points_to_target_start_script(text, target) or "docker compose" in text.lower():
             checks.append(Check("desktop_launcher_mode", "pass", "Desktop launcher uses the Docker Brainstack start path"))
         else:
             checks.append(Check("desktop_launcher_mode", "warn", "Desktop launcher mode is unclear for Docker runtime"))
@@ -1231,6 +1230,29 @@ def _check_desktop_launcher(target: Path, launcher: Path | None, runtime: str) -
         else:
             checks.append(Check("desktop_launcher_mode", "pass", "Local runtime mode does not require Docker launcher checks"))
     return checks
+
+
+def _launcher_points_to_target_start_script(text: str, target: Path) -> bool:
+    target_script = (target / "scripts" / "hermes-brainstack-start.sh").resolve()
+    target_str = str(target)
+    if target_str in text or str(target / "scripts") in text or str(target_script) in text:
+        return True
+    for line in text.splitlines():
+        if not line.startswith("Exec="):
+            continue
+        try:
+            parts = shlex.split(line.removeprefix("Exec="))
+        except ValueError:
+            parts = line.removeprefix("Exec=").split()
+        for part in parts:
+            if not part.endswith("hermes-brainstack-start.sh"):
+                continue
+            try:
+                if Path(part).expanduser().resolve() == target_script:
+                    return True
+            except OSError:
+                continue
+    return False
 
 
 def _check_docker_helpers(target: Path, planned_install: bool) -> list[Check]:

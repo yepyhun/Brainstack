@@ -2091,3 +2091,41 @@ def test_local_doctor_does_not_require_docker_compose(monkeypatch, tmp_path):
         check.name == "docker_gateway_mode" and check.status == "pass"
         for check in checks
     )
+
+
+def test_docker_doctor_accepts_desktop_launcher_stable_source_symlink(tmp_path):
+    real_target = tmp_path / "hermes-clean-commit"
+    (real_target / "scripts").mkdir(parents=True)
+    (real_target / "scripts" / "hermes-brainstack-start.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    stable_target = tmp_path / "hermes-latest-source-current"
+    stable_target.symlink_to(real_target, target_is_directory=True)
+    launcher = tmp_path / "Hermes-Bestie-Start.desktop"
+    launcher.write_text(
+        "[Desktop Entry]\n"
+        f"Exec=/usr/bin/konsole --hold -e {stable_target}/scripts/hermes-brainstack-start.sh start\n",
+        encoding="utf-8",
+    )
+
+    checks = brainstack_doctor._check_desktop_launcher(real_target.resolve(), launcher, "docker")
+
+    assert {check.name: check.status for check in checks}["desktop_launcher_target"] == "pass"
+    assert {check.name: check.status for check in checks}["desktop_launcher_mode"] == "pass"
+
+
+def test_docker_doctor_rejects_desktop_launcher_wrong_checkout(tmp_path):
+    real_target = tmp_path / "hermes-clean-commit"
+    wrong_target = tmp_path / "hermes-old-commit"
+    (real_target / "scripts").mkdir(parents=True)
+    (wrong_target / "scripts").mkdir(parents=True)
+    (real_target / "scripts" / "hermes-brainstack-start.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (wrong_target / "scripts" / "hermes-brainstack-start.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher = tmp_path / "Hermes-Bestie-Start.desktop"
+    launcher.write_text(
+        "[Desktop Entry]\n"
+        f"Exec=/usr/bin/konsole --hold -e {wrong_target}/scripts/hermes-brainstack-start.sh start\n",
+        encoding="utf-8",
+    )
+
+    checks = brainstack_doctor._check_desktop_launcher(real_target.resolve(), launcher, "docker")
+
+    assert {check.name: check.status for check in checks}["desktop_launcher_target"] == "fail"
