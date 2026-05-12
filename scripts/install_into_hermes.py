@@ -37,6 +37,7 @@ from brainstack.capability_enablement import (  # noqa: E402
     build_enablement_plan,
     summarize_enablement_plan,
 )
+from brainstack.config_shape import default_profile_brainstack_dir, validate_brainstack_config_shape  # noqa: E402
 from brainstack.tier2_runtime_spine import (  # noqa: E402
     TIER2_HINDSIGHT_PUBLIC_API_BRIDGE,
     TIER2_INTERNAL_EXTRACTOR,
@@ -5720,6 +5721,7 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
         raise RuntimeError("config.yaml has non-object `agent` section")
     agent = config["agent"]
     proactive_runtime = _normalize_proactive_runtime_config(config)
+    config_shape_validation = validate_brainstack_config_shape(config)
     if not dry_run:
         _write_yaml(config_path, config)
     return {
@@ -5734,6 +5736,7 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
         "compression_runtime_hygiene": compression_runtime_hygiene,
         "discord_visibility_hygiene": discord_visibility_hygiene,
         "kanban_toolset_hygiene": kanban_toolset_hygiene,
+        "config_shape_validation": config_shape_validation,
         "gateway_timeout": agent.get("gateway_timeout"),
         "gateway_timeout_warning": agent.get("gateway_timeout_warning"),
         "proactive_runtime": proactive_runtime,

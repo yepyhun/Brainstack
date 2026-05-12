@@ -28,6 +28,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from brainstack.background_task_binding import REQUIRED_BACKGROUND_TASK_BINDINGS  # noqa: E402
+from brainstack.config_shape import validate_brainstack_config_shape  # noqa: E402
 
 try:
     from hermes_gateway_patch_support import inspect_gateway_patch_support
@@ -722,6 +723,21 @@ def _check_config(
         checks.append(Check("brainstack_plugin_config", "warn", "plugins.brainstack config section is absent; provider will use defaults"))
 
     brainstack = plugins.get("brainstack", {}) if isinstance(plugins.get("brainstack", {}), dict) else {}
+    shape_report = validate_brainstack_config_shape(config)
+    if shape_report["status"] == "pass":
+        checks.append(Check("brainstack_config_shape", "pass", "plugins.brainstack uses the supported flat config shape"))
+    else:
+        for issue in shape_report["issues"]:
+            checks.append(
+                Check(
+                    "brainstack_config_shape",
+                    "fail",
+                    (
+                        f"{issue['key_path']} is ignored by runtime; "
+                        f"use {issue['supported_replacement']} instead"
+                    ),
+                )
+            )
     graph_backend = str(brainstack.get("graph_backend") or "kuzu").strip().lower()
     graph_db_path = str(brainstack.get("graph_db_path") or "").strip()
     corpus_backend = str(brainstack.get("corpus_backend") or "chroma").strip().lower()
