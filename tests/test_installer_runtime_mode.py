@@ -403,6 +403,88 @@ def test_config_patch_preserves_generous_auxiliary_compression_timeout(tmp_path)
     assert result["compression_runtime_hygiene"]["status"] == "unchanged"
 
 
+def test_tool_result_budget_patch_covers_kanban_board_outputs(tmp_path):
+    budget_config = tmp_path / "budget_config.py"
+    budget_config.write_text(
+        "from dataclasses import dataclass, field\n"
+        "from typing import Dict\n"
+        "PINNED_THRESHOLDS: Dict[str, float] = {\n"
+        '    "read_file": float("inf"),\n'
+        "}\n"
+        "DEFAULT_RESULT_SIZE_CHARS: int = 100_000\n"
+        "DEFAULT_TURN_BUDGET_CHARS: int = 200_000\n"
+        "DEFAULT_PREVIEW_SIZE_CHARS: int = 1_500\n"
+        "@dataclass(frozen=True)\n"
+        "class BudgetConfig:\n"
+        "    default_result_size: int = DEFAULT_RESULT_SIZE_CHARS\n"
+        "    turn_budget: int = DEFAULT_TURN_BUDGET_CHARS\n"
+        "    preview_size: int = DEFAULT_PREVIEW_SIZE_CHARS\n"
+        "    tool_overrides: Dict[str, int] = field(default_factory=dict)\n"
+        "    def resolve_threshold(self, tool_name: str) -> int | float:\n"
+        "        if tool_name in PINNED_THRESHOLDS:\n"
+        "            return PINNED_THRESHOLDS[tool_name]\n"
+        "        if tool_name in self.tool_overrides:\n"
+        "            return self.tool_overrides[tool_name]\n"
+        "        return self.default_result_size\n"
+        "DEFAULT_BUDGET = BudgetConfig()\n",
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_tool_result_budget_config(budget_config, dry_run=False)
+    namespace: dict[str, object] = {}
+    exec(compile(budget_config.read_text(encoding="utf-8"), str(budget_config), "exec"), namespace)
+    budget = namespace["DEFAULT_BUDGET"]
+
+    assert "tool_result_budget:constants" in applied
+    assert budget.resolve_threshold("kanban_list") == 12_000
+    assert budget.resolve_threshold("kanban_show") == 16_000
+    assert budget.resolve_threshold("read_file") == 32_000
+
+
+def test_context_compressor_patch_bounds_summary_and_preserves_fallback(tmp_path):
+    context_compressor = tmp_path / "context_compressor.py"
+    context_compressor.write_text(
+        "_SUMMARY_TOKENS_CEILING = 12_000\n"
+        "class ContextCompressor:\n"
+        "    def _compute_summary_budget(self, turns_to_summarize):\n"
+        "        content_tokens = estimate_messages_tokens_rough(turns_to_summarize)\n"
+        "        budget = int(content_tokens * _SUMMARY_RATIO)\n"
+        "        return max(_MIN_SUMMARY_TOKENS, min(budget, self.max_summary_tokens))\n"
+        "    def _generate_summary(self, turns_to_summarize: List[Dict[str, Any]], focus_topic: str = None) -> Optional[str]:\n"
+        "        pass\n"
+        "    def compress(self, messages, current_tokens=None, focus_topic=None):\n"
+        "        summary = self._generate_summary(turns_to_summarize, focus_topic=focus_topic)\n"
+        "        # If LLM summary failed, insert a static fallback so the model\n"
+        "        # knows context was lost rather than silently dropping everything.\n"
+        "        if not summary:\n"
+        "            if not self.quiet_mode:\n"
+        "                logger.warning(\"Summary generation failed — inserting static fallback context marker\")\n"
+        "            n_dropped = compress_end - compress_start\n"
+        "            self._last_summary_dropped_count = n_dropped\n"
+        "            self._last_summary_fallback_used = True\n"
+        "            summary = (\n"
+        "                f\"{SUMMARY_PREFIX}\\n\"\n"
+        "                f\"Summary generation was unavailable. {n_dropped} message(s) were \"\n"
+        "                f\"removed to free context space but could not be summarized. The removed \"\n"
+        "                f\"messages contained earlier work in this session. Continue based on the \"\n"
+        "                f\"recent messages below and the current state of any files or resources.\"\n"
+        "            )\n",
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_context_compressor_runtime_budget(context_compressor, dry_run=False)
+    text = context_compressor.read_text(encoding="utf-8")
+
+    assert "context_compressor:fast_summary_ceiling_constant" in applied
+    assert "context_compressor:bounded_summary_output_budget" in applied
+    assert "context_compressor:deterministic_fallback_summary" in applied
+    assert "context_compressor:deterministic_fallback_use" in applied
+    assert "_FAST_SUMMARY_TOKENS_CEILING = 4_000" in text
+    assert "min(budget, self.max_summary_tokens, _FAST_SUMMARY_TOKENS_CEILING)" in text
+    assert "def _build_deterministic_fallback_summary(" in text
+    assert "Summary generation was unavailable" not in text
+
+
 def test_config_patch_enables_bounded_discord_streaming_visibility(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text(

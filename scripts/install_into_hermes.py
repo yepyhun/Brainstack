@@ -76,6 +76,7 @@ PROACTIVE_CRON_GATE_SCRIPT_NAME = "brainstack_proactive_pulse_gate.py"
 SESSION_SEARCH_TOTAL_TIMEOUT_SECONDS = 20
 SESSION_SEARCH_MAX_CONCURRENCY = 1
 COMPRESSION_AUXILIARY_MIN_TIMEOUT_SECONDS = 120
+COMPRESSION_FAST_SUMMARY_MAX_TOKENS = 4_000
 DISCORD_STREAMING_EDIT_INTERVAL_SECONDS = 3.0
 DISCORD_STREAMING_BUFFER_THRESHOLD = 200
 
@@ -110,6 +111,11 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "category": "required_seam",
         "owner": "host-output-seam",
         "removal_condition": "Hermes natively applies bounded model-facing tool-result budgets for large native/plugin tool outputs while preserving full artifacts.",
+    },
+    "_patch_context_compressor_runtime_budget": {
+        "category": "required_seam",
+        "owner": "host-compression-seam",
+        "removal_condition": "Hermes natively bounds auxiliary compression output budgets and preserves a deterministic fallback summary when auxiliary summarization fails.",
     },
     "_patch_memory_provider": {
         "category": "compat_hotfix",
@@ -505,6 +511,14 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_modes": ("source", "docker"),
         "purpose": "Lower model-facing inline budgets for observed context-heavy tool results and remove the read_file persistence escape hatch.",
         "why": "Hermes already preserves oversized outputs as artifacts, but the 100k default lets 80k+ skill/tool payloads enter the protected context tail and repeatedly break compression.",
+    },
+    {
+        "patcher": "_patch_context_compressor_runtime_budget",
+        "target": "agent/context_compressor.py",
+        "scope": "host-compression-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Keep auxiliary compression summaries within an interactive output budget and preserve a deterministic fallback summary if the auxiliary LLM fails.",
+        "why": "Large but valid sessions can request 10k+ token compression summaries; Codex auxiliary can time out after 120s and otherwise replace compacted turns with a low-information lost-context marker.",
     },
     {
         "patcher": "_patch_gateway_turn_profiles_capability_preserving_default",
@@ -3951,6 +3965,8 @@ def _patch_tool_result_budget_config(path: Path, dry_run: bool) -> list[str]:
             '    "browser_navigate": 12_000,\n'
             '    "delegate_task": BRAINSTACK_MODEL_FACING_INLINE_CHARS,\n'
             '    "execute_code": BRAINSTACK_MODEL_FACING_INLINE_CHARS,\n'
+            '    "kanban_list": 12_000,\n'
+            '    "kanban_show": 16_000,\n'
             '    "process": BRAINSTACK_MODEL_FACING_INLINE_CHARS,\n'
             '    "read_file": BRAINSTACK_MODEL_FACING_INLINE_CHARS,\n'
             '    "search_files": BRAINSTACK_MODEL_FACING_INLINE_CHARS,\n'
@@ -3961,6 +3977,22 @@ def _patch_tool_result_budget_config(path: Path, dry_run: bool) -> list[str]:
         )
         text = _replace_once(text, anchor, insert, label="tool result model-facing budget constants", path=path)
         applied.append("tool_result_budget:constants")
+
+    for entry in (
+        '    "kanban_list": 12_000,\n',
+        '    "kanban_show": 16_000,\n',
+    ):
+        tool_name = entry.split('"', 2)[1]
+        if f'"{tool_name}"' not in text:
+            anchor = '    "process": BRAINSTACK_MODEL_FACING_INLINE_CHARS,\n'
+            text = _replace_once(
+                text,
+                anchor,
+                entry + anchor,
+                label=f"tool result budget {tool_name}",
+                path=path,
+            )
+            applied.append(f"tool_result_budget:{tool_name}")
 
     pinned_block = (
         'PINNED_THRESHOLDS: Dict[str, float] = {\n'
@@ -3986,6 +4018,233 @@ def _patch_tool_result_budget_config(path: Path, dry_run: bool) -> list[str]:
             path=path,
         )
         applied.append("tool_result_budget:default_overrides")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_context_compressor_runtime_budget(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    if "_FAST_SUMMARY_TOKENS_CEILING" not in text:
+        anchor = "_SUMMARY_TOKENS_CEILING = 12_000\n"
+        insert = (
+            "_SUMMARY_TOKENS_CEILING = 12_000\n"
+            "# Runtime guard: auxiliary compression must finish inside an\n"
+            "# interactive gateway timeout. Larger summaries routinely exceed\n"
+            "# Codex auxiliary stream deadlines on valid long sessions; full\n"
+            "# transcript fidelity is preserved by the deterministic fallback and\n"
+            "# by retained tail messages, not by asking for 10k+ output tokens.\n"
+            f"_FAST_SUMMARY_TOKENS_CEILING = {COMPRESSION_FAST_SUMMARY_MAX_TOKENS:_}\n"
+        )
+        text = _replace_once(
+            text,
+            anchor,
+            insert,
+            label="context compressor fast summary ceiling constant",
+            path=path,
+        )
+        applied.append("context_compressor:fast_summary_ceiling_constant")
+
+    old_budget = "        return max(_MIN_SUMMARY_TOKENS, min(budget, self.max_summary_tokens))\n"
+    new_budget = (
+        "        return max(\n"
+        "            _MIN_SUMMARY_TOKENS,\n"
+        "            min(budget, self.max_summary_tokens, _FAST_SUMMARY_TOKENS_CEILING),\n"
+        "        )\n"
+    )
+    if new_budget not in text and old_budget in text:
+        text = _replace_once(
+            text,
+            old_budget,
+            new_budget,
+            label="context compressor bounded summary output budget",
+            path=path,
+        )
+        applied.append("context_compressor:bounded_summary_output_budget")
+
+    if "def _build_deterministic_fallback_summary(" not in text:
+        method_anchor = "    def _generate_summary(self, turns_to_summarize: List[Dict[str, Any]], focus_topic: str = None) -> Optional[str]:\n"
+        method = '''    def _build_deterministic_fallback_summary(
+        self,
+        turns_to_summarize: List[Dict[str, Any]],
+        n_dropped: int,
+    ) -> str:
+        """Build a compact local summary when auxiliary summarization fails.
+
+        This is deliberately deterministic and bounded. It is not as rich as
+        an LLM summary, but it is much better than a lost-context placeholder:
+        it preserves tool/action skeletons, likely file paths, blocker clues,
+        and recent compacted user notes while keeping old asks historical.
+        """
+        call_id_to_tool: Dict[str, tuple[str, str]] = {}
+        for msg in turns_to_summarize:
+            if msg.get("role") != "assistant":
+                continue
+            for tc in msg.get("tool_calls") or []:
+                if isinstance(tc, dict):
+                    cid = self._get_tool_call_id(tc)
+                    fn = tc.get("function", {}) or {}
+                    call_id_to_tool[cid] = (fn.get("name", "unknown"), fn.get("arguments", ""))
+
+        def _one_line(value: Any, limit: int = 220) -> str:
+            text = _content_text_for_contains(value)
+            text = re.sub(r"\\s+", " ", text).strip()
+            if len(text) > limit:
+                return text[: limit - 3].rstrip() + "..."
+            return text
+
+        def _numbered(items: list[str], *, empty: str) -> str:
+            if not items:
+                return empty
+            return "\\n".join(f"{idx}. {item}" for idx, item in enumerate(items, 1))
+
+        actions: list[str] = []
+        blockers: list[str] = []
+        user_notes: list[str] = []
+        paths: list[str] = []
+        seen_paths: set[str] = set()
+
+        path_pattern = re.compile(r"(?:/[A-Za-z0-9_@+./:=,-]+|[A-Za-z0-9_.-]+/[A-Za-z0-9_./=-]+)")
+        blocker_pattern = re.compile(r"\\b(error|failed|failure|blocked|traceback|exception|timeout|critical)\\b", re.I)
+
+        for msg in turns_to_summarize:
+            role = msg.get("role", "unknown")
+            content = msg.get("content") or ""
+            content_text = _content_text_for_contains(content)
+
+            for match in path_pattern.findall(content_text):
+                if 3 < len(match) < 180 and match not in seen_paths:
+                    seen_paths.add(match)
+                    paths.append(match)
+
+            if blocker_pattern.search(content_text):
+                blockers.append(_one_line(content_text, 260))
+
+            if role == "tool":
+                call_id = msg.get("tool_call_id", "")
+                tool_name, tool_args = call_id_to_tool.get(
+                    call_id,
+                    (msg.get("name") or "unknown", ""),
+                )
+                actions.append(_summarize_tool_result(tool_name, tool_args, content_text))
+                continue
+
+            if role == "assistant":
+                tool_calls = msg.get("tool_calls") or []
+                if tool_calls:
+                    names: list[str] = []
+                    for tc in tool_calls:
+                        if isinstance(tc, dict):
+                            names.append((tc.get("function", {}) or {}).get("name", "?"))
+                    if names:
+                        actions.append("[assistant] requested tools: " + ", ".join(names[:8]))
+                elif content_text.strip():
+                    actions.append("[assistant] " + _one_line(content_text, 220))
+                continue
+
+            if role == "user" and content_text.strip():
+                user_notes.append(_one_line(content_text, 260))
+
+        actions = actions[-30:]
+        blockers = blockers[-12:]
+        user_notes = user_notes[-8:]
+        paths = paths[:24]
+
+        body = "\\n".join([
+            "## Active Task",
+            "Use the latest user message after this summary. This deterministic fallback keeps compacted historical context only; it must not promote old compacted asks as new active instructions.",
+            "",
+            "## Goal",
+            f"Recover enough continuity after auxiliary compression failed while compacting {n_dropped} historical message(s).",
+            "",
+            "## Constraints & Preferences",
+            "Preserve current tail messages as authoritative. Treat this fallback as background evidence, not a replacement for live tool state or user instructions.",
+            "",
+            "## Completed Actions",
+            _numbered(actions, empty="No concrete tool/action skeleton was recoverable from the compacted region."),
+            "",
+            "## Active State",
+            "Unknown from deterministic fallback; inspect current files, task board, and recent tail messages before claiming state.",
+            "",
+            "## In Progress",
+            "Unknown from deterministic fallback; use protected tail messages and current runtime state.",
+            "",
+            "## Blocked",
+            _numbered(blockers, empty="No explicit blocker keywords were detected in the compacted region."),
+            "",
+            "## Key Decisions",
+            "Auxiliary LLM summary was unavailable or too slow; Hermes used a deterministic bounded fallback instead of dropping context into a low-information placeholder.",
+            "",
+            "## Resolved Questions",
+            "Not reliably inferable from deterministic fallback.",
+            "",
+            "## Pending User Asks",
+            _numbered(user_notes, empty="None captured from the compacted region. The latest user message after this summary remains authoritative."),
+            "",
+            "## Relevant Files",
+            _numbered(paths, empty="No file paths detected in the compacted region."),
+            "",
+            "## Remaining Work",
+            "Continue from the latest post-summary user message. If detail matters, inspect referenced files, Kanban tasks, logs, or receipts directly.",
+            "",
+            "## Critical Context",
+            "This was generated without an auxiliary LLM call. It is intentionally compact, source-like, and conservative.",
+        ])
+        return self._with_summary_prefix(body)
+
+'''
+        text = _replace_once(
+            text,
+            method_anchor,
+            method + method_anchor,
+            label="context compressor deterministic fallback summary",
+            path=path,
+        )
+        applied.append("context_compressor:deterministic_fallback_summary")
+
+    static_fallback = '''        # If LLM summary failed, insert a static fallback so the model
+        # knows context was lost rather than silently dropping everything.
+        if not summary:
+            if not self.quiet_mode:
+                logger.warning("Summary generation failed — inserting static fallback context marker")
+            n_dropped = compress_end - compress_start
+            self._last_summary_dropped_count = n_dropped
+            self._last_summary_fallback_used = True
+            summary = (
+                f"{SUMMARY_PREFIX}\\n"
+                f"Summary generation was unavailable. {n_dropped} message(s) were "
+                f"removed to free context space but could not be summarized. The removed "
+                f"messages contained earlier work in this session. Continue based on the "
+                f"recent messages below and the current state of any files or resources."
+            )
+'''
+    deterministic_fallback = '''        # If LLM summary failed, keep a deterministic bounded handoff instead
+        # of replacing compacted history with a low-information lost-context
+        # marker. This keeps compression useful even when the auxiliary route is
+        # slow, offline, or rate-limited.
+        if not summary:
+            if not self.quiet_mode:
+                logger.warning("Summary generation failed — inserting deterministic fallback context summary")
+            n_dropped = compress_end - compress_start
+            summary = self._build_deterministic_fallback_summary(turns_to_summarize, n_dropped)
+            self._last_summary_dropped_count = 0
+            self._last_summary_fallback_used = False
+            self._last_summary_error = None
+'''
+    if deterministic_fallback not in text and static_fallback in text:
+        text = _replace_once(
+            text,
+            static_fallback,
+            deterministic_fallback,
+            label="context compressor deterministic fallback use",
+            path=path,
+        )
+        applied.append("context_compressor:deterministic_fallback_use")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -7148,6 +7407,7 @@ def main() -> int:
     host_patches.extend(_run_host_patch("_patch_session_search_total_deadline", target / "tools" / "session_search_tool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_discord_typing_backoff", target / "gateway" / "platforms" / "discord.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_run_agent_ebadf_transport_recovery", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_context_compressor_runtime_budget", target / "agent" / "context_compressor.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_credential_pool", target / "agent" / "credential_pool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_credential_pool_tests", target / "tests" / "agent" / "test_credential_pool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_memory_provider", target / "agent" / "memory_provider.py", args.dry_run, host_patch_mode=args.host_patch_mode))

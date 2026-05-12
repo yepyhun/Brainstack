@@ -35,6 +35,8 @@ OBSERVED_CONTEXT_HEAVY_TOOLS = (
     "browser_navigate",
     "delegate_task",
     "execute_code",
+    "kanban_list",
+    "kanban_show",
     "process",
     "read_file",
     "search_files",
@@ -99,6 +101,10 @@ def _verify_thresholds(namespace: dict[str, Any]) -> tuple[dict[str, int | float
         issues.append("skills_list should use the compact 12k budget")
     if thresholds.get("browser_navigate") != SMALL_LIMIT:
         issues.append("browser_navigate should use the compact 12k budget")
+    if thresholds.get("kanban_list") != SMALL_LIMIT:
+        issues.append("kanban_list should use the compact 12k budget")
+    if thresholds.get("kanban_show") != 16_000:
+        issues.append("kanban_show should use the compact 16k budget")
     return thresholds, issues
 
 
@@ -142,6 +148,8 @@ def build_report(hermes_source: Path) -> dict[str, Any]:
         "read_file_no_longer_infinite_pinned": namespace["PINNED_THRESHOLDS"] == {},
         "skill_view_86k_would_not_inline": thresholds["skill_view"] < 86_000,
         "brainstack_inspect_95k_would_not_inline": thresholds["brainstack_inspect"] < 95_000,
+        "kanban_list_49k_would_not_inline": thresholds["kanban_list"] < 49_000,
+        "kanban_show_17k_would_not_inline": thresholds["kanban_show"] < 17_600,
         "full_output_artifact_contract_present": (
             "Full output saved to:" in storage_source
             and "read_file tool with offset and limit" in storage_source
