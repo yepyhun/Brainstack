@@ -18,20 +18,28 @@ from scripts.hermes_gateway_patch_support import inspect_gateway_patch_support  
 
 SCHEMA = "brainstack.fresh_hermes_brainstack_install_proof.v1"
 
-REQUIRED_PLUGIN_FILES = {
-    "plugins/memory/brainstack/adaptive_consolidation.py",
-    "plugins/memory/brainstack/adaptive_evidence_broker.py",
-    "plugins/memory/brainstack/adaptive_evidence_hotpath.py",
-    "plugins/memory/brainstack/adaptive_route_plan.py",
-    "plugins/memory/brainstack/current_truth_view.py",
-    "plugins/memory/brainstack/control_plane.py",
-    "plugins/memory/brainstack/core/packet_budget.py",
-    "plugins/memory/brainstack/diagnostics.py",
-    "plugins/memory/brainstack/persistent_bloat.py",
-    "plugins/memory/brainstack/projection_conformance.py",
-}
-
 REQUIRED_DOCKERFILE_DEPENDENCIES = {"kuzu", "chromadb", "openai", "croniter"}
+
+
+def _required_plugin_files() -> set[str]:
+    """Return every public Brainstack plugin payload file expected in Hermes.
+
+    The installer copies the full `brainstack/` package into
+    `plugins/memory/brainstack/`. A static sample list lets new modules pass
+    fresh-install verification while missing from the live plugin payload; this
+    function makes the verifier check source-of-truth completeness instead.
+    """
+
+    source_root = ROOT / "brainstack"
+    required: set[str] = set()
+    for path in sorted(source_root.rglob("*")):
+        if not path.is_file():
+            continue
+        if "__pycache__" in path.parts or path.name.endswith(".pyc"):
+            continue
+        rel = path.relative_to(source_root).as_posix()
+        required.add(f"plugins/memory/brainstack/{rel}")
+    return required
 
 
 def _run(
@@ -205,7 +213,8 @@ def _start_script_checks(target: Path) -> dict[str, Any]:
 def evaluate_installed_target(target: Path) -> dict[str, Any]:
     manifest = _load_manifest(target)
     installed_files = _relative_installed_files(target, manifest) if manifest.get("status") == "present" else set()
-    missing_plugin_files = sorted(REQUIRED_PLUGIN_FILES - installed_files)
+    required_plugin_files = _required_plugin_files()
+    missing_plugin_files = sorted(required_plugin_files - installed_files)
     compose = _compose_checks(target)
     dockerfile = _dockerfile_checks(target)
     start_script = _start_script_checks(target)
@@ -231,6 +240,7 @@ def evaluate_installed_target(target: Path) -> dict[str, Any]:
             "status": manifest.get("status"),
             "runtime_mode": manifest.get("runtime_mode"),
             "payload_file_count": len(manifest.get("files") or []),
+            "required_plugin_file_count": len(required_plugin_files),
             "helper_file_count": len(manifest.get("helper_files") or []),
             "generated_file_count": len(manifest.get("generated_files") or []),
             "secrets_included": manifest.get("secrets_included"),

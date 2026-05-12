@@ -41,6 +41,7 @@ REQUIRED_PLUGIN_FILES = [
     "output_contract.py",
     "operating_context.py",
     "operating_truth.py",
+    "operating_loop.py",
     "plugin.yaml",
     "db.py",
     "corpus_backend.py",

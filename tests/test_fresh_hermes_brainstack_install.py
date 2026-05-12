@@ -4,23 +4,15 @@ import json
 from pathlib import Path
 
 from scripts import hermes_gateway_patch_support
-from scripts.verify_fresh_hermes_brainstack_install import evaluate_installed_target
+from scripts.verify_fresh_hermes_brainstack_install import evaluate_installed_target, _required_plugin_files
 
 
 def test_evaluate_installed_target_requires_m007_payload_and_tei_runtime(tmp_path: Path) -> None:
     target = tmp_path / "hermes"
     plugin_root = target / "plugins" / "memory" / "brainstack"
     plugin_files = [
-        "adaptive_consolidation.py",
-        "adaptive_evidence_broker.py",
-        "adaptive_evidence_hotpath.py",
-        "adaptive_route_plan.py",
-        "current_truth_view.py",
-        "control_plane.py",
-        "core/packet_budget.py",
-        "diagnostics.py",
-        "persistent_bloat.py",
-        "projection_conformance.py",
+        rel.removeprefix("plugins/memory/brainstack/")
+        for rel in sorted(_required_plugin_files())
     ]
     manifest_files = []
     for rel in plugin_files:
@@ -125,6 +117,7 @@ def test_evaluate_installed_target_fails_when_adaptive_payload_missing(tmp_path:
     assert report["payload_status"] == "fail"
     assert report["gateway_patch_status"] == "fail"
     assert "plugins/memory/brainstack/adaptive_route_plan.py" in report["missing_plugin_files"]
+    assert "plugins/memory/brainstack/operating_loop.py" in report["missing_plugin_files"]
 
 
 def test_evaluate_installed_target_fails_legacy_python_alias_and_naive_service_picker(tmp_path: Path) -> None:
