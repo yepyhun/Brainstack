@@ -1854,6 +1854,55 @@ def _check_live_memory_fitness_report(tmp: Path) -> CheckResult:
     )
 
 
+def _check_memory_outcome_harness(tmp: Path) -> CheckResult:
+    out = tmp / "memory_outcome_harness.json"
+    command = [sys.executable, "scripts/run_memory_outcome_harness.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    summary = data.get("summary") if isinstance(data.get("summary"), Mapping) else {}
+    proof_keys = (
+        "all_modes_present",
+        "metric_keys_complete",
+        "brainstack_negative_invariants_hold",
+        "raw_history_baseline_represented",
+        "memory_off_baseline_represented",
+        "brainstack_token_savings_observed",
+        "deterministic_no_llm_calls",
+        "public_safe_report",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("read_only") is True
+        and data.get("side_effect_free") is True
+        and data.get("llm_calls_performed") is False
+        and data.get("issues") == []
+        and int(data.get("harness_count") or 0) >= 5
+        and int(data.get("mode_count") or 0) == 3
+        and all(proof.get(key) is True for key in proof_keys)
+    )
+    return CheckResult(
+        name="memory_outcome_harness",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "read_only": data.get("read_only"),
+            "side_effect_free": data.get("side_effect_free"),
+            "harness_count": data.get("harness_count"),
+            "mode_count": data.get("mode_count"),
+            "brainstack_answer_correct_count": summary.get("brainstack_answer_correct_count"),
+            "raw_history_answer_correct_count": summary.get("raw_history_answer_correct_count"),
+            "brainstack_token_savings_cases": summary.get("brainstack_token_savings_cases"),
+            "proof": {key: proof.get(key) for key in proof_keys},
+        },
+    )
+
+
 def _check_kanban_capability_evidence_ladder(tmp: Path) -> CheckResult:
     out = tmp / "kanban_capability_evidence_ladder.json"
     command = [sys.executable, "scripts/verify_kanban_capability_evidence_ladder.py", "--out", str(out)]
@@ -3333,6 +3382,7 @@ def run_checklist(
             _check_host_tool_result_budget(tmp),
             _check_duplicate_strength_consolidation(tmp),
             _check_live_memory_fitness_report(tmp),
+            _check_memory_outcome_harness(tmp),
             _check_kanban_capability_evidence_ladder(tmp),
             _check_wizard_capability_enablement_matrix(tmp),
             _check_live_safe_kanban_gauntlet(tmp),
