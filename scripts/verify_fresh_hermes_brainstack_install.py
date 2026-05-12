@@ -150,13 +150,46 @@ def _compose_checks(target: Path) -> dict[str, Any]:
 def _dockerfile_checks(target: Path) -> dict[str, Any]:
     dockerfile = target / "Dockerfile"
     if not dockerfile.exists():
-        return {"status": "fail", "missing": sorted(REQUIRED_DOCKERFILE_DEPENDENCIES), "dockerfile_present": False}
+        return {
+            "status": "fail",
+            "missing": sorted(REQUIRED_DOCKERFILE_DEPENDENCIES),
+            "dockerfile_present": False,
+            "workstation_python_alias": "missing",
+        }
     text = dockerfile.read_text(encoding="utf-8", errors="replace")
     missing = sorted(dep for dep in REQUIRED_DOCKERFILE_DEPENDENCIES if dep not in text)
+    workstation_python_alias = (
+        "venv_wrapper"
+        if 'exec /opt/hermes/.venv/bin/python "$@"' in text
+        else "legacy_system_python"
+        if "ln -sf /usr/bin/python3 /usr/local/bin/python" in text
+        else "missing"
+    )
     return {
-        "status": "pass" if not missing else "fail",
+        "status": "pass" if not missing and workstation_python_alias == "venv_wrapper" else "fail",
         "dockerfile_present": True,
         "missing": missing,
+        "workstation_python_alias": workstation_python_alias,
+    }
+
+
+def _start_script_checks(target: Path) -> dict[str, Any]:
+    scripts = sorted((target / "scripts").glob("hermes-brainstack-start.sh"))
+    if not scripts:
+        return {"status": "fail", "script_present": False, "reason": "missing_start_script"}
+    text = scripts[0].read_text(encoding="utf-8", errors="replace")
+    expected_service = 'EXPECTED_SERVICE="hermes-' in text
+    expected_service_selected = 'SERVICE="$EXPECTED_SERVICE"' in text
+    fallback_container_lookup = "container_name:[[:space:]]*hermes-.*-live" in text
+    first_service_naive = "print $1; exit" in text
+    passed = expected_service and expected_service_selected and fallback_container_lookup and not first_service_naive
+    return {
+        "status": "pass" if passed else "fail",
+        "script_present": True,
+        "expected_service": expected_service,
+        "expected_service_selected": expected_service_selected,
+        "fallback_container_lookup": fallback_container_lookup,
+        "first_service_naive": first_service_naive,
     }
 
 
@@ -166,6 +199,7 @@ def evaluate_installed_target(target: Path) -> dict[str, Any]:
     missing_plugin_files = sorted(REQUIRED_PLUGIN_FILES - installed_files)
     compose = _compose_checks(target)
     dockerfile = _dockerfile_checks(target)
+    start_script = _start_script_checks(target)
     gateway_patch = inspect_gateway_patch_support(target)
     manifest_status = "pass" if manifest.get("status") == "present" and manifest.get("secrets_included") is False else "fail"
     payload_status = "pass" if not missing_plugin_files else "fail"
@@ -177,6 +211,7 @@ def evaluate_installed_target(target: Path) -> dict[str, Any]:
             payload_status,
             compose.get("status"),
             dockerfile.get("status"),
+            start_script.get("status"),
             gateway_patch_status,
         )
     ) else "fail"
@@ -197,6 +232,7 @@ def evaluate_installed_target(target: Path) -> dict[str, Any]:
         "missing_plugin_files": missing_plugin_files,
         "compose": compose,
         "dockerfile": dockerfile,
+        "start_script": start_script,
         "gateway_patch_status": gateway_patch_status,
         "gateway_patch": {
             "status": gateway_patch.get("status"),

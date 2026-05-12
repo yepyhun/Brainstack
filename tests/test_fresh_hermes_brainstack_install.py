@@ -54,13 +54,42 @@ services:
     environment:
       - BRAINSTACK_EMBEDDINGS_URL=http://127.0.0.1:7997/embed
       - BRAINSTACK_TIER2_HINDSIGHT_EMBEDDINGS_TEI_URL=http://127.0.0.1:7997
+      - TERMINAL_CWD=/workspace
+      - PATH=/opt/hermes/.venv/bin:/opt/data/bin:/usr/local/bin:/usr/bin
+    volumes:
+      - ./runtime/workspace:/workspace
     depends_on:
       tei-jina:
         condition: service_healthy
 """,
         encoding="utf-8",
     )
-    (target / "Dockerfile").write_text("RUN pip install kuzu chromadb openai croniter\n", encoding="utf-8")
+    (target / "Dockerfile").write_text(
+        """
+RUN pip install kuzu chromadb openai croniter
+RUN printf '%s\\n' '#!/bin/sh' 'exec /opt/hermes/.venv/bin/python "$@"' > /usr/local/bin/python && chmod 0755 /usr/local/bin/python
+""",
+        encoding="utf-8",
+    )
+    start_script = target / "scripts" / "hermes-brainstack-start.sh"
+    start_script.parent.mkdir(parents=True, exist_ok=True)
+    start_script.write_text(
+        """
+SERVICE="${HERMES_DOCKER_SERVICE:-}"
+EXPECTED_SERVICE="hermes-bestie"
+if [ -z "$SERVICE" ] && [ -f "$COMPOSE_FILE" ]; then
+  if awk -v svc="$EXPECTED_SERVICE" '$0 ~ "^[[:space:]]{2}" svc ":$" { found=1 } END { exit found ? 0 : 1 }' "$COMPOSE_FILE"; then
+    SERVICE="$EXPECTED_SERVICE"
+  else
+    SERVICE=$(awk '
+      /^[[:space:]]{2}[A-Za-z0-9_.-]+:$/ { svc=$1; gsub(":","",svc); next }
+      /^[[:space:]]{4}container_name:[[:space:]]*hermes-.*-live[[:space:]]*$/ && svc { print svc; exit }
+    ' "$COMPOSE_FILE")
+  fi
+fi
+""",
+        encoding="utf-8",
+    )
     for relative, markers in hermes_gateway_patch_support.REQUIRED_GATEWAY_PROBES.items():
         probe_file = target / relative
         probe_file.parent.mkdir(parents=True, exist_ok=True)
@@ -73,6 +102,8 @@ services:
     assert report["missing_plugin_files"] == []
     assert report["compose"]["status"] == "pass"
     assert report["dockerfile"]["status"] == "pass"
+    assert report["dockerfile"]["workstation_python_alias"] == "venv_wrapper"
+    assert report["start_script"]["status"] == "pass"
     assert report["gateway_patch_status"] == "pass"
 
 
@@ -92,3 +123,44 @@ def test_evaluate_installed_target_fails_when_adaptive_payload_missing(tmp_path:
     assert report["payload_status"] == "fail"
     assert report["gateway_patch_status"] == "fail"
     assert "plugins/memory/brainstack/adaptive_route_plan.py" in report["missing_plugin_files"]
+
+
+def test_evaluate_installed_target_fails_legacy_python_alias_and_naive_service_picker(tmp_path: Path) -> None:
+    target = tmp_path / "hermes"
+    target.mkdir()
+    (target / ".brainstack-install-manifest.json").write_text(
+        json.dumps({"runtime_mode": "docker", "files": [], "secrets_included": False}),
+        encoding="utf-8",
+    )
+    (target / "docker-compose.bestie.yml").write_text(
+        """
+services:
+  tei-jina:
+    image: tei
+  hermes-bestie:
+    container_name: hermes-bestie-live
+    environment:
+      TERMINAL_CWD: /workspace
+      PATH: /opt/hermes/.venv/bin:/opt/data/bin:/usr/local/bin:/usr/bin
+    volumes:
+      - ./runtime/workspace:/workspace
+""",
+        encoding="utf-8",
+    )
+    (target / "Dockerfile").write_text(
+        "RUN pip install kuzu chromadb openai croniter\nRUN ln -sf /usr/bin/python3 /usr/local/bin/python\n",
+        encoding="utf-8",
+    )
+    start_script = target / "scripts" / "hermes-brainstack-start.sh"
+    start_script.parent.mkdir(parents=True, exist_ok=True)
+    start_script.write_text(
+        "SERVICE=$(awk '/^[[:space:]]{2}[A-Za-z0-9_.-]+:$/ {gsub(\":\",\"\",$1); print $1; exit}' \"$COMPOSE_FILE\")\n",
+        encoding="utf-8",
+    )
+
+    report = evaluate_installed_target(target)
+
+    assert report["status"] == "fail"
+    assert report["dockerfile"]["workstation_python_alias"] == "legacy_system_python"
+    assert report["start_script"]["status"] == "fail"
+    assert report["start_script"]["first_service_naive"] is True
