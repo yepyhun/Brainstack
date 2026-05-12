@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from brainstack.operating_loop import build_operating_loop_verdict  # noqa: E402
+from brainstack.operating_loop import build_frontier_continuation_contract, build_operating_loop_verdict  # noqa: E402
 
 
 REPORT_SCHEMA = "brainstack.operating_loop_liveness_contract_proof.v1"
@@ -62,6 +62,23 @@ def build_report() -> dict[str, object]:
             "executor": {"last_run_age_seconds": 1200, "stale_after_seconds": 600},
         }
     )
+    cadence_primary = build_operating_loop_verdict(
+        {
+            "kanban_runtime_snapshot": {"dispatcher_state": "ready_idle"},
+            "signal_bus": {"status": "ok"},
+            "executor": {"status": "ok"},
+            "frontier_continuation": build_frontier_continuation_contract(
+                {
+                    "allocator": {
+                        "id": "allocator",
+                        "fixed_schedule": True,
+                        "creates_work": True,
+                        "reads_events": False,
+                    }
+                }
+            ),
+        }
+    )
 
     proof = {
         "healthy_requires_frontier_and_fresh_lanes": healthy["verdict"] == "healthy",
@@ -72,9 +89,11 @@ def build_report() -> dict[str, object]:
         "empty_evidence_is_not_healthy": insufficient["verdict"] == "insufficient_evidence",
         "fresh_artifact_cannot_mask_stale_loop": artifact_only["verdict"] == "critical"
         and artifact_only["split_brain_detected"] is True,
+        "cadence_primary_frontier_is_not_healthy": cadence_primary["verdict"] == "degraded"
+        and "frontier_continuation_degraded" in cadence_primary["blockers"],
         "read_only_side_effect_free": all(
             item.get("read_only") is True and item.get("side_effect_free") is True
-            for item in (healthy, split_brain, intentional, insufficient, artifact_only)
+            for item in (healthy, split_brain, intentional, insufficient, artifact_only, cadence_primary)
         ),
     }
     issues = sorted(key for key, value in proof.items() if value is not True)
@@ -92,6 +111,7 @@ def build_report() -> dict[str, object]:
             "intentional": intentional["verdict"],
             "insufficient": insufficient["verdict"],
             "artifact_only": artifact_only["verdict"],
+            "cadence_primary": cadence_primary["verdict"],
         },
     }
 
@@ -110,4 +130,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

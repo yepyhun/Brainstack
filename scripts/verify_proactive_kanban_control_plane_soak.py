@@ -23,6 +23,7 @@ from scripts.verify_proactive_inspect_execute_split import build_report as build
 from scripts.verify_scheduler_lane_health_contract import build_report as build_scheduler_report  # noqa: E402
 from scripts.verify_workstream_controller_contract import build_report as build_controller_report  # noqa: E402
 from scripts.verify_hermes_auxiliary_compression_guard import build_report as build_compression_guard_report  # noqa: E402
+from scripts.verify_frontier_continuation_contract import build_report as build_frontier_continuation_report  # noqa: E402
 
 
 REPORT_SCHEMA = "brainstack.proactive_kanban_control_plane_soak.v1"
@@ -47,6 +48,7 @@ def build_report() -> dict[str, Any]:
     recovery = build_recovery_report()
     scheduler = build_scheduler_report()
     compression_guard = build_compression_guard_report()
+    frontier_continuation = build_frontier_continuation_report()
     reports = {
         "kanban_capability_evidence_ladder": kanban,
         "proactive_inspect_execute_split": inspect_execute,
@@ -58,6 +60,7 @@ def build_report() -> dict[str, Any]:
         "kanban_recovery_candidate_contract": recovery,
         "scheduler_lane_health_contract": scheduler,
         "hermes_auxiliary_compression_guard": compression_guard,
+        "frontier_continuation_contract": frontier_continuation,
     }
     kanban_proof = _mapping(kanban.get("proof"))
     inspect_proof = _mapping(inspect_execute.get("proof"))
@@ -69,6 +72,7 @@ def build_report() -> dict[str, Any]:
     recovery_proof = _mapping(recovery.get("proof"))
     scheduler_proof = _mapping(scheduler.get("proof"))
     compression_proof = _mapping(compression_guard.get("proof"))
+    continuation_proof = _mapping(frontier_continuation.get("proof"))
     proof = {
         "runtime_truth_snapshot_present": kanban_proof.get("dispatcher_snapshot_reports_wait_reasons") is True
         and kanban_proof.get("dispatcher_snapshot_reports_e2e_final_state") is True,
@@ -91,6 +95,9 @@ def build_report() -> dict[str, Any]:
         "scheduler_starvation_guarded": scheduler_proof.get("heavy_job_plus_stale_lane_is_critical") is True,
         "compression_bad_fd_guarded": compression_proof.get("incident_detector_catches_bad_fd") is True
         and compression_proof.get("owner_classified_as_hermes") is True,
+        "frontier_continuation_not_cadence_primary": continuation_proof.get("cadence_primary_is_degraded_not_healthy") is True
+        and continuation_proof.get("terminal_event_without_continuation_is_critical") is True
+        and continuation_proof.get("operating_loop_cannot_hide_cadence_primary") is True,
     }
     component_statuses = {name: report.get("status") for name, report in reports.items()}
     issues = [

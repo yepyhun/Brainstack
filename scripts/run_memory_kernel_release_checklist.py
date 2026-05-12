@@ -2083,6 +2083,7 @@ def _check_operating_loop_liveness_contract(tmp: Path) -> CheckResult:
         "intentional_stop_is_not_critical",
         "empty_evidence_is_not_healthy",
         "fresh_artifact_cannot_mask_stale_loop",
+        "cadence_primary_frontier_is_not_healthy",
         "read_only_side_effect_free",
     )
     passed = (
@@ -2095,6 +2096,44 @@ def _check_operating_loop_liveness_contract(tmp: Path) -> CheckResult:
     )
     return CheckResult(
         name="operating_loop_liveness_contract",
+        status=_status(passed),
+        command=command,
+        returncode=proc.returncode,
+        summary={
+            "status": data.get("status"),
+            "public_safe": data.get("public_safe"),
+            "issue_count": len(data.get("issues") or []),
+            "scenario_verdicts": data.get("scenario_verdicts"),
+            "proof_passed": all(proof.get(key) is True for key in proof_keys),
+        },
+    )
+
+
+def _check_frontier_continuation_contract(tmp: Path) -> CheckResult:
+    out = tmp / "frontier_continuation_contract.json"
+    command = [sys.executable, "scripts/verify_frontier_continuation_contract.py", "--out", str(out)]
+    proc = _run(command)
+    data = _load_json(out) if out.exists() else {}
+    proof = data.get("proof") if isinstance(data.get("proof"), Mapping) else {}
+    proof_keys = (
+        "event_bridge_plus_watchdog_is_healthy",
+        "cadence_primary_is_degraded_not_healthy",
+        "terminal_event_without_continuation_is_critical",
+        "continuation_record_closes_duplicate_terminal_event",
+        "intentional_stop_is_not_critical",
+        "operating_loop_cannot_hide_cadence_primary",
+        "read_only_side_effect_free",
+    )
+    passed = (
+        proc.returncode == 0
+        and data.get("status") == "pass"
+        and data.get("public_safe") is True
+        and data.get("read_only") is True
+        and data.get("side_effect_free") is True
+        and all(proof.get(key) is True for key in proof_keys)
+    )
+    return CheckResult(
+        name="frontier_continuation_contract",
         status=_status(passed),
         command=command,
         returncode=proc.returncode,
@@ -2239,6 +2278,7 @@ def _check_proactive_kanban_control_plane_soak(tmp: Path) -> CheckResult:
         "kanban_recovery_candidates_guarded",
         "scheduler_starvation_guarded",
         "compression_bad_fd_guarded",
+        "frontier_continuation_not_cadence_primary",
     )
     passed = (
         proc.returncode == 0
@@ -3388,6 +3428,7 @@ def run_checklist(
             _check_live_safe_kanban_gauntlet(tmp),
             _check_workstream_controller_contract(tmp),
             _check_operating_loop_liveness_contract(tmp),
+            _check_frontier_continuation_contract(tmp),
             _check_kanban_recovery_candidate_contract(tmp),
             _check_scheduler_lane_health_contract(tmp),
             _check_hermes_auxiliary_compression_guard(tmp),

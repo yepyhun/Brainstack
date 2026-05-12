@@ -17,6 +17,7 @@ OPERATING_LOOP_VERDICT_SCHEMA = "brainstack.operating_loop.verdict.v1"
 KANBAN_RECOVERY_CANDIDATE_SCHEMA = "brainstack.kanban.recovery_candidate.v1"
 SCHEDULER_LANE_HEALTH_SCHEMA = "brainstack.scheduler_lane_health.v1"
 COMPRESSION_FAILURE_GUARD_SCHEMA = "brainstack.hermes_auxiliary_compression_guard.v1"
+FRONTIER_CONTINUATION_CONTRACT_SCHEMA = "brainstack.frontier_continuation.contract.v1"
 
 OPERATING_LOOP_VERDICTS = (
     "healthy",
@@ -63,6 +64,149 @@ def _bool(value: Any) -> bool:
     return bool(value)
 
 
+def _record_event_keys(records: list[Mapping[str, Any]]) -> set[str]:
+    keys: set[str] = set()
+    for record in records:
+        for field in ("event_id", "source_event_id", "terminal_event_id", "idempotency_key"):
+            value = _text(record.get(field))
+            if value:
+                keys.add(value)
+    return keys
+
+
+def build_frontier_continuation_contract(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Classify whether frontier continuation is event-first or cadence-primary.
+
+    This contract is intentionally read-only. It does not create tasks, trigger
+    schedulers, notify users, or mutate Kanban state. It only makes the control
+    shape inspectable so agents cannot call a cadence-primary loop healthy.
+    """
+
+    controller = _mapping(evidence.get("controller"))
+    allocator = _mapping(evidence.get("allocator") or controller.get("allocator"))
+    terminal_events = _list_of_mappings(evidence.get("terminal_events"))
+    continuation_records = _list_of_mappings(evidence.get("continuation_records"))
+    seen_continuations = _record_event_keys(continuation_records)
+    explicit_stop = _bool(evidence.get("explicit_stop")) or _text(evidence.get("state")) == "stopped_intentionally"
+
+    event_bridge_enabled = _bool(controller.get("event_bridge_enabled")) or _bool(evidence.get("event_bridge_enabled"))
+    event_bridge_stale = _bool(controller.get("event_bridge_stale")) or _bool(evidence.get("event_bridge_stale"))
+    watchdog_enabled = _bool(controller.get("watchdog_enabled")) or _bool(evidence.get("watchdog_enabled"))
+    allocator_exists = bool(allocator)
+    allocator_fixed = _bool(allocator.get("fixed_schedule", allocator_exists))
+    allocator_creates_work = _bool(allocator.get("creates_work")) or _bool(controller.get("allocator_creates_work"))
+    allocator_reads_events = _bool(allocator.get("reads_events")) or _bool(controller.get("allocator_reads_events"))
+    allocator_watchdog_only = _bool(allocator.get("watchdog_only")) or _text(allocator.get("kind")) in {
+        "watchdog",
+        "recovery",
+        "heartbeat",
+    }
+
+    if event_bridge_enabled and not event_bridge_stale and (watchdog_enabled or allocator_watchdog_only):
+        controller_mode = "event_plus_watchdog"
+    elif event_bridge_enabled and not event_bridge_stale:
+        controller_mode = "event_driven"
+    elif event_bridge_enabled and event_bridge_stale:
+        controller_mode = "event_bridge_stale"
+    elif allocator_creates_work and allocator_fixed and not allocator_reads_events:
+        controller_mode = "cadence_primary"
+    elif watchdog_enabled or allocator_watchdog_only:
+        controller_mode = "watchdog_only"
+    elif not (controller or allocator or terminal_events or continuation_records):
+        controller_mode = "insufficient_evidence"
+    else:
+        controller_mode = "missing"
+
+    terminal_kinds = {
+        "task_completed",
+        "completed",
+        "done",
+        "blocked",
+        "crashed",
+        "failed",
+        "timed_out",
+        "timeout",
+    }
+    allowed_decisions = {
+        "next_frontier_created",
+        "wait_for_parent_or_dependency",
+        "human_gate",
+        "intentional_stop",
+        "recovery_candidate",
+        "wait",
+        "stop",
+        "ask",
+        "kanban_handoff",
+    }
+    continuation_gaps: list[dict[str, Any]] = []
+    for event in terminal_events:
+        event_kind = _text(event.get("kind"))
+        if event_kind not in terminal_kinds:
+            continue
+        event_id = _text(event.get("event_id") or event.get("id") or event.get("idempotency_key"))
+        decision = _text(event.get("continuation_decision") or event.get("decision"))
+        has_continuation = (
+            _bool(event.get("has_continuation"))
+            or decision in allowed_decisions
+            or (event_id and event_id in seen_continuations)
+        )
+        if not has_continuation and not explicit_stop:
+            continuation_gaps.append(
+                {
+                    "event_id": event_id or "unknown-event",
+                    "task_id": _text(event.get("task_id")) or "unknown-task",
+                    "kind": event_kind,
+                    "reason_code": "terminal_event_without_continuation",
+                }
+            )
+
+    reason_codes: list[str] = []
+    if continuation_gaps:
+        reason_codes.append("FRONTIER_CONTINUATION_GAP")
+    if controller_mode == "cadence_primary":
+        reason_codes.append("FRONTIER_CADENCE_PRIMARY_ALLOCATOR")
+    elif controller_mode == "event_bridge_stale":
+        reason_codes.append("FRONTIER_EVENT_BRIDGE_STALE")
+    elif controller_mode == "watchdog_only":
+        reason_codes.append("FRONTIER_WATCHDOG_ONLY")
+    elif controller_mode == "missing":
+        reason_codes.append("FRONTIER_CONTROLLER_MISSING")
+    elif controller_mode == "insufficient_evidence":
+        reason_codes.append("FRONTIER_CONTINUATION_INSUFFICIENT_EVIDENCE")
+
+    if explicit_stop:
+        verdict = "stopped_intentionally"
+        reason_codes.append("FRONTIER_STOPPED_INTENTIONALLY")
+    elif continuation_gaps:
+        verdict = "critical"
+    elif controller_mode in {"cadence_primary", "event_bridge_stale", "missing", "watchdog_only"}:
+        verdict = "degraded"
+    elif controller_mode == "insufficient_evidence":
+        verdict = "insufficient_evidence"
+    else:
+        verdict = "healthy"
+        reason_codes.append("FRONTIER_CONTINUATION_HEALTHY")
+
+    return {
+        "schema": FRONTIER_CONTINUATION_CONTRACT_SCHEMA,
+        "read_only": True,
+        "side_effect_free": True,
+        "verdict": verdict,
+        "controller_mode": controller_mode,
+        "event_bridge_enabled": event_bridge_enabled,
+        "event_bridge_stale": event_bridge_stale,
+        "cadence_primary_allocator": controller_mode == "cadence_primary",
+        "continuation_gap_count": len(continuation_gaps),
+        "terminal_events_without_continuation": continuation_gaps[:20],
+        "reason_codes": sorted(set(reason_codes)),
+        "agent_claim": (
+            "frontier_continuation_event_driven"
+            if verdict == "healthy"
+            else f"frontier_continuation_{verdict}"
+        ),
+    }
+
+
 def _freshness_state(evidence: Mapping[str, Any], *, default_stale_after_seconds: int) -> str:
     if _bool(evidence.get("explicit_stop")) or _bool(evidence.get("human_gate")):
         return "intentional_stop"
@@ -91,6 +235,7 @@ def build_operating_loop_verdict(evidence: Mapping[str, Any]) -> dict[str, Any]:
 
     kanban = _mapping(evidence.get("kanban_runtime_snapshot"))
     scheduler = _mapping(evidence.get("scheduler_lane_health"))
+    continuation = _mapping(evidence.get("frontier_continuation"))
     signal_bus = _mapping(evidence.get("signal_bus"))
     executor = _mapping(evidence.get("executor"))
     builder = _mapping(evidence.get("builder"))
@@ -147,6 +292,15 @@ def build_operating_loop_verdict(evidence: Mapping[str, Any]) -> dict[str, Any]:
         blockers.append("scheduler_lane_unhealthy" if scheduler_verdict == "critical" else "scheduler_lane_degraded")
         reason_codes.extend(scheduler_reasons or [f"SCHEDULER_{scheduler_verdict.upper()}"])
 
+    continuation_verdict = _text(continuation.get("verdict"))
+    continuation_reasons = [str(item) for item in continuation.get("reason_codes") or [] if str(item)]
+    if continuation_verdict == "critical":
+        blockers.append("frontier_continuation_critical")
+        reason_codes.extend(continuation_reasons or ["FRONTIER_CONTINUATION_CRITICAL"])
+    elif continuation_verdict == "degraded":
+        blockers.append("frontier_continuation_degraded")
+        reason_codes.extend(continuation_reasons or ["FRONTIER_CONTINUATION_DEGRADED"])
+
     split_brain = (
         builder_state == "fresh"
         and (signal_state == "stale" or executor_state == "stale" or kanban_state in {"blocked_ready_tasks", "unavailable"})
@@ -167,6 +321,7 @@ def build_operating_loop_verdict(evidence: Mapping[str, Any]) -> dict[str, Any]:
         for item in (
             kanban,
             scheduler,
+            continuation,
             signal_bus,
             executor,
             builder,
@@ -207,6 +362,13 @@ def build_operating_loop_verdict(evidence: Mapping[str, Any]) -> dict[str, Any]:
             "executor": executor_state,
             "builder": builder_state,
         },
+        "frontier_continuation": {
+            "verdict": continuation_verdict,
+            "controller_mode": _text(continuation.get("controller_mode")),
+            "continuation_gap_count": _safe_int(continuation.get("continuation_gap_count"), 0),
+        }
+        if continuation
+        else {},
         "agent_claim": (
             "operating_loop_whole_loop_healthy"
             if verdict == "healthy"
