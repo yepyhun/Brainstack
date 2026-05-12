@@ -105,10 +105,36 @@ def test_generated_docker_start_script_targets_hermes_service_when_tei_is_first(
     script = install_into_hermes._write_docker_start_script(target, config, compose, dry_run=False)
 
     text = script.read_text(encoding="utf-8")
+    assert 'CONFIG_FILE="${HERMES_CONFIG_FILE:-$REPO_ROOT/hermes-config/bestie/config.yaml}"' in text
+    assert 'COMPOSE_FILE="${HERMES_COMPOSE_FILE:-$REPO_ROOT/docker-compose.bestie.yml}"' in text
     assert 'EXPECTED_SERVICE="hermes-bestie"' in text
     assert 'SERVICE="$EXPECTED_SERVICE"' in text
     assert "container_name:[[:space:]]*hermes-.*-live" in text
     assert "print $1; exit" not in text
+
+
+def test_generated_docker_start_script_keeps_symlinked_config_absolute(tmp_path):
+    target = tmp_path / "hermes"
+    runtime_root = tmp_path / "runtime-home"
+    config = runtime_root / "bestie" / "config.yaml"
+    compose = target / "docker-compose.bestie.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text("{}", encoding="utf-8")
+    target.mkdir()
+    (target / "hermes-config").symlink_to(runtime_root, target_is_directory=True)
+
+    install_into_hermes._write_docker_compose_file(
+        target,
+        config.resolve(),
+        compose,
+        dry_run=False,
+        embedding_runtime="local-tei-jina",
+    )
+    script = install_into_hermes._write_docker_start_script(target, config.resolve(), compose, dry_run=False)
+
+    text = script.read_text(encoding="utf-8")
+    assert f'CONFIG_FILE="${{HERMES_CONFIG_FILE:-{config.resolve()}}}"' in text
+    assert "$REPO_ROOT//" not in text
 
 
 def test_dockerfile_patch_adds_global_python_alias_after_editable_install(tmp_path):

@@ -5503,11 +5503,18 @@ def _relative_to_target_or_absolute(target: Path, path: Path) -> str:
         return str(path)
 
 
+def _start_script_default_path_expr(target: Path, path: Path) -> str:
+    ref = _relative_to_target_or_absolute(target, path)
+    if Path(ref).is_absolute():
+        return ref
+    return f"$REPO_ROOT/{ref}"
+
+
 def _write_docker_start_script(target: Path, config_path: Path, compose_path: Path, dry_run: bool) -> Path:
     script_path = target / "scripts" / "hermes-brainstack-start.sh"
     legacy_path = target / "scripts" / "brainstack-start.sh"
-    config_ref = _relative_to_target_or_absolute(target, config_path)
-    compose_ref = _relative_to_target_or_absolute(target, compose_path)
+    config_expr = _start_script_default_path_expr(target, config_path)
+    compose_expr = _start_script_default_path_expr(target, compose_path)
     runtime_home = _docker_runtime_home_dir(target, config_path)
     service_ref = f"hermes-{_sanitize_compose_slug(runtime_home.name)}"
     content = """#!/bin/sh
@@ -5516,8 +5523,8 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
-CONFIG_FILE="${HERMES_CONFIG_FILE:-$REPO_ROOT/__CONFIG_REF__}"
-COMPOSE_FILE="${HERMES_COMPOSE_FILE:-$REPO_ROOT/__COMPOSE_REF__}"
+CONFIG_FILE="${HERMES_CONFIG_FILE:-__CONFIG_EXPR__}"
+COMPOSE_FILE="${HERMES_COMPOSE_FILE:-__COMPOSE_EXPR__}"
 HERMES_HOME_DEFAULT=$(dirname -- "$CONFIG_FILE")
 HERMES_HOME_DIR="${HERMES_HOME_DIR:-$HERMES_HOME_DEFAULT}"
 HERMES_UID="${HERMES_UID:-$(id -u)}"
@@ -5665,8 +5672,8 @@ case "$ACTION" in
 esac
 """
     content = (
-        content.replace("__CONFIG_REF__", config_ref)
-        .replace("__COMPOSE_REF__", compose_ref)
+        content.replace("__CONFIG_EXPR__", config_expr)
+        .replace("__COMPOSE_EXPR__", compose_expr)
         .replace("__SERVICE_REF__", service_ref)
     )
     if not dry_run:
