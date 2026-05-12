@@ -302,11 +302,13 @@ def build_report() -> dict[str, Any]:
         "dispatcher_snapshot_reports_wait_reasons": scenarios["dispatcher_snapshot"].get("runtime_snapshot", {}).get("dispatcher_state")
         == "workers_running"
         and scenarios["dispatcher_snapshot"].get("runtime_snapshot", {}).get("ready_task_count") == 3
+        and scenarios["dispatcher_snapshot"].get("runtime_snapshot", {}).get("blocked_unknown_assignee_count") == 1
+        and scenarios["dispatcher_snapshot"].get("runtime_snapshot", {}).get("blocked_unknown_assignees") == {"missing-worker": 1}
         and {
             item.get("reason_code")
             for item in scenarios["dispatcher_snapshot"].get("runtime_snapshot", {}).get("wait_reasons", [])
         }
-        >= {"waiting_for_worker_capacity", "waiting_for_parent_promotion_or_recompute"},
+        >= {"waiting_for_worker_capacity", "waiting_for_parent_promotion_or_recompute", "blocked_unknown_assignee"},
         "dispatcher_snapshot_reports_e2e_final_state": scenarios["dispatcher_snapshot"].get("runtime_snapshot", {})
         .get("last_e2e_proof", {})
         .get("status")
@@ -328,6 +330,14 @@ def build_report() -> dict[str, Any]:
         "proof": proof,
         "scenario_verdicts": {
             key: value.get("kanban_verdict")
+            for key, value in scenarios.items()
+            if isinstance(value, dict)
+        },
+        "scenario_snapshots": {
+            key: {
+                "kanban_verdict": value.get("kanban_verdict"),
+                "runtime_snapshot": value.get("runtime_snapshot"),
+            }
             for key, value in scenarios.items()
             if isinstance(value, dict)
         },

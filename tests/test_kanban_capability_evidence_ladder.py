@@ -23,6 +23,10 @@ def test_kanban_capability_evidence_ladder_blocks_overclaims() -> None:
     assert report["outbox_split"]["pending_outbox_count"] == 1
     assert report["outbox_split"]["runtime_scope_pending_outbox_count"] == 1
     assert report["outbox_split"]["user_visible_pending_outbox_count"] == 0
+    snapshot = report["scenario_snapshots"]["dispatcher_snapshot"]["runtime_snapshot"]
+    assert snapshot["blocked_unknown_assignee_count"] == 1
+    assert snapshot["blocked_unknown_assignees"] == {"missing-worker": 1}
+    assert "blocked_unknown_assignee" in {item["reason_code"] for item in snapshot["wait_reasons"]}
 
 
 def test_kanban_board_counts_reads_default_hermes_home_db(tmp_path) -> None:

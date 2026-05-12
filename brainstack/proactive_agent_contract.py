@@ -514,16 +514,20 @@ def _kanban_runtime_snapshot(config: Mapping[str, Any] | None, root: Path | None
                 conn.close()
     running_count = len(running_rows)
     wait_reasons: list[dict[str, Any]] = []
+    blocked_unknown_assignee_count = 0
+    blocked_unknown_assignees: dict[str, int] = {}
     for row in ready_rows[:12]:
         status = str(row.get("status") or "").lower()
         assignee = str(row.get("assignee") or "")
         reason = "spawnable_pending_dispatch_tick"
         if status == "todo":
             reason = "waiting_for_parent_promotion_or_recompute"
+        elif assignee and profile_names and assignee not in profile_names:
+            reason = "blocked_unknown_assignee"
+            blocked_unknown_assignee_count += 1
+            blocked_unknown_assignees[assignee] = blocked_unknown_assignees.get(assignee, 0) + 1
         elif max_spawn and running_count >= max_spawn:
             reason = "waiting_for_worker_capacity"
-        elif assignee and profile_names and assignee not in profile_names:
-            reason = "waiting_for_assignee_profile"
         wait_reasons.append(
             {
                 "task_id": str(row.get("id") or ""),
@@ -537,6 +541,8 @@ def _kanban_runtime_snapshot(config: Mapping[str, Any] | None, root: Path | None
         dispatcher_state = "unavailable"
     elif running_count:
         dispatcher_state = "workers_running"
+    elif blocked_unknown_assignee_count:
+        dispatcher_state = "blocked_ready_tasks"
     elif wait_reasons:
         dispatcher_state = "ready_waiting"
     elif board.get("task_count"):
@@ -555,6 +561,8 @@ def _kanban_runtime_snapshot(config: Mapping[str, Any] | None, root: Path | None
         "running_worker_count": running_count,
         "ready_task_count": len(ready_rows),
         "wait_reasons": wait_reasons,
+        "blocked_unknown_assignee_count": blocked_unknown_assignee_count,
+        "blocked_unknown_assignees": dict(sorted(blocked_unknown_assignees.items())) if blocked_unknown_assignees else {},
         "worker_capacity": {
             "configured_max_spawn": max_spawn,
             "running_count": running_count,
