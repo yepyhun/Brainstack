@@ -76,7 +76,7 @@ def _seed_board_db(path: Path, *, task_count: int = 0, run_count: int = 0, event
 
 
 def _status(provider: BrainstackMemoryProvider) -> dict[str, Any]:
-    return json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
+    return json.loads(provider.handle_tool_call("brainstack_proactive_status", {"detail_level": "full"}))
 
 
 def _kanban(provider: BrainstackMemoryProvider) -> dict[str, Any]:

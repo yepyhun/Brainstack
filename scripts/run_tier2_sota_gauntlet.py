@@ -26,6 +26,7 @@ from brainstack.hindsight_spine_adapter import (  # noqa: E402
 
 PHASE_DIR = ROOT / ".planning/phases/239-tier2-proof-gauntlet"
 PUBLIC_SENTINEL = "PUBLIC_SAFE_SENTINEL_SHOULD_NOT_APPEAR"
+DONOR_FETCH_ATTEMPTS = 3
 
 
 def _default_donor_dir() -> Path:
@@ -43,6 +44,32 @@ def _json_dump(path: Path, data: Mapping[str, Any]) -> None:
 def _write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text.rstrip() + "\n", encoding="utf-8")
+
+
+def _fetch_donor_with_retry(donor_dir: Path) -> tuple[subprocess.CompletedProcess[str], list[dict[str, Any]]]:
+    attempts: list[dict[str, Any]] = []
+    last: subprocess.CompletedProcess[str] | None = None
+    for attempt in range(1, DONOR_FETCH_ATTEMPTS + 1):
+        fetch = subprocess.run(
+            ["git", "fetch", "origin", "--prune", "--quiet"],
+            cwd=donor_dir,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+        attempts.append(
+            {
+                "attempt": attempt,
+                "returncode": fetch.returncode,
+                "stderr_tail": fetch.stderr[-240:],
+            }
+        )
+        last = fetch
+        if fetch.returncode == 0:
+            break
+    assert last is not None
+    return last, attempts
 
 
 def _provider(tmp_path: Path, extractor: Callable[..., Mapping[str, Any]], *, session_id: str = "tier2-sota") -> BrainstackMemoryProvider:
@@ -373,14 +400,7 @@ def _donor_rehearsal(donor_dir: Path) -> dict[str, Any]:
         capture_output=True,
         check=False,
     ).stdout.strip()
-    fetch = subprocess.run(
-        ["git", "fetch", "origin", "--prune", "--quiet"],
-        cwd=donor_dir,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=60,
-    )
+    fetch, fetch_attempts = _fetch_donor_with_retry(donor_dir)
     behind = subprocess.run(
         ["git", "rev-list", "--count", "HEAD..origin/main"],
         cwd=donor_dir,
@@ -443,6 +463,7 @@ def _donor_rehearsal(donor_dir: Path) -> dict[str, Any]:
         "status": status,
         "head": head,
         "fetch_returncode": fetch.returncode,
+        "fetch_attempts": fetch_attempts,
         "behind_origin_main": behind,
         "openapi_source": openapi_source,
         "memory_operations": [

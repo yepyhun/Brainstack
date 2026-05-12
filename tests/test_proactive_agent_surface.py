@@ -184,7 +184,7 @@ def test_proactive_status_is_tool_backed_and_read_only(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     try:
         _create_item(provider)
-        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
+        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {"detail_level": "full"}))
 
         assert payload["schema"] == "brainstack.proactive_agent_surface.v1"
         assert payload["operation"] == "status"
@@ -267,7 +267,7 @@ def test_proactive_status_kanban_boundary_is_read_only_and_donor_owned(tmp_path:
     provider = _provider(tmp_path / "kanban", hermes_root=str(hermes_root))
     try:
         before = _table_counts(provider)
-        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
+        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {"detail_level": "full"}))
         after = _table_counts(provider)
         kanban = payload["workstation_integrations"]["kanban"]
 
@@ -285,10 +285,36 @@ def test_proactive_status_kanban_boundary_is_read_only_and_donor_owned(tmp_path:
         provider.shutdown()
 
 
+def test_proactive_status_default_keeps_kanban_summary_model_bounded(tmp_path: Path) -> None:
+    hermes_root = tmp_path / "hermes_root"
+    (hermes_root / "tools").mkdir(parents=True)
+    (hermes_root / "hermes_cli").mkdir()
+    (hermes_root / "plugins" / "kanban").mkdir(parents=True)
+    (hermes_root / "tools" / "kanban_tools.py").write_text("# public fixture\n", encoding="utf-8")
+    (hermes_root / "hermes_cli" / "kanban_db.py").write_text("# public fixture\n", encoding="utf-8")
+    provider = _provider(tmp_path / "kanban-compact", hermes_root=str(hermes_root))
+    try:
+        rendered = provider.handle_tool_call("brainstack_proactive_status", {})
+        payload = json.loads(rendered)
+        kanban = payload["workstation_integrations"]["kanban"]
+
+        assert payload["detail_level"] == "compact"
+        assert len(rendered.encode("utf-8")) < 3000
+        assert kanban["kanban_verdict"] == "installed_only"
+        assert kanban["can_write_board"] is False
+        assert kanban["claim_allowed"] is False
+        assert kanban["detail_omitted"] is True
+        assert "blocked_board_actions" not in kanban
+        assert "evidence_paths" not in kanban
+        assert "claim_guard" not in kanban
+    finally:
+        provider.shutdown()
+
+
 def test_proactive_status_kanban_absent_does_not_degrade_ready_idle(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     try:
-        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
+        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {"detail_level": "full"}))
         kanban = payload["workstation_integrations"]["kanban"]
 
         assert kanban["available"] is False
@@ -320,7 +346,7 @@ def test_proactive_status_kanban_board_storage_does_not_certify_write_or_workers
     provider = _provider(tmp_path / "kanban-board", hermes_root=str(hermes_root))
     provider._config["kanban_db_path"] = str(kanban_db)
     try:
-        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
+        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {"detail_level": "full"}))
         kanban = payload["workstation_integrations"]["kanban"]
 
         assert kanban["kanban_verdict"] == "board_storage_accessible"
@@ -345,7 +371,7 @@ def test_proactive_status_kanban_tool_surface_requires_write_certification(tmp_p
     provider._config["kanban_tool_surface_exposed"] = True
     provider._config["kanban_profile_count"] = 1
     try:
-        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
+        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {"detail_level": "full"}))
         kanban = payload["workstation_integrations"]["kanban"]
 
         assert kanban["kanban_verdict"] == "tool_surface_exposed"
@@ -371,7 +397,7 @@ def test_proactive_status_kanban_write_and_worker_lifecycle_are_explicit_certifi
     provider._config["kanban_worker_lifecycle_certified"] = True
     provider._config["kanban_profile_count"] = 3
     try:
-        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
+        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {"detail_level": "full"}))
         kanban = payload["workstation_integrations"]["kanban"]
 
         assert kanban["kanban_verdict"] == "worker_lifecycle_certified"

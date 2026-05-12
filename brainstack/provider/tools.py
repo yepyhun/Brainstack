@@ -216,7 +216,11 @@ class ProviderToolsMixin(ProviderRuntimeBase):
         if tool_name == "brainstack_candidate_review":
             return json.dumps(self._handle_brainstack_candidate_review(args), ensure_ascii=False)
         if tool_name == "brainstack_proactive_status":
-            return json.dumps(self._handle_brainstack_proactive_status(args), ensure_ascii=False)
+            return json.dumps(
+                self._handle_brainstack_proactive_status(args),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         if tool_name == "brainstack_proactive_list":
             return json.dumps(self._handle_brainstack_proactive_list(args), ensure_ascii=False)
         if tool_name == "brainstack_proactive_inspect":
@@ -735,6 +739,7 @@ class ProviderToolsMixin(ProviderRuntimeBase):
             store=self._store,
             principal_scope_key=self._principal_scope_key,
             config=self._config,
+            detail_level=str(args.get("detail_level") or "compact"),
         )
 
     def _handle_brainstack_proactive_list(self, args: Mapping[str, Any]) -> Dict[str, Any]:

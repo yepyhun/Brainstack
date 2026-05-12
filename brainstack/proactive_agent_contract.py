@@ -22,6 +22,7 @@ PROACTIVE_OPERATIONAL_VERDICT_SCHEMA = "brainstack.proactive_operational_verdict
 PROACTIVE_READINESS_PROBE_SCHEMA = "brainstack.proactive_readiness_probe.v1"
 PROACTIVE_CANDIDATE_INTAKE_SCHEMA = "brainstack.proactive_candidate_intake.v1"
 KANBAN_WORKSTATION_SCHEMA = "brainstack.workstation_integration.kanban.v1"
+PROACTIVE_STATUS_DETAIL_LEVELS = ("compact", "full")
 
 PROACTIVE_ALLOWED_READ_ACTIONS = ("status", "doctor", "list", "inspect")
 PROACTIVE_ALLOWED_CONTROL_ACTIONS = (
@@ -479,6 +480,38 @@ def _kanban_workstation_status(config: Mapping[str, Any] | None = None) -> dict[
     return payload
 
 
+def _compact_kanban_workstation_status(status: Mapping[str, Any]) -> dict[str, Any]:
+    claim_guard = status.get("claim_guard") if isinstance(status.get("claim_guard"), Mapping) else {}
+    payload: dict[str, Any] = {
+        "schema": KANBAN_WORKSTATION_SCHEMA,
+        "available": bool(status.get("available")),
+        "evidence_level": str(status.get("evidence_level") or ""),
+        "kanban_verdict": str(status.get("kanban_verdict") or ""),
+        "can_write_board": bool(status.get("can_write_board")),
+        "worker_lifecycle_certified": bool(status.get("worker_lifecycle_certified")),
+        "profile_count": _safe_int(status.get("profile_count"), 0),
+        "claim_allowed": bool(claim_guard.get("claim_allowed")),
+        "reason_code": str(status.get("reason_code") or ""),
+        "detail_level": "compact",
+        "detail_omitted": True,
+        "detail_hint": "Use detail_level=full for Kanban board/tool/claim diagnostics.",
+    }
+    owner = str(status.get("owner") or "")
+    proactive_role = str(status.get("proactive_role") or "")
+    if owner:
+        payload["owner"] = owner
+    if proactive_role:
+        payload["proactive_role"] = proactive_role
+    return payload
+
+
+def _normalize_proactive_status_detail_level(value: Any) -> str:
+    normalized = str(value or "compact").strip().lower()
+    if normalized in PROACTIVE_STATUS_DETAIL_LEVELS:
+        return normalized
+    return "compact"
+
+
 def _agent_item_summary(item: Mapping[str, Any]) -> dict[str, Any]:
     metadata = item.get("metadata") if isinstance(item, Mapping) else {}
     metadata = metadata if isinstance(metadata, Mapping) else {}
@@ -931,7 +964,9 @@ def build_proactive_status(
     store: Any,
     principal_scope_key: str,
     config: Mapping[str, Any] | None = None,
+    detail_level: str = "compact",
 ) -> dict[str, Any]:
+    normalized_detail_level = _normalize_proactive_status_detail_level(detail_level)
     hermes_home = _resolve_hermes_home(config)
     config_data, load_status = _load_yaml(_config_path_from_home(hermes_home))
     runtime_config = _runtime_config_summary(config_data, load_status)
@@ -942,13 +977,15 @@ def build_proactive_status(
         counts=counts,
         extension=extension,
     )
+    kanban_status = _kanban_workstation_status(config)
     workstation_integrations = {
-        "kanban": _kanban_workstation_status(config),
+        "kanban": kanban_status if normalized_detail_level == "full" else _compact_kanban_workstation_status(kanban_status),
     }
     readiness_probe = _compact_readiness_probe(_readiness_probe(runtime_config, counts))
     return {
         "schema": PROACTIVE_AGENT_CONTRACT_SCHEMA,
         "operation": "status",
+        "detail_level": normalized_detail_level,
         "read_only": True,
         "side_effect": False,
         "bounded_model_facing": True,

@@ -254,3 +254,40 @@ def test_brainstack_latency_status_tool_is_bounded_and_discourages_file_search(t
         assert len(rendered) < 4000
     finally:
         provider.shutdown()
+
+
+def test_brainstack_proactive_status_default_is_bounded_with_installed_kanban(tmp_path: Path) -> None:
+    hermes_root = tmp_path / "hermes_root"
+    (hermes_root / "tools").mkdir(parents=True)
+    (hermes_root / "hermes_cli").mkdir()
+    (hermes_root / "plugins" / "kanban").mkdir(parents=True)
+    (hermes_root / "tools" / "kanban_tools.py").write_text("# fixture\n", encoding="utf-8")
+    (hermes_root / "hermes_cli" / "kanban_db.py").write_text("# fixture\n", encoding="utf-8")
+    provider = BrainstackMemoryProvider(
+        {
+            "db_path": str(tmp_path / "brainstack.sqlite3"),
+            "graph_backend": "sqlite",
+            "corpus_backend": "sqlite",
+            "hermes_root": str(hermes_root),
+        }
+    )
+    provider.initialize(
+        "tool-session",
+        platform="test",
+        user_id="user",
+        agent_identity="agent-smoke",
+        agent_workspace="workspace",
+    )
+    try:
+        rendered = provider.handle_tool_call("brainstack_proactive_status", {})
+        payload = json.loads(rendered)
+        kanban = payload["workstation_integrations"]["kanban"]
+
+        assert payload["bounded_model_facing"] is True
+        assert payload["detail_level"] == "compact"
+        assert len(rendered.encode("utf-8")) < 3000
+        assert kanban["kanban_verdict"] == "installed_only"
+        assert kanban["can_write_board"] is False
+        assert "blocked_board_actions" not in kanban
+    finally:
+        provider.shutdown()

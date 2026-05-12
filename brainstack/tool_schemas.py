@@ -178,7 +178,17 @@ def proactive_status_tool_schema() -> Dict[str, Any]:
         "x_brainstack_tool_class": "read_only_proactive_status",
         "parameters": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "detail_level": {
+                    "type": "string",
+                    "enum": ["compact", "full"],
+                    "default": "compact",
+                    "description": (
+                        "Use compact for model-facing status. Use full only for operator diagnostics "
+                        "that need Kanban board/tool/claim evidence."
+                    ),
+                },
+            },
             "additionalProperties": False,
         },
     }

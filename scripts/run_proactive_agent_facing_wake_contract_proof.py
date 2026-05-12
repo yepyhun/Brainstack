@@ -150,6 +150,7 @@ def _status(store: BrainstackStore, hermes_home: Path, hermes_root: Path | None 
         store=store,
         principal_scope_key=PRINCIPAL_SCOPE_KEY,
         config=config,
+        detail_level="full" if hermes_root is not None else "compact",
     )
 
 
