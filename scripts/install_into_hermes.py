@@ -120,6 +120,11 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "owner": "build-seam",
         "removal_condition": "Hermes supports plugin-declared runtime dependency installation.",
     },
+    "_patch_dockerfile_workstation_python_alias": {
+        "category": "required_seam",
+        "owner": "build-seam",
+        "removal_condition": "Hermes Docker images expose `python` as a stable workstation command natively.",
+    },
     "_patch_dockerignore": {
         "category": "core_hygiene",
         "owner": "source-hygiene",
@@ -633,6 +638,14 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_modes": ("docker",),
         "purpose": "Install Brainstack backend dependencies inside the runtime image.",
         "why": "The plugin payload alone is insufficient; the container image must contain its runtime deps.",
+    },
+    {
+        "patcher": "_patch_dockerfile_workstation_python_alias",
+        "target": "Dockerfile",
+        "scope": "docker-workstation-seam",
+        "runtime_modes": ("docker",),
+        "purpose": "Expose `python` for agent terminal/tool sessions even when login shells reset PATH.",
+        "why": "The container process PATH can be correct while login shells still fall back to /usr/local/bin:/usr/bin without a `python` command.",
     },
     {
         "patcher": "_patch_docker_entrypoint",
@@ -5433,6 +5446,8 @@ def _write_docker_start_script(target: Path, config_path: Path, compose_path: Pa
     legacy_path = target / "scripts" / "brainstack-start.sh"
     config_ref = _relative_to_target_or_absolute(target, config_path)
     compose_ref = _relative_to_target_or_absolute(target, compose_path)
+    runtime_home = _docker_runtime_home_dir(target, config_path)
+    service_ref = f"hermes-{_sanitize_compose_slug(runtime_home.name)}"
     content = """#!/bin/sh
 set -eu
 
@@ -5448,8 +5463,16 @@ HERMES_GID="${HERMES_GID:-$(id -g)}"
 export HERMES_UID HERMES_GID
 
 SERVICE="${HERMES_DOCKER_SERVICE:-}"
+EXPECTED_SERVICE="__SERVICE_REF__"
 if [ -z "$SERVICE" ] && [ -f "$COMPOSE_FILE" ]; then
-  SERVICE=$(awk '/^[[:space:]]{2}[A-Za-z0-9_.-]+:$/ {gsub(":","",$1); print $1; exit}' "$COMPOSE_FILE")
+  if awk -v svc="$EXPECTED_SERVICE" '$0 ~ "^[[:space:]]{2}" svc ":$" { found=1 } END { exit found ? 0 : 1 }' "$COMPOSE_FILE"; then
+    SERVICE="$EXPECTED_SERVICE"
+  else
+    SERVICE=$(awk '
+      /^[[:space:]]{2}[A-Za-z0-9_.-]+:$/ { svc=$1; gsub(":","",svc); next }
+      /^[[:space:]]{4}container_name:[[:space:]]*hermes-.*-live[[:space:]]*$/ && svc { print svc; exit }
+    ' "$COMPOSE_FILE")
+  fi
 fi
 
 dc() {
@@ -5579,7 +5602,11 @@ case "$ACTION" in
     ;;
 esac
 """
-    content = content.replace("__CONFIG_REF__", config_ref).replace("__COMPOSE_REF__", compose_ref)
+    content = (
+        content.replace("__CONFIG_REF__", config_ref)
+        .replace("__COMPOSE_REF__", compose_ref)
+        .replace("__SERVICE_REF__", service_ref)
+    )
     if not dry_run:
         script_path.parent.mkdir(parents=True, exist_ok=True)
         script_path.write_text(content, encoding="utf-8")
@@ -6217,6 +6244,38 @@ def _patch_dockerfile_backend_dependencies(path: Path, dry_run: bool) -> list[st
     return ["dockerfile:install_backend_dependencies"]
 
 
+def _patch_dockerfile_workstation_python_alias(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    legacy_alias_line = "RUN ln -sf /usr/bin/python3 /usr/local/bin/python\n"
+    wrapper_line = (
+        "RUN printf '%s\\n' '#!/bin/sh' 'exec /opt/hermes/.venv/bin/python \"$@\"' "
+        "> /usr/local/bin/python && chmod 0755 /usr/local/bin/python\n"
+    )
+    if wrapper_line in text:
+        return []
+    if legacy_alias_line in text:
+        text = text.replace(legacy_alias_line, wrapper_line, 1)
+        if not dry_run:
+            path.write_text(text, encoding="utf-8")
+        return ["dockerfile:workstation_python_alias"]
+    anchors = (
+        'RUN uv pip install --no-cache-dir --no-deps -e "."\n',
+        '    uv pip install --no-cache-dir -e ".[all]"\n',
+        "RUN uv sync --frozen --no-install-project --extra all\n",
+    )
+    for anchor in anchors:
+        if anchor in text:
+            text = text.replace(anchor, anchor + wrapper_line, 1)
+            break
+    else:
+        raise RuntimeError(f"Installer patch anchor missing for Docker python alias in {path}")
+    if not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return ["dockerfile:workstation_python_alias"]
+
+
 def _patch_docker_entrypoint(path: Path, dry_run: bool) -> list[str]:
     if not path.exists():
         return []
@@ -6756,6 +6815,7 @@ def main() -> int:
         host_patches.extend(_run_host_patch("_patch_compose_remove_discord_forced_heavy_profile", compose_path, args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_dockerignore", target / ".dockerignore", args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_dockerfile_backend_dependencies", target / "Dockerfile", args.dry_run, host_patch_mode=args.host_patch_mode))
+        host_patches.extend(_run_host_patch("_patch_dockerfile_workstation_python_alias", target / "Dockerfile", args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_docker_entrypoint", target / "docker" / "entrypoint.sh", args.dry_run, host_patch_mode=args.host_patch_mode))
 
     if gateway_patch_mode != "skip" and not args.dry_run:

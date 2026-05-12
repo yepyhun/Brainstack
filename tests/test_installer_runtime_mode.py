@@ -74,6 +74,70 @@ def test_generated_docker_compose_includes_local_tei_jina_runtime(tmp_path):
     assert "HERMES_DISCORD_TOOL_PROFILE" not in text
 
 
+def test_generated_docker_start_script_targets_hermes_service_when_tei_is_first(tmp_path):
+    target = tmp_path / "hermes"
+    config = target / "hermes-config" / "bestie" / "config.yaml"
+    compose = target / "docker-compose.bestie.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text("{}", encoding="utf-8")
+
+    install_into_hermes._write_docker_compose_file(
+        target,
+        config,
+        compose,
+        dry_run=False,
+        embedding_runtime="local-tei-jina",
+    )
+    script = install_into_hermes._write_docker_start_script(target, config, compose, dry_run=False)
+
+    text = script.read_text(encoding="utf-8")
+    assert 'EXPECTED_SERVICE="hermes-bestie"' in text
+    assert 'SERVICE="$EXPECTED_SERVICE"' in text
+    assert "container_name:[[:space:]]*hermes-.*-live" in text
+    assert "print $1; exit" not in text
+
+
+def test_dockerfile_patch_adds_global_python_alias_after_editable_install(tmp_path):
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(
+        """
+FROM debian:13
+RUN uv sync --frozen --no-install-project --extra all
+RUN uv pip install --no-cache-dir --no-deps -e "."
+""",
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_dockerfile_workstation_python_alias(dockerfile, dry_run=False)
+
+    text = dockerfile.read_text(encoding="utf-8")
+    assert applied == ["dockerfile:workstation_python_alias"]
+    assert (
+        "RUN uv pip install --no-cache-dir --no-deps -e \".\"\n"
+        "RUN printf '%s\\n' '#!/bin/sh' 'exec /opt/hermes/.venv/bin/python \"$@\"' "
+        "> /usr/local/bin/python && chmod 0755 /usr/local/bin/python\n"
+    ) in text
+    assert install_into_hermes._patch_dockerfile_workstation_python_alias(dockerfile, dry_run=False) == []
+
+
+def test_dockerfile_patch_replaces_legacy_system_python_alias(tmp_path):
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(
+        """
+FROM debian:13
+RUN uv pip install --no-cache-dir --no-deps -e "."
+RUN ln -sf /usr/bin/python3 /usr/local/bin/python
+""",
+        encoding="utf-8",
+    )
+
+    install_into_hermes._patch_dockerfile_workstation_python_alias(dockerfile, dry_run=False)
+
+    text = dockerfile.read_text(encoding="utf-8")
+    assert "ln -sf /usr/bin/python3 /usr/local/bin/python" not in text
+    assert 'exec /opt/hermes/.venv/bin/python "$@"' in text
+
+
 def test_generated_docker_compose_allows_external_embedding_runtime(tmp_path):
     target = tmp_path / "hermes"
     config = target / "hermes-config" / "bestie" / "config.yaml"
