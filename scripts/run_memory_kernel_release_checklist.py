@@ -91,9 +91,9 @@ CRASH_REGRESSION_LOG_NEEDLES = {
     "gpt-5.2-codex",
 }
 
-CRASH_REGRESSION_TOOL_OUTPUT_PREFIXES = (
-    "WARNING run_agent: Tool terminal returned error",
-    "WARNING run_agent: Tool session_search returned error",
+CRASH_REGRESSION_TOOL_OUTPUT_MARKERS = (
+    "run_agent: Tool terminal returned error",
+    "run_agent: Tool session_search returned error",
 )
 
 
@@ -162,7 +162,7 @@ def _local_coredump_since(started_at: str | None) -> str:
 def _count_log_needles(text: str, needles: set[str] = CRASH_REGRESSION_LOG_NEEDLES) -> dict[str, int]:
     counts = {needle: 0 for needle in sorted(needles)}
     for line in text.splitlines():
-        if any(line.startswith(prefix) for prefix in CRASH_REGRESSION_TOOL_OUTPUT_PREFIXES):
+        if any(marker in line for marker in CRASH_REGRESSION_TOOL_OUTPUT_MARKERS):
             continue
         for needle in counts:
             counts[needle] += line.count(needle)

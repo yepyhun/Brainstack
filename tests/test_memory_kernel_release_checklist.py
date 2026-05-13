@@ -569,6 +569,9 @@ def test_live_crash_regression_log_scan_ignores_terminal_tool_payload_errors() -
     log_text = (
         'WARNING run_agent: Tool terminal returned error (0.23s): {"output": "Traceback '
         '(most recent call last):\\nModuleNotFoundError: No module named yaml", "exit_code": 1}\n'
+        '2026-05-13 21:09:39,941 WARNING [20260513_210358_9c9d791c] run_agent: Tool terminal '
+        'returned error (0.22s): {"output": "Traceback (most recent call last):\\n'
+        'sqlite3.OperationalError: no such table: tasks", "exit_code": 1}\n'
         "Traceback (most recent call last): runtime crash\n"
         "ModuleNotFoundError: No module named runtime_dependency\n"
     )
