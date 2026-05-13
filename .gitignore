@@ -43,6 +43,13 @@ brainstack.chroma/
 brainstack.kuzu
 local/private_live_tools/
 
+# Local project/runtime artifacts are not Brainstack source.
+/[zZ][hH][cC]/
+/[zZ][hH][cC]_*
+/local/[zZ][hH][cC]/
+/scripts/[zZ][hH][cC]_*.py
+/scripts/*_[zZ][hH][cC]_*.py
+
 # Local proof/development tests stay off the public release payload unless promoted deliberately.
 tests/test_phase*.py
 tests/test_*_closure.py
