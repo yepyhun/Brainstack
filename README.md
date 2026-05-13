@@ -352,6 +352,11 @@ Current updateability is the middle path:
 - explicit local adapter seams
 - bounded refresh reporting
 - local smoke verification
+- runtime overrides are preserved across pull/reinstall by default, including
+  `compression`, `discord`, `proactive_mode`, and `proactive_kill_switch`
+
+Use `--no-preserve-runtime-overrides` only when you intentionally want the
+target Hermes config to accept upstream or installer defaults for those blocks.
 
 That keeps donor drift inspectable without turning updates into silent rewrites.
 

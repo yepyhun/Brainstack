@@ -9,9 +9,11 @@ conservative: every external command must succeed or the update stops.
 from __future__ import annotations
 
 import argparse
+import copy
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, Mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -19,10 +21,62 @@ if str(REPO_ROOT) not in sys.path:
 
 from scripts.install_into_hermes import _default_compose_path, _default_config_path  # noqa: E402
 
+PRESERVED_HERMES_RUNTIME_OVERRIDE_KEYS: tuple[str, ...] = (
+    "compression",
+    "discord",
+    "proactive_mode",
+    "proactive_kill_switch",
+)
+
 
 def _run(cmd: list[str], cwd: Path | None = None) -> None:
     print("+ " + " ".join(cmd))
     subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    import yaml  # type: ignore[import-untyped]
+
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_yaml(path: Path, data: Mapping[str, Any]) -> None:
+    import yaml  # type: ignore[import-untyped]
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(dict(data), default_flow_style=False, sort_keys=False, allow_unicode=False),
+        encoding="utf-8",
+    )
+
+
+def _snapshot_runtime_overrides(
+    config_path: Path,
+    *,
+    keys: tuple[str, ...] = PRESERVED_HERMES_RUNTIME_OVERRIDE_KEYS,
+) -> dict[str, Any]:
+    data = _load_yaml(config_path)
+    return {key: copy.deepcopy(data[key]) for key in keys if key in data}
+
+
+def _restore_runtime_overrides(
+    config_path: Path,
+    snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not snapshot:
+        return {"status": "skipped", "restored_keys": []}
+    data = _load_yaml(config_path)
+    restored_keys: list[str] = []
+    for key, value in snapshot.items():
+        if data.get(key) != value:
+            data[str(key)] = copy.deepcopy(value)
+            restored_keys.append(str(key))
+    if restored_keys:
+        _write_yaml(config_path, data)
+    return {"status": "restored" if restored_keys else "unchanged", "restored_keys": sorted(restored_keys)}
 
 
 def main() -> int:
@@ -39,6 +93,11 @@ def main() -> int:
     parser.add_argument("--compose-file", type=Path, help="Docker compose file")
     parser.add_argument("--compose-service", help="Optional compose service name for targeted rebuilds")
     parser.add_argument("--desktop-launcher", type=Path, help="Desktop launcher path")
+    parser.add_argument(
+        "--no-preserve-runtime-overrides",
+        action="store_true",
+        help="Do not restore Hermes runtime overrides such as compression, discord, and proactive mode after update/install",
+    )
     args = parser.parse_args()
 
     target = Path(args.target).expanduser().resolve()
@@ -46,11 +105,26 @@ def main() -> int:
         print(f"FAIL target is not a Hermes checkout: {target}", file=sys.stderr)
         return 2
     config_path = args.config.expanduser().resolve() if args.config else _default_config_path(target)
+    if config_path is None:
+        print("FAIL could not resolve target Hermes config.yaml; pass --config explicitly", file=sys.stderr)
+        return 2
+
+    runtime_override_snapshot: dict[str, Any] = {}
+    if not args.no_preserve_runtime_overrides:
+        runtime_override_snapshot = _snapshot_runtime_overrides(config_path)
+
+    def restore_runtime_overrides(stage: str) -> None:
+        if args.no_preserve_runtime_overrides:
+            return
+        result = _restore_runtime_overrides(config_path, runtime_override_snapshot)
+        if result["restored_keys"]:
+            print(f"Preserved Hermes runtime overrides after {stage}: {', '.join(result['restored_keys'])}")
 
     if args.pull:
         _run(["git", "pull", "--ff-only"], cwd=target)
+        restore_runtime_overrides("git pull")
 
-    if args.reinstall or args.doctor:
+    if args.reinstall:
         install_cmd = [
             sys.executable,
             str(REPO_ROOT / "scripts" / "install_into_hermes.py"),
@@ -65,13 +139,30 @@ def main() -> int:
             install_cmd.extend(["--python", str(args.python)])
         if args.skip_deps:
             install_cmd.append("--skip-deps")
-        if args.doctor:
-            install_cmd.append("--doctor")
         if args.compose_file:
             install_cmd.extend(["--compose-file", str(args.compose_file)])
         if args.desktop_launcher:
             install_cmd.extend(["--desktop-launcher", str(args.desktop_launcher)])
         _run(install_cmd)
+        restore_runtime_overrides("Brainstack reinstall")
+
+    if args.doctor:
+        doctor_cmd = [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "brainstack_doctor.py"),
+            str(target),
+            "--config",
+            str(config_path),
+            "--runtime",
+            args.runtime,
+        ]
+        if args.python:
+            doctor_cmd.extend(["--python", str(args.python)])
+        if args.compose_file:
+            doctor_cmd.extend(["--compose-file", str(args.compose_file)])
+        if args.desktop_launcher:
+            doctor_cmd.extend(["--desktop-launcher", str(args.desktop_launcher)])
+        _run(doctor_cmd)
 
     if args.docker_rebuild:
         if args.runtime == "local":

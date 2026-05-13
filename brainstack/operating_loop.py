@@ -255,6 +255,7 @@ def build_operating_loop_verdict(evidence: Mapping[str, Any]) -> dict[str, Any]:
     kanban_state = _text(kanban.get("dispatcher_state"))
     ready_count = _safe_int(kanban.get("ready_task_count"), 0)
     running_count = _safe_int(kanban.get("running_worker_count"), 0)
+    blocked_count = _safe_int(kanban.get("blocked_task_count"), 0)
     unknown_assignee_count = _safe_int(kanban.get("blocked_unknown_assignee_count"), 0)
     recent_failures = [str(item) for item in kanban.get("recent_failure_event_kinds") or [] if str(item)]
     wait_reasons = {
@@ -269,6 +270,9 @@ def build_operating_loop_verdict(evidence: Mapping[str, Any]) -> dict[str, Any]:
     if recent_failures:
         warnings.append("recent_kanban_failures")
         reason_codes.append("KANBAN_RECENT_FAILURE_EVENTS")
+    if blocked_count:
+        warnings.append("blocked_kanban_tasks")
+        reason_codes.append("KANBAN_BLOCKED_TASKS_PRESENT")
     kanban_required = (
         _bool(evidence.get("kanban_required"))
         or _bool(next_action.get("requires_kanban"))

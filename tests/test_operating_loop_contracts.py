@@ -45,6 +45,27 @@ def test_operating_loop_with_active_frontier_and_recent_failures_is_degraded() -
     assert "recent_kanban_failures" in verdict["warnings"]
 
 
+def test_operating_loop_with_active_frontier_and_blocked_tasks_is_degraded() -> None:
+    verdict = build_operating_loop_verdict(
+        {
+            "kanban_required": True,
+            "kanban_runtime_snapshot": {
+                "dispatcher_state": "workers_running",
+                "running_worker_count": 1,
+                "ready_task_count": 1,
+                "blocked_task_count": 5,
+            },
+            "signal_bus": {"status": "ok"},
+            "executor": {"status": "ok"},
+            "next_action": {"exists": True, "requires_kanban": True},
+        }
+    )
+
+    assert verdict["verdict"] == "degraded"
+    assert "blocked_kanban_tasks" in verdict["warnings"]
+    assert "KANBAN_BLOCKED_TASKS_PRESENT" in verdict["reason_codes"]
+
+
 def test_frontier_continuation_contract_blocks_cadence_primary_claim() -> None:
     report = build_frontier_continuation_report()
 

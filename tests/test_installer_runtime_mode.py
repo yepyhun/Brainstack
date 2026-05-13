@@ -79,6 +79,10 @@ def test_patch_config_preserves_hermes_runtime_blocks(tmp_path):
         assert patched["platform_toolsets"]["discord"] == ["hermes-discord", "kanban"]
         assert patched["memory"]["provider"] == "brainstack"
         assert "brainstack" in patched["plugins"]
+        background_tasks = patched["plugins"]["brainstack"]["background_tasks"]
+        assert background_tasks["brainstack.background_consolidation"]["status"] == "active"
+        assert background_tasks["brainstack.background_consolidation"]["provider_label"] == "main"
+        assert background_tasks["brainstack.background_consolidation"]["effective_model_label"] == model_block["default"]
         assert result["gateway_timeout"] == 1800
 
 
