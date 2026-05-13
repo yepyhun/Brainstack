@@ -27,6 +27,73 @@ def test_installer_does_not_bake_fixed_tier2_llm_model() -> None:
     assert 'brainstack.setdefault("tier2_hindsight_llm_provider", "hermes_managed")' in source
 
 
+def test_patch_config_preserves_hermes_runtime_blocks(tmp_path):
+    cases = [
+        {
+            "default": "anthropic/claude-sonnet-4",
+            "provider": "openrouter",
+            "base_url": "https://openrouter.example.invalid/api/v1",
+        },
+        {
+            "default": "qwen3:local",
+            "provider": "local",
+            "base_url": "http://127.0.0.1:11434/v1",
+        },
+    ]
+    for index, model_block in enumerate(cases):
+        config = tmp_path / f"config-{index}.yaml"
+        config.write_text(
+            "\n".join(
+                [
+                    "model:",
+                    f"  default: {model_block['default']}",
+                    f"  provider: {model_block['provider']}",
+                    f"  base_url: {model_block['base_url']}",
+                    "discord:",
+                    "  require_mention: true",
+                    "  free_response_channels: 'user-channel-a,user-channel-b'",
+                    "  auto_thread: true",
+                    "agent:",
+                    "  gateway_timeout: 1800",
+                    "  max_turns: 120",
+                    "platform_toolsets:",
+                    "  discord:",
+                    "    - hermes-discord",
+                    "    - kanban",
+                    "memory: {}",
+                    "plugins: {}",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        result = install_into_hermes._patch_config(config, dry_run=False)
+        patched = install_into_hermes._load_yaml(config)
+
+        assert patched["model"] == model_block
+        assert patched["discord"]["free_response_channels"] == "user-channel-a,user-channel-b"
+        assert patched["discord"]["auto_thread"] is True
+        assert patched["agent"]["gateway_timeout"] == 1800
+        assert patched["agent"]["max_turns"] == 120
+        assert patched["platform_toolsets"]["discord"] == ["hermes-discord", "kanban"]
+        assert patched["memory"]["provider"] == "brainstack"
+        assert "brainstack" in patched["plugins"]
+        assert result["gateway_timeout"] == 1800
+
+
+def test_patch_config_refuses_to_mutate_hermes_runtime_blocks() -> None:
+    before = {"model": {"default": "user-model", "provider": "user-provider"}}
+    after = {"model": {"default": "other-model", "provider": "user-provider"}}
+
+    try:
+        install_into_hermes._assert_existing_config_blocks_preserved(before, after)
+    except RuntimeError as exc:
+        assert "Hermes-owned runtime config block `model`" in str(exc)
+    else:
+        raise AssertionError("installer must reject Hermes-owned runtime config mutation")
+
+
 def test_generated_docker_compose_includes_local_tei_jina_runtime(tmp_path):
     target = tmp_path / "hermes"
     config = target / "hermes-config" / "bestie" / "config.yaml"
@@ -2242,6 +2309,115 @@ def test_local_doctor_does_not_require_docker_compose(monkeypatch, tmp_path):
         check.name == "docker_gateway_mode" and check.status == "pass"
         for check in checks
     )
+
+
+def test_doctor_profile_resolves_named_profile_config(monkeypatch, tmp_path):
+    target = tmp_path / "hermes"
+    config = target / "hermes-config" / "titans-agent" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("memory: {}\nplugins: {}\n", encoding="utf-8")
+    seen: dict[str, Path] = {}
+
+    monkeypatch.setattr(brainstack_doctor, "_default_desktop_launcher", lambda _target: None)
+    monkeypatch.setattr(brainstack_doctor, "_default_target_python", lambda _target: None)
+    monkeypatch.setattr(brainstack_doctor, "_check_target_shape", lambda _target: [])
+    monkeypatch.setattr(brainstack_doctor, "_check_host_surfaces", lambda _target: [])
+    monkeypatch.setattr(brainstack_doctor, "_check_plugin", lambda _target, planned_install: [])
+
+    def record_config(config_path, **_kwargs):
+        seen["config_path"] = config_path
+        return []
+
+    monkeypatch.setattr(brainstack_doctor, "_check_config", record_config)
+
+    args = Namespace(
+        target=str(target),
+        config=None,
+        profile="titans-agent",
+        compose_file=None,
+        desktop_launcher=None,
+        python=None,
+        runtime="local",
+        planned_install=True,
+        check_docker=False,
+        check_desktop_launcher=False,
+        json=False,
+    )
+
+    code, checks = brainstack_doctor.run_doctor(args)
+
+    assert code == 0
+    assert seen["config_path"] == config.resolve()
+    assert any(
+        check.name == "profile_config"
+        and check.status == "pass"
+        and "titans-agent" in check.message
+        for check in checks
+    )
+
+
+def test_doctor_explicit_config_wins_over_profile(monkeypatch, tmp_path):
+    target = tmp_path / "hermes"
+    profile_config = target / "hermes-config" / "titans-agent" / "config.yaml"
+    explicit_config = tmp_path / "explicit-config.yaml"
+    profile_config.parent.mkdir(parents=True)
+    profile_config.write_text("memory: {}\nplugins: {}\n", encoding="utf-8")
+    explicit_config.write_text("memory: {}\nplugins: {}\n", encoding="utf-8")
+    seen: dict[str, Path] = {}
+
+    monkeypatch.setattr(brainstack_doctor, "_default_desktop_launcher", lambda _target: None)
+    monkeypatch.setattr(brainstack_doctor, "_default_target_python", lambda _target: None)
+    monkeypatch.setattr(brainstack_doctor, "_check_target_shape", lambda _target: [])
+    monkeypatch.setattr(brainstack_doctor, "_check_host_surfaces", lambda _target: [])
+    monkeypatch.setattr(brainstack_doctor, "_check_plugin", lambda _target, planned_install: [])
+
+    def record_config(config_path, **_kwargs):
+        seen["config_path"] = config_path
+        return []
+
+    monkeypatch.setattr(brainstack_doctor, "_check_config", record_config)
+
+    args = Namespace(
+        target=str(target),
+        config=str(explicit_config),
+        profile="titans-agent",
+        compose_file=None,
+        desktop_launcher=None,
+        python=None,
+        runtime="local",
+        planned_install=True,
+        check_docker=False,
+        check_desktop_launcher=False,
+        json=False,
+    )
+
+    code, checks = brainstack_doctor.run_doctor(args)
+
+    assert code == 0
+    assert seen["config_path"] == explicit_config.resolve()
+    assert any(
+        check.name == "profile_config"
+        and check.status == "pass"
+        and "did not override" in check.message
+        for check in checks
+    )
+
+
+def test_doctor_python_probe_overrides_inherited_hermes_home(monkeypatch, tmp_path):
+    requested_home = tmp_path / "requested-home"
+    inherited_home = tmp_path / "wrong-home"
+    requested_home.mkdir()
+    inherited_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(inherited_home))
+
+    payload = brainstack_doctor._run_python_probe(
+        "import json, os; print(json.dumps({'home': os.environ.get('HERMES_HOME')}))",
+        python_bin=Path(sys.executable),
+        cwd=tmp_path,
+        hermes_home=requested_home,
+    )
+
+    assert payload == {"home": str(requested_home)}
 
 
 def test_docker_doctor_accepts_desktop_launcher_stable_source_symlink(tmp_path):

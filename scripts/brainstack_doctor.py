@@ -219,6 +219,38 @@ def _default_config_path(target: Path) -> Path | None:
     return None
 
 
+def _profile_config_candidates(target: Path, profile: str) -> list[Path]:
+    profile_name = str(profile or "").strip()
+    if not profile_name or "/" in profile_name or "\\" in profile_name:
+        return []
+
+    candidates = [
+        target / "hermes-config" / profile_name / "config.yaml",
+        target / "profiles" / profile_name / "config.yaml",
+    ]
+    hermes_home = os.getenv("HERMES_HOME")
+    if hermes_home:
+        candidates.append(Path(hermes_home).expanduser() / "profiles" / profile_name / "config.yaml")
+    candidates.append(Path.home() / ".hermes" / "profiles" / profile_name / "config.yaml")
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        marker = str(candidate.expanduser())
+        if marker in seen:
+            continue
+        seen.add(marker)
+        unique.append(candidate.expanduser())
+    return unique
+
+
+def _profile_config_path(target: Path, profile: str) -> Path | None:
+    for candidate in _profile_config_candidates(target, profile):
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
 def _default_compose_path(target: Path, config_path: Path | None = None) -> Path | None:
     candidates: list[Path] = []
     root_compose = target / "docker-compose.yml"
@@ -1048,7 +1080,7 @@ def _run_python_probe(
 ) -> dict[str, Any] | None:
     executable = str(python_bin) if python_bin is not None else sys.executable
     env = os.environ.copy()
-    env.setdefault("HERMES_HOME", str(hermes_home))
+    env["HERMES_HOME"] = str(hermes_home)
     try:
         proc = subprocess.run(
             [executable, "-c", code],
@@ -1323,7 +1355,14 @@ def _has_runtime_ownership_normalization(entrypoint_text: str) -> bool:
 
 def run_doctor(args: argparse.Namespace) -> tuple[int, list[Check]]:
     target = Path(args.target).expanduser().resolve()
-    config_path = Path(args.config).expanduser().resolve() if args.config else _default_config_path(target)
+    profile = str(getattr(args, "profile", "") or "").strip()
+    explicit_config = bool(args.config)
+    if explicit_config:
+        config_path = Path(args.config).expanduser().resolve()
+    elif profile:
+        config_path = _profile_config_path(target, profile)
+    else:
+        config_path = _default_config_path(target)
     compose_path: Path | None = None
     if args.compose_file:
         compose_path = Path(args.compose_file).expanduser().resolve()
@@ -1338,6 +1377,35 @@ def run_doctor(args: argparse.Namespace) -> tuple[int, list[Check]]:
 
     checks: list[Check] = []
     checks.append(Check("runtime_mode", "pass", f"Doctor running in {runtime} mode"))
+    if profile:
+        if explicit_config:
+            checks.append(
+                Check(
+                    "profile_config",
+                    "pass",
+                    f"--config was provided explicitly; --profile {profile!r} did not override it",
+                )
+            )
+        elif config_path is not None:
+            checks.append(
+                Check(
+                    "profile_config",
+                    "pass",
+                    f"Resolved profile {profile!r} config: {config_path}",
+                )
+            )
+        else:
+            candidates = (
+                ", ".join(str(path) for path in _profile_config_candidates(target, profile))
+                or "<invalid profile name>"
+            )
+            checks.append(
+                Check(
+                    "profile_config",
+                    "fail",
+                    f"Could not resolve profile {profile!r} config. Checked: {candidates}",
+                )
+            )
     if python_bin is not None:
         checks.append(Check("python_target", "pass", f"Dependency checks use {python_bin}"))
     else:
@@ -1381,6 +1449,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Validate Brainstack installation in a Hermes checkout.")
     parser.add_argument("target", help="Path to the target Hermes checkout")
     parser.add_argument("--config", help="Path to Hermes config.yaml")
+    parser.add_argument("--profile", help="Hermes profile name to validate without manually passing --config")
     parser.add_argument("--compose-file", help="Path to Docker compose file")
     parser.add_argument("--desktop-launcher", help="Path to desktop launcher")
     parser.add_argument("--python", help="Target Hermes Python interpreter for dependency checks")

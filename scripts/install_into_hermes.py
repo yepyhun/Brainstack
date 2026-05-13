@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 import fnmatch
 import hashlib
 import importlib.util
@@ -75,6 +76,7 @@ DEFAULT_PROACTIVE_RUNTIME_MODE = "dry_run"
 PROACTIVE_CRON_JOB_NAME = "Brainstack Proactive Pulse"
 PROACTIVE_CRON_GATE_SCRIPT_NAME = "brainstack_proactive_pulse_gate.py"
 PROFILE_ISOLATION_MODES = {"shared-scoped", "full-home", "path-override"}
+PRESERVED_HERMES_RUNTIME_CONFIG_BLOCKS = ("model", "discord", "agent")
 SESSION_SEARCH_TOTAL_TIMEOUT_SECONDS = 20
 SESSION_SEARCH_MAX_CONCURRENCY = 1
 COMPRESSION_AUXILIARY_MIN_TIMEOUT_SECONDS = 120
@@ -5323,6 +5325,26 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         raise RuntimeError(f"Cannot parse YAML config at {path}: {exc}") from exc
 
 
+def _snapshot_existing_config_blocks(
+    config: dict[str, Any],
+    block_names: tuple[str, ...] = PRESERVED_HERMES_RUNTIME_CONFIG_BLOCKS,
+) -> dict[str, Any]:
+    return {name: copy.deepcopy(config[name]) for name in block_names if name in config}
+
+
+def _assert_existing_config_blocks_preserved(
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> None:
+    for name, previous in before.items():
+        if after.get(name) != previous:
+            raise RuntimeError(
+                "Brainstack installer refused to alter Hermes-owned runtime "
+                f"config block `{name}`. Preserve user/provider/platform config "
+                "and patch only Brainstack-owned settings."
+            )
+
+
 def _write_yaml(path: Path, data: dict[str, Any]) -> None:
     try:
         import yaml  # type: ignore[import-untyped]
@@ -5794,6 +5816,7 @@ def _normalize_unbound_tier2_runtime(brainstack: dict[str, Any]) -> dict[str, An
 
 def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = "external") -> dict[str, Any]:
     config = _load_yaml(config_path)
+    preserved_runtime_blocks = _snapshot_existing_config_blocks(config)
     config.setdefault("memory", {})
     if not isinstance(config["memory"], dict):
         raise RuntimeError("config.yaml has non-object `memory` section")
@@ -5857,6 +5880,7 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
     agent = config["agent"]
     proactive_runtime = _normalize_proactive_runtime_config(config)
     config_shape_validation = validate_brainstack_config_shape(config)
+    _assert_existing_config_blocks_preserved(preserved_runtime_blocks, config)
     if not dry_run:
         _write_yaml(config_path, config)
     return {
@@ -7233,6 +7257,7 @@ def _run_doctor(
     doctor_args = argparse.Namespace(
         target=str(target),
         config=str(config_path),
+        profile=str(args.profile) if args.profile else None,
         compose_file=str(compose_path) if compose_path else None,
         desktop_launcher=str(args.desktop_launcher) if args.desktop_launcher else None,
         python=str(args.python or _default_target_python(target)) if (args.python or _default_target_python(target)) else None,

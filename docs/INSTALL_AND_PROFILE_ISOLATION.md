@@ -135,6 +135,13 @@ Run the doctor:
 python scripts/brainstack_doctor.py /path/to/hermes-agent --config /path/to/config.yaml --runtime docker --check-docker
 ```
 
+For a named Hermes profile, use `--profile` instead of manually resolving the
+profile config path:
+
+```bash
+python scripts/brainstack_doctor.py /path/to/hermes-agent --profile titans-agent --runtime local
+```
+
 Run the multi-profile shared-backend verifier:
 
 ```bash
