@@ -11,8 +11,11 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+EXT = ROOT / "extensions" / "hermes_continuation"
+if EXT.exists() and str(EXT) not in sys.path:
+    sys.path.insert(0, str(EXT))
 
-from brainstack.continuation_control_contract import build_continuation_control_contract  # noqa: E402
+from hermes_continuation.control_contract import build_continuation_control_contract  # noqa: E402
 from brainstack.operating_loop import build_operating_loop_verdict  # noqa: E402
 
 

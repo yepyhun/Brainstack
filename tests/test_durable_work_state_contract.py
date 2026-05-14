@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from brainstack.operating_loop import build_operating_loop_verdict
-from brainstack.work_state_contract import build_durable_work_state_contract
+from hermes_continuation.work_state import build_durable_work_state_contract
 
 
 def test_durable_work_state_healthy_requires_authority_evidence_durability_and_handoff() -> None:
@@ -21,7 +21,7 @@ def test_durable_work_state_healthy_requires_authority_evidence_durability_and_h
         }
     )
 
-    assert contract["schema"] == "brainstack.durable_work_state_contract.v1"
+    assert contract["schema"] == "hermes_continuation.durable_work_state_contract.v1"
     assert contract["verdict"] == "healthy"
     assert contract["late_participant_continuable"] is True
     assert contract["read_only"] is True

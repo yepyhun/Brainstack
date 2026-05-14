@@ -11,12 +11,15 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+EXT = ROOT / "extensions" / "hermes_continuation"
+if EXT.exists() and str(EXT) not in sys.path:
+    sys.path.insert(0, str(EXT))
 
 from brainstack.operating_loop import build_operating_loop_verdict  # noqa: E402
-from brainstack.work_state_contract import build_durable_work_state_contract  # noqa: E402
+from hermes_continuation.work_state import build_durable_work_state_contract  # noqa: E402
 
 
-REPORT_SCHEMA = "brainstack.durable_work_state_contract_proof.v1"
+REPORT_SCHEMA = "hermes_continuation.durable_work_state_contract_proof.v1"
 
 
 def build_report() -> dict[str, object]:

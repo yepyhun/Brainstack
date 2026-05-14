@@ -60,6 +60,7 @@ except ModuleNotFoundError:
 SOURCE_PLUGIN = REPO_ROOT / "brainstack"
 SOURCE_HOST_PAYLOAD = REPO_ROOT / "host_payload"
 SOURCE_HERMES_PROACTIVE_EXTENSION = REPO_ROOT / "extensions" / "hermes_proactive"
+SOURCE_HERMES_CONTINUATION_EXTENSION = REPO_ROOT / "extensions" / "hermes_continuation"
 BACKEND_DEPENDENCIES = {
     "kuzu": "kuzu",
     "chromadb": "chromadb",
@@ -6371,6 +6372,30 @@ def _normalize_proactive_runtime_config(config: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _normalize_continuation_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
+    extensions = config.setdefault("extensions", {})
+    if not isinstance(extensions, dict):
+        raise RuntimeError("config.yaml has non-object `extensions` section")
+    continuation = extensions.setdefault("hermes_continuation", {})
+    if not isinstance(continuation, dict):
+        raise RuntimeError("config.yaml has non-object `extensions.hermes_continuation` section")
+    continuation.setdefault("enabled", False)
+    mode = str(continuation.get("mode") or "").strip().lower()
+    if mode not in PROACTIVE_RUNTIME_MODES:
+        mode = DEFAULT_PROACTIVE_RUNTIME_MODE
+        continuation["mode"] = mode
+    continuation.setdefault("max_fanout", 4)
+    continuation.setdefault("min_confidence_to_continue", 0.55)
+    continuation.setdefault("min_expected_value_to_continue", 0.45)
+    return {
+        "status": "configured",
+        "enabled": bool(continuation.get("enabled")),
+        "mode": mode,
+        "default": "installed_inert_until_enabled",
+        "side_effect_policy": "decision_contract_only_no_runtime_mutation",
+    }
+
+
 def _looks_like_legacy_local_tier2_llm_config(brainstack: dict[str, Any]) -> bool:
     provider = str(brainstack.get("tier2_hindsight_llm_provider") or "").strip().lower()
     base_url = str(brainstack.get("tier2_hindsight_llm_base_url") or "").strip().lower()
@@ -6650,6 +6675,7 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
         raise RuntimeError("config.yaml has non-object `agent` section")
     agent = config["agent"]
     proactive_runtime = _normalize_proactive_runtime_config(config)
+    continuation_runtime = _normalize_continuation_runtime_config(config)
     config_shape_validation = validate_brainstack_config_shape(config)
     _assert_existing_config_blocks_preserved(preserved_runtime_blocks, config)
     if not dry_run:
@@ -6670,6 +6696,7 @@ def _patch_config(config_path: Path, dry_run: bool, *, embedding_runtime: str = 
         "gateway_timeout": agent.get("gateway_timeout"),
         "gateway_timeout_warning": agent.get("gateway_timeout_warning"),
         "proactive_runtime": proactive_runtime,
+        "continuation_runtime": continuation_runtime,
     }
 
 
@@ -8140,6 +8167,11 @@ def main() -> int:
         help="Skip installing the Hermes proactive runtime extension payload. Default is safe dry-run install.",
     )
     parser.add_argument(
+        "--skip-hermes-continuation-extension",
+        action="store_true",
+        help="Skip installing the optional Hermes continuation extension payload. Default installs it inert/disabled.",
+    )
+    parser.add_argument(
         "--install-hermes-proactive-extension",
         action="store_true",
         help="Deprecated no-op: the Hermes proactive runtime extension is installed by default in safe dry-run form.",
@@ -8326,6 +8358,20 @@ def main() -> int:
             "dependency_policy": "stdlib_plus_brainstack_sdk",
         }
 
+    hermes_continuation_extension: dict[str, Any] = {"status": "skipped", "reason": "explicitly_skipped"}
+    if not args.skip_hermes_continuation_extension:
+        continuation_target = target / "extensions" / "hermes_continuation"
+        continuation_files = _copy_tree(SOURCE_HERMES_CONTINUATION_EXTENSION, continuation_target, args.dry_run)
+        hermes_continuation_extension = {
+            "status": "planned" if args.dry_run else "installed",
+            "source": str(SOURCE_HERMES_CONTINUATION_EXTENSION),
+            "target": str(continuation_target),
+            "files": continuation_files,
+            "mode": "installed_inert_until_enabled",
+            "dependency_policy": "stdlib_only",
+            "side_effect_policy": "decision_contract_only_no_runtime_mutation",
+        }
+
     proactive_runtime: dict[str, Any] = {"status": "skipped", "reason": "no_config_path"}
     if not args.skip_hermes_proactive_extension and config_path is not None:
         try:
@@ -8442,6 +8488,7 @@ def main() -> int:
         "helper_files": helper_files,
         "host_helper_files": host_helper_files,
         "hermes_proactive_extension": hermes_proactive_extension,
+        "hermes_continuation_extension": hermes_continuation_extension,
         "hermes_proactive_runtime": proactive_runtime,
         "host_patches": host_patches,
         "host_patch_inventory": _selected_host_patch_inventory(args.runtime, args.host_patch_mode),
@@ -8464,6 +8511,7 @@ def main() -> int:
     print(f"{action} Brainstack payload files: {len(files)}")
     print(f"{action} helper files: {len(helper_files)}")
     print(f"{action} Hermes proactive extension: {hermes_proactive_extension.get('status')}")
+    print(f"{action} Hermes continuation extension: {hermes_continuation_extension.get('status')}")
     print(f"{action} Hermes proactive runtime: {proactive_runtime.get('status')}")
     print(f"{action} profile isolation: {profile_isolation.get('status')} ({profile_isolation.get('mode', profile_isolation.get('reason', 'n/a'))})")
     capability_summary = summarize_enablement_plan(capability_enablement)

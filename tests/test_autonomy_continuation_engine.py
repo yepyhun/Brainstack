@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from brainstack.autonomy_continuation_engine import (
+from hermes_continuation.engine import (
     build_autonomy_continuation_decision,
     build_autonomy_runtime_adapter_contract,
 )

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hermes Continuation Extension Config",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "default": false
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["disabled", "dry_run", "live"],
+      "default": "dry_run"
+    },
+    "max_fanout": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "default": 4
+    },
+    "min_confidence_to_continue": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.55
+    },
+    "min_expected_value_to_continue": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.45
+    }
+  }
+}

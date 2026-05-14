@@ -11,7 +11,6 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from .workstream_controller import classify_cadence_job
-from .work_state_contract import durable_work_state_summary
 
 
 OPERATING_LOOP_VERDICT_SCHEMA = "brainstack.operating_loop.verdict.v1"
@@ -62,6 +61,26 @@ def _bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _external_work_state_summary(contract: Mapping[str, Any]) -> dict[str, Any]:
+    """Compact an optional extension-provided work-state verdict.
+
+    Brainstack does not calculate continuation/work-state authority. Optional
+    runtime extensions may pass a verdict into this health contract; the memory
+    kernel only surfaces a bounded summary.
+    """
+
+    repair_candidates = contract.get("repair_candidates")
+    reason_codes = [str(item) for item in contract.get("reason_codes") or [] if str(item)]
+    return {
+        "schema": "brainstack.external_work_state_summary.v1",
+        "verdict": _text(contract.get("verdict")),
+        "reason_code": reason_codes[0] if reason_codes else "",
+        "reason_count": len(reason_codes),
+        "repair_candidate_count": len(repair_candidates) if isinstance(repair_candidates, list) else 0,
+        "agent_claim": _text(contract.get("agent_claim")),
+    }
 
 
 def _freshness_state(evidence: Mapping[str, Any], *, default_stale_after_seconds: int) -> str:
@@ -250,7 +269,7 @@ def build_operating_loop_verdict(evidence: Mapping[str, Any]) -> dict[str, Any]:
         }
         if continuation
         else {},
-        "durable_work_state": durable_work_state_summary(durable_work_state)
+        "durable_work_state": _external_work_state_summary(durable_work_state)
         if durable_work_state
         else {},
         "agent_claim": (

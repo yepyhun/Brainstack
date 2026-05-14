@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 
-DURABLE_WORK_STATE_CONTRACT_SCHEMA = "brainstack.durable_work_state_contract.v1"
+DURABLE_WORK_STATE_CONTRACT_SCHEMA = "hermes_continuation.durable_work_state_contract.v1"
 
 TERMINAL_STATUSES = {"completed", "done"}
 BLOCKED_STATUSES = {"blocked", "failed", "crashed", "timed_out", "timeout"}
@@ -44,7 +44,7 @@ def _refs(value: Any) -> list[str]:
 
 def _repair_candidate(work_item_id: str, failure_class: str, evidence: Mapping[str, Any]) -> dict[str, Any]:
     return {
-        "schema": "brainstack.durable_work_state.repair_candidate.v1",
+        "schema": "hermes_continuation.durable_work_state.repair_candidate.v1",
         "read_only": True,
         "side_effect_free": True,
         "work_item_id": work_item_id,
@@ -170,7 +170,7 @@ def build_durable_work_state_contract(evidence: Mapping[str, Any]) -> dict[str, 
 
 def durable_work_state_summary(contract: Mapping[str, Any]) -> dict[str, Any]:
     return {
-        "schema": "brainstack.durable_work_state_summary.v1",
+        "schema": "brainstack.external_work_state_summary.v1",
         "verdict": _text(contract.get("verdict")),
         "reason_codes": [str(item) for item in contract.get("reason_codes") or [] if str(item)],
         "repair_candidate_count": len(contract.get("repair_candidates") or []),

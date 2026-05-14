@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from typing import Any
 
 
-CONTINUATION_CONTROL_CONTRACT_SCHEMA = "brainstack.continuation_control.contract.v1"
+CONTINUATION_CONTROL_CONTRACT_SCHEMA = "hermes_continuation.control.contract.v1"
 FRONTIER_CONTINUATION_CONTRACT_SCHEMA = CONTINUATION_CONTROL_CONTRACT_SCHEMA
 
 

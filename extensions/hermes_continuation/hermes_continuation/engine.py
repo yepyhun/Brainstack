@@ -13,8 +13,8 @@ from hashlib import sha256
 from typing import Any
 
 
-AUTONOMY_CONTINUATION_ENGINE_SCHEMA = "brainstack.autonomy_continuation_engine.v1"
-AUTONOMY_RUNTIME_ADAPTER_CONTRACT_SCHEMA = "brainstack.autonomy_runtime_adapter_contract.v1"
+AUTONOMY_CONTINUATION_ENGINE_SCHEMA = "hermes_continuation.engine.v1"
+AUTONOMY_RUNTIME_ADAPTER_CONTRACT_SCHEMA = "hermes_continuation.runtime_adapter_contract.v1"
 
 EVENT_KINDS = {
     "task_completed",

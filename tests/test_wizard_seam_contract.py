@@ -9,6 +9,27 @@ from scripts import hermes_gateway_patch_support
 from scripts import install_into_hermes
 
 
+def test_continuation_engine_is_extension_not_brainstack_core() -> None:
+    assert (install_into_hermes.SOURCE_HERMES_CONTINUATION_EXTENSION / "hermes_continuation" / "engine.py").exists()
+    assert not (install_into_hermes.SOURCE_PLUGIN / "autonomy_continuation_engine.py").exists()
+    assert not (install_into_hermes.SOURCE_PLUGIN / "continuation_control_contract.py").exists()
+    assert not (install_into_hermes.SOURCE_PLUGIN / "work_state_contract.py").exists()
+
+
+def test_patch_config_adds_inert_continuation_extension_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("model:\n  default: local\n", encoding="utf-8")
+
+    result = install_into_hermes._patch_config(config_path, dry_run=False, embedding_runtime="none")
+    config = install_into_hermes._load_yaml(config_path)
+    continuation = config["extensions"]["hermes_continuation"]
+
+    assert result["continuation_runtime"]["status"] == "configured"
+    assert continuation["enabled"] is False
+    assert continuation["mode"] == "dry_run"
+    assert continuation["max_fanout"] == 4
+
+
 def test_core_host_patch_mode_skips_legacy_prompt_builder_patch(tmp_path: Path) -> None:
     prompt_builder = tmp_path / "prompt_builder.py"
     original = (

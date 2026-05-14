@@ -12,8 +12,6 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Mapping
 
-from .autonomy_continuation_engine import build_autonomy_continuation_decision
-from .continuation_control_contract import build_continuation_control_contract
 from .core.proactive import ProactiveEventKind, ProactiveEventState, ProactiveReasonCode
 from .operating_loop import (
     build_kanban_recovery_candidates,
@@ -1484,15 +1482,13 @@ def build_proactive_status(
     scheduler_health = build_scheduler_lane_health(_scheduler_jobs_from_config(config))
     kanban_runtime = _mapping(kanban_status.get("runtime_snapshot"))
     cron_authority = _cron_authority_status(config, hermes_home)
-    continuation_control_evidence = (
+    continuation_control = (
         _mapping(config.get("frontier_continuation") if isinstance(config, Mapping) else {})
         or _mapping(config.get("continuation_control") if isinstance(config, Mapping) else {})
     )
-    continuation_control = build_continuation_control_contract(continuation_control_evidence)
-    autonomy_continuation_evidence = _mapping(
+    autonomy_continuation = _mapping(
         config.get("autonomy_continuation") if isinstance(config, Mapping) else {}
     )
-    autonomy_continuation = build_autonomy_continuation_decision(autonomy_continuation_evidence)
     operating_loop = build_operating_loop_verdict(
         {
             "kanban_runtime_snapshot": kanban_runtime,
@@ -1519,14 +1515,12 @@ def build_proactive_status(
         operating_loop_payload = _compact_operating_loop_verdict(operating_loop)
         continuation_control_payload = (
             _compact_frontier_continuation_contract(continuation_control)
-            if continuation_control_evidence
-            or str(continuation_control.get("verdict") or "") != "insufficient_evidence"
+            if continuation_control
             else {}
         )
         autonomy_continuation_payload = (
             _compact_autonomy_continuation_decision(autonomy_continuation)
-            if autonomy_continuation_evidence
-            or str(autonomy_continuation.get("verdict") or "") not in {"waiting_for_signal", "insufficient_evidence"}
+            if autonomy_continuation
             else {}
         )
         workstream_controller_payload = _compact_workstream_controller_status(workstream_controller)

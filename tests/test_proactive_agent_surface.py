@@ -11,7 +11,7 @@ from brainstack.proactive_agent_contract import (
     PROACTIVE_ALLOWED_CONTROL_ACTIONS,
     validate_proactive_candidate_intake,
 )
-from brainstack.work_state_contract import build_durable_work_state_contract
+from hermes_continuation.work_state import build_durable_work_state_contract
 from brainstack.tool_schemas import proactive_control_tool_schema, proactive_mode_tool_schema
 
 
@@ -464,7 +464,7 @@ def test_proactive_status_compact_payload_surfaces_durable_work_state_verdict(tm
         assert payload["detail_level"] == "compact"
         assert payload["operating_loop"]["verdict"] == "critical"
         assert "durable_work_state_critical" in payload["operating_loop"]["blockers"]
-        assert durable["schema"] == "brainstack.durable_work_state_summary.v1"
+        assert durable["schema"] == "brainstack.external_work_state_summary.v1"
         assert durable["verdict"] == "critical"
         assert durable["repair_candidate_count"] == 1
     finally:
@@ -476,8 +476,10 @@ def test_proactive_status_compact_payload_surfaces_continuation_control_when_con
     provider._config.update(
         {
             "continuation_control": {
-                "controller": {"controller_mode": "prompt_primary", "normal_path_uses_llm": True},
-                "token_policy": {"model_calls": 1, "max_input_tokens": 50000},
+                "verdict": "critical",
+                "controller_mode": "prompt_primary",
+                "token_policy": "violation",
+                "reason_codes": ["PROMPT_PRIMARY_TOKEN_WASTE"],
             }
         }
     )
@@ -498,8 +500,15 @@ def test_proactive_status_compact_payload_surfaces_autonomy_continuation_when_co
     provider._config.update(
         {
             "autonomy_continuation": {
-                "event": {"kind": "task_completed", "event_id": "evt-local", "artifact_missing": True},
-                "safety": {"local_repair_available": True},
+                "verdict": "degraded",
+                "decision": "repair",
+                "reason_codes": ["LOCAL_REPAIR_REQUIRED"],
+                "decision_journal": {
+                    "confidence": 0.7,
+                    "expected_value_next": 0.8,
+                    "continue_score": 0.6,
+                },
+                "review": {"deep_verifier_required": True},
             }
         }
     )

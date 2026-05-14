@@ -11,14 +11,17 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+EXT = ROOT / "extensions" / "hermes_continuation"
+if EXT.exists() and str(EXT) not in sys.path:
+    sys.path.insert(0, str(EXT))
 
-from brainstack.autonomy_continuation_engine import (  # noqa: E402
+from hermes_continuation.engine import (  # noqa: E402
     build_autonomy_continuation_decision,
     build_autonomy_runtime_adapter_contract,
 )
 
 
-REPORT_SCHEMA = "brainstack.autonomy_continuation_engine_proof.v1"
+REPORT_SCHEMA = "hermes_continuation.engine_proof.v1"
 
 
 def _decision(name: str, evidence: dict) -> dict:
