@@ -188,6 +188,11 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "owner": "upstream-hermes-discord-bugfix",
         "removal_condition": "Hermes natively guarantees idempotent Discord final-response delivery across streaming, fallback, retry, and normal final-send paths. Tracking: https://github.com/NousResearch/hermes-agent/issues/25349",
     },
+    "_patch_platform_final_response_delivery_metadata": {
+        "category": "temporary_upstream_hotfix",
+        "owner": "upstream-hermes-discord-bugfix",
+        "removal_condition": "Hermes gateway natively marks logical final responses with stable delivery metadata before platform sends. Tracking: https://github.com/NousResearch/hermes-agent/issues/25349",
+    },
     "_patch_cron_authority_jobs": {
         "category": "temporary_upstream_hotfix",
         "owner": "upstream-hermes-cron-authority",
@@ -496,8 +501,16 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "target": "gateway/platforms/discord.py",
         "scope": "temporary-upstream-hermes-bugfix",
         "runtime_modes": ("source", "docker"),
-        "purpose": "Temporarily suppress duplicate Discord final-response chunks while upstream fixes delivery idempotency.",
-        "why": "Hermes can deliver the same long Discord response twice when streaming/chunked/final-send paths overlap; this patch is isolated for easy removal once upstream issue #25349 is fixed.",
+        "purpose": "Temporarily suppress duplicate Discord final responses while upstream fixes delivery idempotency.",
+        "why": "Hermes can deliver the same long Discord response twice when streaming/chunked/final-send paths overlap; this patch tracks logical final responses and keeps chunk dedupe only as defense-in-depth until upstream issue #25349 is fixed.",
+    },
+    {
+        "patcher": "_patch_platform_final_response_delivery_metadata",
+        "target": "gateway/platforms/base.py",
+        "scope": "temporary-upstream-hermes-bugfix",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Mark gateway final text sends with a stable logical delivery id for platform adapters.",
+        "why": "Discord chunk boundaries are not a reliable identity. The gateway has the logical final text and session key, so it must annotate final sends before adapter chunking.",
     },
     {
         "patcher": "_patch_cron_authority_jobs",
@@ -5916,25 +5929,97 @@ def _patch_discord_typing_backoff(path: Path, dry_run: bool) -> list[str]:
     return applied
 
 
+def _patch_platform_final_response_delivery_metadata(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    if "hermes_delivery_scope" in text and "hermes_delivery_id" in text:
+        return applied
+
+    anchor = (
+        "                    if _thread_metadata is not None:\n"
+        "                        _thread_metadata = dict(_thread_metadata)\n"
+        "                        _thread_metadata[\"notify\"] = True\n"
+        "                    else:\n"
+        "                        _thread_metadata = {\"notify\": True}\n"
+        "                    result = await self._send_with_retry(\n"
+    )
+    replacement = (
+        "                    if _thread_metadata is not None:\n"
+        "                        _thread_metadata = dict(_thread_metadata)\n"
+        "                        _thread_metadata[\"notify\"] = True\n"
+        "                    else:\n"
+        "                        _thread_metadata = {\"notify\": True}\n"
+        "                    # Temporary upstream Hermes bugfix (#25349): mark a\n"
+        "                    # logical final response before platform chunking so\n"
+        "                    # adapters can suppress duplicate final sends without\n"
+        "                    # guessing from individual chunks.\n"
+        "                    import hashlib as _hermes_delivery_hashlib\n"
+        "                    _final_delivery_hash = _hermes_delivery_hashlib.sha256(\n"
+        "                        text_content.encode(\"utf-8\")\n"
+        "                    ).hexdigest()\n"
+        "                    _thread_metadata.setdefault(\"hermes_delivery_scope\", \"final_response\")\n"
+        "                    _thread_metadata.setdefault(\n"
+        "                        \"hermes_delivery_id\",\n"
+        "                        f\"{session_key}:final:{_final_delivery_hash}\",\n"
+        "                    )\n"
+        "                    result = await self._send_with_retry(\n"
+    )
+    if anchor not in text:
+        return applied
+    text = _replace_once(
+        text,
+        anchor,
+        replacement,
+        label="Platform final-response delivery metadata",
+        path=path,
+    )
+    applied.append("platform_final_delivery_metadata:final_response")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
 def _patch_discord_outbound_final_dedupe(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
 
     # Temporary upstream Hermes bugfix. If upstream adds its own delivery
     # idempotency guard, do not force this patch over it.
-    if "self._recent_outbound_chunk_dedupe" in text:
+    if "self._recent_outbound_final_dedupe" in text and "hermes_delivery_id" in text:
         return applied
-    if "duplicate_suppressed" in text and "content_hash" in text and "channel.send" in text:
+    if (
+        "duplicate_suppressed" in text
+        and "dedupe_scope" in text
+        and "final_response" in text
+        and "channel.send" in text
+    ):
         return applied
+
+    chunk_patch_present = "self._recent_outbound_chunk_dedupe" in text
 
     import_anchor = "import asyncio\n"
     state_anchor = "        self._typing_tasks: Dict[str, asyncio.Task] = {}\n"
+    chunk_state_anchor = (
+        "        self._outbound_chunk_dedupe_min_chars = max(\n"
+        "            0,\n"
+        "            int(os.getenv(\"HERMES_DISCORD_OUTBOUND_DEDUPE_MIN_CHARS\", \"200\")),\n"
+        "        )\n"
+    )
     send_anchor = (
         "            # Format and split message if needed\n"
         "            formatted = self.format_message(content)\n"
         "            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)\n"
         "\n"
         "            message_ids = []\n"
+    )
+    chunk_setup_anchor = (
+        "            if dedupe_enabled and len(self._recent_outbound_chunk_dedupe) > 512:\n"
+        "                dedupe_cutoff = dedupe_now - self._outbound_chunk_dedupe_seconds\n"
+        "                for dedupe_key, (seen_at, _msg_id) in list(self._recent_outbound_chunk_dedupe.items()):\n"
+        "                    if seen_at < dedupe_cutoff:\n"
+        "                        self._recent_outbound_chunk_dedupe.pop(dedupe_key, None)\n"
     )
     loop_anchor = (
         "            for i, chunk in enumerate(chunks):\n"
@@ -5945,7 +6030,17 @@ def _patch_discord_outbound_final_dedupe(path: Path, dry_run: bool) -> list[str]
         "                try:\n"
     )
     append_anchor = "                message_ids.append(str(msg.id))\n"
-    required_anchors = [state_anchor, send_anchor, loop_anchor, append_anchor]
+    chunk_key_anchor = "                    dedupe_key = f\"{dedupe_target_id}:{reference_id}:{content_hash}\"\n"
+    final_check_anchor = "            for i, chunk in enumerate(chunks):\n"
+    return_anchor = (
+        "            return SendResult(\n"
+        "                success=True,\n"
+    )
+    required_anchors = [final_check_anchor, return_anchor]
+    if chunk_patch_present:
+        required_anchors.extend([chunk_state_anchor, chunk_setup_anchor])
+    else:
+        required_anchors.extend([state_anchor, send_anchor, loop_anchor, append_anchor])
     if "import hashlib\n" not in text:
         required_anchors.append(import_anchor)
     if any(anchor not in text for anchor in required_anchors):
@@ -5961,105 +6056,213 @@ def _patch_discord_outbound_final_dedupe(path: Path, dry_run: bool) -> list[str]
         )
         applied.append("discord_outbound_dedupe:import")
 
-    state_replacement = (
-        state_anchor +
-        "        # Temporary upstream Hermes bugfix (#25349): suppress exact duplicate\n"
-        "        # outbound Discord chunks when streaming/fallback/normal final-send\n"
-        "        # paths overlap. Remove when Hermes owns final delivery idempotency.\n"
-        "        self._recent_outbound_chunk_dedupe: Dict[str, tuple[float, str]] = {}\n"
-        "        self._outbound_chunk_dedupe_seconds = max(\n"
+    final_state = (
+        "        # Temporary upstream Hermes bugfix (#25349): suppress duplicate\n"
+        "        # logical final Discord responses. Chunk dedupe remains only as\n"
+        "        # defense-in-depth because chunk boundaries are not response identity.\n"
+        "        self._recent_outbound_final_dedupe: Dict[str, tuple[float, list[str]]] = {}\n"
+        "        self._outbound_final_dedupe_seconds = max(\n"
         "            0.0,\n"
-        "            float(os.getenv(\"HERMES_DISCORD_OUTBOUND_DEDUPE_SECONDS\", \"120\")),\n"
+        "            float(os.getenv(\"HERMES_DISCORD_OUTBOUND_FINAL_DEDUPE_SECONDS\", os.getenv(\"HERMES_DISCORD_OUTBOUND_DEDUPE_SECONDS\", \"120\"))),\n"
         "        )\n"
-        "        self._outbound_chunk_dedupe_min_chars = max(\n"
+        "        self._outbound_final_dedupe_min_chars = max(\n"
         "            0,\n"
-        "            int(os.getenv(\"HERMES_DISCORD_OUTBOUND_DEDUPE_MIN_CHARS\", \"200\")),\n"
+        "            int(os.getenv(\"HERMES_DISCORD_OUTBOUND_FINAL_DEDUPE_MIN_CHARS\", \"1000\")),\n"
         "        )\n"
     )
+    if chunk_patch_present:
+        text = _replace_once(
+            text,
+            chunk_state_anchor,
+            chunk_state_anchor + final_state,
+            label="Discord outbound duplicate-final dedupe state",
+            path=path,
+        )
+        applied.append("discord_outbound_dedupe:final_state")
+    else:
+        state_replacement = (
+            state_anchor +
+            "        # Temporary upstream Hermes bugfix (#25349): suppress exact duplicate\n"
+            "        # outbound Discord chunks when streaming/fallback/normal final-send\n"
+            "        # paths overlap. Remove when Hermes owns final delivery idempotency.\n"
+            "        self._recent_outbound_chunk_dedupe: Dict[str, tuple[float, str]] = {}\n"
+            "        self._outbound_chunk_dedupe_seconds = max(\n"
+            "            0.0,\n"
+            "            float(os.getenv(\"HERMES_DISCORD_OUTBOUND_DEDUPE_SECONDS\", \"120\")),\n"
+            "        )\n"
+            "        self._outbound_chunk_dedupe_min_chars = max(\n"
+            "            0,\n"
+            "            int(os.getenv(\"HERMES_DISCORD_OUTBOUND_DEDUPE_MIN_CHARS\", \"200\")),\n"
+            "        )\n" +
+            final_state
+        )
+        text = _replace_once(
+            text,
+            state_anchor,
+            state_replacement,
+            label="Discord outbound duplicate dedupe state",
+            path=path,
+        )
+        applied.append("discord_outbound_dedupe:state")
+
+    final_setup = (
+        "            final_dedupe_key = \"\"\n"
+        "            final_dedupe_enabled = self._outbound_final_dedupe_seconds > 0\n"
+        "            if final_dedupe_enabled and len(self._recent_outbound_final_dedupe) > 512:\n"
+        "                final_cutoff = dedupe_now - self._outbound_final_dedupe_seconds\n"
+        "                for final_key, (seen_at, _message_ids) in list(self._recent_outbound_final_dedupe.items()):\n"
+        "                    if seen_at < final_cutoff:\n"
+        "                        self._recent_outbound_final_dedupe.pop(final_key, None)\n"
+    )
+    if chunk_patch_present:
+        text = _replace_once(
+            text,
+            chunk_setup_anchor,
+            chunk_setup_anchor + final_setup,
+            label="Discord outbound duplicate-final dedupe setup",
+            path=path,
+        )
+        applied.append("discord_outbound_dedupe:final_setup")
+    else:
+        send_replacement = (
+            "            # Format and split message if needed\n"
+            "            formatted = self.format_message(content)\n"
+            "            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)\n"
+            "\n"
+            "            message_ids = []\n"
+            "            dedupe_enabled = self._outbound_chunk_dedupe_seconds > 0\n"
+            "            dedupe_now = time.monotonic()\n"
+            "            dedupe_target_id = str(getattr(channel, \"id\", thread_id or chat_id))\n"
+            "            if dedupe_enabled and len(self._recent_outbound_chunk_dedupe) > 512:\n"
+            "                dedupe_cutoff = dedupe_now - self._outbound_chunk_dedupe_seconds\n"
+            "                for dedupe_key, (seen_at, _msg_id) in list(self._recent_outbound_chunk_dedupe.items()):\n"
+            "                    if seen_at < dedupe_cutoff:\n"
+            "                        self._recent_outbound_chunk_dedupe.pop(dedupe_key, None)\n" +
+            final_setup
+        )
+        text = _replace_once(
+            text,
+            send_anchor,
+            send_replacement,
+            label="Discord outbound duplicate dedupe setup",
+            path=path,
+        )
+        applied.append("discord_outbound_dedupe:setup")
+
+    final_check = (
+        "            final_metadata = metadata if isinstance(metadata, dict) else {}\n"
+        "            final_delivery_scope = str(final_metadata.get(\"hermes_delivery_scope\") or \"\")\n"
+        "            final_delivery_id = str(final_metadata.get(\"hermes_delivery_id\") or \"\")\n"
+        "            if (\n"
+        "                final_dedupe_enabled\n"
+        "                and (final_delivery_scope == \"final_response\" or len(formatted) >= self._outbound_final_dedupe_min_chars)\n"
+        "            ):\n"
+        "                reference_id = \"\"\n"
+        "                if reference is not None:\n"
+        "                    reference_id = str(getattr(reference, \"message_id\", \"\") or getattr(reference, \"id\", \"\"))\n"
+        "                if not final_delivery_id:\n"
+        "                    final_delivery_id = hashlib.sha256(formatted.encode(\"utf-8\")).hexdigest()\n"
+        "                final_dedupe_key = f\"{dedupe_target_id}:{reference_id}:final:{final_delivery_id}\"\n"
+        "                previous_final = self._recent_outbound_final_dedupe.get(final_dedupe_key)\n"
+        "                if previous_final and (dedupe_now - previous_final[0]) <= self._outbound_final_dedupe_seconds:\n"
+        "                    previous_ids = list(previous_final[1])\n"
+        "                    logger.info(\n"
+        "                        \"[%s] Suppressed duplicate Discord final response for %s (delivery_id=%s)\",\n"
+        "                        self.name,\n"
+        "                        dedupe_target_id,\n"
+        "                        final_delivery_id[:12],\n"
+        "                    )\n"
+        "                    return SendResult(\n"
+        "                        success=True,\n"
+        "                        message_id=previous_ids[0] if previous_ids else None,\n"
+        "                        raw_response={\"message_ids\": previous_ids, \"duplicate_suppressed\": True, \"dedupe_scope\": \"final_response\"},\n"
+        "                    )\n"
+    )
     text = _replace_once(
         text,
-        state_anchor,
-        state_replacement,
-        label="Discord outbound duplicate-chunk dedupe state",
+        final_check_anchor,
+        final_check + final_check_anchor,
+        label="Discord outbound duplicate-final dedupe check",
         path=path,
     )
-    applied.append("discord_outbound_dedupe:state")
+    applied.append("discord_outbound_dedupe:final_check")
 
-    send_replacement = (
-        "            # Format and split message if needed\n"
-        "            formatted = self.format_message(content)\n"
-        "            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)\n"
+    if not chunk_patch_present:
+        loop_replacement = (
+            "            for i, chunk in enumerate(chunks):\n"
+            "                if self._reply_to_mode == \"all\":\n"
+            "                    chunk_reference = reference\n"
+            "                else:  # \"first\" (default) or \"off\"\n"
+            "                    chunk_reference = reference if i == 0 else None\n"
+            "                dedupe_key = \"\"\n"
+            "                if (\n"
+            "                    dedupe_enabled\n"
+            "                    and len(chunk) >= self._outbound_chunk_dedupe_min_chars\n"
+            "                ):\n"
+            "                    reference_id = \"\"\n"
+            "                    if chunk_reference is not None:\n"
+            "                        reference_id = str(getattr(chunk_reference, \"message_id\", \"\") or getattr(chunk_reference, \"id\", \"\"))\n"
+            "                    content_hash = hashlib.sha256(chunk.encode(\"utf-8\")).hexdigest()\n"
+            "                    dedupe_key = f\"{dedupe_target_id}:{reference_id}:{i}:{content_hash}\"\n"
+            "                    previous = self._recent_outbound_chunk_dedupe.get(dedupe_key)\n"
+            "                    if previous and (dedupe_now - previous[0]) <= self._outbound_chunk_dedupe_seconds:\n"
+            "                        message_ids.append(previous[1])\n"
+            "                        logger.info(\n"
+            "                            \"[%s] Suppressed duplicate Discord outbound chunk for %s (content_hash=%s)\",\n"
+            "                            self.name,\n"
+            "                            dedupe_target_id,\n"
+            "                            content_hash[:12],\n"
+            "                        )\n"
+            "                        continue\n"
+            "                try:\n"
+        )
+        text = _replace_once(
+            text,
+            loop_anchor,
+            loop_replacement,
+            label="Discord outbound duplicate-chunk dedupe check",
+            path=path,
+        )
+        applied.append("discord_outbound_dedupe:check")
+    elif chunk_key_anchor in text:
+        text = _replace_once(
+            text,
+            chunk_key_anchor,
+            "                    dedupe_key = f\"{dedupe_target_id}:{reference_id}:{i}:{content_hash}\"\n",
+            label="Discord outbound duplicate-chunk dedupe index key",
+            path=path,
+        )
+        applied.append("discord_outbound_dedupe:chunk_index_key")
+
+    if not chunk_patch_present:
+        append_replacement = (
+            "                msg_id = str(msg.id)\n"
+            "                message_ids.append(msg_id)\n"
+            "                if dedupe_key:\n"
+            "                    self._recent_outbound_chunk_dedupe[dedupe_key] = (time.monotonic(), msg_id)\n"
+        )
+        text = _replace_once(
+            text,
+            append_anchor,
+            append_replacement,
+            label="Discord outbound duplicate-chunk dedupe record",
+            path=path,
+        )
+        applied.append("discord_outbound_dedupe:record")
+
+    final_record = (
+        "            if final_dedupe_key and message_ids:\n"
+        "                self._recent_outbound_final_dedupe[final_dedupe_key] = (time.monotonic(), list(message_ids))\n"
         "\n"
-        "            message_ids = []\n"
-        "            dedupe_enabled = self._outbound_chunk_dedupe_seconds > 0\n"
-        "            dedupe_now = time.monotonic()\n"
-        "            dedupe_target_id = str(getattr(channel, \"id\", thread_id or chat_id))\n"
-        "            if dedupe_enabled and len(self._recent_outbound_chunk_dedupe) > 512:\n"
-        "                dedupe_cutoff = dedupe_now - self._outbound_chunk_dedupe_seconds\n"
-        "                for dedupe_key, (seen_at, _msg_id) in list(self._recent_outbound_chunk_dedupe.items()):\n"
-        "                    if seen_at < dedupe_cutoff:\n"
-        "                        self._recent_outbound_chunk_dedupe.pop(dedupe_key, None)\n"
     )
     text = _replace_once(
         text,
-        send_anchor,
-        send_replacement,
-        label="Discord outbound duplicate-chunk dedupe setup",
+        return_anchor,
+        final_record + return_anchor,
+        label="Discord outbound duplicate-final dedupe record",
         path=path,
     )
-    applied.append("discord_outbound_dedupe:setup")
-
-    loop_replacement = (
-        "            for i, chunk in enumerate(chunks):\n"
-        "                if self._reply_to_mode == \"all\":\n"
-        "                    chunk_reference = reference\n"
-        "                else:  # \"first\" (default) or \"off\"\n"
-        "                    chunk_reference = reference if i == 0 else None\n"
-        "                dedupe_key = \"\"\n"
-        "                if (\n"
-        "                    dedupe_enabled\n"
-        "                    and len(chunk) >= self._outbound_chunk_dedupe_min_chars\n"
-        "                ):\n"
-        "                    reference_id = \"\"\n"
-        "                    if chunk_reference is not None:\n"
-        "                        reference_id = str(getattr(chunk_reference, \"message_id\", \"\") or getattr(chunk_reference, \"id\", \"\"))\n"
-        "                    content_hash = hashlib.sha256(chunk.encode(\"utf-8\")).hexdigest()\n"
-        "                    dedupe_key = f\"{dedupe_target_id}:{reference_id}:{content_hash}\"\n"
-        "                    previous = self._recent_outbound_chunk_dedupe.get(dedupe_key)\n"
-        "                    if previous and (dedupe_now - previous[0]) <= self._outbound_chunk_dedupe_seconds:\n"
-        "                        message_ids.append(previous[1])\n"
-        "                        logger.info(\n"
-        "                            \"[%s] Suppressed duplicate Discord outbound chunk for %s (content_hash=%s)\",\n"
-        "                            self.name,\n"
-        "                            dedupe_target_id,\n"
-        "                            content_hash[:12],\n"
-        "                        )\n"
-        "                        continue\n"
-        "                try:\n"
-    )
-    text = _replace_once(
-        text,
-        loop_anchor,
-        loop_replacement,
-        label="Discord outbound duplicate-chunk dedupe check",
-        path=path,
-    )
-    applied.append("discord_outbound_dedupe:check")
-
-    append_replacement = (
-        "                msg_id = str(msg.id)\n"
-        "                message_ids.append(msg_id)\n"
-        "                if dedupe_key:\n"
-        "                    self._recent_outbound_chunk_dedupe[dedupe_key] = (time.monotonic(), msg_id)\n"
-    )
-    text = _replace_once(
-        text,
-        append_anchor,
-        append_replacement,
-        label="Discord outbound duplicate-chunk dedupe record",
-        path=path,
-    )
-    applied.append("discord_outbound_dedupe:record")
+    applied.append("discord_outbound_dedupe:final_record")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -8442,6 +8645,7 @@ def main() -> int:
     host_patches.extend(_run_host_patch("_patch_auxiliary_client", target / "agent" / "auxiliary_client.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_session_search_total_deadline", target / "tools" / "session_search_tool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_discord_typing_backoff", target / "gateway" / "platforms" / "discord.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_platform_final_response_delivery_metadata", target / "gateway" / "platforms" / "base.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_discord_outbound_final_dedupe", target / "gateway" / "platforms" / "discord.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_run_agent_ebadf_transport_recovery", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_context_compressor_runtime_budget", target / "agent" / "context_compressor.py", args.dry_run, host_patch_mode=args.host_patch_mode))

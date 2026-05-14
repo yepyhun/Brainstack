@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import importlib.util
 import subprocess
 from pathlib import Path
 
@@ -269,6 +271,11 @@ def test_core_host_patch_mode_applies_discord_outbound_final_dedupe(tmp_path: Pa
         "import os\n"
         "import time\n"
         "from typing import Dict\n\n"
+        "class SendResult:\n"
+        "    def __init__(self, success=True, message_id=None, raw_response=None):\n"
+        "        self.success = success\n"
+        "        self.message_id = message_id\n"
+        "        self.raw_response = raw_response or {}\n\n"
         "class DiscordAdapter:\n"
         "    MAX_MESSAGE_LENGTH = 2000\n\n"
         "    def __init__(self):\n"
@@ -280,7 +287,7 @@ def test_core_host_patch_mode_applies_discord_outbound_final_dedupe(tmp_path: Pa
         "        return content\n\n"
         "    def truncate_message(self, formatted, limit):\n"
         "        return [formatted]\n\n"
-        "    async def send_message(self, chat_id: str, content: str, thread_id=None, reply_to=None):\n"
+        "    async def send_message(self, chat_id: str, content: str, thread_id=None, reply_to=None, metadata=None):\n"
         "        channel = await self._client.fetch_channel(thread_id or chat_id)\n"
         "        try:\n"
         "            # Format and split message if needed\n"
@@ -304,7 +311,11 @@ def test_core_host_patch_mode_applies_discord_outbound_final_dedupe(tmp_path: Pa
         "                except Exception:\n"
         "                    raise\n"
         "                message_ids.append(str(msg.id))\n"
-        "            return message_ids\n"
+        "            return SendResult(\n"
+        "                success=True,\n"
+        "                message_id=message_ids[0] if message_ids else None,\n"
+        "                raw_response={\"message_ids\": message_ids},\n"
+        "            )\n"
         "        except Exception:\n"
         "            raise\n",
         encoding="utf-8",
@@ -322,15 +333,206 @@ def test_core_host_patch_mode_applies_discord_outbound_final_dedupe(tmp_path: Pa
         "discord_outbound_dedupe:import",
         "discord_outbound_dedupe:state",
         "discord_outbound_dedupe:setup",
+        "discord_outbound_dedupe:final_check",
         "discord_outbound_dedupe:check",
         "discord_outbound_dedupe:record",
+        "discord_outbound_dedupe:final_record",
     ]
     assert "import hashlib" in text
     assert "Temporary upstream Hermes bugfix (#25349)" in text
+    assert "self._recent_outbound_final_dedupe" in text
+    assert "HERMES_DISCORD_OUTBOUND_FINAL_DEDUPE_SECONDS" in text
     assert "HERMES_DISCORD_OUTBOUND_DEDUPE_SECONDS" in text
+    assert "hermes_delivery_id" in text
     assert "content_hash = hashlib.sha256" in text
+    assert ":{i}:{content_hash}" in text
+    assert "Suppressed duplicate Discord final response" in text
     assert "Suppressed duplicate Discord outbound chunk" in text
     assert "self._recent_outbound_chunk_dedupe[dedupe_key]" in text
+    assert "self._recent_outbound_final_dedupe[final_dedupe_key]" in text
+
+
+def test_discord_final_response_dedupe_suppresses_second_logical_send(tmp_path: Path) -> None:
+    discord_py = tmp_path / "discord_runtime.py"
+    discord_py.write_text(
+        "import asyncio\n"
+        "import os\n"
+        "import time\n"
+        "from typing import Dict\n\n"
+        "class Logger:\n"
+        "    def info(self, *args, **kwargs):\n"
+        "        pass\n"
+        "logger = Logger()\n\n"
+        "class SendResult:\n"
+        "    def __init__(self, success=True, message_id=None, raw_response=None):\n"
+        "        self.success = success\n"
+        "        self.message_id = message_id\n"
+        "        self.raw_response = raw_response or {}\n\n"
+        "class FakeMessage:\n"
+        "    def __init__(self, mid):\n"
+        "        self.id = mid\n\n"
+        "class FakeChannel:\n"
+        "    id = \"channel-1\"\n"
+        "    def __init__(self):\n"
+        "        self.sent = []\n"
+        "    async def send(self, content, reference=None):\n"
+        "        self.sent.append(content)\n"
+        "        return FakeMessage(f\"m{len(self.sent)}\")\n\n"
+        "class FakeClient:\n"
+        "    def __init__(self, channel):\n"
+        "        self.channel = channel\n"
+        "    async def fetch_channel(self, channel_id):\n"
+        "        return self.channel\n\n"
+        "class DiscordAdapter:\n"
+        "    MAX_MESSAGE_LENGTH = 2000\n\n"
+        "    def __init__(self, channel):\n"
+        "        self._typing_tasks: Dict[str, asyncio.Task] = {}\n"
+        "        self._reply_to_mode = \"first\"\n"
+        "        self.name = \"discord\"\n"
+        "        self._client = FakeClient(channel)\n\n"
+        "    def format_message(self, content):\n"
+        "        return content\n\n"
+        "    def truncate_message(self, formatted, limit):\n"
+        "        return [formatted[i:i + limit] for i in range(0, len(formatted), limit)] or [\"\"]\n\n"
+        "    async def send_message(self, chat_id: str, content: str, thread_id=None, reply_to=None, metadata=None):\n"
+        "        channel = await self._client.fetch_channel(thread_id or chat_id)\n"
+        "        try:\n"
+        "            # Format and split message if needed\n"
+        "            formatted = self.format_message(content)\n"
+        "            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)\n"
+        "\n"
+        "            message_ids = []\n"
+        "            reference = None\n"
+        "            if reply_to and self._reply_to_mode != \"off\":\n"
+        "                reference = reply_to\n"
+        "            for i, chunk in enumerate(chunks):\n"
+        "                if self._reply_to_mode == \"all\":\n"
+        "                    chunk_reference = reference\n"
+        "                else:  # \"first\" (default) or \"off\"\n"
+        "                    chunk_reference = reference if i == 0 else None\n"
+        "                try:\n"
+        "                    msg = await channel.send(\n"
+        "                        content=chunk,\n"
+        "                        reference=chunk_reference,\n"
+        "                    )\n"
+        "                except Exception:\n"
+        "                    raise\n"
+        "                message_ids.append(str(msg.id))\n"
+        "            return SendResult(\n"
+        "                success=True,\n"
+        "                message_id=message_ids[0] if message_ids else None,\n"
+        "                raw_response={\"message_ids\": message_ids},\n"
+        "            )\n"
+        "        except Exception:\n"
+        "            raise\n",
+        encoding="utf-8",
+    )
+    install_into_hermes._run_host_patch(
+        "_patch_discord_outbound_final_dedupe",
+        discord_py,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    spec = importlib.util.spec_from_file_location("discord_runtime", discord_py)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    channel = module.FakeChannel()
+    adapter = module.DiscordAdapter(channel)
+    metadata = {"hermes_delivery_scope": "final_response", "hermes_delivery_id": "turn-1-final"}
+
+    first = asyncio.run(adapter.send_message("c", "x" * 4442, metadata=metadata))
+    second = asyncio.run(adapter.send_message("c", "x" * 4442, metadata=metadata))
+
+    assert first.success is True
+    assert second.success is True
+    assert second.raw_response["duplicate_suppressed"] is True
+    assert second.raw_response["dedupe_scope"] == "final_response"
+    assert len(channel.sent) == 3
+
+
+def test_core_host_patch_mode_adds_final_dedupe_when_chunk_dedupe_already_exists(tmp_path: Path) -> None:
+    discord_py = tmp_path / "discord.py"
+    discord_py.write_text(
+        "import asyncio\n"
+        "import hashlib\n"
+        "import os\n"
+        "import time\n"
+        "from typing import Dict\n\n"
+        "class SendResult:\n"
+        "    def __init__(self, success=True, message_id=None, raw_response=None):\n"
+        "        self.success = success\n"
+        "        self.message_id = message_id\n"
+        "        self.raw_response = raw_response or {}\n\n"
+        "class DiscordAdapter:\n"
+        "    MAX_MESSAGE_LENGTH = 2000\n"
+        "    def __init__(self):\n"
+        "        self._typing_tasks: Dict[str, asyncio.Task] = {}\n"
+        "        self._recent_outbound_chunk_dedupe: Dict[str, tuple[float, str]] = {}\n"
+        "        self._outbound_chunk_dedupe_seconds = max(\n"
+        "            0.0,\n"
+        "            float(os.getenv(\"HERMES_DISCORD_OUTBOUND_DEDUPE_SECONDS\", \"120\")),\n"
+        "        )\n"
+        "        self._outbound_chunk_dedupe_min_chars = max(\n"
+        "            0,\n"
+        "            int(os.getenv(\"HERMES_DISCORD_OUTBOUND_DEDUPE_MIN_CHARS\", \"200\")),\n"
+        "        )\n"
+        "        self._reply_to_mode = \"first\"\n"
+        "        self.name = \"discord\"\n"
+        "    def format_message(self, content):\n"
+        "        return content\n"
+        "    def truncate_message(self, formatted, limit):\n"
+        "        return [formatted]\n"
+        "    async def send(self, chat_id, content, reply_to=None, metadata=None):\n"
+        "        channel = object()\n"
+        "        thread_id = None\n"
+        "        try:\n"
+        "            formatted = self.format_message(content)\n"
+        "            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)\n"
+        "            message_ids = []\n"
+        "            dedupe_enabled = self._outbound_chunk_dedupe_seconds > 0\n"
+        "            dedupe_now = time.monotonic()\n"
+        "            dedupe_target_id = str(getattr(channel, \"id\", thread_id or chat_id))\n"
+        "            if dedupe_enabled and len(self._recent_outbound_chunk_dedupe) > 512:\n"
+        "                dedupe_cutoff = dedupe_now - self._outbound_chunk_dedupe_seconds\n"
+        "                for dedupe_key, (seen_at, _msg_id) in list(self._recent_outbound_chunk_dedupe.items()):\n"
+        "                    if seen_at < dedupe_cutoff:\n"
+        "                        self._recent_outbound_chunk_dedupe.pop(dedupe_key, None)\n"
+        "            reference = None\n"
+        "            for i, chunk in enumerate(chunks):\n"
+        "                reference_id = \"\"\n"
+        "                content_hash = hashlib.sha256(chunk.encode(\"utf-8\")).hexdigest()\n"
+        "                if True:\n"
+        "                    dedupe_key = f\"{dedupe_target_id}:{reference_id}:{content_hash}\"\n"
+        "                msg = type(\"Msg\", (), {\"id\": \"m1\"})()\n"
+        "                message_ids.append(str(msg.id))\n"
+        "            return SendResult(\n"
+        "                success=True,\n"
+        "                message_id=message_ids[0] if message_ids else None,\n"
+        "                raw_response={\"message_ids\": message_ids}\n"
+        "            )\n"
+        "        except Exception:\n"
+        "            raise\n",
+        encoding="utf-8",
+    )
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_discord_outbound_final_dedupe",
+        discord_py,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    text = discord_py.read_text(encoding="utf-8")
+
+    assert actions == [
+        "discord_outbound_dedupe:final_state",
+        "discord_outbound_dedupe:final_setup",
+        "discord_outbound_dedupe:final_check",
+        "discord_outbound_dedupe:chunk_index_key",
+        "discord_outbound_dedupe:final_record",
+    ]
+    assert "self._recent_outbound_final_dedupe" in text
+    assert "Suppressed duplicate Discord final response" in text
 
 
 def test_core_host_patch_mode_skips_discord_outbound_dedupe_when_upstream_changed(tmp_path: Path) -> None:
@@ -355,6 +557,39 @@ def test_core_host_patch_mode_skips_discord_outbound_dedupe_when_upstream_change
     assert discord_py.read_text(encoding="utf-8") == original
 
 
+def test_core_host_patch_mode_marks_platform_final_response_delivery_metadata(tmp_path: Path) -> None:
+    base_py = tmp_path / "base.py"
+    base_py.write_text(
+        "async def process(self, event, text_content, session_key, _thread_metadata, _reply_anchor):\n"
+        "    if text_content:\n"
+        "                    if _thread_metadata is not None:\n"
+        "                        _thread_metadata = dict(_thread_metadata)\n"
+        "                        _thread_metadata[\"notify\"] = True\n"
+        "                    else:\n"
+        "                        _thread_metadata = {\"notify\": True}\n"
+        "                    result = await self._send_with_retry(\n"
+        "                        chat_id=event.source.chat_id,\n"
+        "                        content=text_content,\n"
+        "                        reply_to=_reply_anchor,\n"
+        "                        metadata=_thread_metadata,\n"
+        "                    )\n",
+        encoding="utf-8",
+    )
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_platform_final_response_delivery_metadata",
+        base_py,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    text = base_py.read_text(encoding="utf-8")
+
+    assert actions == ["platform_final_delivery_metadata:final_response"]
+    assert "hermes_delivery_scope" in text
+    assert "hermes_delivery_id" in text
+    assert "session_key}:final:" in text
+
+
 def test_discord_outbound_dedupe_is_temporary_upstream_hotfix_inventory() -> None:
     inventory = {
         item["patcher"]: item
@@ -369,6 +604,11 @@ def test_discord_outbound_dedupe_is_temporary_upstream_hotfix_inventory() -> Non
     assert seam["category"] == "temporary_upstream_hotfix"
     assert seam["owner"] == "upstream-hermes-discord-bugfix"
     assert "25349" in seam["removal_condition"]
+    metadata = inventory["_patch_platform_final_response_delivery_metadata"]
+    assert metadata["selected"] is True
+    assert metadata["category"] == "temporary_upstream_hotfix"
+    assert metadata["owner"] == "upstream-hermes-discord-bugfix"
+    assert "25349" in metadata["removal_condition"]
 
 
 def test_core_host_patch_mode_applies_cron_authority_jobs_without_forcing_shared_default(
