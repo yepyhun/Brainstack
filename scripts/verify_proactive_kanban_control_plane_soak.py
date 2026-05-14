@@ -24,6 +24,7 @@ from scripts.verify_scheduler_lane_health_contract import build_report as build_
 from scripts.verify_workstream_controller_contract import build_report as build_controller_report  # noqa: E402
 from scripts.verify_hermes_auxiliary_compression_guard import build_report as build_compression_guard_report  # noqa: E402
 from scripts.verify_frontier_continuation_contract import build_report as build_frontier_continuation_report  # noqa: E402
+from scripts.verify_autonomy_continuation_engine import build_report as build_autonomy_continuation_report  # noqa: E402
 
 
 REPORT_SCHEMA = "brainstack.proactive_kanban_control_plane_soak.v1"
@@ -49,6 +50,7 @@ def build_report() -> dict[str, Any]:
     scheduler = build_scheduler_report()
     compression_guard = build_compression_guard_report()
     frontier_continuation = build_frontier_continuation_report()
+    autonomy_continuation = build_autonomy_continuation_report()
     reports = {
         "kanban_capability_evidence_ladder": kanban,
         "proactive_inspect_execute_split": inspect_execute,
@@ -61,6 +63,7 @@ def build_report() -> dict[str, Any]:
         "scheduler_lane_health_contract": scheduler,
         "hermes_auxiliary_compression_guard": compression_guard,
         "frontier_continuation_contract": frontier_continuation,
+        "autonomy_continuation_engine": autonomy_continuation,
     }
     kanban_proof = _mapping(kanban.get("proof"))
     inspect_proof = _mapping(inspect_execute.get("proof"))
@@ -73,6 +76,7 @@ def build_report() -> dict[str, Any]:
     scheduler_proof = _mapping(scheduler.get("proof"))
     compression_proof = _mapping(compression_guard.get("proof"))
     continuation_proof = _mapping(frontier_continuation.get("proof"))
+    autonomy_continuation_proof = _mapping(autonomy_continuation.get("proof"))
     proof = {
         "runtime_truth_snapshot_present": kanban_proof.get("dispatcher_snapshot_reports_wait_reasons") is True
         and kanban_proof.get("dispatcher_snapshot_reports_e2e_final_state") is True,
@@ -98,6 +102,12 @@ def build_report() -> dict[str, Any]:
         "frontier_continuation_not_cadence_primary": continuation_proof.get("cadence_primary_is_degraded_not_healthy") is True
         and continuation_proof.get("terminal_event_without_continuation_is_critical") is True
         and continuation_proof.get("operating_loop_cannot_hide_cadence_primary") is True,
+        "autonomy_continuation_contracts_guarded": autonomy_continuation_proof.get(
+            "unknown_assignee_is_not_runnable"
+        )
+        is True
+        and autonomy_continuation_proof.get("valid_work_graph_has_actionable_frontier") is True
+        and autonomy_continuation_proof.get("trace_replay_suppresses_duplicate_and_preserves_human_gate") is True,
     }
     component_statuses = {name: report.get("status") for name, report in reports.items()}
     issues = [

@@ -26,5 +26,16 @@ Allowed decisions:
 - `wait`
 - `human_needed`
 
+Additional contracts:
+
+- capability assignment: reject unknown or incapable workers before work is
+  considered runnable.
+- completion proof: a worker cannot claim "done" without artifact, evidence,
+  verdict, postcondition, and sufficient proof strength.
+- Work Graph: describe fan-out, fan-in, repair, and terminal states without
+  mutating Kanban.
+- decision trace replay: rebuild compact recovery state after restart and
+  suppress duplicate events.
+
 The extension is safe to ship publicly because domain-specific adapters,
 private project policies, and private artifacts are not included here.
