@@ -30,6 +30,22 @@ def test_patch_config_adds_inert_continuation_extension_config(tmp_path: Path) -
     assert continuation["max_fanout"] == 4
 
 
+def test_installer_removes_stale_continuation_core_files(tmp_path: Path) -> None:
+    plugin_target = tmp_path / "plugins" / "memory" / "brainstack"
+    plugin_target.mkdir(parents=True)
+    for name in install_into_hermes.STALE_BRAINSTACK_PLUGIN_FILES:
+        (plugin_target / name).write_text("stale", encoding="utf-8")
+
+    removed = install_into_hermes._remove_stale_files(
+        plugin_target,
+        install_into_hermes.STALE_BRAINSTACK_PLUGIN_FILES,
+        dry_run=False,
+    )
+
+    assert len(removed) == 3
+    assert all(not (plugin_target / name).exists() for name in install_into_hermes.STALE_BRAINSTACK_PLUGIN_FILES)
+
+
 def test_core_host_patch_mode_skips_legacy_prompt_builder_patch(tmp_path: Path) -> None:
     prompt_builder = tmp_path / "prompt_builder.py"
     original = (

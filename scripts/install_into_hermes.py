@@ -61,6 +61,11 @@ SOURCE_PLUGIN = REPO_ROOT / "brainstack"
 SOURCE_HOST_PAYLOAD = REPO_ROOT / "host_payload"
 SOURCE_HERMES_PROACTIVE_EXTENSION = REPO_ROOT / "extensions" / "hermes_proactive"
 SOURCE_HERMES_CONTINUATION_EXTENSION = REPO_ROOT / "extensions" / "hermes_continuation"
+STALE_BRAINSTACK_PLUGIN_FILES = (
+    "autonomy_continuation_engine.py",
+    "continuation_control_contract.py",
+    "work_state_contract.py",
+)
 BACKEND_DEPENDENCIES = {
     "kuzu": "kuzu",
     "chromadb": "chromadb",
@@ -999,6 +1004,20 @@ def _copy_tree(src: Path, dst: Path, dry_run: bool) -> list[dict[str, str]]:
             dst_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src_file, dst_file)
     return copied
+
+
+def _remove_stale_files(base: Path, relative_paths: tuple[str, ...], dry_run: bool) -> list[dict[str, str]]:
+    removed: list[dict[str, str]] = []
+    for relative_path in relative_paths:
+        path = base / relative_path
+        if not path.exists():
+            continue
+        if path.is_dir():
+            continue
+        removed.append({"path": str(path), "reason": "stale_payload_moved_to_extension"})
+        if not dry_run:
+            path.unlink()
+    return removed
 
 
 def _copy_file(src: Path, dst: Path, dry_run: bool) -> dict[str, str]:
@@ -8285,6 +8304,7 @@ def main() -> int:
     plugin_target = target / "plugins" / "memory" / "brainstack"
     selected_python = args.python.expanduser() if args.python else _default_target_python(target)
     files = _copy_tree(SOURCE_PLUGIN, plugin_target, args.dry_run)
+    stale_plugin_files = _remove_stale_files(plugin_target, STALE_BRAINSTACK_PLUGIN_FILES, args.dry_run)
     _assert_no_private_payload_files(files)
     helper_files: list[dict[str, str]] = []
     shadow_probe_script = REPO_ROOT / "scripts" / "run_hindsight_runtime_shadow_probe.py"
@@ -8485,6 +8505,7 @@ def main() -> int:
         "source_only_install": config_path is None,
         "plugin_target": str(plugin_target),
         "files": files,
+        "stale_plugin_files": stale_plugin_files,
         "helper_files": helper_files,
         "host_helper_files": host_helper_files,
         "hermes_proactive_extension": hermes_proactive_extension,
@@ -8509,6 +8530,7 @@ def main() -> int:
 
     action = "DRY-RUN" if args.dry_run else "INSTALLED"
     print(f"{action} Brainstack payload files: {len(files)}")
+    print(f"{action} stale Brainstack plugin files removed: {len(stale_plugin_files)}")
     print(f"{action} helper files: {len(helper_files)}")
     print(f"{action} Hermes proactive extension: {hermes_proactive_extension.get('status')}")
     print(f"{action} Hermes continuation extension: {hermes_continuation_extension.get('status')}")
