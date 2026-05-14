@@ -12,17 +12,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from brainstack.operating_loop import (  # noqa: E402
-    build_frontier_continuation_contract,
-    build_operating_loop_verdict,
-)
+from brainstack.continuation_control_contract import build_continuation_control_contract  # noqa: E402
+from brainstack.operating_loop import build_operating_loop_verdict  # noqa: E402
 
 
 REPORT_SCHEMA = "brainstack.frontier_continuation_contract_proof.v1"
 
 
 def build_report() -> dict[str, object]:
-    event_driven = build_frontier_continuation_contract(
+    event_driven = build_continuation_control_contract(
         {
             "controller": {"event_bridge_enabled": True, "watchdog_enabled": True},
             "terminal_events": [
@@ -35,7 +33,7 @@ def build_report() -> dict[str, object]:
             ],
         }
     )
-    cadence_primary = build_frontier_continuation_contract(
+    cadence_primary = build_continuation_control_contract(
         {
             "allocator": {
                 "id": "allocator",
@@ -45,13 +43,13 @@ def build_report() -> dict[str, object]:
             }
         }
     )
-    missing_continuation = build_frontier_continuation_contract(
+    missing_continuation = build_continuation_control_contract(
         {
             "controller": {"event_bridge_enabled": True},
             "terminal_events": [{"event_id": "evt-gap", "task_id": "t-gap", "kind": "task_completed"}],
         }
     )
-    duplicate = build_frontier_continuation_contract(
+    duplicate = build_continuation_control_contract(
         {
             "controller": {"event_bridge_enabled": True},
             "terminal_events": [{"event_id": "evt-dup", "task_id": "t-dup", "kind": "task_completed"}],
@@ -61,10 +59,37 @@ def build_report() -> dict[str, object]:
             ],
         }
     )
-    stopped = build_frontier_continuation_contract(
+    stopped = build_continuation_control_contract(
         {
             "state": "stopped_intentionally",
             "terminal_events": [{"event_id": "evt-stop", "task_id": "t-stop", "kind": "task_completed"}],
+        }
+    )
+    prompt_primary = build_continuation_control_contract(
+        {
+            "controller": {"controller_mode": "prompt_primary", "normal_path_uses_llm": True},
+            "token_policy": {"model_calls": 1, "max_input_tokens": 50000},
+        }
+    )
+    dry_run_as_live = build_continuation_control_contract(
+        {
+            "controller": {
+                "event_bridge_enabled": True,
+                "dry_run": True,
+                "presented_as_live": True,
+            }
+        }
+    )
+    cursor_stale = build_continuation_control_contract(
+        {
+            "controller": {"event_bridge_enabled": True},
+            "event_cursor": {"last_event_id": 10, "max_terminal_event_id": 12},
+        }
+    )
+    llm_worker = build_continuation_control_contract(
+        {
+            "controller": {"event_bridge_enabled": True},
+            "token_policy": {"role": "worker", "model_calls": 1, "max_input_tokens": 2000},
         }
     )
     operating_loop = build_operating_loop_verdict(
@@ -78,10 +103,19 @@ def build_report() -> dict[str, object]:
 
     proof = {
         "event_bridge_plus_watchdog_is_healthy": event_driven["verdict"] == "healthy"
-        and event_driven["controller_mode"] == "event_plus_watchdog",
+        and event_driven["controller_mode"] == "event_primary",
         "cadence_primary_is_degraded_not_healthy": cadence_primary["verdict"] == "degraded"
         and cadence_primary["controller_mode"] == "cadence_primary"
         and cadence_primary["cadence_primary_allocator"] is True,
+        "prompt_primary_token_waste_is_critical": prompt_primary["verdict"] == "critical"
+        and prompt_primary["controller_mode"] == "prompt_primary"
+        and prompt_primary["token_policy"] == "violation",
+        "dry_run_cannot_satisfy_live_health": dry_run_as_live["verdict"] == "critical"
+        and "DRY_RUN_PRESENTED_AS_LIVE" in dry_run_as_live["reason_codes"],
+        "stale_event_cursor_is_degraded": cursor_stale["verdict"] == "degraded"
+        and cursor_stale["controller_mode"] == "event_primary_stale",
+        "llm_worker_is_allowed_when_not_primary_control": llm_worker["verdict"] == "healthy"
+        and llm_worker["token_policy"] == "llm_worker_allowed",
         "terminal_event_without_continuation_is_critical": missing_continuation["verdict"] == "critical"
         and missing_continuation["continuation_gap_count"] == 1,
         "continuation_record_closes_duplicate_terminal_event": duplicate["verdict"] == "healthy"
@@ -91,7 +125,17 @@ def build_report() -> dict[str, object]:
         and "frontier_continuation_degraded" in operating_loop["blockers"],
         "read_only_side_effect_free": all(
             item.get("read_only") is True and item.get("side_effect_free") is True
-            for item in (event_driven, cadence_primary, missing_continuation, duplicate, stopped)
+            for item in (
+                event_driven,
+                cadence_primary,
+                missing_continuation,
+                duplicate,
+                stopped,
+                prompt_primary,
+                dry_run_as_live,
+                cursor_stale,
+                llm_worker,
+            )
         ),
     }
     issues = sorted(key for key, value in proof.items() if value is not True)
@@ -109,6 +153,10 @@ def build_report() -> dict[str, object]:
             "missing_continuation": missing_continuation["verdict"],
             "duplicate": duplicate["verdict"],
             "stopped": stopped["verdict"],
+            "prompt_primary": prompt_primary["verdict"],
+            "dry_run_as_live": dry_run_as_live["verdict"],
+            "cursor_stale": cursor_stale["verdict"],
+            "llm_worker": llm_worker["verdict"],
             "operating_loop_with_cadence_primary": operating_loop["verdict"],
         },
     }

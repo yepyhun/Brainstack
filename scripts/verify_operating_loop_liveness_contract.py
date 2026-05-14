@@ -12,7 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from brainstack.operating_loop import build_frontier_continuation_contract, build_operating_loop_verdict  # noqa: E402
+from brainstack.continuation_control_contract import build_continuation_control_contract  # noqa: E402
+from brainstack.operating_loop import build_operating_loop_verdict  # noqa: E402
 
 
 REPORT_SCHEMA = "brainstack.operating_loop_liveness_contract_proof.v1"
@@ -67,7 +68,7 @@ def build_report() -> dict[str, object]:
             "kanban_runtime_snapshot": {"dispatcher_state": "ready_idle"},
             "signal_bus": {"status": "ok"},
             "executor": {"status": "ok"},
-            "frontier_continuation": build_frontier_continuation_contract(
+            "frontier_continuation": build_continuation_control_contract(
                 {
                     "allocator": {
                         "id": "allocator",

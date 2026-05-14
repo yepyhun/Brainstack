@@ -11,6 +11,7 @@ from brainstack.proactive_agent_contract import (
     PROACTIVE_ALLOWED_CONTROL_ACTIONS,
     validate_proactive_candidate_intake,
 )
+from brainstack.work_state_contract import build_durable_work_state_contract
 from brainstack.tool_schemas import proactive_control_tool_schema, proactive_mode_tool_schema
 
 
@@ -311,6 +312,59 @@ def test_proactive_status_default_keeps_kanban_summary_model_bounded(tmp_path: P
         provider.shutdown()
 
 
+def test_proactive_status_reports_profile_local_cron_authority(tmp_path: Path) -> None:
+    provider = _provider(tmp_path / "cron-profile-local")
+    try:
+        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {"detail_level": "full"}))
+        cron = payload["workstation_integrations"]["cron_authority"]
+        hermes_home = Path(provider._config["hermes_home"])
+
+        assert cron["status"] == "healthy"
+        assert cron["cron_authority_mode"] == "profile_local"
+        assert cron["override_present"] is False
+        assert cron["jobs_file"] == str(hermes_home / "cron" / "jobs.json")
+        assert cron["output_dir"] == str(hermes_home / "cron" / "output")
+        assert cron["expected_tick_lock"] == str(hermes_home / "cron" / ".tick.lock")
+    finally:
+        provider.shutdown()
+
+
+def test_proactive_status_reports_explicit_shared_cron_authority(tmp_path: Path) -> None:
+    provider = _provider(tmp_path / "cron-explicit-shared")
+    try:
+        shared_home = tmp_path / "shared-hermes-home"
+        provider._config["cron_authority_home"] = str(shared_home)
+        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {"detail_level": "full"}))
+        cron = payload["workstation_integrations"]["cron_authority"]
+
+        assert cron["status"] == "healthy"
+        assert cron["cron_authority_mode"] == "explicit_shared"
+        assert cron["override_present"] is True
+        assert cron["jobs_file"] == str(shared_home / "cron" / "jobs.json")
+        assert cron["output_dir"] == str(shared_home / "cron" / "output")
+        assert cron["expected_tick_lock"] == str(shared_home / "cron" / ".tick.lock")
+    finally:
+        provider.shutdown()
+
+
+def test_proactive_status_degrades_on_cron_tick_lock_mismatch(tmp_path: Path) -> None:
+    provider = _provider(tmp_path / "cron-mismatch")
+    try:
+        shared_home = tmp_path / "shared-hermes-home"
+        profile_home = Path(provider._config["hermes_home"])
+        provider._config["cron_authority_home"] = str(shared_home)
+        provider._config["cron_scheduler_lock_path"] = str(profile_home / "cron" / ".tick.lock")
+        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
+        cron = payload["workstation_integrations"]["cron_authority"]
+
+        assert cron["status"] == "degraded"
+        assert cron["cron_authority_mode"] == "explicit_shared"
+        assert cron["jobs_output_lock_agree"] is False
+        assert cron["reason_code"] == "CRON_AUTHORITY_LOCK_MISMATCH"
+    finally:
+        provider.shutdown()
+
+
 def test_proactive_status_default_stays_bounded_with_live_loop_diagnostics(tmp_path: Path) -> None:
     hermes_root = tmp_path / "hermes_root"
     (hermes_root / "tools").mkdir(parents=True)
@@ -379,6 +433,84 @@ def test_proactive_status_default_stays_bounded_with_live_loop_diagnostics(tmp_p
         assert payload["operating_loop"]["verdict"] in {"critical", "degraded"}
         assert "schema" not in kanban
         assert "lane_freshness" not in payload["operating_loop"]
+    finally:
+        provider.shutdown()
+
+
+def test_proactive_status_compact_payload_surfaces_durable_work_state_verdict(tmp_path: Path) -> None:
+    provider = _provider(tmp_path / "durable-work-state-compact")
+    provider._config.update(
+        {
+            "durable_work_state": build_durable_work_state_contract(
+                {
+                    "work_items": [
+                        {
+                            "id": "w1",
+                            "status": "completed",
+                            "authority": "verified",
+                            "evidence_refs": ["artifact:1"],
+                            "side_effect_durable": False,
+                            "acknowledged": True,
+                        }
+                    ]
+                }
+            )
+        }
+    )
+    try:
+        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
+        durable = payload["operating_loop"]["durable_work_state"]
+
+        assert payload["detail_level"] == "compact"
+        assert payload["operating_loop"]["verdict"] == "critical"
+        assert "durable_work_state_critical" in payload["operating_loop"]["blockers"]
+        assert durable["schema"] == "brainstack.durable_work_state_summary.v1"
+        assert durable["verdict"] == "critical"
+        assert durable["repair_candidate_count"] == 1
+    finally:
+        provider.shutdown()
+
+
+def test_proactive_status_compact_payload_surfaces_continuation_control_when_configured(tmp_path: Path) -> None:
+    provider = _provider(tmp_path / "continuation-control-compact")
+    provider._config.update(
+        {
+            "continuation_control": {
+                "controller": {"controller_mode": "prompt_primary", "normal_path_uses_llm": True},
+                "token_policy": {"model_calls": 1, "max_input_tokens": 50000},
+            }
+        }
+    )
+    try:
+        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
+        continuation = payload["continuation_control"]
+
+        assert continuation["verdict"] == "critical"
+        assert continuation["controller_mode"] == "prompt_primary"
+        assert continuation["token_policy"] == "violation"
+        assert payload["operating_loop"]["verdict"] == "critical"
+    finally:
+        provider.shutdown()
+
+
+def test_proactive_status_compact_payload_surfaces_autonomy_continuation_when_configured(tmp_path: Path) -> None:
+    provider = _provider(tmp_path / "autonomy-continuation-compact")
+    provider._config.update(
+        {
+            "autonomy_continuation": {
+                "event": {"kind": "task_completed", "event_id": "evt-local", "artifact_missing": True},
+                "safety": {"local_repair_available": True},
+            }
+        }
+    )
+    try:
+        payload = json.loads(provider.handle_tool_call("brainstack_proactive_status", {}))
+        continuation = payload["autonomy_continuation"]
+
+        assert continuation["decision"] == "repair"
+        assert continuation["verdict"] == "degraded"
+        assert continuation["reason_code"] == "LOCAL_REPAIR_REQUIRED"
+        assert continuation["deep_verifier_required"] is True
     finally:
         provider.shutdown()
 

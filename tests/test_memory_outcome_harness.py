@@ -1,7 +1,6 @@
 import json
 import subprocess
 import sys
-from pathlib import Path
 
 from brainstack.outcome_harness import METRIC_NAMES, MODES, build_report
 

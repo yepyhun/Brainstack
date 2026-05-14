@@ -69,6 +69,25 @@ Each host patch entry records:
 - `scope`: what seam category it belongs to
 - `purpose`: what the patch does
 - `why`: why Brainstack still owns that seam today
+- `category`: whether it is a required Brainstack seam, hygiene patch, compatibility
+  hotfix, or temporary upstream Hermes bugfix
+- `removal_condition`: the concrete upstream state where the installer should stop
+  applying it
+
+## Temporary Upstream Hermes Hotfixes
+
+Temporary upstream hotfixes are not Brainstack product features. They are
+small, isolated Hermes runtime workarounds that keep the live Brainstack install
+usable while an upstream Hermes issue is open.
+
+Rules for this category:
+
+- every entry must link to the upstream Hermes issue/PR in `removal_condition`
+  when an upstream tracker exists
+- the patcher must skip itself when upstream already has an equivalent fix
+- the patch must be listed in `HOST_PATCH_INVENTORY`
+- the installer manifest must keep it visible under `host_patch_inventory`
+- remove it as soon as upstream Hermes owns the behavior
 
 Current high-risk host-owned seams include:
 
@@ -77,6 +96,44 @@ Current high-risk host-owned seams include:
 - memory-provider/write-origin bridge wiring
 - gateway lifecycle hooks
 - Hermes capability preservation while deferring JSON tool schemas
+
+### Hermes Cron Authority Hotfix
+
+Brainstack may temporarily patch Hermes cron authority while upstream does not
+ship a native `HERMES_CRON_HOME` resolver.
+
+The intended behavior is narrow:
+
+- ordinary profiles keep profile-local cron under their own `HERMES_HOME`
+- coordinated worker systems may explicitly set `HERMES_CRON_HOME` to share one
+  cron authority
+- `jobs.json`, `cron/output`, scheduler `.tick.lock`, and spawned profile
+  workers must all use the same explicit authority when it is set
+- the wizard must skip this patch once Hermes already implements equivalent
+  behavior
+
+This hotfix is not Brainstack cron ownership. Brainstack only installs and
+diagnoses the temporary Hermes seam so memory/proactive status does not report
+healthy work while profile workers are looking at a different scheduled-job
+store.
+
+### Hermes OpenAI Runtime Credential-Pool Hotfix
+
+Brainstack may temporarily patch Hermes OpenAI-family runtime auth while upstream
+reports credential-pool logins as valid in `hermes auth status` but runtime
+provider resolution still only reads legacy provider state.
+
+The intended behavior is narrow:
+
+- `hermes auth status openai-codex` and runtime execution must agree
+- credential-pool OAuth entries may be used by cron/worker runtime resolution
+- legacy provider-state auth remains supported
+- the wizard must skip this patch once Hermes natively resolves runtime
+  credentials from the same pool used by auth status
+
+This hotfix is not a Brainstack auth system. It only prevents scheduled or
+worker runs from failing as logged out while Hermes itself reports a valid
+login.
 
 This is the minimum required to answer these questions quickly:
 

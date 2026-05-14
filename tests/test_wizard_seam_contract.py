@@ -225,6 +225,438 @@ def test_core_host_patch_mode_skips_discord_typing_backoff_when_upstream_changed
     assert discord_py.read_text(encoding="utf-8") == original
 
 
+def test_core_host_patch_mode_applies_discord_outbound_final_dedupe(tmp_path: Path) -> None:
+    discord_py = tmp_path / "discord.py"
+    discord_py.write_text(
+        "import asyncio\n"
+        "import os\n"
+        "import time\n"
+        "from typing import Dict\n\n"
+        "class DiscordAdapter:\n"
+        "    MAX_MESSAGE_LENGTH = 2000\n\n"
+        "    def __init__(self):\n"
+        "        self._typing_tasks: Dict[str, asyncio.Task] = {}\n"
+        "        self._reply_to_mode = \"first\"\n"
+        "        self.name = \"discord\"\n"
+        "        self._client = None\n\n"
+        "    def format_message(self, content):\n"
+        "        return content\n\n"
+        "    def truncate_message(self, formatted, limit):\n"
+        "        return [formatted]\n\n"
+        "    async def send_message(self, chat_id: str, content: str, thread_id=None, reply_to=None):\n"
+        "        channel = await self._client.fetch_channel(thread_id or chat_id)\n"
+        "        try:\n"
+        "            # Format and split message if needed\n"
+        "            formatted = self.format_message(content)\n"
+        "            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)\n"
+        "\n"
+        "            message_ids = []\n"
+        "            reference = None\n"
+        "            if reply_to and self._reply_to_mode != \"off\":\n"
+        "                reference = reply_to\n"
+        "            for i, chunk in enumerate(chunks):\n"
+        "                if self._reply_to_mode == \"all\":\n"
+        "                    chunk_reference = reference\n"
+        "                else:  # \"first\" (default) or \"off\"\n"
+        "                    chunk_reference = reference if i == 0 else None\n"
+        "                try:\n"
+        "                    msg = await channel.send(\n"
+        "                        content=chunk,\n"
+        "                        reference=chunk_reference,\n"
+        "                    )\n"
+        "                except Exception:\n"
+        "                    raise\n"
+        "                message_ids.append(str(msg.id))\n"
+        "            return message_ids\n"
+        "        except Exception:\n"
+        "            raise\n",
+        encoding="utf-8",
+    )
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_discord_outbound_final_dedupe",
+        discord_py,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    text = discord_py.read_text(encoding="utf-8")
+
+    assert actions == [
+        "discord_outbound_dedupe:import",
+        "discord_outbound_dedupe:state",
+        "discord_outbound_dedupe:setup",
+        "discord_outbound_dedupe:check",
+        "discord_outbound_dedupe:record",
+    ]
+    assert "import hashlib" in text
+    assert "Temporary upstream Hermes bugfix (#25349)" in text
+    assert "HERMES_DISCORD_OUTBOUND_DEDUPE_SECONDS" in text
+    assert "content_hash = hashlib.sha256" in text
+    assert "Suppressed duplicate Discord outbound chunk" in text
+    assert "self._recent_outbound_chunk_dedupe[dedupe_key]" in text
+
+
+def test_core_host_patch_mode_skips_discord_outbound_dedupe_when_upstream_changed(tmp_path: Path) -> None:
+    discord_py = tmp_path / "discord.py"
+    original = (
+        "class DiscordAdapter:\n"
+        "    async def send_message(self, channel, content):\n"
+        "        content_hash = \"abc\"\n"
+        "        duplicate_suppressed = True\n"
+        "        return await channel.send(content=content)\n"
+    )
+    discord_py.write_text(original, encoding="utf-8")
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_discord_outbound_final_dedupe",
+        discord_py,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+
+    assert actions == []
+    assert discord_py.read_text(encoding="utf-8") == original
+
+
+def test_discord_outbound_dedupe_is_temporary_upstream_hotfix_inventory() -> None:
+    inventory = {
+        item["patcher"]: item
+        for item in install_into_hermes._selected_host_patch_inventory(
+            "docker",
+            host_patch_mode="core",
+        )
+    }
+
+    seam = inventory["_patch_discord_outbound_final_dedupe"]
+    assert seam["selected"] is True
+    assert seam["category"] == "temporary_upstream_hotfix"
+    assert seam["owner"] == "upstream-hermes-discord-bugfix"
+    assert "25349" in seam["removal_condition"]
+
+
+def test_core_host_patch_mode_applies_cron_authority_jobs_without_forcing_shared_default(
+    tmp_path: Path,
+) -> None:
+    jobs_py = tmp_path / "jobs.py"
+    jobs_py.write_text(
+        "import json\n"
+        "from pathlib import Path\n"
+        "from hermes_constants import get_hermes_home\n\n"
+        "HERMES_DIR = get_hermes_home().resolve()\n"
+        "CRON_DIR = HERMES_DIR / \"cron\"\n"
+        "JOBS_FILE = CRON_DIR / \"jobs.json\"\n"
+        "OUTPUT_DIR = CRON_DIR / \"output\"\n",
+        encoding="utf-8",
+    )
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_cron_authority_jobs",
+        jobs_py,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    text = jobs_py.read_text(encoding="utf-8")
+
+    assert actions == ["cron_authority_jobs:import_os", "cron_authority_jobs:resolver"]
+    assert "def get_cron_home() -> Path:" in text
+    assert 'os.environ.get("HERMES_CRON_HOME", "")' in text
+    assert "return get_hermes_home()" in text
+    assert "get_default_hermes_root" not in text
+    assert "HERMES_DIR = get_cron_home().resolve()" in text
+    assert "OUTPUT_DIR = CRON_DIR / \"output\"" in text
+
+
+def test_core_host_patch_mode_applies_cron_authority_jobs_with_existing_lock_block(
+    tmp_path: Path,
+) -> None:
+    jobs_py = tmp_path / "jobs.py"
+    jobs_py.write_text(
+        "import copy\n"
+        "import json\n"
+        "import threading\n"
+        "import os\n"
+        "from pathlib import Path\n"
+        "from hermes_constants import get_hermes_home\n\n"
+        "HERMES_DIR = get_hermes_home().resolve()\n"
+        "CRON_DIR = HERMES_DIR / \"cron\"\n"
+        "JOBS_FILE = CRON_DIR / \"jobs.json\"\n"
+        "\n"
+        "# In-process lock protecting load_jobs\u2192modify\u2192save_jobs cycles.\n"
+        "# Required when tick() runs jobs in parallel threads \u2014 without this,\n"
+        "# concurrent mark_job_run / advance_next_run calls can clobber each other.\n"
+        "_jobs_file_lock = threading.Lock()\n"
+        "OUTPUT_DIR = CRON_DIR / \"output\"\n",
+        encoding="utf-8",
+    )
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_cron_authority_jobs",
+        jobs_py,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    text = jobs_py.read_text(encoding="utf-8")
+
+    assert actions == ["cron_authority_jobs:resolver"]
+    assert "def get_cron_home() -> Path:" in text
+    assert "HERMES_DIR = get_cron_home().resolve()" in text
+    assert "_jobs_file_lock = threading.Lock()" in text
+    assert "OUTPUT_DIR = CRON_DIR / \"output\"" in text
+
+
+def test_core_host_patch_mode_skips_cron_authority_jobs_when_upstream_present(
+    tmp_path: Path,
+) -> None:
+    jobs_py = tmp_path / "jobs.py"
+    original = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "from hermes_constants import get_hermes_home\n\n"
+        "def get_cron_home() -> Path:\n"
+        "    override = os.environ.get(\"HERMES_CRON_HOME\", \"\").strip()\n"
+        "    if override:\n"
+        "        return Path(override).expanduser()\n"
+        "    return get_hermes_home()\n\n"
+        "HERMES_DIR = get_cron_home().resolve()\n"
+        "CRON_DIR = HERMES_DIR / \"cron\"\n"
+    )
+    jobs_py.write_text(original, encoding="utf-8")
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_cron_authority_jobs",
+        jobs_py,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+
+    assert actions == []
+    assert jobs_py.read_text(encoding="utf-8") == original
+
+
+def test_core_host_patch_mode_skips_cron_authority_jobs_with_direct_cron_dir_resolver(
+    tmp_path: Path,
+) -> None:
+    jobs_py = tmp_path / "jobs.py"
+    original = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "from hermes_constants import get_hermes_home\n\n"
+        "def get_cron_home() -> Path:\n"
+        "    override = os.environ.get(\"HERMES_CRON_HOME\", \"\").strip()\n"
+        "    if override:\n"
+        "        return Path(override).expanduser()\n"
+        "    return get_hermes_home()\n\n"
+        "CRON_DIR = get_cron_home().resolve() / \"cron\"\n"
+        "JOBS_FILE = CRON_DIR / \"jobs.json\"\n"
+        "OUTPUT_DIR = CRON_DIR / \"output\"\n"
+    )
+    jobs_py.write_text(original, encoding="utf-8")
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_cron_authority_jobs",
+        jobs_py,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+
+    assert actions == []
+    assert jobs_py.read_text(encoding="utf-8") == original
+
+
+def test_core_host_patch_mode_applies_cron_scheduler_authority_lock(
+    tmp_path: Path,
+) -> None:
+    scheduler_py = tmp_path / "scheduler.py"
+    scheduler_py.write_text(
+        "import logging\n"
+        "from pathlib import Path\n"
+        "from hermes_constants import get_hermes_home\n\n"
+        "_hermes_home: Path | None = None\n\n"
+        "def _get_hermes_home() -> Path:\n"
+        "    return _hermes_home or get_hermes_home()\n\n\n"
+        "def _get_lock_paths() -> tuple[Path, Path]:\n"
+        "    hermes_home = _get_hermes_home()\n"
+        "    lock_dir = hermes_home / \"cron\"\n"
+        "    return lock_dir, lock_dir / \".tick.lock\"\n",
+        encoding="utf-8",
+    )
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_cron_authority_scheduler",
+        scheduler_py,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    text = scheduler_py.read_text(encoding="utf-8")
+
+    assert actions == [
+        "cron_authority_scheduler:import_os",
+        "cron_authority_scheduler:resolver",
+        "cron_authority_scheduler:lock_resolver",
+    ]
+    assert "def _get_cron_home() -> Path:" in text
+    assert 'os.environ.get("HERMES_CRON_HOME", "")' in text
+    assert "cron_home = _get_cron_home()" in text
+    assert "lock_dir = cron_home / \"cron\"" in text
+
+
+def test_core_host_patch_mode_applies_cron_scheduler_authority_with_docstrings(
+    tmp_path: Path,
+) -> None:
+    scheduler_py = tmp_path / "scheduler.py"
+    scheduler_py.write_text(
+        "import logging\n"
+        "import os\n"
+        "from pathlib import Path\n"
+        "from hermes_constants import get_hermes_home\n\n"
+        "_hermes_home: Path | None = None\n\n"
+        "def _get_hermes_home() -> Path:\n"
+        "    \"\"\"Resolve Hermes home dynamically while preserving test monkeypatch hooks.\"\"\"\n"
+        "    return _hermes_home or get_hermes_home()\n\n\n"
+        "def _get_lock_paths() -> tuple[Path, Path]:\n"
+        "    \"\"\"Resolve cron lock paths at call time so profile/env changes are honored.\"\"\"\n"
+        "    hermes_home = _get_hermes_home()\n"
+        "    lock_dir = hermes_home / \"cron\"\n"
+        "    return lock_dir, lock_dir / \".tick.lock\"\n",
+        encoding="utf-8",
+    )
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_cron_authority_scheduler",
+        scheduler_py,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    text = scheduler_py.read_text(encoding="utf-8")
+
+    assert actions == [
+        "cron_authority_scheduler:resolver",
+        "cron_authority_scheduler:lock_resolver",
+    ]
+    assert "def _get_cron_home() -> Path:" in text
+    assert "cron_home = _get_cron_home()" in text
+    assert "lock_dir = cron_home / \"cron\"" in text
+
+
+def test_core_host_patch_mode_applies_kanban_spawn_cron_authority_env(
+    tmp_path: Path,
+) -> None:
+    kanban_db_py = tmp_path / "kanban_db.py"
+    kanban_db_py.write_text(
+        "import json\n\n"
+        "def _default_spawn(task, profile_arg):\n"
+        "    env = dict(os.environ)\n"
+        "    try:\n"
+        "        env[\"HERMES_HOME\"] = resolve_profile_env(profile_arg)\n"
+        "    except FileNotFoundError:\n"
+        "        pass\n"
+        "    return env\n",
+        encoding="utf-8",
+    )
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_kanban_spawn_cron_authority",
+        kanban_db_py,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    text = kanban_db_py.read_text(encoding="utf-8")
+
+    assert actions == [
+        "kanban_spawn_cron_authority:import_os",
+        "kanban_spawn_cron_authority:env",
+    ]
+    assert "import os" in text
+    assert 'cron_home = os.environ.get("HERMES_CRON_HOME", "").strip()' in text
+    assert 'env["HERMES_CRON_HOME"] = cron_home' in text
+
+
+def test_cron_authority_patches_are_temporary_upstream_hotfix_inventory() -> None:
+    inventory = {
+        item["patcher"]: item
+        for item in install_into_hermes._selected_host_patch_inventory(
+            "docker",
+            host_patch_mode="core",
+        )
+    }
+
+    for patcher in {
+        "_patch_cron_authority_jobs",
+        "_patch_cron_authority_scheduler",
+        "_patch_kanban_spawn_cron_authority",
+        "_patch_cron_authority_tests",
+        "_patch_cron_scheduler_authority_tests",
+    }:
+        seam = inventory[patcher]
+        assert seam["selected"] is True
+        assert seam["category"] == "temporary_upstream_hotfix"
+        assert seam["owner"].startswith("upstream-hermes-cron-authority")
+        assert "HERMES_CRON_HOME" in seam["removal_condition"]
+
+
+def test_core_host_patch_mode_applies_openai_codex_runtime_pool_fallback(
+    tmp_path: Path,
+) -> None:
+    auth_py = tmp_path / "auth.py"
+    auth_py.write_text(
+        "from __future__ import annotations\n\n"
+        "from typing import Any, Dict\n\n"
+        "class AuthError(RuntimeError):\n"
+        "    pass\n\n"
+        "CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 60\n\n"
+        "def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:\n"
+        "    raise AuthError('missing')\n\n"
+        "def resolve_codex_runtime_credentials(\n"
+        "    *,\n"
+        "    force_refresh: bool = False,\n"
+        "    refresh_if_expiring: bool = True,\n"
+        "    refresh_skew_seconds: int = CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,\n"
+        ") -> Dict[str, Any]:\n"
+        "    data = _read_codex_tokens()\n"
+        "    tokens = dict(data[\"tokens\"])\n"
+        "    should_refresh = bool(force_refresh)\n"
+        "    if should_refresh:\n"
+        "        with _auth_store_lock():\n"
+        "            data = _read_codex_tokens(_lock=False)\n"
+        "            tokens = dict(data[\"tokens\"])\n"
+        "    return {\"api_key\": tokens.get(\"access_token\")}\n",
+        encoding="utf-8",
+    )
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_openai_codex_runtime_pool_fallback",
+        auth_py,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    text = auth_py.read_text(encoding="utf-8")
+
+    assert actions == [
+        "openai_codex_auth:pool_fallback_helper",
+        "openai_codex_auth:initial_pool_fallback",
+        "openai_codex_auth:refresh_pool_fallback",
+    ]
+    assert "def _read_codex_pool_tokens" in text
+    assert 'load_pool("openai-codex")' in text
+    assert "initial_codex_pool_data" in text
+
+
+def test_openai_codex_runtime_pool_fallback_is_temporary_upstream_hotfix_inventory() -> None:
+    inventory = {
+        item["patcher"]: item
+        for item in install_into_hermes._selected_host_patch_inventory(
+            "docker",
+            host_patch_mode="core",
+        )
+    }
+
+    seam = inventory["_patch_openai_codex_runtime_pool_fallback"]
+    assert seam["selected"] is True
+    assert seam["category"] == "temporary_upstream_hotfix"
+    assert seam["owner"] == "upstream-hermes-auth-pool-runtime"
+    assert "credential pool" in seam["removal_condition"]
+
+
 def test_core_host_patch_mode_applies_ebadf_provider_transport_recovery(tmp_path: Path) -> None:
     run_agent = tmp_path / "run_agent.py"
     run_agent.write_text(

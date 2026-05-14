@@ -12,6 +12,8 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Mapping
 
+from .autonomy_continuation_engine import build_autonomy_continuation_decision
+from .continuation_control_contract import build_continuation_control_contract
 from .core.proactive import ProactiveEventKind, ProactiveEventState, ProactiveReasonCode
 from .operating_loop import (
     build_kanban_recovery_candidates,
@@ -30,6 +32,7 @@ PROACTIVE_READINESS_PROBE_SCHEMA = "brainstack.proactive_readiness_probe.v1"
 PROACTIVE_CANDIDATE_INTAKE_SCHEMA = "brainstack.proactive_candidate_intake.v1"
 KANBAN_WORKSTATION_SCHEMA = "brainstack.workstation_integration.kanban.v1"
 KANBAN_RUNTIME_SNAPSHOT_SCHEMA = "brainstack.workstation_integration.kanban_runtime_snapshot.v1"
+CRON_AUTHORITY_SCHEMA = "brainstack.workstation_integration.cron_authority.v1"
 PROACTIVE_STATUS_DETAIL_LEVELS = ("compact", "full")
 
 PROACTIVE_ALLOWED_READ_ACTIONS = ("status", "doctor", "list", "inspect")
@@ -178,6 +181,99 @@ def _config_path_from_home(hermes_home: Path | None) -> Path | None:
     if hermes_home is None:
         return None
     return hermes_home / "config.yaml"
+
+
+def _path_from_config_or_env(
+    config: Mapping[str, Any] | None,
+    *config_keys: str,
+    env_key: str = "",
+) -> Path | None:
+    raw = ""
+    if isinstance(config, Mapping):
+        for key in config_keys:
+            raw = str(config.get(key) or "").strip()
+            if raw:
+                break
+    if not raw and env_key:
+        raw = os.getenv(env_key, "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser()
+
+
+def _same_path(left: Path | None, right: Path | None) -> bool:
+    if left is None or right is None:
+        return False
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return left.absolute() == right.absolute()
+
+
+def _cron_authority_status(
+    config: Mapping[str, Any] | None,
+    hermes_home: Path | None,
+) -> dict[str, Any]:
+    override_home = _path_from_config_or_env(
+        config,
+        "cron_authority_home",
+        "cron_home",
+        env_key="HERMES_CRON_HOME",
+    )
+    active_home = _path_from_config_or_env(config, "active_profile_home", "profile_home") or hermes_home
+    if hermes_home is None and active_home is None and override_home is None:
+        return {
+            "schema": CRON_AUTHORITY_SCHEMA,
+            "status": "unknown",
+            "cron_authority_mode": "unknown",
+            "reason_code": "CRON_AUTHORITY_HOME_UNRESOLVED",
+        }
+
+    authority_home = override_home or active_home or hermes_home
+    authority_cron_dir = authority_home / "cron" if authority_home is not None else None
+    jobs_file = authority_cron_dir / "jobs.json" if authority_cron_dir is not None else None
+    output_dir = authority_cron_dir / "output" if authority_cron_dir is not None else None
+    expected_lock_file = authority_cron_dir / ".tick.lock" if authority_cron_dir is not None else None
+    actual_lock_file = _path_from_config_or_env(config, "cron_scheduler_lock_path")
+    active_jobs_file = active_home / "cron" / "jobs.json" if active_home is not None else None
+    profile_jobs_symlink_to_authority = False
+    if active_jobs_file is not None and active_jobs_file.is_symlink() and jobs_file is not None:
+        profile_jobs_symlink_to_authority = _same_path(active_jobs_file, jobs_file)
+
+    jobs_output_lock_agree = True
+    if actual_lock_file is not None and expected_lock_file is not None:
+        jobs_output_lock_agree = _same_path(actual_lock_file, expected_lock_file)
+
+    mode = "explicit_shared" if override_home is not None else "profile_local"
+    status = "healthy" if jobs_output_lock_agree else "degraded"
+    reason_code = "CRON_AUTHORITY_COHERENT" if status == "healthy" else "CRON_AUTHORITY_LOCK_MISMATCH"
+    return {
+        "schema": CRON_AUTHORITY_SCHEMA,
+        "status": status,
+        "cron_authority_mode": mode,
+        "override_present": override_home is not None,
+        "active_home": str(active_home) if active_home is not None else "",
+        "authority_home": str(authority_home) if authority_home is not None else "",
+        "jobs_file": str(jobs_file) if jobs_file is not None else "",
+        "output_dir": str(output_dir) if output_dir is not None else "",
+        "expected_tick_lock": str(expected_lock_file) if expected_lock_file is not None else "",
+        "actual_tick_lock": str(actual_lock_file) if actual_lock_file is not None else "",
+        "jobs_output_lock_agree": jobs_output_lock_agree,
+        "profile_jobs_symlink_to_authority": profile_jobs_symlink_to_authority,
+        "current_assignment_authority": False,
+        "reason_code": reason_code,
+    }
+
+
+def _compact_cron_authority_status(status: Mapping[str, Any]) -> dict[str, Any]:
+    payload = {
+        "status": str(status.get("status") or ""),
+        "cron_authority_mode": str(status.get("cron_authority_mode") or ""),
+        "jobs_output_lock_agree": bool(status.get("jobs_output_lock_agree", True)),
+    }
+    if payload["status"] != "healthy":
+        payload["reason_code"] = str(status.get("reason_code") or "")
+    return payload
 
 
 def _load_yaml(path: Path | None) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -844,7 +940,7 @@ def _compact_scheduler_lane_health(scheduler_health: Mapping[str, Any]) -> dict[
 
 
 def _compact_operating_loop_verdict(operating_loop: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    payload = {
         "verdict": str(operating_loop.get("verdict") or ""),
         "reason_codes": [str(item) for item in operating_loop.get("reason_codes") or [] if str(item)],
         "split_brain_detected": bool(operating_loop.get("split_brain_detected")),
@@ -852,6 +948,44 @@ def _compact_operating_loop_verdict(operating_loop: Mapping[str, Any]) -> dict[s
         "blockers": [str(item) for item in operating_loop.get("blockers") or [] if str(item)],
         "warnings": [str(item) for item in operating_loop.get("warnings") or [] if str(item)],
         "agent_claim": str(operating_loop.get("agent_claim") or ""),
+    }
+    durable_work_state = _mapping(operating_loop.get("durable_work_state"))
+    if durable_work_state:
+        payload["durable_work_state"] = durable_work_state
+    return payload
+
+
+def _compact_frontier_continuation_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
+    reason_codes = [str(item) for item in contract.get("reason_codes") or [] if str(item)]
+    event_cursor = _mapping(contract.get("event_cursor"))
+    payload = {
+        "verdict": str(contract.get("verdict") or ""),
+        "controller_mode": str(contract.get("controller_mode") or ""),
+        "token_policy": str(contract.get("token_policy") or ""),
+    }
+    if reason_codes:
+        payload["reason_code"] = reason_codes[0]
+        payload["reason_count"] = len(reason_codes)
+    if bool(event_cursor.get("stale")):
+        payload["event_cursor_stale"] = True
+    if bool(contract.get("dry_run_presented_as_live")):
+        payload["dry_run_presented_as_live"] = True
+    return payload
+
+
+def _compact_autonomy_continuation_decision(decision: Mapping[str, Any]) -> dict[str, Any]:
+    reason_codes = [str(item) for item in decision.get("reason_codes") or [] if str(item)]
+    journal = _mapping(decision.get("decision_journal"))
+    return {
+        "verdict": str(decision.get("verdict") or ""),
+        "decision": str(decision.get("decision") or ""),
+        "reason_code": reason_codes[0] if reason_codes else "",
+        "confidence": journal.get("confidence"),
+        "expected_value_next": journal.get("expected_value_next"),
+        "continue_score": journal.get("continue_score"),
+        "deep_verifier_required": bool(_mapping(decision.get("review")).get("deep_verifier_required")),
+        "forecast_revision_required": bool(decision.get("forecast_revision_required")),
+        "agent_claim": str(decision.get("agent_claim") or ""),
     }
 
 
@@ -1349,18 +1483,33 @@ def build_proactive_status(
     kanban_status = _kanban_workstation_status(config)
     scheduler_health = build_scheduler_lane_health(_scheduler_jobs_from_config(config))
     kanban_runtime = _mapping(kanban_status.get("runtime_snapshot"))
+    cron_authority = _cron_authority_status(config, hermes_home)
+    continuation_control_evidence = (
+        _mapping(config.get("frontier_continuation") if isinstance(config, Mapping) else {})
+        or _mapping(config.get("continuation_control") if isinstance(config, Mapping) else {})
+    )
+    continuation_control = build_continuation_control_contract(continuation_control_evidence)
+    autonomy_continuation_evidence = _mapping(
+        config.get("autonomy_continuation") if isinstance(config, Mapping) else {}
+    )
+    autonomy_continuation = build_autonomy_continuation_decision(autonomy_continuation_evidence)
     operating_loop = build_operating_loop_verdict(
         {
             "kanban_runtime_snapshot": kanban_runtime,
             "scheduler_lane_health": scheduler_health,
+            "frontier_continuation": continuation_control,
             "signal_bus": _mapping(config.get("signal_bus") if isinstance(config, Mapping) else {}),
             "executor": _mapping(config.get("executor") if isinstance(config, Mapping) else {}),
             "builder": _mapping(config.get("builder") if isinstance(config, Mapping) else {}),
             "next_action": _mapping(config.get("next_action") if isinstance(config, Mapping) else {}),
+            "durable_work_state": _mapping(config.get("durable_work_state") if isinstance(config, Mapping) else {}),
         }
     )
     workstation_integrations = {
         "kanban": kanban_status if normalized_detail_level == "full" else _compact_kanban_workstation_status(kanban_status),
+        "cron_authority": cron_authority
+        if normalized_detail_level == "full"
+        else _compact_cron_authority_status(cron_authority),
     }
     workstream_controller = controller_status([])
     model_use_contract = _agent_use_contract(str(operational_verdict["operational_state"]))
@@ -1368,12 +1517,26 @@ def build_proactive_status(
         config_payload = _compact_runtime_config_summary(runtime_config)
         scheduler_health_payload = _compact_scheduler_lane_health(scheduler_health)
         operating_loop_payload = _compact_operating_loop_verdict(operating_loop)
+        continuation_control_payload = (
+            _compact_frontier_continuation_contract(continuation_control)
+            if continuation_control_evidence
+            or str(continuation_control.get("verdict") or "") != "insufficient_evidence"
+            else {}
+        )
+        autonomy_continuation_payload = (
+            _compact_autonomy_continuation_decision(autonomy_continuation)
+            if autonomy_continuation_evidence
+            or str(autonomy_continuation.get("verdict") or "") not in {"waiting_for_signal", "insufficient_evidence"}
+            else {}
+        )
         workstream_controller_payload = _compact_workstream_controller_status(workstream_controller)
         model_use_contract_payload = _compact_agent_use_contract(model_use_contract)
     else:
         config_payload = runtime_config
         scheduler_health_payload = scheduler_health
         operating_loop_payload = operating_loop
+        continuation_control_payload = continuation_control
+        autonomy_continuation_payload = autonomy_continuation
         workstream_controller_payload = workstream_controller
         model_use_contract_payload = model_use_contract
     readiness_probe = _compact_readiness_probe(_readiness_probe(runtime_config, counts))
@@ -1382,7 +1545,7 @@ def build_proactive_status(
         if normalized_detail_level == "full"
         else _compact_operational_verdict(operational_verdict)
     )
-    return {
+    payload = {
         "schema": PROACTIVE_AGENT_CONTRACT_SCHEMA,
         "operation": "status",
         "detail_level": normalized_detail_level,
@@ -1408,6 +1571,11 @@ def build_proactive_status(
         "model_use_contract": model_use_contract_payload,
         "reason_code": "PROACTIVE_STATUS_TOOL_BACKED_COMPACT",
     }
+    if continuation_control_payload:
+        payload["continuation_control"] = continuation_control_payload
+    if autonomy_continuation_payload:
+        payload["autonomy_continuation"] = autonomy_continuation_payload
+    return payload
 
 
 def list_proactive_agent_items(

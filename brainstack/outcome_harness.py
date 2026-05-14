@@ -5,6 +5,8 @@ import math
 from copy import deepcopy
 from typing import Any, Iterable, Mapping
 
+from .memory_use_record import build_memory_use_record, validate_memory_use_record
+
 REPORT_SCHEMA = "brainstack.memory_outcome_harness_report.v1"
 
 MODES = ("memory_off", "raw_history", "brainstack_packet")
@@ -392,11 +394,33 @@ def _score_mode(case: Mapping[str, Any], mode_name: str, mode: Mapping[str, Any]
         "used_in_answer": used_in_answer,
         "correction_needed": (not answer_correct) or stale_or_forbidden > 0 or scope_bleed > 0,
     }
+    memory_use_record = build_memory_use_record(
+        consumer_id=f"outcome_harness:{mode_name}",
+        task_id=str(case["id"]),
+        source_packet_id=f"{case['id']}:{mode_name}",
+        selected_memory_ids=mode["selected_evidence"],
+        used_memory_ids=[item["id"] for item in selected if bool(item.get("supports_expected")) and answer_correct],
+        ignored_memory_ids=[
+            item["id"]
+            for item in selected
+            if not (bool(item.get("supports_expected")) and answer_correct)
+        ],
+        provenance_refs=provenance_refs,
+        outcome_metrics={
+            "answer_correct": answer_correct,
+            "used_in_answer": used_in_answer,
+            "stale_or_forbidden_selected_count": stale_or_forbidden,
+            "scope_bleed_count": scope_bleed,
+        },
+    )
+    memory_use_record_validation = validate_memory_use_record(memory_use_record)
     return {
         "mode": mode_name,
         "answer": mode["answer"],
         "selected_evidence": list(mode["selected_evidence"]),
         "metrics": metrics,
+        "memory_use_record": memory_use_record,
+        "memory_use_record_validation": memory_use_record_validation,
     }
 
 
@@ -435,6 +459,13 @@ def build_report(case_ids: Iterable[str] | None = None) -> dict[str, Any]:
         for case in scored_cases
         for mode in MODES
     )
+    memory_use_records_valid = all(
+        case["results"][mode]["memory_use_record_validation"] == []
+        and case["results"][mode]["memory_use_record"]["truth_eligible"] is False
+        and case["results"][mode]["memory_use_record"]["model_facing_default"] is False
+        for case in scored_cases
+        for mode in MODES
+    )
     all_modes_present = all(set(case["results"]) == set(MODES) for case in scored_cases)
     brainstack_negative_invariants_hold = all(
         metrics["stale_or_forbidden_selected_count"] == 0
@@ -466,6 +497,7 @@ def build_report(case_ids: Iterable[str] | None = None) -> dict[str, Any]:
         "raw_history_baseline_represented": raw_history_correct_count >= 3,
         "memory_off_baseline_represented": len(memory_off_results) == len(scored_cases),
         "brainstack_token_savings_observed": brainstack_token_savings_cases >= 4,
+        "memory_use_records_valid": memory_use_records_valid,
         "deterministic_no_llm_calls": True,
     }
     report = {

@@ -92,6 +92,7 @@ def build_report() -> dict[str, Any]:
         module.write_text(_fixture(), encoding="utf-8")
         applied = install_into_hermes._patch_gateway_background_process_output_boundary(module, dry_run=False)
         text = module.read_text(encoding="utf-8")
+        previous_hermes_home = os.environ.get("HERMES_HOME")
         os.environ["HERMES_HOME"] = str(base / "hermes-home")
 
         try:
@@ -138,6 +139,11 @@ def build_report() -> dict[str, Any]:
         missing = [key for key in required if proof.get(key) is not True]
         if missing:
             issues.append({"code": "context_pressure_proof_failed", "missing": missing})
+
+        if previous_hermes_home is None:
+            os.environ.pop("HERMES_HOME", None)
+        else:
+            os.environ["HERMES_HOME"] = previous_hermes_home
 
         return {
             "schema": "brainstack.context_pressure_queue_liveness_proof.v1",

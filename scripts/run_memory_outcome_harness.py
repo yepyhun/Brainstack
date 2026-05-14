@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from brainstack.outcome_harness import REPORT_SCHEMA, run_harness
+from brainstack.outcome_harness import REPORT_SCHEMA, run_harness  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -85,9 +85,15 @@ DISCORD_STREAMING_EDIT_INTERVAL_SECONDS = 3.0
 DISCORD_STREAMING_BUFFER_THRESHOLD = 200
 
 HOST_PATCH_MODE_CATEGORIES: dict[str, set[str]] = {
-    "core": {"required_seam", "core_hygiene"},
-    "compat": {"required_seam", "core_hygiene", "compat_hotfix"},
-    "legacy": {"required_seam", "core_hygiene", "compat_hotfix", "legacy_host_patch"},
+    "core": {"required_seam", "core_hygiene", "temporary_upstream_hotfix"},
+    "compat": {"required_seam", "core_hygiene", "compat_hotfix", "temporary_upstream_hotfix"},
+    "legacy": {
+        "required_seam",
+        "core_hygiene",
+        "compat_hotfix",
+        "temporary_upstream_hotfix",
+        "legacy_host_patch",
+    },
 }
 
 HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
@@ -171,6 +177,36 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "owner": "host-discord-runtime",
         "removal_condition": "Hermes Discord adapter natively keeps typing indicators rate-limit aware and prevents overlapping stale typing loops.",
     },
+    "_patch_discord_outbound_final_dedupe": {
+        "category": "temporary_upstream_hotfix",
+        "owner": "upstream-hermes-discord-bugfix",
+        "removal_condition": "Hermes natively guarantees idempotent Discord final-response delivery across streaming, fallback, retry, and normal final-send paths. Tracking: https://github.com/NousResearch/hermes-agent/issues/25349",
+    },
+    "_patch_cron_authority_jobs": {
+        "category": "temporary_upstream_hotfix",
+        "owner": "upstream-hermes-cron-authority",
+        "removal_condition": "Hermes cron.jobs natively resolves jobs/output from HERMES_CRON_HOME when set while preserving profile-local cron by default.",
+    },
+    "_patch_cron_authority_scheduler": {
+        "category": "temporary_upstream_hotfix",
+        "owner": "upstream-hermes-cron-authority",
+        "removal_condition": "Hermes cron.scheduler natively places the tick lock under the same HERMES_CRON_HOME authority as cron.jobs when set.",
+    },
+    "_patch_kanban_spawn_cron_authority": {
+        "category": "temporary_upstream_hotfix",
+        "owner": "upstream-hermes-cron-authority",
+        "removal_condition": "Hermes Kanban worker spawning natively preserves explicit HERMES_CRON_HOME for profile workers.",
+    },
+    "_patch_cron_authority_tests": {
+        "category": "temporary_upstream_hotfix",
+        "owner": "upstream-hermes-cron-authority-test",
+        "removal_condition": "Upstream Hermes tests cover HERMES_CRON_HOME jobs/output authority without changing profile-local defaults.",
+    },
+    "_patch_cron_scheduler_authority_tests": {
+        "category": "temporary_upstream_hotfix",
+        "owner": "upstream-hermes-cron-authority-test",
+        "removal_condition": "Upstream Hermes tests cover scheduler tick-lock parity with HERMES_CRON_HOME.",
+    },
     "_patch_run_agent_ebadf_transport_recovery": {
         "category": "required_seam",
         "owner": "host-provider-runtime",
@@ -185,6 +221,11 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "category": "compat_hotfix",
         "owner": "host-provider-hotfix-test",
         "removal_condition": "Upstream Hermes tests cover stale Nous agent-key rejection.",
+    },
+    "_patch_openai_codex_runtime_pool_fallback": {
+        "category": "temporary_upstream_hotfix",
+        "owner": "upstream-hermes-auth-pool-runtime",
+        "removal_condition": "Hermes OpenAI Codex runtime credential resolution natively uses the same credential pool that auth status reports as logged in.",
     },
     "_patch_compose_healthcheck": {
         "category": "required_seam",
@@ -445,6 +486,54 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "why": "Long Hermes turns should show safe liveness, but Discord typing is optional and must back off instead of producing repeated 429 retries.",
     },
     {
+        "patcher": "_patch_discord_outbound_final_dedupe",
+        "target": "gateway/platforms/discord.py",
+        "scope": "temporary-upstream-hermes-bugfix",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Temporarily suppress duplicate Discord final-response chunks while upstream fixes delivery idempotency.",
+        "why": "Hermes can deliver the same long Discord response twice when streaming/chunked/final-send paths overlap; this patch is isolated for easy removal once upstream issue #25349 is fixed.",
+    },
+    {
+        "patcher": "_patch_cron_authority_jobs",
+        "target": "cron/jobs.py",
+        "scope": "temporary-upstream-hermes-cron-authority",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Add explicit HERMES_CRON_HOME cron authority for jobs.json and cron/output while preserving profile-local cron by default.",
+        "why": "Multi-profile Kanban workers can otherwise import cron.jobs under profile-local HERMES_HOME and see a different scheduled-job store than the gateway/proactive controller.",
+    },
+    {
+        "patcher": "_patch_cron_authority_scheduler",
+        "target": "cron/scheduler.py",
+        "scope": "temporary-upstream-hermes-cron-authority",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Place the scheduler tick lock under the same explicit cron authority as cron.jobs.",
+        "why": "Fixing jobs.json without the tick lock leaves duplicate or stale scheduler ticks possible across profile workers.",
+    },
+    {
+        "patcher": "_patch_kanban_spawn_cron_authority",
+        "target": "hermes_cli/kanban_db.py",
+        "scope": "temporary-upstream-hermes-cron-authority",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Preserve explicit HERMES_CRON_HOME when Kanban spawns worker profiles.",
+        "why": "Profile activation changes HERMES_HOME; explicit shared cron authority must survive the worker spawn boundary.",
+    },
+    {
+        "patcher": "_patch_cron_authority_tests",
+        "target": "tests/cron/test_jobs.py",
+        "scope": "temporary-upstream-hermes-cron-authority-verification",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Add regression coverage for profile-local default cron and explicit shared HERMES_CRON_HOME jobs/output paths.",
+        "why": "The temporary hotfix must prove it does not turn all profile cron jobs into shared cron by default.",
+    },
+    {
+        "patcher": "_patch_cron_scheduler_authority_tests",
+        "target": "tests/cron/test_scheduler.py",
+        "scope": "temporary-upstream-hermes-cron-authority-verification",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Add regression coverage that scheduler tick-lock authority follows HERMES_CRON_HOME when set.",
+        "why": "Cron authority is only coherent if jobs, output, and scheduler lock all resolve to the same authority.",
+    },
+    {
         "patcher": "_patch_run_agent_ebadf_transport_recovery",
         "target": "run_agent.py",
         "scope": "provider-transport-recovery-seam",
@@ -467,6 +556,14 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_modes": ("source", "docker"),
         "purpose": "Add regression coverage for skipping stale Nous credential-pool entries and keep time-sensitive fixtures valid.",
         "why": "The credential-pool seam is host-owned runtime behavior and must keep an explicit, reproducible test contract.",
+    },
+    {
+        "patcher": "_patch_openai_codex_runtime_pool_fallback",
+        "target": "hermes_cli/auth.py",
+        "scope": "temporary-upstream-hermes-auth-runtime-hotfix",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Let OpenAI Codex runtime credential resolution fall back to the same credential pool that Hermes auth status already treats as logged in.",
+        "why": "Without this, cron and worker runtime execution can fail with missing credentials while `hermes auth status openai-codex` reports a valid login.",
     },
     {
         "patcher": "_patch_memory_provider",
@@ -522,7 +619,7 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "scope": "host-compression-seam",
         "runtime_modes": ("source", "docker"),
         "purpose": "Keep auxiliary compression summaries within an interactive output budget and preserve a deterministic fallback summary if the auxiliary LLM fails.",
-        "why": "Large but valid sessions can request 10k+ token compression summaries; Codex auxiliary can time out after 120s and otherwise replace compacted turns with a low-information lost-context marker.",
+        "why": "Large but valid sessions can request 10k+ token compression summaries; auxiliary model streams can time out after 120s and otherwise replace compacted turns with a low-information lost-context marker.",
     },
     {
         "patcher": "_patch_gateway_turn_profiles_capability_preserving_default",
@@ -1024,6 +1121,412 @@ def _memory_manager_forwards_write_metadata(text: str) -> bool:
         if len(node.args) >= 4:
             return True
     return False
+
+
+def _patch_cron_authority_jobs(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+    if (
+        "HERMES_CRON_HOME" in text
+        and "def get_cron_home() -> Path:" in text
+        and (
+            "HERMES_DIR = get_cron_home().resolve()" in text
+            or "CRON_DIR = get_cron_home().resolve() / \"cron\"" in text
+        )
+    ):
+        return []
+
+    if "import os\n" not in text:
+        text = _replace_once_any(
+            text,
+            [
+                ("import json\n", "import json\nimport os\n"),
+                ("from pathlib import Path\n", "import os\nfrom pathlib import Path\n"),
+            ],
+            label="cron.jobs os import for cron authority",
+            path=path,
+        )
+        applied.append("cron_authority_jobs:import_os")
+
+    old_authority = (
+        "HERMES_DIR = get_hermes_home().resolve()\n"
+        "CRON_DIR = HERMES_DIR / \"cron\"\n"
+        "JOBS_FILE = CRON_DIR / \"jobs.json\"\n"
+        "OUTPUT_DIR = CRON_DIR / \"output\"\n"
+    )
+    locked_authority = (
+        "HERMES_DIR = get_hermes_home().resolve()\n"
+        "CRON_DIR = HERMES_DIR / \"cron\"\n"
+        "JOBS_FILE = CRON_DIR / \"jobs.json\"\n"
+        "\n"
+        "# In-process lock protecting load_jobs\u2192modify\u2192save_jobs cycles.\n"
+        "# Required when tick() runs jobs in parallel threads \u2014 without this,\n"
+        "# concurrent mark_job_run / advance_next_run calls can clobber each other.\n"
+        "_jobs_file_lock = threading.Lock()\n"
+        "OUTPUT_DIR = CRON_DIR / \"output\"\n"
+    )
+    alt_authority = (
+        "CRON_DIR = get_hermes_home().resolve() / \"cron\"\n"
+        "JOBS_FILE = CRON_DIR / \"jobs.json\"\n"
+        "OUTPUT_DIR = CRON_DIR / \"output\"\n"
+    )
+    new_authority = (
+        "def get_cron_home() -> Path:\n"
+        "    \"\"\"Return the explicit cron authority for this process.\n\n"
+        "    Profiles keep profile-local cron by default. Coordinated multi-profile\n"
+        "    workers may opt into a shared cron authority by setting HERMES_CRON_HOME.\n"
+        "    \"\"\"\n"
+        "    override = os.environ.get(\"HERMES_CRON_HOME\", \"\").strip()\n"
+        "    if override:\n"
+        "        return Path(override).expanduser()\n"
+        "    return get_hermes_home()\n\n\n"
+        "HERMES_DIR = get_cron_home().resolve()\n"
+        "CRON_DIR = HERMES_DIR / \"cron\"\n"
+        "JOBS_FILE = CRON_DIR / \"jobs.json\"\n"
+        "OUTPUT_DIR = CRON_DIR / \"output\"\n"
+    )
+    locked_new_authority = (
+        "def get_cron_home() -> Path:\n"
+        "    \"\"\"Return the explicit cron authority for this process.\n\n"
+        "    Profiles keep profile-local cron by default. Coordinated multi-profile\n"
+        "    workers may opt into a shared cron authority by setting HERMES_CRON_HOME.\n"
+        "    \"\"\"\n"
+        "    override = os.environ.get(\"HERMES_CRON_HOME\", \"\").strip()\n"
+        "    if override:\n"
+        "        return Path(override).expanduser()\n"
+        "    return get_hermes_home()\n\n\n"
+        "HERMES_DIR = get_cron_home().resolve()\n"
+        "CRON_DIR = HERMES_DIR / \"cron\"\n"
+        "JOBS_FILE = CRON_DIR / \"jobs.json\"\n"
+        "\n"
+        "# In-process lock protecting load_jobs\u2192modify\u2192save_jobs cycles.\n"
+        "# Required when tick() runs jobs in parallel threads \u2014 without this,\n"
+        "# concurrent mark_job_run / advance_next_run calls can clobber each other.\n"
+        "_jobs_file_lock = threading.Lock()\n"
+        "OUTPUT_DIR = CRON_DIR / \"output\"\n"
+    )
+    alt_new_authority = (
+        "def get_cron_home() -> Path:\n"
+        "    \"\"\"Return the explicit cron authority for this process.\n\n"
+        "    Profiles keep profile-local cron by default. Coordinated multi-profile\n"
+        "    workers may opt into a shared cron authority by setting HERMES_CRON_HOME.\n"
+        "    \"\"\"\n"
+        "    override = os.environ.get(\"HERMES_CRON_HOME\", \"\").strip()\n"
+        "    if override:\n"
+        "        return Path(override).expanduser()\n"
+        "    return get_hermes_home()\n\n\n"
+        "CRON_DIR = get_cron_home().resolve() / \"cron\"\n"
+        "JOBS_FILE = CRON_DIR / \"jobs.json\"\n"
+        "OUTPUT_DIR = CRON_DIR / \"output\"\n"
+    )
+    if "def get_cron_home() -> Path:" not in text:
+        text = _replace_once_any(
+            text,
+            [
+                (locked_authority, locked_new_authority),
+                (old_authority, new_authority),
+                (alt_authority, alt_new_authority),
+            ],
+            label="cron.jobs HERMES_CRON_HOME authority",
+            path=path,
+        )
+        applied.append("cron_authority_jobs:resolver")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_cron_authority_scheduler(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+    if (
+        "HERMES_CRON_HOME" in text
+        and "def _get_cron_home() -> Path:" in text
+        and "cron_home = _get_cron_home()" in text
+    ):
+        return []
+
+    if "import os\n" not in text:
+        text = _replace_once_any(
+            text,
+            [
+                ("import logging\n", "import logging\nimport os\n"),
+                ("from pathlib import Path\n", "import os\nfrom pathlib import Path\n"),
+            ],
+            label="cron.scheduler os import for cron authority",
+            path=path,
+        )
+        applied.append("cron_authority_scheduler:import_os")
+
+    resolver_anchor = (
+        "def _get_hermes_home() -> Path:\n"
+        "    return _hermes_home or get_hermes_home()\n\n\n"
+    )
+    resolver_anchor_with_docstring = (
+        "def _get_hermes_home() -> Path:\n"
+        "    \"\"\"Resolve Hermes home dynamically while preserving test monkeypatch hooks.\"\"\"\n"
+        "    return _hermes_home or get_hermes_home()\n\n\n"
+    )
+    resolver_block = (
+        "def _get_hermes_home() -> Path:\n"
+        "    return _hermes_home or get_hermes_home()\n\n\n"
+        "def _get_cron_home() -> Path:\n"
+        "    override = os.environ.get(\"HERMES_CRON_HOME\", \"\").strip()\n"
+        "    if override:\n"
+        "        return Path(override).expanduser()\n"
+        "    return _get_hermes_home()\n\n\n"
+    )
+    resolver_block_with_docstring = (
+        "def _get_hermes_home() -> Path:\n"
+        "    \"\"\"Resolve Hermes home dynamically while preserving test monkeypatch hooks.\"\"\"\n"
+        "    return _hermes_home or get_hermes_home()\n\n\n"
+        "def _get_cron_home() -> Path:\n"
+        "    override = os.environ.get(\"HERMES_CRON_HOME\", \"\").strip()\n"
+        "    if override:\n"
+        "        return Path(override).expanduser()\n"
+        "    return _get_hermes_home()\n\n\n"
+    )
+    if "def _get_cron_home() -> Path:" not in text:
+        text = _replace_once_any(
+            text,
+            [
+                (resolver_anchor_with_docstring, resolver_block_with_docstring),
+                (resolver_anchor, resolver_block),
+            ],
+            label="cron.scheduler HERMES_CRON_HOME resolver",
+            path=path,
+        )
+        applied.append("cron_authority_scheduler:resolver")
+
+    old_lock_paths = (
+        "def _get_lock_paths() -> tuple[Path, Path]:\n"
+        "    hermes_home = _get_hermes_home()\n"
+        "    lock_dir = hermes_home / \"cron\"\n"
+        "    return lock_dir, lock_dir / \".tick.lock\"\n"
+    )
+    old_lock_paths_with_docstring = (
+        "def _get_lock_paths() -> tuple[Path, Path]:\n"
+        "    \"\"\"Resolve cron lock paths at call time so profile/env changes are honored.\"\"\"\n"
+        "    hermes_home = _get_hermes_home()\n"
+        "    lock_dir = hermes_home / \"cron\"\n"
+        "    return lock_dir, lock_dir / \".tick.lock\"\n"
+    )
+    new_lock_paths = (
+        "def _get_lock_paths() -> tuple[Path, Path]:\n"
+        "    cron_home = _get_cron_home()\n"
+        "    lock_dir = cron_home / \"cron\"\n"
+        "    return lock_dir, lock_dir / \".tick.lock\"\n"
+    )
+    new_lock_paths_with_docstring = (
+        "def _get_lock_paths() -> tuple[Path, Path]:\n"
+        "    \"\"\"Resolve cron lock paths at call time so profile/env changes are honored.\"\"\"\n"
+        "    cron_home = _get_cron_home()\n"
+        "    lock_dir = cron_home / \"cron\"\n"
+        "    return lock_dir, lock_dir / \".tick.lock\"\n"
+    )
+    if (
+        "cron_home = _get_cron_home()" not in text
+        and (old_lock_paths in text or old_lock_paths_with_docstring in text)
+    ):
+        text = _replace_once_any(
+            text,
+            [
+                (old_lock_paths_with_docstring, new_lock_paths_with_docstring),
+                (old_lock_paths, new_lock_paths),
+            ],
+            label="cron.scheduler tick lock cron authority",
+            path=path,
+        )
+        applied.append("cron_authority_scheduler:lock_resolver")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_kanban_spawn_cron_authority(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+    if "HERMES_CRON_HOME" in text and "cron_home = os.environ.get(\"HERMES_CRON_HOME\"" in text:
+        return []
+
+    if "import os\n" not in text:
+        text = _replace_once_any(
+            text,
+            [
+                ("import json\n", "import json\nimport os\n"),
+                ("from pathlib import Path\n", "import os\nfrom pathlib import Path\n"),
+            ],
+            label="kanban_db os import for cron authority",
+            path=path,
+        )
+        applied.append("kanban_spawn_cron_authority:import_os")
+
+    hermes_home_line = '        env["HERMES_HOME"] = resolve_profile_env(profile_arg)\n'
+    hermes_home_with_cron = (
+        '        env["HERMES_HOME"] = resolve_profile_env(profile_arg)\n'
+        "        cron_home = os.environ.get(\"HERMES_CRON_HOME\", \"\").strip()\n"
+        "        if cron_home:\n"
+        "            env[\"HERMES_CRON_HOME\"] = cron_home\n"
+    )
+    if hermes_home_line in text and "env[\"HERMES_CRON_HOME\"] = cron_home" not in text:
+        text = _replace_once(
+            text,
+            hermes_home_line,
+            hermes_home_with_cron,
+            label="kanban worker explicit cron authority env",
+            path=path,
+        )
+        applied.append("kanban_spawn_cron_authority:env")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_cron_authority_tests(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+
+    text = path.read_text(encoding="utf-8")
+    if "class TestCronAuthorityHome" in text:
+        return []
+
+    test_block = r'''
+
+
+class TestCronAuthorityHome:
+    def _cron_paths_for_env(self, hermes_home, cron_home=None):
+        import json
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path as _Path
+
+        env = os.environ.copy()
+        env["HERMES_HOME"] = str(hermes_home)
+        env.pop("HERMES_CRON_HOME", None)
+        if cron_home is not None:
+            env["HERMES_CRON_HOME"] = str(cron_home)
+        code = (
+            "import json; "
+            "from cron import jobs; "
+            "print(json.dumps({"
+            "'cron_dir': str(jobs.CRON_DIR), "
+            "'jobs_file': str(jobs.JOBS_FILE), "
+            "'output_dir': str(jobs.OUTPUT_DIR)"
+            "}))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=_Path(__file__).resolve().parents[2],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return json.loads(result.stdout)
+
+    def test_profile_home_uses_profile_local_cron_by_default(self, tmp_path):
+        profile_home = tmp_path / "profiles" / "coder"
+        paths = self._cron_paths_for_env(profile_home)
+
+        assert paths["cron_dir"] == str(profile_home / "cron")
+        assert paths["jobs_file"] == str(profile_home / "cron" / "jobs.json")
+        assert paths["output_dir"] == str(profile_home / "cron" / "output")
+
+    def test_profile_home_can_use_explicit_shared_cron_authority(self, tmp_path):
+        root_home = tmp_path / "root"
+        profile_home = root_home / "profiles" / "coder"
+        paths = self._cron_paths_for_env(profile_home, cron_home=root_home)
+
+        assert paths["cron_dir"] == str(root_home / "cron")
+        assert paths["jobs_file"] == str(root_home / "cron" / "jobs.json")
+        assert paths["output_dir"] == str(root_home / "cron" / "output")
+
+    def test_root_home_uses_root_cron_without_override(self, tmp_path):
+        root_home = tmp_path / "root"
+        paths = self._cron_paths_for_env(root_home)
+
+        assert paths["cron_dir"] == str(root_home / "cron")
+        assert paths["jobs_file"] == str(root_home / "cron" / "jobs.json")
+        assert paths["output_dir"] == str(root_home / "cron" / "output")
+'''
+    text = text.rstrip() + test_block + "\n"
+    if not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return ["cron_authority_tests:jobs_output_paths"]
+
+
+def _patch_cron_scheduler_authority_tests(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+
+    text = path.read_text(encoding="utf-8")
+    if "class TestCronSchedulerAuthorityHome" in text:
+        return []
+
+    test_block = r'''
+
+
+class TestCronSchedulerAuthorityHome:
+    def _lock_paths_for_env(self, hermes_home, cron_home=None):
+        import json
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path as _Path
+
+        env = os.environ.copy()
+        env["HERMES_HOME"] = str(hermes_home)
+        env.pop("HERMES_CRON_HOME", None)
+        if cron_home is not None:
+            env["HERMES_CRON_HOME"] = str(cron_home)
+        code = (
+            "import json; "
+            "from cron import scheduler; "
+            "lock_dir, lock_file = scheduler._get_lock_paths(); "
+            "print(json.dumps({'lock_dir': str(lock_dir), 'lock_file': str(lock_file)}))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=_Path(__file__).resolve().parents[2],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return json.loads(result.stdout)
+
+    def test_scheduler_lock_is_profile_local_by_default(self, tmp_path):
+        profile_home = tmp_path / "profiles" / "coder"
+        paths = self._lock_paths_for_env(profile_home)
+
+        assert paths["lock_dir"] == str(profile_home / "cron")
+        assert paths["lock_file"] == str(profile_home / "cron" / ".tick.lock")
+
+    def test_scheduler_lock_follows_explicit_shared_cron_authority(self, tmp_path):
+        root_home = tmp_path / "root"
+        profile_home = root_home / "profiles" / "coder"
+        paths = self._lock_paths_for_env(profile_home, cron_home=root_home)
+
+        assert paths["lock_dir"] == str(root_home / "cron")
+        assert paths["lock_file"] == str(root_home / "cron" / ".tick.lock")
+'''
+    text = text.rstrip() + test_block + "\n"
+    if not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return ["cron_scheduler_authority_tests:lock_paths"]
 
 
 def _patch_memory_manager_required_seam(path: Path, dry_run: bool) -> list[str]:
@@ -2141,6 +2644,124 @@ def _patch_credential_pool_tests(path: Path, dry_run: bool) -> list[str]:
     if "def test_select_skips_stale_nous_agent_keys" not in text and marker in text:
         text = text.replace(marker, new_test + "\n\n" + marker)
         applied.append("credential_pool_tests:skip_stale_nous_entries")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_openai_codex_runtime_pool_fallback(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    if "_read_codex_pool_tokens" in text and "initial_codex_pool_data" in text:
+        return []
+
+    helper_anchor = (
+        "\n\n"
+        "def resolve_codex_runtime_credentials(\n"
+        "    *,\n"
+        "    force_refresh: bool = False,\n"
+        "    refresh_if_expiring: bool = True,\n"
+        "    refresh_skew_seconds: int = CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,\n"
+        ") -> Dict[str, Any]:\n"
+    )
+    helper_block = (
+        "\n\n"
+        "def _read_codex_pool_tokens(original_error: AuthError | None = None) -> Dict[str, Any]:\n"
+        "    \"\"\"Read OpenAI Codex OAuth tokens from the Hermes credential pool.\n"
+        "\n"
+        "    Temporary compatibility path: Hermes auth status already considers\n"
+        "    credential-pool Codex entries logged in, so runtime resolution must not\n"
+        "    fail before the agent can use the same credentials.\n"
+        "    \"\"\"\n"
+        "    try:\n"
+        "        from agent.credential_pool import load_pool\n"
+        "\n"
+        "        pool = load_pool(\"openai-codex\")\n"
+        "        if pool and pool.has_credentials():\n"
+        "            entry = pool.select()\n"
+        "            if entry is not None:\n"
+        "                access_token = str(\n"
+        "                    getattr(entry, \"access_token\", \"\")\n"
+        "                    or getattr(entry, \"runtime_api_key\", \"\")\n"
+        "                    or \"\"\n"
+        "                ).strip()\n"
+        "                refresh_token = str(getattr(entry, \"refresh_token\", \"\") or \"\").strip()\n"
+        "                if access_token and refresh_token:\n"
+        "                    return {\n"
+        "                        \"tokens\": {\n"
+        "                            \"access_token\": access_token,\n"
+        "                            \"refresh_token\": refresh_token,\n"
+        "                        },\n"
+        "                        \"last_refresh\": getattr(entry, \"last_refresh\", None),\n"
+        "                        \"auth_mode\": \"chatgpt\",\n"
+        "                        \"source\": f\"credential_pool:{getattr(entry, 'label', 'openai-codex')}\",\n"
+        "                    }\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    if original_error is not None:\n"
+        "        raise original_error\n"
+        "    raise AuthError(\n"
+        "        \"No Codex credentials stored. Run `hermes auth` to authenticate.\",\n"
+        "        provider=\"openai-codex\",\n"
+        "        code=\"codex_auth_missing\",\n"
+        "        relogin_required=True,\n"
+        "    )\n"
+    )
+    if "_read_codex_pool_tokens" not in text:
+        text = _replace_once(
+            text,
+            helper_anchor,
+            helper_block + helper_anchor,
+            label="openai codex credential-pool runtime fallback helper",
+            path=path,
+        )
+        applied.append("openai_codex_auth:pool_fallback_helper")
+
+    old_initial = (
+        "    data = _read_codex_tokens()\n"
+        "    tokens = dict(data[\"tokens\"])\n"
+    )
+    new_initial = (
+        "    try:\n"
+        "        data = _read_codex_tokens()\n"
+        "    except AuthError as exc:\n"
+        "        data = _read_codex_pool_tokens(exc)\n"
+        "    initial_codex_pool_data = dict(data) if data.get(\"source\", \"\").startswith(\"credential_pool:\") else None\n"
+        "    tokens = dict(data[\"tokens\"])\n"
+    )
+    if old_initial in text and "initial_codex_pool_data = dict(data)" not in text:
+        text = _replace_once(
+            text,
+            old_initial,
+            new_initial,
+            label="openai codex runtime initial credential-pool fallback",
+            path=path,
+        )
+        applied.append("openai_codex_auth:initial_pool_fallback")
+
+    old_refresh_read = "            data = _read_codex_tokens(_lock=False)\n"
+    new_refresh_read = (
+        "            try:\n"
+        "                data = _read_codex_tokens(_lock=False)\n"
+        "            except AuthError:\n"
+        "                if initial_codex_pool_data is None:\n"
+        "                    raise\n"
+        "                data = dict(initial_codex_pool_data)\n"
+    )
+    if old_refresh_read in text and "if initial_codex_pool_data is None:" not in text:
+        text = _replace_once(
+            text,
+            old_refresh_read,
+            new_refresh_read,
+            label="openai codex runtime refresh credential-pool fallback",
+            path=path,
+        )
+        applied.append("openai_codex_auth:refresh_pool_fallback")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -4040,7 +4661,7 @@ def _patch_context_compressor_runtime_budget(path: Path, dry_run: bool) -> list[
             "_SUMMARY_TOKENS_CEILING = 12_000\n"
             "# Runtime guard: auxiliary compression must finish inside an\n"
             "# interactive gateway timeout. Larger summaries routinely exceed\n"
-            "# Codex auxiliary stream deadlines on valid long sessions; full\n"
+            "# auxiliary model stream deadlines on valid long sessions; full\n"
             "# transcript fidelity is preserved by the deterministic fallback and\n"
             "# by retained tail messages, not by asking for 10k+ output tokens.\n"
             f"_FAST_SUMMARY_TOKENS_CEILING = {COMPRESSION_FAST_SUMMARY_MAX_TOKENS:_}\n"
@@ -5269,6 +5890,156 @@ def _patch_discord_typing_backoff(path: Path, dry_run: bool) -> list[str]:
         if not replaced:
             return applied
         applied.append("discord_typing:opt_in_loop")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_discord_outbound_final_dedupe(path: Path, dry_run: bool) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    # Temporary upstream Hermes bugfix. If upstream adds its own delivery
+    # idempotency guard, do not force this patch over it.
+    if "self._recent_outbound_chunk_dedupe" in text:
+        return applied
+    if "duplicate_suppressed" in text and "content_hash" in text and "channel.send" in text:
+        return applied
+
+    import_anchor = "import asyncio\n"
+    state_anchor = "        self._typing_tasks: Dict[str, asyncio.Task] = {}\n"
+    send_anchor = (
+        "            # Format and split message if needed\n"
+        "            formatted = self.format_message(content)\n"
+        "            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)\n"
+        "\n"
+        "            message_ids = []\n"
+    )
+    loop_anchor = (
+        "            for i, chunk in enumerate(chunks):\n"
+        "                if self._reply_to_mode == \"all\":\n"
+        "                    chunk_reference = reference\n"
+        "                else:  # \"first\" (default) or \"off\"\n"
+        "                    chunk_reference = reference if i == 0 else None\n"
+        "                try:\n"
+    )
+    append_anchor = "                message_ids.append(str(msg.id))\n"
+    required_anchors = [state_anchor, send_anchor, loop_anchor, append_anchor]
+    if "import hashlib\n" not in text:
+        required_anchors.append(import_anchor)
+    if any(anchor not in text for anchor in required_anchors):
+        return applied
+
+    if "import hashlib\n" not in text:
+        text = _replace_once(
+            text,
+            import_anchor,
+            "import asyncio\nimport hashlib\n",
+            label="Discord outbound duplicate-chunk dedupe import",
+            path=path,
+        )
+        applied.append("discord_outbound_dedupe:import")
+
+    state_replacement = (
+        state_anchor +
+        "        # Temporary upstream Hermes bugfix (#25349): suppress exact duplicate\n"
+        "        # outbound Discord chunks when streaming/fallback/normal final-send\n"
+        "        # paths overlap. Remove when Hermes owns final delivery idempotency.\n"
+        "        self._recent_outbound_chunk_dedupe: Dict[str, tuple[float, str]] = {}\n"
+        "        self._outbound_chunk_dedupe_seconds = max(\n"
+        "            0.0,\n"
+        "            float(os.getenv(\"HERMES_DISCORD_OUTBOUND_DEDUPE_SECONDS\", \"120\")),\n"
+        "        )\n"
+        "        self._outbound_chunk_dedupe_min_chars = max(\n"
+        "            0,\n"
+        "            int(os.getenv(\"HERMES_DISCORD_OUTBOUND_DEDUPE_MIN_CHARS\", \"200\")),\n"
+        "        )\n"
+    )
+    text = _replace_once(
+        text,
+        state_anchor,
+        state_replacement,
+        label="Discord outbound duplicate-chunk dedupe state",
+        path=path,
+    )
+    applied.append("discord_outbound_dedupe:state")
+
+    send_replacement = (
+        "            # Format and split message if needed\n"
+        "            formatted = self.format_message(content)\n"
+        "            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)\n"
+        "\n"
+        "            message_ids = []\n"
+        "            dedupe_enabled = self._outbound_chunk_dedupe_seconds > 0\n"
+        "            dedupe_now = time.monotonic()\n"
+        "            dedupe_target_id = str(getattr(channel, \"id\", thread_id or chat_id))\n"
+        "            if dedupe_enabled and len(self._recent_outbound_chunk_dedupe) > 512:\n"
+        "                dedupe_cutoff = dedupe_now - self._outbound_chunk_dedupe_seconds\n"
+        "                for dedupe_key, (seen_at, _msg_id) in list(self._recent_outbound_chunk_dedupe.items()):\n"
+        "                    if seen_at < dedupe_cutoff:\n"
+        "                        self._recent_outbound_chunk_dedupe.pop(dedupe_key, None)\n"
+    )
+    text = _replace_once(
+        text,
+        send_anchor,
+        send_replacement,
+        label="Discord outbound duplicate-chunk dedupe setup",
+        path=path,
+    )
+    applied.append("discord_outbound_dedupe:setup")
+
+    loop_replacement = (
+        "            for i, chunk in enumerate(chunks):\n"
+        "                if self._reply_to_mode == \"all\":\n"
+        "                    chunk_reference = reference\n"
+        "                else:  # \"first\" (default) or \"off\"\n"
+        "                    chunk_reference = reference if i == 0 else None\n"
+        "                dedupe_key = \"\"\n"
+        "                if (\n"
+        "                    dedupe_enabled\n"
+        "                    and len(chunk) >= self._outbound_chunk_dedupe_min_chars\n"
+        "                ):\n"
+        "                    reference_id = \"\"\n"
+        "                    if chunk_reference is not None:\n"
+        "                        reference_id = str(getattr(chunk_reference, \"message_id\", \"\") or getattr(chunk_reference, \"id\", \"\"))\n"
+        "                    content_hash = hashlib.sha256(chunk.encode(\"utf-8\")).hexdigest()\n"
+        "                    dedupe_key = f\"{dedupe_target_id}:{reference_id}:{content_hash}\"\n"
+        "                    previous = self._recent_outbound_chunk_dedupe.get(dedupe_key)\n"
+        "                    if previous and (dedupe_now - previous[0]) <= self._outbound_chunk_dedupe_seconds:\n"
+        "                        message_ids.append(previous[1])\n"
+        "                        logger.info(\n"
+        "                            \"[%s] Suppressed duplicate Discord outbound chunk for %s (content_hash=%s)\",\n"
+        "                            self.name,\n"
+        "                            dedupe_target_id,\n"
+        "                            content_hash[:12],\n"
+        "                        )\n"
+        "                        continue\n"
+        "                try:\n"
+    )
+    text = _replace_once(
+        text,
+        loop_anchor,
+        loop_replacement,
+        label="Discord outbound duplicate-chunk dedupe check",
+        path=path,
+    )
+    applied.append("discord_outbound_dedupe:check")
+
+    append_replacement = (
+        "                msg_id = str(msg.id)\n"
+        "                message_ids.append(msg_id)\n"
+        "                if dedupe_key:\n"
+        "                    self._recent_outbound_chunk_dedupe[dedupe_key] = (time.monotonic(), msg_id)\n"
+    )
+    text = _replace_once(
+        text,
+        append_anchor,
+        append_replacement,
+        label="Discord outbound duplicate-chunk dedupe record",
+        path=path,
+    )
+    applied.append("discord_outbound_dedupe:record")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -7593,6 +8364,11 @@ def main() -> int:
     host_patches.extend(_run_host_patch("_patch_terminal_tool_result_hygiene", target / "tools" / "terminal_tool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_tool_result_budget_config", target / "tools" / "budget_config.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_prompt_builder", target / "agent" / "prompt_builder.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_cron_authority_jobs", target / "cron" / "jobs.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_cron_authority_scheduler", target / "cron" / "scheduler.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_kanban_spawn_cron_authority", target / "hermes_cli" / "kanban_db.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_cron_scheduler_authority_tests", target / "tests" / "cron" / "test_scheduler.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_cron_authority_tests", target / "tests" / "cron" / "test_jobs.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_cron_jobs", target / "cron" / "jobs.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_cron_scheduler", target / "cron" / "scheduler.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_cron_scheduler_tests", target / "tests" / "cron" / "test_scheduler.py", args.dry_run, host_patch_mode=args.host_patch_mode))
@@ -7600,10 +8376,12 @@ def main() -> int:
     host_patches.extend(_run_host_patch("_patch_auxiliary_client", target / "agent" / "auxiliary_client.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_session_search_total_deadline", target / "tools" / "session_search_tool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_discord_typing_backoff", target / "gateway" / "platforms" / "discord.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_discord_outbound_final_dedupe", target / "gateway" / "platforms" / "discord.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_run_agent_ebadf_transport_recovery", target / "run_agent.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_context_compressor_runtime_budget", target / "agent" / "context_compressor.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_credential_pool", target / "agent" / "credential_pool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_credential_pool_tests", target / "tests" / "agent" / "test_credential_pool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_openai_codex_runtime_pool_fallback", target / "hermes_cli" / "auth.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_memory_provider", target / "agent" / "memory_provider.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_memory_manager_required_seam", target / "agent" / "memory_manager.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_memory_manager_output_validation_seam", target / "agent" / "memory_manager.py", args.dry_run, host_patch_mode=args.host_patch_mode))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from scripts.verify_hermes_auxiliary_compression_guard import build_report as build_compression_report
 from scripts.verify_frontier_continuation_contract import build_report as build_frontier_continuation_report
+from scripts.verify_durable_work_state_contract import build_report as build_durable_work_report
 from scripts.verify_kanban_recovery_candidate_contract import build_report as build_recovery_report
 from scripts.verify_operating_loop_liveness_contract import build_report as build_liveness_report
 from scripts.verify_scheduler_lane_health_contract import build_report as build_scheduler_report
@@ -72,6 +73,14 @@ def test_frontier_continuation_contract_blocks_cadence_primary_claim() -> None:
     _assert_report_passes(report)
     assert report["scenario_verdicts"]["cadence_primary"] == "degraded"
     assert report["scenario_verdicts"]["missing_continuation"] == "critical"
+
+
+def test_durable_work_state_contract_blocks_ack_before_durability() -> None:
+    report = build_durable_work_report()
+
+    _assert_report_passes(report)
+    assert report["scenario_verdicts"]["ack_before_durability"] == "critical"
+    assert report["operating_loop_verdict"] == "critical"
 
 
 def test_kanban_recovery_candidate_contract_is_read_only() -> None:

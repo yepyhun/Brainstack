@@ -258,6 +258,9 @@ def test_brainstack_latency_status_tool_is_bounded_and_discourages_file_search(t
 
 def test_brainstack_proactive_status_default_is_bounded_with_installed_kanban(tmp_path: Path) -> None:
     hermes_root = tmp_path / "hermes_root"
+    hermes_home = tmp_path / "hermes_home"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text("proactive_mode: live\n", encoding="utf-8")
     (hermes_root / "tools").mkdir(parents=True)
     (hermes_root / "hermes_cli").mkdir()
     (hermes_root / "plugins" / "kanban").mkdir(parents=True)
@@ -266,11 +269,12 @@ def test_brainstack_proactive_status_default_is_bounded_with_installed_kanban(tm
     provider = BrainstackMemoryProvider(
         {
             "db_path": str(tmp_path / "brainstack.sqlite3"),
-            "graph_backend": "sqlite",
-            "corpus_backend": "sqlite",
-            "hermes_root": str(hermes_root),
-        }
-    )
+                "graph_backend": "sqlite",
+                "corpus_backend": "sqlite",
+                "hermes_root": str(hermes_root),
+                "hermes_home": str(hermes_home),
+            }
+        )
     provider.initialize(
         "tool-session",
         platform="test",
