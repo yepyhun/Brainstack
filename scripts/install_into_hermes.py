@@ -128,6 +128,16 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "owner": "host-output-seam",
         "removal_condition": "Hermes natively applies bounded model-facing tool-result budgets for large native/plugin tool outputs while preserving full artifacts.",
     },
+    "_patch_skill_prompt_policy": {
+        "category": "temporary_upstream_hotfix",
+        "owner": "upstream-hermes-skill-policy",
+        "removal_condition": "Hermes natively loads skills only for direct task relevance, explicit user requests, or risky live-system operations instead of weak partial relevance.",
+    },
+    "_patch_skill_view_progressive_disclosure": {
+        "category": "temporary_upstream_hotfix",
+        "owner": "upstream-hermes-skill-policy",
+        "removal_condition": "Hermes skill_view natively supports auto/summary/full modes, unchanged-session compact reloads, content hashes, and operator-tunable skill-view budgets.",
+    },
     "_patch_context_compressor_runtime_budget": {
         "category": "required_seam",
         "owner": "host-compression-seam",
@@ -631,6 +641,22 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_modes": ("source", "docker"),
         "purpose": "Lower model-facing inline budgets for observed context-heavy tool results and remove the read_file persistence escape hatch.",
         "why": "Hermes already preserves oversized outputs as artifacts, but the 100k default lets 80k+ skill/tool payloads enter the protected context tail and repeatedly break compression.",
+    },
+    {
+        "patcher": "_patch_skill_prompt_policy",
+        "target": "agent/prompt_builder.py",
+        "scope": "temporary-upstream-hermes-skill-policy",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Narrow Hermes skill-loading policy so weak partial relevance does not force large skill reads.",
+        "why": "Large broad skills can otherwise be reloaded for routine status/opinion turns, consuming protected context without improving task quality.",
+    },
+    {
+        "patcher": "_patch_skill_view_progressive_disclosure",
+        "target": "tools/skills_tool.py",
+        "scope": "temporary-upstream-hermes-skill-policy",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Add auto/summary/full skill_view modes, content hashes, and same-session unchanged-load summaries.",
+        "why": "Hermes needs a full-content escape hatch, but default agent skill reads should be progressive and cache-aware instead of repeatedly dumping 20k-80k SKILL.md files.",
     },
     {
         "patcher": "_patch_context_compressor_runtime_budget",
@@ -1885,6 +1911,596 @@ def _patch_prompt_builder(path: Path, dry_run: bool) -> list[str]:
             path=path,
         )
         applied.append("prompt_builder:scheduler_truth_guidance")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_skill_prompt_policy(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    if (
+        "Load a skill only when it is directly relevant" in text
+        and "Do not reload the same skill in the same session" in text
+        and "even partially relevant" not in text
+    ):
+        return []
+
+    old_block = (
+        '            "## Skills (mandatory)\\n"\n'
+        '            "Before replying, scan the skills below. If a skill matches or is even partially relevant "\n'
+        '            "to your task, you MUST load it with skill_view(name) and follow its instructions. "\n'
+        '            "Err on the side of loading — it is always better to have context you don\'t need "\n'
+        '            "than to miss critical steps, pitfalls, or established workflows. "\n'
+        '            "Skills contain specialized knowledge — API endpoints, tool-specific commands, "\n'
+        '            "and proven workflows that outperform general-purpose approaches. Load the skill "\n'
+        '            "even if you think you could handle the task with basic tools like web_search or terminal. "\n'
+        '            "Skills also encode the user\'s preferred approach, conventions, and quality standards "\n'
+        '            "for tasks like code review, planning, and testing — load them even for tasks you "\n'
+        '            "already know how to do, because the skill defines how it should be done here.\\n"\n'
+    )
+    new_block = (
+        '            "## Skills (mandatory)\\n"\n'
+        '            "Before replying, scan the skills below. Load a skill only when it is directly relevant "\n'
+        '            "to the user\'s current task, explicitly requested by the user, or needed for a risky "\n'
+        '            "operation such as configuring, installing, modifying, dispatching, deploying, "\n'
+        '            "authenticating, scheduling, or troubleshooting a live system. "\n'
+        '            "For simple status checks, short opinions, brief explanations, or low-risk questions, "\n'
+        '            "prefer the skill list metadata and do not load broad workflow skills just because they "\n'
+        '            "are loosely related. "\n'
+        '            "Do not reload the same skill in the same session if it is already loaded and unchanged; "\n'
+        '            "reload only when the previous content is unavailable after compaction, a linked file is "\n'
+        '            "needed, or the full text is required for the current operation. "\n'
+        '            "Skills contain specialized knowledge — API endpoints, tool-specific commands, "\n'
+        '            "and proven workflows that outperform general-purpose approaches. "\n'
+        '            "Skills also encode the user\'s preferred approach, conventions, and quality standards "\n'
+        '            "for tasks like code review, planning, and testing — load the directly applicable skill "\n'
+        '            "when the task requires that workflow.\\n"\n'
+    )
+
+    if "even partially relevant" in text or "Err on the side of loading" in text:
+        text = _replace_once_any(
+            text,
+            [
+                (old_block, new_block),
+                (
+                    old_block.replace('            "', '        "'),
+                    new_block.replace('            "', '        "'),
+                ),
+            ],
+            label="skill prompt direct relevance policy",
+            path=path,
+        )
+        applied.append("skill_prompt_policy:direct_relevance")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+SKILL_VIEW_PROGRESSIVE_DISCLOSURE_HELPERS = '''
+
+@dataclass(frozen=True)
+class SkillViewPolicy:
+    auto_full_char_limit: int = DEFAULT_SKILL_VIEW_AUTO_FULL_CHAR_LIMIT
+    summary_excerpt_chars: int = DEFAULT_SKILL_VIEW_SUMMARY_EXCERPT_CHARS
+    summary_heading_limit: int = DEFAULT_SKILL_VIEW_SUMMARY_HEADING_LIMIT
+    session_cache_max: int = DEFAULT_SKILL_VIEW_SESSION_CACHE_MAX
+
+
+def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def _nested_dict_get(data: Dict[str, Any], *keys: str, default: Any = None) -> Any:
+    current: Any = data
+    for key in keys:
+        if not isinstance(current, dict):
+            return default
+        current = current.get(key)
+    return default if current is None else current
+
+
+def _load_skill_view_policy(frontmatter: Dict[str, Any] | None = None) -> SkillViewPolicy:
+    """Resolve skill_view budget policy from config, then skill metadata."""
+    config_view: Dict[str, Any] = {}
+    try:
+        from hermes_cli.config import load_config
+
+        loaded = load_config()
+        raw_view = _nested_dict_get(loaded, "skills", "view", default={})
+        if isinstance(raw_view, dict):
+            config_view = raw_view
+    except Exception:
+        config_view = {}
+
+    metadata_view: Dict[str, Any] = {}
+    if isinstance(frontmatter, dict):
+        raw_metadata_view = _nested_dict_get(
+            frontmatter,
+            "metadata",
+            "hermes",
+            "skill_view",
+            default={},
+        )
+        if isinstance(raw_metadata_view, dict):
+            metadata_view = raw_metadata_view
+
+    merged = {**config_view, **metadata_view}
+    return SkillViewPolicy(
+        auto_full_char_limit=_bounded_int(
+            merged.get("auto_full_char_limit"),
+            default=DEFAULT_SKILL_VIEW_AUTO_FULL_CHAR_LIMIT,
+            minimum=1000,
+            maximum=200000,
+        ),
+        summary_excerpt_chars=_bounded_int(
+            merged.get("summary_excerpt_chars"),
+            default=DEFAULT_SKILL_VIEW_SUMMARY_EXCERPT_CHARS,
+            minimum=200,
+            maximum=20000,
+        ),
+        summary_heading_limit=_bounded_int(
+            merged.get("summary_heading_limit"),
+            default=DEFAULT_SKILL_VIEW_SUMMARY_HEADING_LIMIT,
+            minimum=0,
+            maximum=100,
+        ),
+        session_cache_max=_bounded_int(
+            merged.get("session_cache_max"),
+            default=DEFAULT_SKILL_VIEW_SESSION_CACHE_MAX,
+            minimum=16,
+            maximum=5000,
+        ),
+    )
+
+
+def _skill_view_content_hash(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _skill_view_session_key(task_id: str | None, skill_name: str) -> Tuple[str, str] | None:
+    if not task_id:
+        return None
+    return (str(task_id), skill_name)
+
+
+def _skill_view_cache_has_full_load(
+    key: Tuple[str, str] | None,
+    content_hash: str,
+) -> bool:
+    if key is None:
+        return False
+    with _SKILL_VIEW_SESSION_CACHE_LOCK:
+        cached = _SKILL_VIEW_SESSION_CACHE.get(key)
+        if not cached or cached.get("content_hash") != content_hash:
+            return False
+        _SKILL_VIEW_SESSION_CACHE.move_to_end(key)
+        return bool(cached.get("full_loaded"))
+
+
+def _write_skill_view_cache(
+    key: Tuple[str, str] | None,
+    content_hash: str,
+    *,
+    full_loaded: bool,
+    policy: SkillViewPolicy,
+) -> None:
+    if key is None:
+        return
+    with _SKILL_VIEW_SESSION_CACHE_LOCK:
+        previous = _SKILL_VIEW_SESSION_CACHE.get(key, {})
+        _SKILL_VIEW_SESSION_CACHE[key] = {
+            "content_hash": content_hash,
+            "full_loaded": bool(previous.get("full_loaded")) or full_loaded,
+        }
+        _SKILL_VIEW_SESSION_CACHE.move_to_end(key)
+        while len(_SKILL_VIEW_SESSION_CACHE) > policy.session_cache_max:
+            _SKILL_VIEW_SESSION_CACHE.popitem(last=False)
+
+
+def _normalize_skill_view_mode(mode: str | None) -> str:
+    if mode in {"auto", "summary", "full"}:
+        return str(mode)
+    return "full"
+
+
+def _extract_skill_headings(content: str, *, limit: int) -> List[str]:
+    headings: List[str] = []
+    if limit <= 0:
+        return headings
+    for match in re.finditer(r"^\\s{0,3}#{1,3}\\s+(.+?)\\s*$", content, re.MULTILINE):
+        heading = re.sub(r"\\s+", " ", match.group(1)).strip()
+        if heading and heading not in headings:
+            headings.append(heading)
+        if len(headings) >= limit:
+            break
+    return headings
+
+
+def _render_skill_summary(
+    *,
+    skill_name: str,
+    content: str,
+    content_hash: str,
+    already_loaded: bool,
+    linked_files: Dict[str, List[str]] | None,
+    policy: SkillViewPolicy,
+) -> str:
+    if already_loaded:
+        return (
+            f"Skill '{skill_name}' is already loaded in this session and unchanged "
+            f"(content_hash={content_hash}). Do not reload it unless compaction removed "
+            "the needed details, a linked file is required, or full mode is necessary."
+        )
+
+    headings = _extract_skill_headings(
+        content,
+        limit=policy.summary_heading_limit,
+    )
+    lines = [
+        f"Compact skill preview for '{skill_name}' (content_hash={content_hash}).",
+        "Call skill_view with mode='full' only if these core details are insufficient.",
+        "",
+        "Excerpt:",
+        content[: policy.summary_excerpt_chars].rstrip(),
+    ]
+    if headings:
+        lines.extend(["", "Headings:"])
+        lines.extend(f"- {heading}" for heading in headings)
+    if linked_files:
+        lines.extend(["", "Linked files:"])
+        for category, files in linked_files.items():
+            lines.append(f"- {category}: {', '.join(files[:8])}")
+    return "\\n".join(lines)
+
+
+def _skill_view_content_fields(
+    *,
+    skill_name: str,
+    rendered_content: str,
+    mode: str | None,
+    task_id: str | None,
+    linked_files: Dict[str, List[str]] | None,
+    policy: SkillViewPolicy,
+) -> Dict[str, Any]:
+    normalized_mode = _normalize_skill_view_mode(mode)
+    content_hash = _skill_view_content_hash(rendered_content)
+    cache_key = _skill_view_session_key(task_id, skill_name)
+    full_loaded_before = _skill_view_cache_has_full_load(cache_key, content_hash)
+
+    if normalized_mode == "auto":
+        content_mode = (
+            "summary"
+            if full_loaded_before
+            or len(rendered_content) > policy.auto_full_char_limit
+            else "full"
+        )
+    else:
+        content_mode = normalized_mode
+
+    content = (
+        rendered_content
+        if content_mode == "full"
+        else _render_skill_summary(
+            skill_name=skill_name,
+            content=rendered_content,
+            content_hash=content_hash,
+            already_loaded=full_loaded_before,
+            linked_files=linked_files,
+            policy=policy,
+        )
+    )
+    _write_skill_view_cache(
+        cache_key,
+        content_hash,
+        full_loaded=content_mode == "full",
+        policy=policy,
+    )
+    return {
+        "content": content,
+        "content_mode": content_mode,
+        "content_hash": content_hash,
+        "content_chars": len(rendered_content),
+        "already_loaded_in_session": full_loaded_before,
+        "full_content_available": True,
+        "inspect_handle": {
+            "name": skill_name,
+            "mode": "full",
+            "content_hash": content_hash,
+        },
+    }
+'''
+
+
+def _patch_skill_view_progressive_disclosure(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    if (
+        "DEFAULT_SKILL_VIEW_AUTO_FULL_CHAR_LIMIT" in text
+        and "def _skill_view_content_fields" in text
+        and "already_loaded_in_session" in text
+        and 'mode=args.get("mode") or ("full" if args.get("file_path") else "auto")' in text
+    ):
+        return []
+
+    if "import hashlib\n" not in text:
+        text = _replace_once(text, "import json\n", "import hashlib\nimport json\n", label="skill_view hashlib import", path=path)
+        applied.append("skill_view:import_hashlib")
+    if "import threading\n" not in text:
+        text = _replace_once(text, "import logging\n", "import logging\nimport threading\n", label="skill_view threading import", path=path)
+        applied.append("skill_view:import_threading")
+    if "from collections import OrderedDict\n" not in text:
+        text = _replace_once(text, "import threading\n", "import threading\nfrom collections import OrderedDict\n", label="skill_view ordered dict import", path=path)
+        applied.append("skill_view:import_ordered_dict")
+    if "from dataclasses import dataclass\n" not in text:
+        text = _replace_once(text, "from collections import OrderedDict\n", "from collections import OrderedDict\nfrom dataclasses import dataclass\n", label="skill_view dataclass import", path=path)
+        applied.append("skill_view:import_dataclass")
+    if "import re\n" not in text:
+        text = _replace_once_any(
+            text,
+            [
+                ("import os\n", "import os\nimport re\n"),
+                ("import logging\n", "import logging\nimport re\n"),
+            ],
+            label="skill_view re import",
+            path=path,
+        )
+        applied.append("skill_view:import_re")
+
+    if "DEFAULT_SKILL_VIEW_AUTO_FULL_CHAR_LIMIT" not in text:
+        constants = (
+            "MAX_DESCRIPTION_LENGTH = 1024\n"
+            "DEFAULT_SKILL_VIEW_AUTO_FULL_CHAR_LIMIT = 8000\n"
+            "DEFAULT_SKILL_VIEW_SUMMARY_EXCERPT_CHARS = 1200\n"
+            "DEFAULT_SKILL_VIEW_SUMMARY_HEADING_LIMIT = 16\n"
+            "DEFAULT_SKILL_VIEW_SESSION_CACHE_MAX = 256\n"
+            "_SKILL_VIEW_SESSION_CACHE: OrderedDict[Tuple[str, str], Dict[str, Any]] = OrderedDict()\n"
+            "_SKILL_VIEW_SESSION_CACHE_LOCK = threading.Lock()\n"
+        )
+        text = _replace_once(
+            text,
+            "MAX_DESCRIPTION_LENGTH = 1024\n",
+            constants,
+            label="skill_view policy constants",
+            path=path,
+        )
+        applied.append("skill_view:policy_constants")
+
+    if "def _skill_view_content_fields" not in text:
+        text = _replace_once(
+            text,
+            "\ndef set_secret_capture_callback(callback) -> None:\n",
+            f"{SKILL_VIEW_PROGRESSIVE_DISCLOSURE_HELPERS}\n\ndef set_secret_capture_callback(callback) -> None:\n",
+            label="skill_view policy helpers",
+            path=path,
+        )
+        applied.append("skill_view:policy_helpers")
+
+    plugin_mode_present = bool(
+        re.search(
+            r"def _serve_plugin_skill\([\s\S]{0,260}?mode: str \| None = \"full\"",
+            text,
+        )
+    )
+    if not plugin_mode_present:
+        text = _replace_once_any(
+            text,
+            [
+                (
+                    "    session_id: str | None = None,\n) -> str:\n",
+                    "    session_id: str | None = None,\n    mode: str | None = \"full\",\n) -> str:\n",
+                ),
+                (
+                    "def _serve_plugin_skill(namespace, bare, *, preprocess: bool = True, session_id: str | None = None) -> str:\n",
+                    "def _serve_plugin_skill(namespace, bare, *, preprocess: bool = True, session_id: str | None = None, mode: str | None = \"full\") -> str:\n",
+                ),
+            ],
+            label="plugin skill_view mode signature",
+            path=path,
+        )
+        text = _replace_once_any(
+            text,
+            [
+                (
+                    "                    session_id=task_id,\n                )\n",
+                    "                    session_id=task_id,\n                    mode=mode,\n                )\n",
+                ),
+                (
+                    "            session_id=task_id,\n        )\n",
+                    "            session_id=task_id,\n            mode=mode,\n        )\n",
+                ),
+            ],
+            label="plugin skill_view mode call",
+            path=path,
+        )
+        applied.append("skill_view:plugin_mode")
+
+    local_mode_present = bool(
+        re.search(
+            r"def skill_view\([\s\S]{0,260}?mode: str \| None = \"full\"",
+            text,
+        )
+    )
+    if not local_mode_present:
+        text = _replace_once_any(
+            text,
+            [
+                (
+                    "    preprocess: bool = True,\n) -> str:\n",
+                    "    preprocess: bool = True,\n    mode: str | None = \"full\",\n) -> str:\n",
+                ),
+                (
+                    "def skill_view(skill_name: str, file_path: str = None, task_id: str = None, preprocess: bool = True) -> str:\n",
+                    "def skill_view(skill_name: str, file_path: str = None, task_id: str = None, preprocess: bool = True, mode: str | None = \"full\") -> str:\n",
+                ),
+            ],
+            label="local skill_view mode signature",
+            path=path,
+        )
+        applied.append("skill_view:local_mode")
+
+    if '"content": f"{banner}{rendered_content}" if banner else rendered_content' in text:
+        plugin_return_old = (
+            "    return json.dumps(\n"
+            "        {\n"
+            "            \"success\": True,\n"
+            "            \"name\": f\"{namespace}:{bare}\",\n"
+            "            \"content\": f\"{banner}{rendered_content}\" if banner else rendered_content,\n"
+            "            \"description\": description,\n"
+            "            \"linked_files\": None,\n"
+            "            \"readiness_status\": SkillReadinessStatus.AVAILABLE.value,\n"
+            "        },\n"
+            "        ensure_ascii=False,\n"
+            "    )\n"
+        )
+        plugin_return_fixture_old = plugin_return_old.replace("SkillReadinessStatus.AVAILABLE.value", "\"available\"")
+        plugin_return_new = (
+            "    skill_name = f\"{namespace}:{bare}\"\n"
+            "    content_payload = f\"{banner}{rendered_content}\" if banner else rendered_content\n"
+            "    result = {\n"
+            "        \"success\": True,\n"
+            "        \"name\": skill_name,\n"
+            "        \"description\": description,\n"
+            "        \"linked_files\": None,\n"
+            "        \"readiness_status\": SkillReadinessStatus.AVAILABLE.value if 'SkillReadinessStatus' in globals() else \"available\",\n"
+            "    }\n"
+            "    result.update(\n"
+            "        _skill_view_content_fields(\n"
+            "            skill_name=skill_name,\n"
+            "            rendered_content=content_payload,\n"
+            "            mode=mode,\n"
+            "            task_id=session_id,\n"
+            "            linked_files=None,\n"
+            "            policy=_load_skill_view_policy(parsed_frontmatter),\n"
+            "        )\n"
+            "    )\n"
+            "    return json.dumps(result, ensure_ascii=False)\n"
+        )
+        text = _replace_once_any(
+            text,
+            [(plugin_return_old, plugin_return_new), (plugin_return_fixture_old, plugin_return_new)],
+            label="plugin skill_view content fields",
+            path=path,
+        )
+        applied.append("skill_view:plugin_content_fields")
+
+    if '"content": rendered_content,\n' in text:
+        text = _replace_once_any(
+            text,
+            [
+                ('            "content": rendered_content,\n', ""),
+                ('        "content": rendered_content,\n', ""),
+            ],
+            label="local skill_view remove raw content field",
+            path=path,
+        )
+        text = _replace_once_any(
+            text,
+            [
+                (
+                    "        setup_help = next((e[\"help\"] for e in required_env_vars if e.get(\"help\")), None)\n",
+                    "        result.update(\n"
+                    "            _skill_view_content_fields(\n"
+                    "                skill_name=skill_name,\n"
+                    "                rendered_content=rendered_content,\n"
+                    "                mode=mode,\n"
+                    "                task_id=task_id,\n"
+                    "                linked_files=linked_files if linked_files else None,\n"
+                    "                policy=_load_skill_view_policy(frontmatter),\n"
+                    "            )\n"
+                    "        )\n\n"
+                    "        setup_help = next((e[\"help\"] for e in required_env_vars if e.get(\"help\")), None)\n",
+                ),
+                (
+                    "    setup_help = next((e[\"help\"] for e in required_env_vars if e.get(\"help\")), None)\n",
+                    "    result.update(\n"
+                    "        _skill_view_content_fields(\n"
+                    "            skill_name=skill_name,\n"
+                    "            rendered_content=rendered_content,\n"
+                    "            mode=mode,\n"
+                    "            task_id=task_id,\n"
+                    "            linked_files=linked_files if linked_files else None,\n"
+                    "            policy=_load_skill_view_policy(frontmatter),\n"
+                    "        )\n"
+                    "    )\n\n"
+                    "    setup_help = next((e[\"help\"] for e in required_env_vars if e.get(\"help\")), None)\n",
+                ),
+            ],
+            label="local skill_view content fields",
+            path=path,
+        )
+        applied.append("skill_view:local_content_fields")
+
+    if '"enum": ["auto", "summary", "full"]' not in text:
+        text = text.replace(
+            "Use skill_view(name) to see full content, tags, and linked files",
+            "Use skill_view(name) when exact instructions are needed; agent tool calls default to auto mode and may return a compact preview for large skills.",
+        )
+        text = text.replace(
+            "List available skills (name + description). Use skill_view(name) to load full content.",
+            "List available skills (name + description). Use skill_view(name) only when exact instructions are needed.",
+        )
+        text = text.replace(
+            "Skills allow for loading information about specific tasks and workflows, as well as scripts and templates. Load a skill's full content or access its linked files (references, templates, scripts). First call returns SKILL.md content plus a 'linked_files' dict showing available references/templates/scripts. To access those, call again with file_path parameter.",
+            "Skills provide task-specific workflows plus linked files. Agent calls default to auto mode: small first loads return full content, while large or already-loaded skills return a compact preview with a hash and linked file list. Use mode='full' only when exact instructions are required. Use file_path to access references, templates, scripts, or assets.",
+        )
+        text = _replace_once_any(
+            text,
+            [
+                (
+                    "            \"file_path\": {\n"
+                    "                \"type\": \"string\",\n"
+                    "                \"description\": \"OPTIONAL: Path to a linked file within the skill (e.g., 'references/api.md', 'templates/config.yaml', 'scripts/validate.py'). Omit to get the main SKILL.md content.\",\n"
+                    "            },\n",
+                    "            \"file_path\": {\n"
+                    "                \"type\": \"string\",\n"
+                    "                \"description\": \"OPTIONAL: Path to a linked file within the skill (e.g., 'references/api.md', 'templates/config.yaml', 'scripts/validate.py'). Omit to get the main SKILL.md content.\",\n"
+                    "            },\n"
+                    "            \"mode\": {\n"
+                    "                \"type\": \"string\",\n"
+                    "                \"enum\": [\"auto\", \"summary\", \"full\"],\n"
+                    "                \"description\": \"Content mode for main SKILL.md. auto is the default for agent tool calls: it returns full content for small first loads, compact summary for large or already-loaded skills. Use full only when exact instructions are needed.\",\n"
+                    "            },\n",
+                ),
+                (
+                    "            \"file_path\": {\"type\": \"string\", \"description\": \"OPTIONAL: Path to a linked file within the skill.\"},\n",
+                    "            \"file_path\": {\"type\": \"string\", \"description\": \"OPTIONAL: Path to a linked file within the skill.\"},\n"
+                    "            \"mode\": {\"type\": \"string\", \"enum\": [\"auto\", \"summary\", \"full\"], \"description\": \"Content mode for main SKILL.md.\"},\n",
+                ),
+            ],
+            label="skill_view mode schema",
+            path=path,
+        )
+        applied.append("skill_view:schema_mode")
+
+    if 'mode=args.get("mode") or ("full" if args.get("file_path") else "auto")' not in text:
+        text = _replace_once(
+            text,
+            "    result = skill_view(\n"
+            "        name, file_path=args.get(\"file_path\"), task_id=kw.get(\"task_id\")\n"
+            "    )\n",
+            "    result = skill_view(\n"
+            "        name,\n"
+            "        file_path=args.get(\"file_path\"),\n"
+            "        task_id=kw.get(\"task_id\"),\n"
+            "        mode=args.get(\"mode\") or (\"full\" if args.get(\"file_path\") else \"auto\"),\n"
+            "    )\n",
+            label="skill_view tool handler auto mode",
+            path=path,
+        )
+        applied.append("skill_view:tool_handler_auto_mode")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -8632,6 +9248,8 @@ def main() -> int:
     host_patches.extend(_run_host_patch("_patch_memory_answer_renderer_language", target / "gateway" / "memory_answer_renderer.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_terminal_tool_result_hygiene", target / "tools" / "terminal_tool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_tool_result_budget_config", target / "tools" / "budget_config.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_skill_prompt_policy", target / "agent" / "prompt_builder.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_skill_view_progressive_disclosure", target / "tools" / "skills_tool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_prompt_builder", target / "agent" / "prompt_builder.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_cron_authority_jobs", target / "cron" / "jobs.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_cron_authority_scheduler", target / "cron" / "scheduler.py", args.dry_run, host_patch_mode=args.host_patch_mode))

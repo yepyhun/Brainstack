@@ -353,6 +353,96 @@ def _has_brainstack_evidence_use_contract(text: str) -> bool:
     )
 
 
+SKILL_FILE_SIZE_WARN_CHARS = 16_000
+
+
+def _discover_skill_main_files(target: Path) -> list[Path]:
+    roots = [
+        target / "skills",
+        target.parent / "skills",
+    ]
+    hermes_home = os.environ.get("HERMES_HOME")
+    if hermes_home:
+        roots.append(Path(hermes_home).expanduser() / "skills")
+
+    seen: set[Path] = set()
+    files: list[Path] = []
+    for root in roots:
+        try:
+            resolved_root = root.resolve()
+        except Exception:
+            resolved_root = root
+        if resolved_root in seen or not root.exists():
+            continue
+        seen.add(resolved_root)
+        files.extend(path for path in sorted(root.glob("*/SKILL.md")) if path.is_file())
+    return files
+
+
+def _check_skill_policy_surfaces(target: Path, *, planned_install: bool = False) -> list[Check]:
+    checks: list[Check] = []
+    prompt_builder = _read(target / "agent" / "prompt_builder.py")
+    skills_tool = _read(target / "tools" / "skills_tool.py")
+
+    narrowed_prompt_policy = (
+        "Load a skill only when it is directly relevant" in prompt_builder
+        and "Do not reload the same skill in the same session" in prompt_builder
+        and "even partially relevant" not in prompt_builder
+    )
+    aggressive_prompt_policy = (
+        "even partially relevant" in prompt_builder
+        or "Err on the side of loading" in prompt_builder
+    )
+    if narrowed_prompt_policy:
+        checks.append(Check("hermes_skill_prompt_policy", "pass", "Hermes skill prompt uses direct-relevance loading policy"))
+    elif planned_install and aggressive_prompt_policy:
+        checks.append(Check("hermes_skill_prompt_policy", "pass", "Installer will narrow Hermes skill prompt loading policy"))
+    elif aggressive_prompt_policy:
+        checks.append(Check("hermes_skill_prompt_policy", "warn", "Hermes skill prompt still encourages weak partial-relevance skill loads"))
+    else:
+        checks.append(Check("hermes_skill_prompt_policy", "pass", "Hermes skill prompt does not show the old partial-relevance overload wording"))
+
+    progressive_view = (
+        "DEFAULT_SKILL_VIEW_AUTO_FULL_CHAR_LIMIT" in skills_tool
+        and "def _skill_view_content_fields" in skills_tool
+        and "already_loaded_in_session" in skills_tool
+        and "content_hash" in skills_tool
+    )
+    if progressive_view:
+        checks.append(Check("hermes_skill_view_progressive_disclosure", "pass", "skill_view supports progressive disclosure and unchanged-session metadata"))
+    elif planned_install:
+        checks.append(Check("hermes_skill_view_progressive_disclosure", "pass", "Installer will add skill_view auto/summary/full progressive disclosure"))
+    else:
+        checks.append(Check("hermes_skill_view_progressive_disclosure", "warn", "skill_view appears to return full SKILL.md content without cache-aware summary mode"))
+
+    oversized: list[str] = []
+    for skill_file in _discover_skill_main_files(target):
+        try:
+            char_count = len(skill_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if char_count > SKILL_FILE_SIZE_WARN_CHARS:
+            try:
+                label = str(skill_file.relative_to(skill_file.parents[1]))
+            except Exception:
+                label = str(skill_file)
+            oversized.append(f"{label} ({char_count} chars)")
+
+    if oversized:
+        checks.append(
+            Check(
+                "hermes_skill_file_size_advisory",
+                "warn",
+                "Large SKILL.md files should be slim core/router files with references loaded only when needed: "
+                + ", ".join(oversized[:8]),
+            )
+        )
+    else:
+        checks.append(Check("hermes_skill_file_size_advisory", "pass", "No oversized SKILL.md files found in discovered skill roots"))
+
+    return checks
+
+
 def _check_host_surfaces(target: Path, *, planned_install: bool = False) -> list[Check]:
     checks: list[Check] = []
     memory_provider = _read(target / "agent" / "memory_provider.py")
@@ -523,6 +613,8 @@ def _check_host_surfaces(target: Path, *, planned_install: bool = False) -> list
     else:
         missing = ", ".join(gateway_patch_status.get("missing_files") or [])
         checks.append(Check("hermes_gateway_patch_support", "fail", f"Hermes Gateway patch state is partial; missing: {missing}"))
+
+    checks.extend(_check_skill_policy_surfaces(target, planned_install=planned_install))
 
     return checks
 

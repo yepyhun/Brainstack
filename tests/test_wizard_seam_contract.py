@@ -7,6 +7,7 @@ from pathlib import Path
 
 from brainstack.db import BrainstackStore
 from brainstack.retrieval import build_system_prompt_projection, render_working_memory_block
+from scripts import brainstack_doctor
 from scripts import hermes_gateway_patch_support
 from scripts import install_into_hermes
 
@@ -88,6 +89,248 @@ def test_legacy_host_patch_mode_can_still_apply_prompt_builder_patch(tmp_path: P
     assert "generic internal task list is not a scheduled job" in prompt_builder.read_text(
         encoding="utf-8"
     )
+
+
+def test_core_host_patch_mode_applies_skill_prompt_policy(tmp_path: Path) -> None:
+    prompt_builder = tmp_path / "prompt_builder.py"
+    prompt_builder.write_text(
+        "def build_skills_system_prompt():\n"
+        "    result = (\n"
+        "        \"## Skills (mandatory)\\n\"\n"
+        "        \"Before replying, scan the skills below. If a skill matches or is even partially relevant \"\n"
+        "        \"to your task, you MUST load it with skill_view(name) and follow its instructions. \"\n"
+        "        \"Err on the side of loading — it is always better to have context you don't need \"\n"
+        "        \"than to miss critical steps, pitfalls, or established workflows. \"\n"
+        "        \"Skills contain specialized knowledge — API endpoints, tool-specific commands, \"\n"
+        "        \"and proven workflows that outperform general-purpose approaches. Load the skill \"\n"
+        "        \"even if you think you could handle the task with basic tools like web_search or terminal. \"\n"
+        "        \"Skills also encode the user's preferred approach, conventions, and quality standards \"\n"
+        "        \"for tasks like code review, planning, and testing — load them even for tasks you \"\n"
+        "        \"already know how to do, because the skill defines how it should be done here.\\n\"\n"
+        "    )\n",
+        encoding="utf-8",
+    )
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_skill_prompt_policy",
+        prompt_builder,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    text = prompt_builder.read_text(encoding="utf-8")
+
+    assert actions == ["skill_prompt_policy:direct_relevance"]
+    assert "even partially relevant" not in text
+    assert "Err on the side of loading" not in text
+    assert "directly relevant" in text
+    assert "Do not reload the same skill in the same session" in text
+
+
+def test_core_host_patch_mode_skips_skill_prompt_policy_when_upstream_present(tmp_path: Path) -> None:
+    prompt_builder = tmp_path / "prompt_builder.py"
+    original = (
+        "def build_skills_system_prompt():\n"
+        "    result = (\n"
+        "        \"## Skills (mandatory)\\n\"\n"
+        "        \"Before replying, scan the skills below. Load a skill only when it is directly relevant \"\n"
+        "        \"to the user's current task, explicitly requested by the user, or needed for a risky operation. \"\n"
+        "        \"Do not reload the same skill in the same session if it is already loaded and unchanged.\"\n"
+        "    )\n"
+    )
+    prompt_builder.write_text(original, encoding="utf-8")
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_skill_prompt_policy",
+        prompt_builder,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+
+    assert actions == []
+    assert prompt_builder.read_text(encoding="utf-8") == original
+
+
+def _skill_view_legacy_fixture() -> str:
+    return (
+        "import json\n"
+        "import logging\n"
+        "from typing import Any, Dict, List, Tuple\n\n"
+        "MAX_NAME_LENGTH = 64\n"
+        "MAX_DESCRIPTION_LENGTH = 1024\n\n"
+        "_INJECTION_PATTERNS: list = [\n"
+        "    \"ignore previous instructions\",\n"
+        "    \"]]>\",\n"
+        "]\n\n\n"
+        "def set_secret_capture_callback(callback) -> None:\n"
+        "    pass\n\n\n"
+        "def skills_list(category: str = None, task_id: str = None) -> str:\n"
+        "    return json.dumps({\"hint\": \"Use skill_view(name) to see full content, tags, and linked files\"})\n\n\n"
+        "def _serve_plugin_skill(namespace, bare, *, preprocess: bool = True, session_id: str | None = None) -> str:\n"
+        "    parsed_frontmatter = {}\n"
+        "    rendered_content = \"# Plugin skill\\nBody\"\n"
+        "    banner = \"\"\n"
+        "    description = \"plugin\"\n"
+        "    return json.dumps(\n"
+        "        {\n"
+        "            \"success\": True,\n"
+        "            \"name\": f\"{namespace}:{bare}\",\n"
+        "            \"content\": f\"{banner}{rendered_content}\" if banner else rendered_content,\n"
+        "            \"description\": description,\n"
+        "            \"linked_files\": None,\n"
+        "            \"readiness_status\": \"available\",\n"
+        "        },\n"
+        "        ensure_ascii=False,\n"
+        "    )\n\n\n"
+        "def skill_view(skill_name: str, file_path: str = None, task_id: str = None, preprocess: bool = True) -> str:\n"
+        "    if \":\" in skill_name:\n"
+        "        namespace, bare = skill_name.split(\":\", 1)\n"
+        "        return _serve_plugin_skill(\n"
+        "            namespace,\n"
+        "            bare,\n"
+        "            preprocess=preprocess,\n"
+        "            session_id=task_id,\n"
+        "        )\n"
+        "    frontmatter = {\"description\": \"demo\"}\n"
+        "    tags = []\n"
+        "    related_skills = []\n"
+        "    rendered_content = \"# Demo\\nBody\"\n"
+        "    rel_path = \"demo/SKILL.md\"\n"
+        "    skill_dir = None\n"
+        "    linked_files = None\n"
+        "    required_env_vars = []\n"
+        "    setup_needed = False\n"
+        "    result = {\n"
+        "        \"success\": True,\n"
+        "        \"name\": skill_name,\n"
+        "        \"description\": frontmatter.get(\"description\", \"\"),\n"
+        "        \"tags\": tags,\n"
+        "        \"related_skills\": related_skills,\n"
+        "        \"content\": rendered_content,\n"
+        "        \"path\": rel_path,\n"
+        "        \"skill_dir\": str(skill_dir) if skill_dir else None,\n"
+        "        \"linked_files\": linked_files if linked_files else None,\n"
+        "        \"readiness_status\": \"setup_needed\" if setup_needed else \"available\",\n"
+        "    }\n"
+        "    setup_help = next((e[\"help\"] for e in required_env_vars if e.get(\"help\")), None)\n"
+        "    return json.dumps(result, ensure_ascii=False)\n\n\n"
+        "SKILLS_LIST_SCHEMA = {\n"
+        "    \"name\": \"skills_list\",\n"
+        "    \"description\": \"List available skills (name + description). Use skill_view(name) to load full content.\",\n"
+        "}\n\n"
+        "SKILL_VIEW_SCHEMA = {\n"
+        "    \"name\": \"skill_view\",\n"
+        "    \"description\": \"Skills allow for loading information about specific tasks and workflows, as well as scripts and templates. Load a skill's full content or access its linked files (references, templates, scripts). First call returns SKILL.md content plus a 'linked_files' dict showing available references/templates/scripts. To access those, call again with file_path parameter.\",\n"
+        "    \"parameters\": {\n"
+        "        \"type\": \"object\",\n"
+        "        \"properties\": {\n"
+        "            \"name\": {\"type\": \"string\"},\n"
+        "            \"file_path\": {\"type\": \"string\", \"description\": \"OPTIONAL: Path to a linked file within the skill.\"},\n"
+        "        },\n"
+        "        \"required\": [\"name\"],\n"
+        "    },\n"
+        "}\n\n"
+        "def _skill_view_with_bump(args, **kw):\n"
+        "    name = args.get(\"name\", \"\")\n"
+        "    result = skill_view(\n"
+        "        name, file_path=args.get(\"file_path\"), task_id=kw.get(\"task_id\")\n"
+        "    )\n"
+        "    return result\n"
+    )
+
+
+def test_core_host_patch_mode_applies_skill_view_progressive_disclosure(tmp_path: Path) -> None:
+    skills_tool = tmp_path / "skills_tool.py"
+    skills_tool.write_text(_skill_view_legacy_fixture(), encoding="utf-8")
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_skill_view_progressive_disclosure",
+        skills_tool,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+    text = skills_tool.read_text(encoding="utf-8")
+
+    assert "skill_view:policy_helpers" in actions
+    assert "skill_view:plugin_mode" in actions
+    assert "skill_view:local_content_fields" in actions
+    assert "skill_view:tool_handler_auto_mode" in actions
+    assert "DEFAULT_SKILL_VIEW_AUTO_FULL_CHAR_LIMIT" in text
+    assert "content_mode" in text
+    assert "content_hash" in text
+    assert "already_loaded_in_session" in text
+    assert "mode=args.get(\"mode\") or (\"full\" if args.get(\"file_path\") else \"auto\")" in text
+    assert '"enum": ["auto", "summary", "full"]' in text
+
+
+def test_core_host_patch_mode_skips_skill_view_progressive_disclosure_when_upstream_present(
+    tmp_path: Path,
+) -> None:
+    skills_tool = tmp_path / "skills_tool.py"
+    original = (
+        "DEFAULT_SKILL_VIEW_AUTO_FULL_CHAR_LIMIT = 8000\n"
+        "def _skill_view_content_fields():\n"
+        "    return {\"content_mode\": \"summary\", \"already_loaded_in_session\": False}\n"
+        "def _skill_view_with_bump(args, **kw):\n"
+        "    return skill_view(mode=args.get(\"mode\") or (\"full\" if args.get(\"file_path\") else \"auto\"))\n"
+    )
+    skills_tool.write_text(original, encoding="utf-8")
+
+    actions = install_into_hermes._run_host_patch(
+        "_patch_skill_view_progressive_disclosure",
+        skills_tool,
+        dry_run=False,
+        host_patch_mode="core",
+    )
+
+    assert actions == []
+    assert skills_tool.read_text(encoding="utf-8") == original
+
+
+def test_skill_policy_patches_are_temporary_upstream_hotfix_inventory() -> None:
+    inventory = {
+        item["patcher"]: item
+        for item in install_into_hermes._selected_host_patch_inventory(
+            "docker",
+            host_patch_mode="core",
+        )
+    }
+
+    for patcher in {
+        "_patch_skill_prompt_policy",
+        "_patch_skill_view_progressive_disclosure",
+    }:
+        seam = inventory[patcher]
+        assert seam["selected"] is True
+        assert seam["category"] == "temporary_upstream_hotfix"
+        assert seam["owner"] == "upstream-hermes-skill-policy"
+        assert "skill" in seam["removal_condition"].lower()
+
+
+def test_doctor_warns_about_aggressive_skill_policy_and_large_skill(tmp_path: Path) -> None:
+    target = tmp_path / "hermes"
+    (target / "agent").mkdir(parents=True)
+    (target / "tools").mkdir()
+    (target / "skills" / "wide").mkdir(parents=True)
+    (target / "agent" / "memory_provider.py").write_text("", encoding="utf-8")
+    (target / "agent" / "memory_manager.py").write_text("", encoding="utf-8")
+    (target / "agent" / "prompt_builder.py").write_text(
+        "If a skill matches or is even partially relevant, you MUST load it with skill_view(name). "
+        "Err on the side of loading.",
+        encoding="utf-8",
+    )
+    (target / "tools" / "skills_tool.py").write_text(
+        "def skill_view(name):\n    return {'content': 'full'}\n",
+        encoding="utf-8",
+    )
+    (target / "skills" / "wide" / "SKILL.md").write_text("# Wide\n" + ("x" * 17000), encoding="utf-8")
+
+    checks = brainstack_doctor._check_skill_policy_surfaces(target, planned_install=False)
+    by_name = {check.name: check for check in checks}
+
+    assert by_name["hermes_skill_prompt_policy"].status == "warn"
+    assert by_name["hermes_skill_view_progressive_disclosure"].status == "warn"
+    assert by_name["hermes_skill_file_size_advisory"].status == "warn"
+    assert "wide/SKILL.md" in by_name["hermes_skill_file_size_advisory"].message
 
 
 def test_core_memory_manager_patch_skips_metadata_compat_seam(tmp_path: Path) -> None:
