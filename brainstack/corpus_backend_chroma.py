@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import shutil
+import tempfile
 import time
 from typing import Any, Dict, List
 import urllib.request
@@ -374,6 +375,8 @@ def _next_quarantine_path(db_path: Path) -> Path:
 
 
 def _lock_path_for_chroma_store(db_path: str) -> Path:
+    if str(db_path).strip() == ":memory:":
+        return Path(tempfile.gettempdir()) / "brainstack-chroma-memory.lock"
     path = Path(db_path)
     return path.parent / f".{path.name}.lock"
 

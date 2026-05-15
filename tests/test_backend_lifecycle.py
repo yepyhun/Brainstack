@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from brainstack.corpus_backend_chroma import ChromaCorpusBackend, _exclusive_chroma_store_lock
+from brainstack.corpus_backend_chroma import ChromaCorpusBackend, _exclusive_chroma_store_lock, _lock_path_for_chroma_store
 from brainstack.db import BrainstackStore
 from brainstack.diagnostics import build_memory_kernel_doctor
 from scripts import brainstack_doctor
@@ -271,6 +271,14 @@ def test_chroma_lock_permission_failure_explains_runtime_owner_fix(tmp_path: Pat
                 pass
     finally:
         lock_path.chmod(0o600)
+
+
+def test_memory_chroma_lock_path_does_not_dirty_repo_root() -> None:
+    lock_path = _lock_path_for_chroma_store(":memory:")
+
+    assert lock_path.name == "brainstack-chroma-memory.lock"
+    assert lock_path.parent != Path(".")
+    assert ".:memory:.lock" not in str(lock_path)
 
 
 def test_doctor_chroma_probe_uses_brainstack_embedding_semantics(monkeypatch, tmp_path: Path) -> None:
