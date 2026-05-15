@@ -2272,6 +2272,52 @@ def test_docker_doctor_treats_live_kuzu_lock_as_warn(monkeypatch, tmp_path):
     assert "locked by the active Docker runtime" in graph_open.message
 
 
+def test_docker_backend_probe_runs_as_hermes_runtime_user(monkeypatch, tmp_path):
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text("services:\n  gateway: {}\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    class Completed:
+        stdout = '{"ok": true}\n'
+
+    monkeypatch.setattr(brainstack_doctor, "_default_compose_service", lambda _path: "gateway")
+    monkeypatch.setattr(brainstack_doctor, "_default_container_name", lambda *_args, **_kwargs: "hermes-live")
+    monkeypatch.setattr(
+        brainstack_doctor.subprocess,
+        "run",
+        lambda cmd, **_kwargs: calls.append(cmd) or Completed(),
+    )
+
+    payload = brainstack_doctor._run_docker_python_probe("print('probe')", compose_path=compose)
+
+    assert payload == {"ok": True}
+    assert calls[0][:5] == ["docker", "exec", "--user", "hermes", "hermes-live"]
+
+
+def test_docker_backend_probe_does_not_fall_back_to_root_by_default(monkeypatch, tmp_path):
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text("services:\n  gateway: {}\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    class Completed:
+        stdout = ""
+
+    monkeypatch.setattr(brainstack_doctor, "_default_compose_service", lambda _path: "gateway")
+    monkeypatch.setattr(brainstack_doctor, "_default_container_name", lambda *_args, **_kwargs: "hermes-live")
+    monkeypatch.setattr(
+        brainstack_doctor.subprocess,
+        "run",
+        lambda cmd, **_kwargs: calls.append(cmd) or Completed(),
+    )
+
+    payload = brainstack_doctor._run_docker_python_probe("print('probe')", compose_path=compose)
+
+    assert payload is None
+    assert calls
+    assert all("--user" in cmd for cmd in calls)
+    assert ["docker", "exec", "hermes-live", "/opt/hermes/.venv/bin/python3", "-c", "print('probe')"] not in calls
+
+
 def test_local_doctor_does_not_require_docker_compose(monkeypatch, tmp_path):
     target = tmp_path / "hermes"
     config = target / "hermes-config" / "brainstack-smoke" / "config.yaml"

@@ -382,7 +382,14 @@ def _lock_path_for_chroma_store(db_path: str) -> Path:
 def _exclusive_chroma_store_lock(db_path: str) -> Any:
     lock_path = _lock_path_for_chroma_store(db_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "a+b") as handle:
+    try:
+        handle = open(lock_path, "a+b")
+    except PermissionError as exc:
+        raise PermissionError(
+            f"Chroma lock file is not writable by the current runtime user: {lock_path}. "
+            "Run probes as the Hermes runtime user or normalize ownership of the Brainstack data directory."
+        ) from exc
+    with handle:
         if fcntl is not None:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:

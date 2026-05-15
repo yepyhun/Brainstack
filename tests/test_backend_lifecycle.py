@@ -4,7 +4,9 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from brainstack.corpus_backend_chroma import ChromaCorpusBackend
+import pytest
+
+from brainstack.corpus_backend_chroma import ChromaCorpusBackend, _exclusive_chroma_store_lock
 from brainstack.db import BrainstackStore
 from brainstack.diagnostics import build_memory_kernel_doctor
 from scripts import brainstack_doctor
@@ -257,6 +259,18 @@ def test_store_reports_chroma_repair_events_after_open(monkeypatch, tmp_path: Pa
         assert corpus["repair_events"][0]["reason_code"] == "CHROMA_STORE_CORRUPT_QUARANTINED"
     finally:
         store.close()
+
+
+def test_chroma_lock_permission_failure_explains_runtime_owner_fix(tmp_path: Path) -> None:
+    lock_path = tmp_path / ".brainstack.chroma.lock"
+    lock_path.write_bytes(b"")
+    lock_path.chmod(0o400)
+    try:
+        with pytest.raises(PermissionError, match="Run probes as the Hermes runtime user"):
+            with _exclusive_chroma_store_lock(str(tmp_path / "brainstack.chroma")):
+                pass
+    finally:
+        lock_path.chmod(0o600)
 
 
 def test_doctor_chroma_probe_uses_brainstack_embedding_semantics(monkeypatch, tmp_path: Path) -> None:

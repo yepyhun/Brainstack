@@ -1223,26 +1223,22 @@ def _run_docker_python_probe(
         "/opt/hermes/.venv/bin/python",
         "python3",
     ]
+    probe_user = os.environ.get("BRAINSTACK_DOCKER_PROBE_USER", "hermes").strip()
     container_name = _default_container_name(compose_path, service=resolved_service)
     commands: list[list[str]] = []
     if container_name:
         for python_cmd in python_commands:
-            commands.append(["docker", "exec", container_name, python_cmd, "-c", code])
+            cmd = ["docker", "exec"]
+            if probe_user:
+                cmd.extend(["--user", probe_user])
+            cmd.extend([container_name, python_cmd, "-c", code])
+            commands.append(cmd)
     for python_cmd in python_commands:
-        commands.append(
-            [
-                "docker",
-                "compose",
-                "-f",
-                str(compose_path),
-                "exec",
-                "-T",
-                resolved_service,
-                python_cmd,
-                "-c",
-                code,
-            ]
-        )
+        cmd = ["docker", "compose", "-f", str(compose_path), "exec", "-T"]
+        if probe_user:
+            cmd.extend(["--user", probe_user])
+        cmd.extend([resolved_service, python_cmd, "-c", code])
+        commands.append(cmd)
     for cmd in commands:
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
