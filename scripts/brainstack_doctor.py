@@ -1085,6 +1085,7 @@ def _backend_probe_code(*, backend: str, configured_path: str, default_suffix: s
             "from brainstack.corpus_backend_chroma import ChromaCorpusBackend\n"
             "    backend = ChromaCorpusBackend(db_path=path)\n"
             "    backend.open()\n"
+            "    payload['repair_events'] = getattr(backend, 'repair_events', [])\n"
             "    backend.close()"
         )
         skip_missing = False
@@ -1278,6 +1279,15 @@ def _backend_openability_checks(
         status = "pass" if planned_install else "warn"
         return [Check(check_name, status, f"{backend} backend path does not exist yet: {path}")]
     if payload.get("openable") is True:
+        repair_events = payload.get("repair_events") if isinstance(payload.get("repair_events"), list) else []
+        if backend == "chroma" and repair_events:
+            return [
+                Check(
+                    check_name,
+                    "pass",
+                    f"{backend} backend opened successfully at {path} after quarantining a corrupt derived cache",
+                )
+            ]
         return [Check(check_name, "pass", f"{backend} backend opens successfully at {path}")]
     error = str(payload.get("error") or "unknown backend open failure")
     error_class = str(payload.get("error_class") or "backend_open_failure")

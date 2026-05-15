@@ -93,6 +93,7 @@ def _backend_card(capability: Mapping[str, Any]) -> dict[str, Any]:
         "safe_reason": safe_reason,
         "error_class": _text(capability.get("error_class")),
         "repair_plan": dict(repair_plan),
+        "repair_event_count": int(capability.get("repair_event_count") or 0),
     }
 
 

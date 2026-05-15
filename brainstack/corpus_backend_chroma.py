@@ -1,19 +1,30 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+import logging
 import json
 import hashlib
 import math
 import os
 from pathlib import Path
+import shutil
+import time
 from typing import Any, Dict, List
 import urllib.request
 import warnings
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback.
+    fcntl = None  # type: ignore[assignment]
 
 warnings.filterwarnings(
     "ignore",
     message="'asyncio\\.iscoroutinefunction' is deprecated and slated for removal in Python 3\\.16; use inspect\\.iscoroutinefunction\\(\\) instead",
     category=DeprecationWarning,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ChromaCorpusBackend:
@@ -26,6 +37,11 @@ class ChromaCorpusBackend:
         self._collection: Any | None = None
         self._embedding_client: _ExternalEmbeddingClient | None = None
         self._embedding_function: Any | None = None
+        self._repair_events: List[Dict[str, Any]] = []
+
+    @property
+    def repair_events(self) -> List[Dict[str, Any]]:
+        return [dict(event) for event in self._repair_events]
 
     @property
     def collection(self) -> Any:
@@ -47,6 +63,16 @@ class ChromaCorpusBackend:
         return _ExternalEmbeddingClient.from_env()
 
     def open(self) -> None:
+        with _exclusive_chroma_store_lock(self._db_path):
+            try:
+                self._open_unlocked()
+            except Exception as exc:
+                if not _is_chroma_store_corruption_error(exc):
+                    raise
+                self._repair_corrupt_store_unlocked(exc, operation="open")
+                self._open_unlocked()
+
+    def _open_unlocked(self) -> None:
         chromadb, Settings = self._import_chromadb()
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._embedding_client = self._build_embedding_client()
@@ -80,6 +106,43 @@ class ChromaCorpusBackend:
         )
         self._collection = self._client.get_or_create_collection(**collection_kwargs)
 
+    def _repair_corrupt_store_unlocked(self, exc: Exception, *, operation: str) -> None:
+        self.close()
+        db_path = Path(self._db_path)
+        quarantine_path = ""
+        if db_path.exists():
+            quarantine = _next_quarantine_path(db_path)
+            shutil.move(str(db_path), str(quarantine))
+            quarantine_path = str(quarantine)
+        event = {
+            "schema": "brainstack.chroma_repair_event.v1",
+            "reason_code": "CHROMA_STORE_CORRUPT_QUARANTINED",
+            "operation": str(operation or "unknown"),
+            "path": str(db_path),
+            "quarantine_path": quarantine_path,
+            "error_class": exc.__class__.__name__,
+            "error": str(exc),
+            "source_rows_preserved": True,
+            "action": "quarantine_corrupt_cache_and_recreate",
+        }
+        self._repair_events.append(event)
+        logger.warning(
+            "Brainstack Chroma cache corrupt during %s; quarantined %s and will recreate derived index",
+            operation,
+            quarantine_path or str(db_path),
+        )
+
+    def _with_repairable_store_operation(self, operation: str, func: Any) -> Any:
+        with _exclusive_chroma_store_lock(self._db_path):
+            try:
+                return func()
+            except Exception as exc:
+                if not _is_chroma_store_corruption_error(exc):
+                    raise
+                self._repair_corrupt_store_unlocked(exc, operation=operation)
+                self._open_unlocked()
+                return func()
+
     def close(self) -> None:
         self._collection = None
         self._client = None
@@ -87,9 +150,20 @@ class ChromaCorpusBackend:
         self._embedding_function = None
 
     def is_empty(self) -> bool:
-        return int(self.collection.count() or 0) == 0
+        return bool(
+            self._with_repairable_store_operation(
+                "is_empty",
+                lambda: int(self.collection.count() or 0) == 0,
+            )
+        )
 
     def publish_document(self, snapshot: Dict[str, Any]) -> None:
+        self._with_repairable_store_operation(
+            "publish_document",
+            lambda: self._publish_document_unlocked(snapshot),
+        )
+
+    def _publish_document_unlocked(self, snapshot: Dict[str, Any]) -> None:
         document = dict(snapshot.get("document") or {})
         sections = list(snapshot.get("sections") or [])
         stable_key = str(document.get("stable_key") or "").strip()
@@ -166,6 +240,20 @@ class ChromaCorpusBackend:
         limit: int,
         where: Dict[str, Any] | None = None,
     ) -> List[Dict[str, Any]]:
+        return list(
+            self._with_repairable_store_operation(
+                "search_semantic",
+                lambda: self._search_semantic_unlocked(query=query, limit=limit, where=where),
+            )
+        )
+
+    def _search_semantic_unlocked(
+        self,
+        *,
+        query: str,
+        limit: int,
+        where: Dict[str, Any] | None = None,
+    ) -> List[Dict[str, Any]]:
         if limit <= 0 or not str(query or "").strip():
             return []
         query_kwargs = {
@@ -221,6 +309,19 @@ class ChromaCorpusBackend:
         query: str,
         texts: List[str],
     ) -> List[float]:
+        return list(
+            self._with_repairable_store_operation(
+                "score_texts",
+                lambda: self._score_texts_unlocked(query=query, texts=texts),
+            )
+        )
+
+    def _score_texts_unlocked(
+        self,
+        *,
+        query: str,
+        texts: List[str],
+    ) -> List[float]:
         items = [str(text or "").strip() for text in texts]
         if not items:
             return []
@@ -245,6 +346,50 @@ class ChromaCorpusBackend:
             _cosine_similarity(query_embedding, embedding)
             for embedding in embeddings_list[1:]
         ]
+
+
+def _is_chroma_store_corruption_error(exc: Exception) -> bool:
+    text = f"{exc.__class__.__name__}: {exc}".casefold()
+    return any(
+        marker in text
+        for marker in (
+            "file is not a database",
+            "database disk image is malformed",
+            "code: 26",
+            "sqlite_database_corrupt",
+            "sqlite_notadb",
+        )
+    )
+
+
+def _next_quarantine_path(db_path: Path) -> Path:
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    base = db_path.with_name(f"{db_path.name}.corrupt-{stamp}")
+    candidate = base
+    counter = 1
+    while candidate.exists():
+        counter += 1
+        candidate = db_path.with_name(f"{db_path.name}.corrupt-{stamp}-{counter}")
+    return candidate
+
+
+def _lock_path_for_chroma_store(db_path: str) -> Path:
+    path = Path(db_path)
+    return path.parent / f".{path.name}.lock"
+
+
+@contextmanager
+def _exclusive_chroma_store_lock(db_path: str) -> Any:
+    lock_path = _lock_path_for_chroma_store(db_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+b") as handle:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _chroma_where_filter(where: Dict[str, Any]) -> Dict[str, Any]:

@@ -69,6 +69,7 @@ class BrainstackStore(
         self._graph_backend_error = ""
         self._corpus_backend: CorpusBackend | None = None
         self._corpus_backend_error = ""
+        self._corpus_backend_repair_events: list[dict[str, object]] = []
         self._lock = threading.RLock()
 
     @property
@@ -118,6 +119,7 @@ class BrainstackStore(
                 self._corpus_backend_error = ""
                 self._bootstrap_corpus_backend_if_needed()
                 self._replay_corpus_publications_if_needed()
+                self._capture_corpus_backend_repair_events()
             except ModuleNotFoundError as exc:
                 self._disable_corpus_backend(reason=str(exc))
             except Exception as exc:
@@ -128,6 +130,18 @@ class BrainstackStore(
                 self._disable_corpus_backend(reason=str(exc))
             else:
                 self._corpus_backend_error = ""
+
+    def _capture_corpus_backend_repair_events(self) -> None:
+        if self._corpus_backend is None:
+            return
+        repair_events = getattr(self._corpus_backend, "repair_events", [])
+        if not isinstance(repair_events, list) or not repair_events:
+            return
+        self._corpus_backend_repair_events = [
+            dict(event)
+            for event in repair_events
+            if isinstance(event, dict)
+        ]
 
     @_locked
     def close(self) -> None:

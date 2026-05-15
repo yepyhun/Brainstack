@@ -102,6 +102,7 @@ def _backend_capability(
     active_backend: Any,
     error: Any,
     fallback_reason: str,
+    repair_events: Any = None,
 ) -> Dict[str, Any]:
     requested = str(requested_name or "sqlite").strip().lower()
     external_requested = _external_backend_requested(requested)
@@ -135,6 +136,11 @@ def _backend_capability(
     else:
         status = "active"
         reason = fallback_reason
+    normalized_repair_events = [
+        dict(event)
+        for event in (repair_events if isinstance(repair_events, list) else [])
+        if isinstance(event, Mapping)
+    ]
     return {
         "kind": kind,
         "requested": requested,
@@ -147,6 +153,8 @@ def _backend_capability(
         "reason": reason,
         "error": error_text,
         "error_class": error_class,
+        "repair_events": normalized_repair_events[-5:],
+        "repair_event_count": len(normalized_repair_events),
     }
 
 
@@ -569,6 +577,7 @@ def build_memory_kernel_doctor(
         active_backend=getattr(store, "_corpus_backend", None),
         error=getattr(store, "_corpus_backend_error", ""),
         fallback_reason="No external corpus backend was requested; SQLite corpus storage/search is the active mode.",
+        repair_events=getattr(store, "_corpus_backend_repair_events", []),
     )
     corpus["repair_plan"] = _corpus_repair_plan(corpus, row_counts)
     tier2 = _tier2_capability(tier2_state)
