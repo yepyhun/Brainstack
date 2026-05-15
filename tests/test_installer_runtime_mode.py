@@ -2424,6 +2424,24 @@ def test_doctor_python_probe_overrides_inherited_hermes_home(monkeypatch, tmp_pa
     assert payload == {"home": str(requested_home)}
 
 
+def test_doctor_python_probe_adds_hermes_plugin_memory_path(monkeypatch, tmp_path):
+    target = tmp_path / "hermes"
+    package = target / "plugins" / "memory" / "brainstack"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("VALUE = 'plugin-import-ok'\n", encoding="utf-8")
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+
+    payload = brainstack_doctor._run_python_probe(
+        "import json; import brainstack; print(json.dumps({'value': brainstack.VALUE}))",
+        python_bin=Path(sys.executable),
+        cwd=target,
+        hermes_home=tmp_path / "profile-home",
+        target=target,
+    )
+
+    assert payload == {"value": "plugin-import-ok"}
+
+
 def test_docker_doctor_accepts_desktop_launcher_stable_source_symlink(tmp_path):
     real_target = tmp_path / "hermes-clean-commit"
     (real_target / "scripts").mkdir(parents=True)

@@ -677,6 +677,7 @@ def _check_config(
     python_bin: Path | None,
     runtime: str,
     compose_path: Path | None,
+    target: Path | None = None,
 ) -> list[Check]:
     checks: list[Check] = []
     config: dict[str, Any] = {}
@@ -704,6 +705,7 @@ def _check_config(
             python_bin=python_bin,
             runtime=runtime,
             compose_path=compose_path,
+            target=target,
         )
 
     def runtime_db_hygiene_checks() -> list[Check]:
@@ -1170,10 +1172,19 @@ def _run_python_probe(
     python_bin: Path | None,
     cwd: Path,
     hermes_home: Path,
+    target: Path | None = None,
 ) -> dict[str, Any] | None:
     executable = str(python_bin) if python_bin is not None else sys.executable
     env = os.environ.copy()
     env["HERMES_HOME"] = str(hermes_home)
+    if target is not None:
+        plugin_memory_path = target / "plugins" / "memory"
+        if plugin_memory_path.exists():
+            existing_pythonpath = str(env.get("PYTHONPATH") or "")
+            parts = [str(plugin_memory_path)]
+            if existing_pythonpath:
+                parts.append(existing_pythonpath)
+            env["PYTHONPATH"] = os.pathsep.join(parts)
     try:
         proc = subprocess.run(
             [executable, "-c", code],
@@ -1255,6 +1266,7 @@ def _backend_openability_checks(
     python_bin: Path | None,
     runtime: str,
     compose_path: Path | None,
+    target: Path | None = None,
 ) -> list[Check]:
     default_suffix = "brainstack.kuzu" if backend == "kuzu" else "brainstack.chroma"
     check_name = "graph_backend_open" if backend == "kuzu" else "corpus_backend_open"
@@ -1271,6 +1283,7 @@ def _backend_openability_checks(
             python_bin=python_bin,
             cwd=config_path.parent,
             hermes_home=config_path.parent,
+            target=target,
         )
     if payload is None:
         return [Check(check_name, "warn", f"Could not probe {backend} backend openability")]
@@ -1529,6 +1542,7 @@ def run_doctor(args: argparse.Namespace) -> tuple[int, list[Check]]:
                 python_bin=python_bin,
                 runtime=runtime,
                 compose_path=compose_path,
+                target=target,
             )
         )
     if runtime == "docker" and args.check_docker:
