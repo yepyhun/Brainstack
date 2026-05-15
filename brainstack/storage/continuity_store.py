@@ -11,6 +11,7 @@ from .store_runtime import (
     _cursor_lastrowid,
     _enrich_record_metadata_with_literals,
     _extract_query_terms,
+    _env_truthy,
     _locked,
     _normalize_record_metadata,
     _row_to_dict,
@@ -156,7 +157,10 @@ class ContinuityStoreMixin(StoreRuntimeBase):
         )
         self.conn.commit()
         if self._corpus_backend is not None:
-            self._publish_conversation_transcript(row_id, raise_on_error=False)
+            if _env_truthy("BRAINSTACK_SYNC_TRANSCRIPT_SEMANTIC_PUBLICATION", default=False):
+                self._publish_conversation_transcript(row_id, raise_on_error=False)
+            else:
+                self._queue_conversation_transcript_publication(row_id)
         return row_id
 
     @_locked

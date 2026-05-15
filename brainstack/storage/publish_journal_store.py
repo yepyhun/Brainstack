@@ -54,7 +54,7 @@ class PublishJournalStoreMixin(StoreRuntimeBase):
         placeholders = ", ".join("?" for _ in statuses)
         pending = self.conn.execute(
             f"""
-            SELECT object_kind, object_key
+            SELECT object_kind, object_key, status
             FROM publish_journal
             WHERE target_name = ? AND object_kind IN ('corpus_document', 'conversation_transcript') AND status IN ({placeholders})
             ORDER BY updated_at ASC, id ASC
@@ -78,6 +78,12 @@ class PublishJournalStoreMixin(StoreRuntimeBase):
                     self._publish_corpus_document(int(document["id"]))
                 continue
             if object_kind == "conversation_transcript":
+                status = str(row["status"] or "").strip()
+                if status == "pending" and not _env_truthy(
+                    "BRAINSTACK_REPLAY_CONVERSATION_TRANSCRIPTS_ON_OPEN",
+                    default=False,
+                ):
+                    continue
                 transcript_id = self._parse_conversation_object_key(object_key)
                 if transcript_id is None:
                     continue
@@ -281,6 +287,18 @@ class PublishJournalStoreMixin(StoreRuntimeBase):
             object_key=self._conversation_semantic_object_key(transcript_id),
             snapshot=snapshot,
             raise_on_error=raise_on_error,
+        )
+
+    def _queue_conversation_transcript_publication(self, transcript_id: int) -> None:
+        if self._corpus_backend is None:
+            return
+        snapshot = self._conversation_transcript_snapshot(transcript_id)
+        self._upsert_publish_journal(
+            target_name=self._corpus_backend.target_name,
+            object_kind="conversation_transcript",
+            object_key=self._conversation_semantic_object_key(transcript_id),
+            payload=snapshot,
+            status="pending",
         )
 
     @_locked

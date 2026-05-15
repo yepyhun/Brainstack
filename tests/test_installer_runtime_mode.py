@@ -1504,6 +1504,16 @@ def test_tool_result_budget_config_is_required_core_host_seam() -> None:
     assert seam["category"] == "required_seam"
     assert seam["owner"] == "host-output-seam"
 
+    storage = inventory["_patch_tool_result_storage_no_env_artifact"]
+    assert storage["selected"] is True
+    assert storage["category"] == "required_seam"
+    assert storage["owner"] == "host-output-seam"
+
+    kanban = inventory["_patch_kanban_list_compact_default"]
+    assert kanban["selected"] is True
+    assert kanban["category"] == "temporary_upstream_hotfix"
+    assert kanban["owner"] == "upstream-hermes-kanban-tool-surface"
+
 
 def test_tool_result_budget_config_patch_installs_bounded_defaults(tmp_path) -> None:
     module = tmp_path / "budget_config.py"
@@ -1556,6 +1566,227 @@ DEFAULT_BUDGET = BudgetConfig()
     assert default_budget.resolve_threshold("brainstack_recall") == 12_000
     assert default_budget.resolve_threshold("unknown_tool") == 100_000
     assert "not tool capability limits" in text
+
+
+def test_tool_result_storage_patch_persists_large_output_without_env(tmp_path, monkeypatch) -> None:
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    (tools_dir / "__init__.py").write_text("", encoding="utf-8")
+    (tools_dir / "budget_config.py").write_text(
+        "DEFAULT_PREVIEW_SIZE_CHARS = 32\n"
+        "class BudgetConfig:\n"
+        "    preview_size = 32\n"
+        "    def resolve_threshold(self, tool_name):\n"
+        "        return 10\n"
+        "DEFAULT_BUDGET = BudgetConfig()\n",
+        encoding="utf-8",
+    )
+    module = tools_dir / "tool_result_storage.py"
+    module.write_text(
+        '''
+import logging
+import os
+import shlex
+import uuid
+from tools.budget_config import DEFAULT_PREVIEW_SIZE_CHARS, BudgetConfig, DEFAULT_BUDGET
+logger = logging.getLogger(__name__)
+PERSISTED_OUTPUT_TAG = "<persisted-output>"
+PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>"
+STORAGE_DIR = "/tmp/hermes-results"
+HEREDOC_MARKER = "HERMES_PERSIST_EOF"
+def _resolve_storage_dir(env) -> str:
+    if env is not None:
+        get_temp_dir = getattr(env, "get_temp_dir", None)
+        if callable(get_temp_dir):
+            temp_dir = get_temp_dir()
+            if temp_dir:
+                temp_dir = temp_dir.rstrip("/") or "/"
+                return f"{temp_dir}/hermes-results"
+    return STORAGE_DIR
+def generate_preview(content: str, max_chars: int = DEFAULT_PREVIEW_SIZE_CHARS):
+    if len(content) <= max_chars:
+        return content, False
+    return content[:max_chars], True
+def _heredoc_marker(content: str) -> str:
+    return HEREDOC_MARKER
+def _write_to_sandbox(content: str, remote_path: str, env) -> bool:
+    storage_dir = os.path.dirname(remote_path)
+    cmd = f"mkdir -p {shlex.quote(storage_dir)} && cat > {shlex.quote(remote_path)}"
+    result = env.execute(cmd, timeout=30, stdin_data=content)
+    return result.get("returncode", 1) == 0
+def _build_persisted_message(preview: str, has_more: bool, original_size: int, file_path: str) -> str:
+    msg = f"{PERSISTED_OUTPUT_TAG}\\n"
+    msg += f"This tool result was too large ({original_size:,} characters).\\n"
+    msg += f"Full output saved to: {file_path}\\n"
+    msg += "Use the read_file tool with offset and limit to access specific sections of this output.\\n\\n"
+    msg += f"Preview (first {len(preview)} chars):\\n"
+    msg += preview
+    msg += f"\\n{PERSISTED_OUTPUT_CLOSING_TAG}"
+    return msg
+def maybe_persist_tool_result(content: str, tool_name: str, tool_use_id: str, env=None, config: BudgetConfig = DEFAULT_BUDGET, threshold=None) -> str:
+    effective_threshold = threshold if threshold is not None else config.resolve_threshold(tool_name)
+    if effective_threshold == float("inf"):
+        return content
+    if len(content) <= effective_threshold:
+        return content
+    storage_dir = _resolve_storage_dir(env)
+    remote_path = f"{storage_dir}/{tool_use_id}.txt"
+    preview, has_more = generate_preview(content, max_chars=config.preview_size)
+    if env is not None:
+        try:
+            if _write_to_sandbox(content, remote_path, env):
+                return _build_persisted_message(preview, has_more, len(content), remote_path)
+        except Exception:
+            pass
+    logger.info(
+        "Inline-truncating large tool result: %s (%d chars, no sandbox write)",
+        tool_name, len(content),
+    )
+    return (
+        f"{preview}\\n\\n"
+        f"[Truncated: tool response was {len(content):,} chars. "
+        f"Full output could not be saved to sandbox.]"
+    )
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_tool_result_storage_no_env_artifact(module, dry_run=False)
+    text = module.read_text(encoding="utf-8")
+    assert "tool_result_storage:no_env_local_artifact" in applied
+    assert "_write_to_local_temp" in text
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("tools.tool_result_storage", module)
+    assert spec is not None and spec.loader is not None
+    loaded = importlib.util.module_from_spec(spec)
+    sys.modules.pop("tools.tool_result_storage", None)
+    spec.loader.exec_module(loaded)
+    loaded.STORAGE_DIR = str(tmp_path / "results")
+    content = "x" * 5_000
+    result = loaded.maybe_persist_tool_result(content, "kanban_list", "abc123", env=None, threshold=10)
+
+    assert "<persisted-output>" in result
+    assert "Full output saved to:" in result
+    assert "Full output could not be saved" not in result
+    assert (tmp_path / "results" / "abc123.txt").read_text(encoding="utf-8") == content
+
+
+def test_kanban_list_compact_default_patch_keeps_full_link_escape_hatch(tmp_path) -> None:
+    module = tmp_path / "kanban_tools.py"
+    module.write_text(
+        '''
+import json
+KANBAN_LIST_DEFAULT_LIMIT = 50
+KANBAN_LIST_MAX_LIMIT = 200
+def _parse_bool_arg(args: dict, name: str, *, default: bool = False):
+    value = args.get(name)
+    if value is None:
+        return default, None
+    return bool(value), None
+def _task_summary_dict(kb, conn, task) -> dict:
+    """Compact task shape for board-listing tools."""
+    parents = kb.parent_ids(conn, task.id)
+    children = kb.child_ids(conn, task.id)
+    return {
+        "id": task.id,
+        "title": task.title,
+        "assignee": task.assignee,
+        "status": task.status,
+        "priority": task.priority,
+        "tenant": task.tenant,
+        "workspace_kind": task.workspace_kind,
+        "workspace_path": task.workspace_path,
+        "created_by": task.created_by,
+        "created_at": task.created_at,
+        "started_at": task.started_at,
+        "completed_at": task.completed_at,
+        "current_run_id": task.current_run_id,
+        "parents": parents,
+        "children": children,
+        "parent_count": len(parents),
+        "child_count": len(children),
+    }
+def _handle_list(args: dict, **kw) -> str:
+    include_archived, bool_error = _parse_bool_arg(args, "include_archived")
+    if bool_error:
+        return bool_error
+    limit = args.get("limit")
+    return json.dumps({"tasks": [_task_summary_dict(kb, conn, t) for t in tasks]})
+KANBAN_LIST_SCHEMA = {
+    "name": "kanban_list",
+    "description": (
+        "List Kanban task summaries so an orchestrator profile can discover "
+        "work to route. Supports the same core filters as the CLI: assignee, "
+        "status, tenant, include_archived, and limit. Returns compact rows "
+        "with ids, title, status, assignee, priority, parent/child ids, and "
+        "counts. Bounded to 50 rows by default, 200 max, with truncation "
+        "metadata. Also recomputes ready tasks before listing, matching the "
+        "CLI. Orchestrator-only — dispatcher-spawned task workers never see "
+        "this tool."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "include_archived": {
+                "type": "boolean",
+                "description": "Include archived tasks. Defaults to false.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Optional maximum rows to return (default 50, max 200).",
+            },
+        },
+        "required": [],
+    },
+}
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_kanban_list_compact_default(module, dry_run=False)
+    text = module.read_text(encoding="utf-8")
+    assert "kanban_list:compact_default_links" in applied
+    assert "include_links" in text
+    assert "Include full parent/child id arrays" in text
+    assert "default 20" in text
+
+    namespace: dict[str, object] = {}
+    exec(compile(text, str(module), "exec"), namespace)
+
+    class Kb:
+        def parent_ids(self, conn, task_id):
+            return ["p1", "p2"]
+
+        def child_ids(self, conn, task_id):
+            return ["c1"]
+
+    class Task:
+        id = "t1"
+        title = "task"
+        assignee = "worker"
+        status = "ready"
+        priority = 10
+        tenant = "default"
+        workspace_kind = "default"
+        workspace_path = ""
+        created_by = "test"
+        created_at = 1
+        started_at = None
+        completed_at = None
+        current_run_id = None
+
+    summary = namespace["_task_summary_dict"](Kb(), None, Task())
+    full = namespace["_task_summary_dict"](Kb(), None, Task(), include_links=True)
+
+    assert "parents" not in summary
+    assert "children" not in summary
+    assert summary["parent_count"] == 2
+    assert summary["child_count"] == 1
+    assert full["parents"] == ["p1", "p2"]
+    assert full["children"] == ["c1"]
 
 
 def test_gateway_background_process_output_boundary_compacts_large_output(tmp_path, monkeypatch) -> None:

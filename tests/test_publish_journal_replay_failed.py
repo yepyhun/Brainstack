@@ -28,7 +28,7 @@ class _FakeCorpusBackend:
         return [0.0 for _ in texts]
 
 
-def _store_with_failed_transcript_journal(tmp_path):
+def _store_with_transcript_journal(tmp_path, *, status: str):
     store = BrainstackStore(
         str(tmp_path / "brainstack.db"),
         graph_backend="sqlite",
@@ -52,10 +52,46 @@ def _store_with_failed_transcript_journal(tmp_path):
             status, attempt_count, last_error, created_at, updated_at
         ) VALUES (?, 'conversation_transcript', ?, '{}', ?, 1, 'timed out', ?, ?)
         """,
-        (backend.target_name, f"transcript:{transcript_id}", "failed", now, now),
+        (backend.target_name, f"transcript:{transcript_id}", status, now, now),
     )
     store.conn.commit()
     return store, backend
+
+
+def _store_with_failed_transcript_journal(tmp_path):
+    return _store_with_transcript_journal(tmp_path, status="failed")
+
+
+def _store_with_pending_transcript_journal(tmp_path):
+    return _store_with_transcript_journal(tmp_path, status="pending")
+
+
+def test_add_transcript_entry_queues_semantic_publication_without_synchronous_backend_call(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("BRAINSTACK_SYNC_TRANSCRIPT_SEMANTIC_PUBLICATION", raising=False)
+    store = BrainstackStore(
+        str(tmp_path / "brainstack.db"),
+        graph_backend="sqlite",
+        corpus_backend="none",
+    )
+    store.open()
+    backend = _FakeCorpusBackend()
+    store._corpus_backend = backend
+    try:
+        transcript_id = store.add_transcript_entry(
+            session_id="session-1",
+            turn_number=1,
+            kind="user",
+            content="semantic publication should be queued, not blocking",
+            source="user",
+        )
+        rows = store.list_publish_journal(target_name=backend.target_name, status="pending")
+        assert backend.published == []
+        assert [row["object_key"] for row in rows] == [f"transcript:{transcript_id}"]
+    finally:
+        store.close()
 
 
 def test_failed_corpus_publications_are_not_replayed_on_open_path_by_default(
@@ -77,6 +113,32 @@ def test_failed_corpus_publications_can_be_explicitly_replayed(
 ) -> None:
     monkeypatch.setenv("BRAINSTACK_REPLAY_FAILED_PUBLICATIONS_ON_OPEN", "true")
     store, backend = _store_with_failed_transcript_journal(tmp_path)
+    try:
+        store._replay_corpus_publications_if_needed()
+        assert len(backend.published) == 1
+    finally:
+        store.close()
+
+
+def test_pending_conversation_transcripts_are_not_replayed_on_open_path_by_default(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("BRAINSTACK_REPLAY_CONVERSATION_TRANSCRIPTS_ON_OPEN", raising=False)
+    store, backend = _store_with_pending_transcript_journal(tmp_path)
+    try:
+        store._replay_corpus_publications_if_needed()
+        assert backend.published == []
+    finally:
+        store.close()
+
+
+def test_pending_conversation_transcripts_can_be_explicitly_replayed(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("BRAINSTACK_REPLAY_CONVERSATION_TRANSCRIPTS_ON_OPEN", "true")
+    store, backend = _store_with_pending_transcript_journal(tmp_path)
     try:
         store._replay_corpus_publications_if_needed()
         assert len(backend.published) == 1

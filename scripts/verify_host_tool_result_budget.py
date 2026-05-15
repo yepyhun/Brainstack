@@ -113,6 +113,7 @@ def build_report(hermes_source: Path) -> dict[str, Any]:
     hermes_source = hermes_source.expanduser().resolve()
     source_budget = hermes_source / "tools" / "budget_config.py"
     source_storage = hermes_source / "tools" / "tool_result_storage.py"
+    source_kanban = hermes_source / "tools" / "kanban_tools.py"
 
     with tempfile.TemporaryDirectory(prefix="brainstack-tool-budget-") as tmp_raw:
         tmp = Path(tmp_raw)
@@ -133,6 +134,7 @@ def build_report(hermes_source: Path) -> dict[str, Any]:
 
     installer_source = (REPO_ROOT / "scripts" / "install_into_hermes.py").read_text(encoding="utf-8")
     storage_source = source_storage.read_text(encoding="utf-8") if source_storage.exists() else ""
+    kanban_source = source_kanban.read_text(encoding="utf-8") if source_kanban.exists() else ""
 
     proof = {
         "installer_registers_required_core_host_seam": (
@@ -141,6 +143,8 @@ def build_report(hermes_source: Path) -> dict[str, Any]:
             and '_run_host_patch("_patch_tool_result_budget_config"' in installer_source
         ),
         "wizard_patches_budget_config": '_run_host_patch("_patch_tool_result_budget_config"' in installer_source,
+        "wizard_patches_no_env_artifact_storage": '_run_host_patch("_patch_tool_result_storage_no_env_artifact"' in installer_source,
+        "wizard_patches_compact_kanban_list": '_run_host_patch("_patch_kanban_list_compact_default"' in installer_source,
         "observed_context_heavy_tools_covered": all(
             tool in namespace["BRAINSTACK_MODEL_FACING_TOOL_THRESHOLDS"]
             for tool in OBSERVED_CONTEXT_HEAVY_TOOLS
@@ -154,6 +158,17 @@ def build_report(hermes_source: Path) -> dict[str, Any]:
             "Full output saved to:" in storage_source
             and "read_file tool with offset and limit" in storage_source
             and "preview + path" in storage_source
+        ),
+        "no_env_large_tool_output_artifact_present": (
+            "_write_to_local_temp" in storage_source
+            and "Persisted large tool result locally" in storage_source
+            and "env is None" in storage_source
+        ),
+        "kanban_list_compact_default_present": (
+            "KANBAN_LIST_DEFAULT_LIMIT = 20" in kanban_source
+            and '"include_links"' in kanban_source
+            and "include_links=include_links" in kanban_source
+            and "Pass include_links=true" in kanban_source
         ),
         "no_blind_drop_contract": "tool capability limits" in patched and "persisted-output" in storage_source,
         "public_safe": True,

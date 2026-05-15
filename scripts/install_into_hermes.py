@@ -128,6 +128,16 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "owner": "host-output-seam",
         "removal_condition": "Hermes natively applies bounded model-facing tool-result budgets for large native/plugin tool outputs while preserving full artifacts.",
     },
+    "_patch_tool_result_storage_no_env_artifact": {
+        "category": "required_seam",
+        "owner": "host-output-seam",
+        "removal_condition": "Hermes natively persists oversized tool outputs as inspectable artifacts even when no active sandbox/environment object exists.",
+    },
+    "_patch_kanban_list_compact_default": {
+        "category": "temporary_upstream_hotfix",
+        "owner": "upstream-hermes-kanban-tool-surface",
+        "removal_condition": "Hermes kanban_list natively returns compact link-count summaries by default with explicit full-link expansion.",
+    },
     "_patch_skill_prompt_policy": {
         "category": "temporary_upstream_hotfix",
         "owner": "upstream-hermes-skill-policy",
@@ -641,6 +651,22 @@ HOST_PATCH_INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_modes": ("source", "docker"),
         "purpose": "Lower model-facing inline budgets for observed context-heavy tool results and remove the read_file persistence escape hatch.",
         "why": "Hermes already preserves oversized outputs as artifacts, but the 100k default lets 80k+ skill/tool payloads enter the protected context tail and repeatedly break compression.",
+    },
+    {
+        "patcher": "_patch_tool_result_storage_no_env_artifact",
+        "target": "tools/tool_result_storage.py",
+        "scope": "host-output-seam",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Preserve oversized tool outputs as local artifacts when Hermes has no active sandbox/environment object.",
+        "why": "No-env tool calls can otherwise inline-truncate large outputs without an inspectable full-output path, forcing repeated expensive tool reads.",
+    },
+    {
+        "patcher": "_patch_kanban_list_compact_default",
+        "target": "tools/kanban_tools.py",
+        "scope": "temporary-upstream-hermes-kanban-tool-surface",
+        "runtime_modes": ("source", "docker"),
+        "purpose": "Make kanban_list compact by default while preserving explicit parent/child link expansion.",
+        "why": "Large Kanban boards can produce huge parent/child arrays for ordinary status checks; counts are enough by default and full links remain available on demand.",
     },
     {
         "patcher": "_patch_skill_prompt_policy",
@@ -5298,6 +5324,242 @@ def _patch_tool_result_budget_config(path: Path, dry_run: bool) -> list[str]:
     return applied
 
 
+def _patch_tool_result_storage_no_env_artifact(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    if "def _write_to_local_temp(" not in text:
+        helper = (
+            "def _write_to_local_temp(content: str, local_path: str) -> bool:\n"
+            "    \"\"\"Write oversized output locally when no sandbox/env exists.\"\"\"\n"
+            "    storage_dir = os.path.dirname(local_path)\n"
+            "    os.makedirs(storage_dir, exist_ok=True)\n"
+            "    with open(local_path, \"w\", encoding=\"utf-8\") as handle:\n"
+            "        handle.write(content)\n"
+            "    return True\n"
+        )
+        marker = "def _build_persisted_message"
+        if marker not in text:
+            raise RuntimeError(f"Installer patch anchor missing for tool result no-env local artifact writer in {path}")
+        text = text.replace(marker, helper + "\n\n" + marker, 1)
+        applied.append("tool_result_storage:no_env_writer")
+
+    if "Persisted large tool result locally" not in text:
+        anchor = (
+            "    logger.info(\n"
+            "        \"Inline-truncating large tool result: %s (%d chars, no sandbox write)\",\n"
+            "        tool_name, len(content),\n"
+            "    )\n"
+            "    return (\n"
+            "        f\"{preview}\\n\\n\"\n"
+            "        f\"[Truncated: tool response was {len(content):,} chars. \"\n"
+            "        f\"Full output could not be saved to sandbox.]\"\n"
+            "    )\n"
+        )
+        insert = (
+            "    if env is None:\n"
+            "        try:\n"
+            "            if _write_to_local_temp(content, remote_path):\n"
+            "                logger.info(\n"
+            "                    \"Persisted large tool result locally: %s (%s, %d chars -> %s)\",\n"
+            "                    tool_name, tool_use_id, len(content), remote_path,\n"
+            "                )\n"
+            "                return _build_persisted_message(preview, has_more, len(content), remote_path)\n"
+            "        except Exception as exc:\n"
+            "            logger.warning(\"Local temp write failed for %s: %s\", tool_use_id, exc)\n"
+            "\n"
+            "    logger.info(\n"
+            "        \"Inline-truncating large tool result: %s (%d chars, no sandbox write)\",\n"
+            "        tool_name, len(content),\n"
+            "    )\n"
+            "    return (\n"
+            "        f\"{preview}\\n\\n\"\n"
+            "        f\"[Truncated: tool response was {len(content):,} chars. \"\n"
+            "        f\"Full output could not be saved to sandbox.]\"\n"
+            "    )\n"
+        )
+        text = _replace_once(
+            text,
+            anchor,
+            insert,
+            label="tool result no-env artifact fallback",
+            path=path,
+        )
+        applied.append("tool_result_storage:no_env_local_artifact")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
+def _patch_kanban_list_compact_default(path: Path, dry_run: bool) -> list[str]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    applied: list[str] = []
+
+    if "KANBAN_LIST_DEFAULT_LIMIT = 50" in text:
+        text = _replace_once(
+            text,
+            "KANBAN_LIST_DEFAULT_LIMIT = 50",
+            "KANBAN_LIST_DEFAULT_LIMIT = 20",
+            label="kanban list compact default limit",
+            path=path,
+        )
+        applied.append("kanban_list:default_limit_20")
+
+    old_summary = '''def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
+    """Compact task shape for board-listing tools."""
+    parents = kb.parent_ids(conn, task.id)
+    children = kb.child_ids(conn, task.id)
+    return {
+        "id": task.id,
+        "title": task.title,
+        "assignee": task.assignee,
+        "status": task.status,
+        "priority": task.priority,
+        "tenant": task.tenant,
+        "workspace_kind": task.workspace_kind,
+        "workspace_path": task.workspace_path,
+        "created_by": task.created_by,
+        "created_at": task.created_at,
+        "started_at": task.started_at,
+        "completed_at": task.completed_at,
+        "current_run_id": task.current_run_id,
+        "parents": parents,
+        "children": children,
+        "parent_count": len(parents),
+        "child_count": len(children),
+    }
+'''
+    if old_summary not in text:
+        old_summary = old_summary.replace("dict[str, Any]", "dict")
+    if old_summary in text and "include_links: bool = False" not in text:
+        new_summary = '''def _task_summary_dict(kb, conn, task, *, include_links: bool = False) -> dict:
+    """Compact task shape for board-listing tools.
+
+    Parent/child ids are useful for deep inspection, but ordinary board
+    status checks only need counts. Keep full ids behind an explicit
+    include_links flag so large boards do not flood model context.
+    """
+    parents = kb.parent_ids(conn, task.id)
+    children = kb.child_ids(conn, task.id)
+    summary = {
+        "id": task.id,
+        "title": task.title,
+        "assignee": task.assignee,
+        "status": task.status,
+        "priority": task.priority,
+        "tenant": task.tenant,
+        "workspace_kind": task.workspace_kind,
+        "workspace_path": task.workspace_path,
+        "created_by": task.created_by,
+        "created_at": task.created_at,
+        "started_at": task.started_at,
+        "completed_at": task.completed_at,
+        "current_run_id": task.current_run_id,
+        "parent_count": len(parents),
+        "child_count": len(children),
+    }
+    if include_links:
+        summary["parents"] = parents
+        summary["children"] = children
+    return summary
+'''
+        text = _replace_once(
+            text,
+            old_summary,
+            new_summary,
+            label="kanban list compact default links",
+            path=path,
+        )
+        applied.append("kanban_list:compact_default_links")
+
+    if 'include_links, bool_error = _parse_bool_arg(args, "include_links")' not in text:
+        anchor = (
+            '    include_archived, bool_error = _parse_bool_arg(args, "include_archived")\n'
+            "    if bool_error:\n"
+            "        return tool_error(bool_error)\n"
+        )
+        insert = (
+            '    include_archived, bool_error = _parse_bool_arg(args, "include_archived")\n'
+            "    if bool_error:\n"
+            "        return tool_error(bool_error)\n"
+            '    include_links, bool_error = _parse_bool_arg(args, "include_links")\n'
+            "    if bool_error:\n"
+            "        return tool_error(bool_error)\n"
+        )
+        if anchor in text:
+            text = _replace_once(
+                text,
+                anchor,
+                insert,
+                label="kanban list include_links arg",
+                path=path,
+            )
+            applied.append("kanban_list:include_links_arg")
+
+    old_call = "[_task_summary_dict(kb, conn, t) for t in tasks]"
+    if old_call in text:
+        text = _replace_once(
+            text,
+            old_call,
+            "[_task_summary_dict(kb, conn, t, include_links=include_links) for t in tasks]",
+            label="kanban list include_links summary call",
+            path=path,
+        )
+        applied.append("kanban_list:include_links_summary_call")
+
+    old_description = (
+        '        "with ids, title, status, assignee, priority, parent/child ids, and "\n'
+        '        "counts. Bounded to 50 rows by default, 200 max, with truncation "\n'
+    )
+    if old_description in text:
+        text = _replace_once(
+            text,
+            old_description,
+            '        "with ids, title, status, assignee, priority, and parent/child "\n'
+            '        "counts by default. Pass include_links=true for full link ids. "\n'
+            '        "Bounded to 20 rows by default, 200 max, with truncation "\n',
+            label="kanban list schema compact description",
+            path=path,
+        )
+        applied.append("kanban_list:schema_description")
+
+    include_links_property = (
+        '            "include_links": {\n'
+        '                "type": "boolean",\n'
+        '                "description": "Include full parent/child id arrays. Defaults to false; counts are always returned.",\n'
+        "            },\n"
+    )
+    if "Include full parent/child id arrays" not in text:
+        anchor = (
+            '            "include_archived": {\n'
+            '                "type": "boolean",\n'
+            '                "description": "Include archived tasks. Defaults to false.",\n'
+            "            },\n"
+        )
+        if anchor in text:
+            text = _replace_once(
+                text,
+                anchor,
+                anchor + include_links_property,
+                label="kanban list include_links schema",
+                path=path,
+            )
+            applied.append("kanban_list:include_links_schema")
+
+    if "default 50, max 200" in text:
+        text = text.replace("default 50, max 200", "default 20, max 200")
+        applied.append("kanban_list:limit_description")
+
+    if applied and not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return applied
+
+
 def _patch_context_compressor_runtime_budget(path: Path, dry_run: bool) -> list[str]:
     if not path.exists():
         return []
@@ -9248,6 +9510,8 @@ def main() -> int:
     host_patches.extend(_run_host_patch("_patch_memory_answer_renderer_language", target / "gateway" / "memory_answer_renderer.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_terminal_tool_result_hygiene", target / "tools" / "terminal_tool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_tool_result_budget_config", target / "tools" / "budget_config.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_tool_result_storage_no_env_artifact", target / "tools" / "tool_result_storage.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    host_patches.extend(_run_host_patch("_patch_kanban_list_compact_default", target / "tools" / "kanban_tools.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_skill_prompt_policy", target / "agent" / "prompt_builder.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_skill_view_progressive_disclosure", target / "tools" / "skills_tool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_prompt_builder", target / "agent" / "prompt_builder.py", args.dry_run, host_patch_mode=args.host_patch_mode))
