@@ -47,6 +47,16 @@ def _graph_row_for_subject(report: dict[str, Any], subject: str, *, row_type: st
     raise AssertionError(f"Missing graph row for subject: {subject}")
 
 
+class _EmptyExternalGraphBackend:
+    target_name = "graph.kuzu"
+
+    def search_graph(self, *, query: str, limit: int) -> list[dict[str, Any]]:
+        return []
+
+    def close(self) -> None:
+        pass
+
+
 def test_configured_missing_kuzu_reports_degraded_status_without_false_success(tmp_path: Path) -> None:
     store = _open_store(tmp_path, graph_backend="kuzu")
     try:
@@ -72,6 +82,33 @@ def test_configured_missing_kuzu_reports_degraded_status_without_false_success(t
             assert snapshot["graph_fallback_reason"]
         else:
             assert graph_capability["status"] == "active"
+    finally:
+        store.close()
+
+
+def test_external_graph_empty_result_falls_back_to_scoped_sqlite_truth(tmp_path: Path) -> None:
+    store = _open_store(tmp_path, graph_backend="sqlite")
+    try:
+        fixture = seed_graph_parity_fixture(store)
+        store.conn.execute("DELETE FROM semantic_evidence_index WHERE shelf = 'graph'")
+        store.conn.commit()
+        store._graph_backend_name = "kuzu"
+        store._graph_backend = _EmptyExternalGraphBackend()
+        store._graph_backend_error = ""
+
+        report = _inspect(store, fixture["queries"]["current"])
+        row = _graph_row_for_subject(report, "CurrentWindowBeta")
+        snapshot = graph_trace_snapshot(row)
+
+        assert snapshot["graph_backend_status"] == "degraded"
+        assert snapshot["graph_backend_requested"] == "kuzu"
+        assert "external_empty" in snapshot["graph_fallback_reason"]
+        assert snapshot["retrieval_source"] == "graph.sqlite_fallback"
+
+        graph_channel = next(channel for channel in report["channels"] if channel["name"] == "graph")
+        assert graph_channel["status"] == "degraded"
+        assert graph_channel["candidate_count"] >= 1
+        assert "external_empty" in graph_channel["reason"]
     finally:
         store.close()
 

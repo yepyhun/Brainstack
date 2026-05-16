@@ -95,6 +95,10 @@ CRASH_REGRESSION_TOOL_OUTPUT_MARKERS = (
     "run_agent: Tool terminal returned error",
     "run_agent: Tool session_search returned error",
 )
+CRASH_REGRESSION_NON_CRASH_MARKERS = (
+    "HTTP 429: The usage limit has been reached",
+    "RateLimitError [HTTP 429]",
+)
 
 
 @dataclass(frozen=True)
@@ -161,9 +165,23 @@ def _local_coredump_since(started_at: str | None) -> str:
 
 def _count_log_needles(text: str, needles: set[str] = CRASH_REGRESSION_LOG_NEEDLES) -> dict[str, int]:
     counts = {needle: 0 for needle in sorted(needles)}
+    suppress_provider_traceback_lines = 0
     for line in text.splitlines():
         if any(marker in line for marker in CRASH_REGRESSION_TOOL_OUTPUT_MARKERS):
             continue
+        if any(marker in line for marker in CRASH_REGRESSION_NON_CRASH_MARKERS):
+            suppress_provider_traceback_lines = 8
+            continue
+        if suppress_provider_traceback_lines > 0:
+            if (
+                line.startswith("Traceback")
+                or line.startswith("  File ")
+                or line.startswith("    raise RuntimeError")
+                or line.startswith("RuntimeError: HTTP 429")
+            ):
+                suppress_provider_traceback_lines -= 1
+                continue
+            suppress_provider_traceback_lines = 0
         for needle in counts:
             counts[needle] += line.count(needle)
     return counts

@@ -5,8 +5,10 @@ from .store_runtime import (
     Any,
     Dict,
     Iterable,
+    Mapping,
     SEMANTIC_EVIDENCE_INDEX_VERSION,
     _cursor_lastrowid,
+    _locked,
     _merge_record_metadata,
     _row_to_dict,
     json,
@@ -15,7 +17,19 @@ from .store_runtime import (
     utc_now_iso,
 )
 
+
 class GraphStateCoreMixin(StoreRuntimeBase):
+    def _record_graph_projection_runtime_status_unlocked(self, status: Mapping[str, Any]) -> None:
+        self._graph_projection_runtime_status = dict(status)
+
+    @_locked
+    def record_graph_projection_runtime_status(self, status: Mapping[str, Any]) -> None:
+        self._record_graph_projection_runtime_status_unlocked(status)
+
+    @_locked
+    def graph_projection_runtime_status(self) -> Dict[str, Any]:
+        return dict(getattr(self, "_graph_projection_runtime_status", {}) or {})
+
     def graph_backend_channel_status(self) -> Dict[str, str]:
             if self._graph_backend is None:
                 if self._graph_backend_error:

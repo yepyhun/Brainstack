@@ -1122,6 +1122,30 @@ class GraphStateSnapshotMixin(StoreRuntimeBase):
             fallback_reason = str(self._graph_backend_error or "") if backend_status == "degraded" else ""
             if self._graph_backend is None:
                 rows = self._sqlite_search_graph(query=query, limit=limit)
+                if external_requested:
+                    self._record_graph_projection_runtime_status_unlocked(
+                        {
+                            "status": "degraded",
+                            "reason_code": "external_unavailable_sqlite_fallback",
+                            "reason": fallback_reason or "External graph projection is unavailable; SQLite graph truth fallback is active.",
+                            "backend": self._graph_backend_name,
+                            "fallback_used": True,
+                            "source_row_count": len(rows),
+                            "projected_candidate_count": 0,
+                        }
+                    )
+                else:
+                    self._record_graph_projection_runtime_status_unlocked(
+                        {
+                            "status": "active" if rows else "idle",
+                            "reason_code": "sqlite_graph_search",
+                            "reason": "SQLite graph search completed.",
+                            "backend": "sqlite",
+                            "fallback_used": False,
+                            "source_row_count": len(rows),
+                            "projected_candidate_count": len(rows),
+                        }
+                    )
             else:
                 try:
                     rows = self._graph_backend.search_graph(query=query, limit=max(limit * 8, 24))
@@ -1129,14 +1153,77 @@ class GraphStateSnapshotMixin(StoreRuntimeBase):
                     self._disable_graph_backend(reason=str(exc))
                     logger.warning("Brainstack graph search failed; falling back to SQLite: %s", exc)
                     rows = self._sqlite_search_graph(query=query, limit=limit)
+                    self._record_graph_projection_runtime_status_unlocked(
+                        {
+                            "status": "degraded",
+                            "reason_code": "external_exception_sqlite_fallback",
+                            "reason": f"External graph projection failed; SQLite graph truth fallback is active: {exc}",
+                            "backend": self._graph_backend_name,
+                            "fallback_used": True,
+                            "source_row_count": len(rows),
+                            "projected_candidate_count": 0,
+                        }
+                    )
                     backend_status = "degraded"
                     fallback_reason = str(exc)
+                    retrieval_source = "graph.sqlite_fallback"
                 else:
+                    projected_count = len(rows)
                     self._graph_backend_error = ""
-                    retrieval_source = f"graph.{getattr(self._graph_backend, 'target_name', '') or self._graph_backend_name}"
-                    match_mode = "external_graph"
-                    backend_status = "active"
-                    fallback_reason = ""
+                    if not rows:
+                        sqlite_rows = self._sqlite_search_graph(query=query, limit=limit)
+                        if sqlite_rows:
+                            rows = sqlite_rows
+                            retrieval_source = "graph.sqlite_fallback"
+                            match_mode = "sqlite_lexical"
+                            backend_status = "degraded"
+                            fallback_reason = (
+                                "external_empty_sqlite_fallback: external graph projection returned no "
+                                "query-relevant rows while SQLite graph truth matched."
+                            )
+                            self._record_graph_projection_runtime_status_unlocked(
+                                {
+                                    "status": "degraded",
+                                    "reason_code": "external_empty_sqlite_fallback",
+                                    "reason": fallback_reason,
+                                    "backend": self._graph_backend_name,
+                                    "fallback_used": True,
+                                    "source_row_count": len(sqlite_rows),
+                                    "projected_candidate_count": projected_count,
+                                }
+                            )
+                        else:
+                            retrieval_source = f"graph.{getattr(self._graph_backend, 'target_name', '') or self._graph_backend_name}"
+                            match_mode = "external_graph"
+                            backend_status = "active"
+                            fallback_reason = ""
+                            self._record_graph_projection_runtime_status_unlocked(
+                                {
+                                    "status": "idle",
+                                    "reason_code": "external_empty_no_sqlite_match",
+                                    "reason": "External graph projection returned no rows and SQLite graph truth had no query-relevant match.",
+                                    "backend": self._graph_backend_name,
+                                    "fallback_used": False,
+                                    "source_row_count": 0,
+                                    "projected_candidate_count": projected_count,
+                                }
+                            )
+                    else:
+                        retrieval_source = f"graph.{getattr(self._graph_backend, 'target_name', '') or self._graph_backend_name}"
+                        match_mode = "external_graph"
+                        backend_status = "active"
+                        fallback_reason = ""
+                        self._record_graph_projection_runtime_status_unlocked(
+                            {
+                                "status": "active",
+                                "reason_code": "external_graph_recall_producing",
+                                "reason": "External graph projection returned query-relevant rows.",
+                                "backend": self._graph_backend_name,
+                                "fallback_used": False,
+                                "source_row_count": projected_count,
+                                "projected_candidate_count": projected_count,
+                            }
+                        )
             keyword_rows = _attach_keyword_scores(rows)
             scored: List[Dict[str, Any]] = []
             for row in keyword_rows:

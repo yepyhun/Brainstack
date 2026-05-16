@@ -83,6 +83,29 @@ def _safe_count(store: BrainstackStore, table: str) -> int:
     return int(row["count"] if row is not None else 0)
 
 
+def _safe_group_counts(
+    store: BrainstackStore,
+    table: str,
+    column: str,
+    *,
+    where: str = "",
+    params: tuple[Any, ...] = (),
+) -> dict[str, int]:
+    try:
+        where_clause = f"WHERE {where}" if where else ""
+        rows = store.conn.execute(
+            f"SELECT {column} AS key, COUNT(*) AS count FROM {table} {where_clause} GROUP BY {column}",
+            params,
+        ).fetchall()
+    except Exception:
+        return {}
+    return {
+        str(row["key"] or ""): int(row["count"] or 0)
+        for row in rows
+        if str(row["key"] or "").strip()
+    }
+
+
 def _safe_max(store: BrainstackStore, table: str, column: str) -> str:
     try:
         row = store.conn.execute(f"SELECT MAX({column}) AS value FROM {table}").fetchone()
@@ -1023,6 +1046,13 @@ def build_query_inspect(
         "memory_answerability": packet_answerability,
         "active_preference_delivery": active_preference_delivery,
         "explicit_truth_parity": explicit_truth_parity,
+        "semantic_corpus_contract": _semantic_corpus_contract(
+            store,
+            selected_by_shelf=selected_by_shelf,
+            candidate_trace=candidate_trace,
+            channels=list(packet.get("channels") or []),
+            corpus_limit=corpus_limit,
+        ),
         "global_allocator_shadow": build_global_allocator_shadow(
             candidate_trace,
             candidate_budget=int(policy_snapshot.get("evidence_item_budget") or evidence_item_budget or 1),
@@ -1043,3 +1073,212 @@ def build_query_inspect(
     report["trace_mode"] = "full"
     report["compact_trace_available"] = True
     return report
+
+
+def _channel_probe_payload(channel: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "name": str(channel.get("name") or ""),
+        "status": str(channel.get("status") or ""),
+        "candidate_count": int(channel.get("candidate_count") or 0),
+        "reason_code": str(channel.get("reason_code") or ""),
+        "fallback_used": bool(channel.get("fallback_used")),
+    }
+
+
+def _candidate_trace_counts_by_shelf(items: list[Mapping[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        shelf = str(item.get("shelf") or "").strip()
+        if not shelf:
+            continue
+        counts[shelf] = counts.get(shelf, 0) + 1
+    return counts
+
+
+def _candidate_reasons_by_shelf(items: list[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
+    reasons: dict[str, dict[str, int]] = {}
+    for item in items:
+        shelf = str(item.get("shelf") or "").strip()
+        if not shelf:
+            continue
+        selection = item.get("selection") if isinstance(item.get("selection"), Mapping) else {}
+        reason = str(selection.get("reason") or selection.get("suppression_reason") or "unknown").strip()
+        if not reason:
+            reason = "unknown"
+        shelf_reasons = reasons.setdefault(shelf, {})
+        shelf_reasons[reason] = shelf_reasons.get(reason, 0) + 1
+    return reasons
+
+
+def _semantic_corpus_contract(
+    store: BrainstackStore,
+    *,
+    selected_by_shelf: Mapping[str, list[Dict[str, Any]]],
+    candidate_trace: Mapping[str, Any],
+    channels: list[Mapping[str, Any]],
+    corpus_limit: int,
+) -> dict[str, Any]:
+    selected_raw = candidate_trace.get("selected") if isinstance(candidate_trace.get("selected"), list) else []
+    suppressed_raw = candidate_trace.get("suppressed") if isinstance(candidate_trace.get("suppressed"), list) else []
+    selected_items = [item for item in selected_raw if isinstance(item, Mapping)]
+    suppressed_items = [item for item in suppressed_raw if isinstance(item, Mapping)]
+    selected_counts = _candidate_trace_counts_by_shelf(selected_items)
+    suppressed_counts = _candidate_trace_counts_by_shelf(suppressed_items)
+    semantic_counts = _safe_group_counts(store, "semantic_evidence_index", "shelf", where="active = 1")
+    document_count = _safe_count(store, "corpus_documents")
+    section_count = _safe_count(store, "corpus_sections")
+    corpus_runtime_getter = getattr(store, "corpus_semantic_runtime_status", None)
+    corpus_runtime = corpus_runtime_getter() if callable(corpus_runtime_getter) else {}
+    semantic_channel = next(
+        (dict(channel) for channel in channels if str(channel.get("name") or "") == "semantic"),
+        {},
+    )
+    final_selected_counts = {shelf: len(rows) for shelf, rows in selected_by_shelf.items() if rows}
+    corpus_selected = int(selected_counts.get("corpus") or len(selected_by_shelf.get("corpus") or []))
+    corpus_suppressed = int(suppressed_counts.get("corpus") or 0)
+    if corpus_limit <= 0:
+        status = "skipped"
+        reason_code = "CORPUS_ROUTE_DISABLED"
+        reason = "Corpus retrieval was intentionally disabled for this query."
+    elif corpus_selected > 0:
+        status = "selected"
+        reason_code = "CORPUS_EVIDENCE_SELECTED"
+        reason = "Document corpus evidence reached the selected evidence packet."
+    elif document_count <= 0 or section_count <= 0:
+        status = "empty"
+        reason_code = "NO_CORPUS_DOCUMENTS_INDEXED"
+        reason = "No active document corpus rows are indexed. Profile/operating truth is not expected to appear as corpus evidence."
+    elif corpus_suppressed > 0:
+        status = "suppressed"
+        reason_code = "CORPUS_CANDIDATES_SUPPRESSED"
+        reason = "Corpus candidates existed but were not selected by route, authority, dedupe, or packet budget."
+    elif str(corpus_runtime.get("status") or "") == "degraded":
+        status = "degraded"
+        reason_code = "CORPUS_BACKEND_DEGRADED"
+        reason = str(corpus_runtime.get("reason") or "Corpus semantic backend was degraded.")
+    else:
+        status = "idle"
+        reason_code = "NO_CORPUS_MATCH"
+        reason = "Corpus retrieval ran or was available, but no document corpus evidence matched strongly enough."
+    truth_semantic_count = sum(int(semantic_counts.get(shelf) or 0) for shelf in ("profile", "operating", "task", "graph"))
+    return {
+        "schema": "brainstack.semantic_corpus_contract.v1",
+        "public_safe": True,
+        "status": status,
+        "reason_code": reason_code,
+        "reason": reason,
+        "profile_operating_truth_contract": {
+            "stored_truth_shelves": ["profile", "operating", "task", "graph"],
+            "document_corpus_shelf": "corpus",
+            "expected_corpus_parity": False,
+            "truth_semantic_indexed_count": truth_semantic_count,
+            "explanation": (
+                "Committed profile/operating truth is searched through structured lookup and semantic evidence shelves. "
+                "Corpus is document/source support evidence, not a mirror of every truth write."
+            ),
+        },
+        "document_corpus": {
+            "document_count": document_count,
+            "section_count": section_count,
+            "selected_count": corpus_selected,
+            "suppressed_count": corpus_suppressed,
+            "runtime_status": dict(corpus_runtime) if isinstance(corpus_runtime, Mapping) else {},
+        },
+        "semantic_evidence_shelf_counts": semantic_counts,
+        "candidate_selected_counts": selected_counts,
+        "candidate_suppressed_counts": suppressed_counts,
+        "final_packet_selected_counts": final_selected_counts,
+        "semantic_channel": {
+            "status": str(semantic_channel.get("status") or ""),
+            "candidate_count": int(semantic_channel.get("candidate_count") or 0),
+            "reason_code": str(semantic_channel.get("reason_code") or ""),
+            "semantic_followup_skipped": int(semantic_channel.get("semantic_followup_skipped") or 0),
+        },
+    }
+
+
+def build_backend_parity_probe(
+    store: BrainstackStore,
+    *,
+    query: str = "",
+    session_id: str = "backend-parity-probe",
+    principal_scope_key: str = "",
+) -> Dict[str, Any]:
+    """Return a compact public-safe backend parity snapshot.
+
+    This report intentionally returns counts, statuses, and structural reasons
+    only. It must not include raw memory row content.
+    """
+    row_counts = {
+        table: _safe_count(store, table)
+        for table in (
+            "profile_items",
+            "operating_records",
+            "graph_entities",
+            "graph_states",
+            "graph_relations",
+            "graph_inferred_relations",
+            "graph_conflicts",
+            "corpus_documents",
+            "corpus_sections",
+            "semantic_evidence_index",
+            "publish_journal",
+        )
+    }
+    semantic_counts = _safe_group_counts(
+        store,
+        "semantic_evidence_index",
+        "shelf",
+        where="active = 1",
+    )
+    publish_counts = _safe_group_counts(store, "publish_journal", "status")
+
+    inspect: Dict[str, Any] = {}
+    selected_counts: dict[str, int] = {}
+    suppressed_counts: dict[str, int] = {}
+    suppression_reasons: dict[str, dict[str, int]] = {}
+    channels: list[dict[str, Any]] = []
+    if str(query or "").strip():
+        inspect = build_query_inspect(
+            store,
+            query=query,
+            session_id=session_id,
+            principal_scope_key=principal_scope_key,
+            trace_mode="full",
+        )
+        selected = inspect.get("retrieval_candidates", {}).get("selected", [])
+        suppressed = inspect.get("retrieval_candidates", {}).get("suppressed", [])
+        selected_items = [item for item in selected if isinstance(item, Mapping)]
+        suppressed_items = [item for item in suppressed if isinstance(item, Mapping)]
+        selected_counts = _candidate_trace_counts_by_shelf(selected_items)
+        suppressed_counts = _candidate_trace_counts_by_shelf(suppressed_items)
+        suppression_reasons = _candidate_reasons_by_shelf(suppressed_items)
+        channels = [
+            _channel_probe_payload(channel)
+            for channel in inspect.get("channels", [])
+            if isinstance(channel, Mapping)
+        ]
+
+    projection_status_getter = getattr(store, "graph_projection_runtime_status", None)
+    graph_projection = projection_status_getter() if callable(projection_status_getter) else {}
+    corpus_semantic_status_getter = getattr(store, "corpus_semantic_runtime_status", None)
+    corpus_semantic = corpus_semantic_status_getter() if callable(corpus_semantic_status_getter) else {}
+
+    return {
+        "schema": "brainstack.backend_parity_probe.v1",
+        "public_safe": True,
+        "raw_memory_text_included": False,
+        "principal_scope_key_present": bool(str(principal_scope_key or "").strip()),
+        "query_supplied": bool(str(query or "").strip()),
+        "row_counts": row_counts,
+        "semantic_evidence_shelf_counts": semantic_counts,
+        "publish_journal_status_counts": publish_counts,
+        "capability_health": _query_capability_health(store),
+        "graph_projection": dict(graph_projection) if isinstance(graph_projection, Mapping) else {},
+        "corpus_semantic_runtime": dict(corpus_semantic) if isinstance(corpus_semantic, Mapping) else {},
+        "semantic_corpus_contract": dict(inspect.get("semantic_corpus_contract") or {}) if inspect else {},
+        "selected_counts": selected_counts,
+        "suppressed_counts": suppressed_counts,
+        "suppression_reasons": suppression_reasons,
+        "channels": channels,
+    }

@@ -509,6 +509,19 @@ def collect_graph_rows(
         else []
     )
     graph_status = store.graph_backend_channel_status()
+    projection_status_getter = getattr(store, "graph_projection_runtime_status", None)
+    if callable(projection_status_getter):
+        projection_status = projection_status_getter()
+        if isinstance(projection_status, Mapping) and str(projection_status.get("status") or "") in {"degraded", "idle"}:
+            graph_status = {
+                **dict(graph_status),
+                "status": str(projection_status.get("status") or graph_status.get("status") or "degraded"),
+                "reason": str(projection_status.get("reason") or graph_status.get("reason") or ""),
+                "reason_code": str(projection_status.get("reason_code") or ""),
+                "fallback_used": bool(projection_status.get("fallback_used")),
+                "projected_candidate_count": int(projection_status.get("projected_candidate_count") or 0),
+                "source_row_count": int(projection_status.get("source_row_count") or 0),
+            }
     if graph_rows and semantic_graph_rows:
         graph_recall_status = {
             "status": "active",

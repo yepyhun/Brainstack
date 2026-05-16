@@ -80,6 +80,7 @@ def graph_trace_snapshot(row: dict[str, Any]) -> dict[str, Any]:
         "match_mode": row.get("match_mode", ""),
         "retrieval_source": row.get("retrieval_source", ""),
         "graph_backend_status": row.get("graph_backend_status", ""),
+        "graph_backend_requested": row.get("graph_backend_requested", ""),
         "matched_alias": row.get("matched_alias", ""),
         "valid_to": row.get("valid_to", ""),
         "conflict_value": row.get("conflict_value", ""),

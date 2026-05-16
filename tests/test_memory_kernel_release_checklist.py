@@ -582,6 +582,41 @@ def test_live_crash_regression_log_scan_ignores_terminal_tool_payload_errors() -
     assert counts["ModuleNotFoundError"] == 1
 
 
+def test_live_crash_regression_log_scan_ignores_provider_rate_limit_traceback() -> None:
+    log_text = (
+        "⚠️  API call failed (attempt 1/1): RateLimitError [HTTP 429]\n"
+        "ERROR root: API call failed after 1 retries. HTTP 429: The usage limit has been reached\n"
+        "ERROR cron.scheduler: Job 'bounded checkpoint' failed: RuntimeError: HTTP 429: The usage limit has been reached\n"
+        "Traceback (most recent call last):\n"
+        '  File "/opt/hermes/cron/scheduler.py", line 1573, in run_job\n'
+        "    raise RuntimeError(_err_text)\n"
+        "RuntimeError: HTTP 429: The usage limit has been reached\n"
+        "INFO gateway.run: unrelated line closes provider-noise suppression\n"
+        "Traceback (most recent call last): real runtime crash\n"
+    )
+
+    counts = _count_log_needles(log_text)
+
+    assert counts["ERROR"] == 0
+    assert counts["Traceback"] == 1
+
+
+def test_live_crash_regression_log_scan_ignores_provider_rate_limit_traceback_only() -> None:
+    log_text = (
+        "WARNING run_agent: API call failed summary=HTTP 429: The usage limit has been reached\n"
+        "ERROR cron.scheduler: Job 'bounded checkpoint' failed: RuntimeError: HTTP 429: The usage limit has been reached\n"
+        "Traceback (most recent call last):\n"
+        '  File "/opt/hermes/cron/scheduler.py", line 1573, in run_job\n'
+        "    raise RuntimeError(_err_text)\n"
+        "RuntimeError: HTTP 429: The usage limit has been reached\n"
+    )
+
+    counts = _count_log_needles(log_text)
+
+    assert counts["ERROR"] == 0
+    assert counts["Traceback"] == 0
+
+
 def test_live_crash_regression_guard_summary_blocks_native_crash_markers() -> None:
     summary = _live_crash_regression_summary(
         container_name="hermes-bestie-live",
