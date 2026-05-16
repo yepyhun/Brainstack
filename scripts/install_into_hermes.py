@@ -9406,6 +9406,16 @@ def main() -> int:
                 args.dry_run,
             )
         )
+    for helper_name in ("brainstack_context_audit.py", "brainstack_skill_audit.py"):
+        helper_script = REPO_ROOT / "scripts" / helper_name
+        if helper_script.exists():
+            helper_files.append(
+                _copy_file(
+                    helper_script,
+                    target / "scripts" / helper_name,
+                    args.dry_run,
+                )
+            )
 
     generated_files: list[dict[str, str]] = []
     if args.runtime == "docker":

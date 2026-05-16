@@ -19,6 +19,11 @@ def test_continuation_engine_is_extension_not_brainstack_core() -> None:
     assert not (install_into_hermes.SOURCE_PLUGIN / "work_state_contract.py").exists()
 
 
+def test_token_audit_helpers_are_installer_visible() -> None:
+    assert (install_into_hermes.REPO_ROOT / "scripts" / "brainstack_context_audit.py").exists()
+    assert (install_into_hermes.REPO_ROOT / "scripts" / "brainstack_skill_audit.py").exists()
+
+
 def test_patch_config_adds_inert_continuation_extension_config(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("model:\n  default: local\n", encoding="utf-8")
