@@ -128,10 +128,10 @@ index 8a53cefb5..466ee82f9 100644
      # ------------------------------------------------------------------
      # Shared helpers
 diff --git a/tools/environments/local.py b/tools/environments/local.py
-index 985bf4bdc..fef11d9bb 100644
+index 378f34054..7d7204425 100644
 --- a/tools/environments/local.py
 +++ b/tools/environments/local.py
-@@ -469,7 +469,10 @@ class LocalEnvironment(BaseEnvironment):
+@@ -531,7 +531,10 @@ class LocalEnvironment(BaseEnvironment):
              stdout=subprocess.PIPE,
              stderr=subprocess.STDOUT,
              stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
@@ -142,19 +142,20 @@ index 985bf4bdc..fef11d9bb 100644
 +            start_new_session=False if _IS_WINDOWS else True,
              creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
              cwd=_popen_cwd,
+             **_popen_kwargs,
          )
          if not _IS_WINDOWS:
 diff --git a/tools/process_registry.py b/tools/process_registry.py
-index 260ba4739..29fde6a9d 100644
+index 771ebf0b4..060feef8d 100644
 --- a/tools/process_registry.py
 +++ b/tools/process_registry.py
-@@ -556,7 +556,7 @@ class ProcessRegistry:
+@@ -562,7 +562,7 @@ class ProcessRegistry:
              stdout=subprocess.PIPE,
              stderr=subprocess.STDOUT,
              stdin=subprocess.DEVNULL,
 -            preexec_fn=None if _IS_WINDOWS else os.setsid,
 +            start_new_session=False if _IS_WINDOWS else True,
-             creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
+             **_popen_kwargs,
          )
  
          session.process = proc
