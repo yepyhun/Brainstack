@@ -24,6 +24,7 @@ index 092f7e37e..d00e888f3 100644
 +            # preexec_fn is unsafe in long-lived multithreaded gateway
 +            # processes and can wedge before our poll loop/heartbeat starts.
 +            start_new_session=False if _IS_WINDOWS else True,
+             creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
          )
  
          # --- Poll loop: watch for exit, timeout, and interrupt ---
@@ -139,6 +140,7 @@ index 985bf4bdc..fef11d9bb 100644
 +            # exposes start_new_session for this exact setsid use case without
 +            # running arbitrary Python in the forked child.
 +            start_new_session=False if _IS_WINDOWS else True,
+             creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
              cwd=_popen_cwd,
          )
          if not _IS_WINDOWS:
@@ -149,9 +151,10 @@ index 260ba4739..29fde6a9d 100644
 @@ -556,7 +556,7 @@ class ProcessRegistry:
              stdout=subprocess.PIPE,
              stderr=subprocess.STDOUT,
-             stdin=subprocess.PIPE,
+             stdin=subprocess.DEVNULL,
 -            preexec_fn=None if _IS_WINDOWS else os.setsid,
 +            start_new_session=False if _IS_WINDOWS else True,
+             creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
          )
  
          session.process = proc
