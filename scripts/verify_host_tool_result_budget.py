@@ -118,6 +118,8 @@ def build_report(hermes_source: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="brainstack-tool-budget-") as tmp_raw:
         tmp = Path(tmp_raw)
         budget_path = tmp / "budget_config.py"
+        storage_path = tmp / "tool_result_storage.py"
+        kanban_path = tmp / "kanban_tools.py"
         if source_budget.exists():
             shutil.copy2(source_budget, budget_path)
             source_mode = "hermes_source"
@@ -125,17 +127,26 @@ def build_report(hermes_source: Path) -> dict[str, Any]:
             budget_path.write_text(_minimal_budget_config(), encoding="utf-8")
             source_mode = "minimal_fixture"
             issues.append(f"Hermes budget_config.py not found at {source_budget}")
+        if source_storage.exists():
+            shutil.copy2(source_storage, storage_path)
+        if source_kanban.exists():
+            shutil.copy2(source_kanban, kanban_path)
 
         applied = install_into_hermes._patch_tool_result_budget_config(budget_path, dry_run=False)
+        storage_applied = install_into_hermes._patch_tool_result_storage_no_env_artifact(
+            storage_path, dry_run=False
+        )
+        kanban_applied = install_into_hermes._patch_kanban_list_compact_default(
+            kanban_path, dry_run=False
+        )
         patched = budget_path.read_text(encoding="utf-8")
+        patched_storage = storage_path.read_text(encoding="utf-8") if storage_path.exists() else ""
+        patched_kanban = kanban_path.read_text(encoding="utf-8") if kanban_path.exists() else ""
         namespace = _exec_budget_config(patched, budget_path)
         thresholds, threshold_issues = _verify_thresholds(namespace)
         issues.extend(threshold_issues)
 
     installer_source = (REPO_ROOT / "scripts" / "install_into_hermes.py").read_text(encoding="utf-8")
-    storage_source = source_storage.read_text(encoding="utf-8") if source_storage.exists() else ""
-    kanban_source = source_kanban.read_text(encoding="utf-8") if source_kanban.exists() else ""
-
     proof = {
         "installer_registers_required_core_host_seam": (
             '"patcher": "_patch_tool_result_budget_config"' in installer_source
@@ -155,22 +166,22 @@ def build_report(hermes_source: Path) -> dict[str, Any]:
         "kanban_list_49k_would_not_inline": thresholds["kanban_list"] < 49_000,
         "kanban_show_17k_would_not_inline": thresholds["kanban_show"] < 17_600,
         "full_output_artifact_contract_present": (
-            "Full output saved to:" in storage_source
-            and "read_file tool with offset and limit" in storage_source
-            and "preview + path" in storage_source
+            "Full output saved to:" in patched_storage
+            and "read_file tool with offset and limit" in patched_storage
+            and "preview + path" in patched_storage
         ),
         "no_env_large_tool_output_artifact_present": (
-            "_write_to_local_temp" in storage_source
-            and "Persisted large tool result locally" in storage_source
-            and "env is None" in storage_source
+            "_write_to_local_temp" in patched_storage
+            and "Persisted large tool result locally" in patched_storage
+            and "env is None" in patched_storage
         ),
         "kanban_list_compact_default_present": (
-            "KANBAN_LIST_DEFAULT_LIMIT = 20" in kanban_source
-            and '"include_links"' in kanban_source
-            and "include_links=include_links" in kanban_source
-            and "Pass include_links=true" in kanban_source
+            "KANBAN_LIST_DEFAULT_LIMIT = 20" in patched_kanban
+            and '"include_links"' in patched_kanban
+            and "include_links=include_links" in patched_kanban
+            and "Pass include_links=true" in patched_kanban
         ),
-        "no_blind_drop_contract": "tool capability limits" in patched and "persisted-output" in storage_source,
+        "no_blind_drop_contract": "tool capability limits" in patched and "persisted-output" in patched_storage,
         "public_safe": True,
     }
     for key, ok in proof.items():
@@ -185,6 +196,8 @@ def build_report(hermes_source: Path) -> dict[str, Any]:
         "source_mode": source_mode,
         "hermes_source": str(hermes_source),
         "applied": applied,
+        "storage_applied": storage_applied,
+        "kanban_applied": kanban_applied,
         "thresholds": thresholds,
         "issues": issues,
         "proof": proof,

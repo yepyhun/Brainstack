@@ -231,6 +231,24 @@ RUN uv pip install --no-cache-dir --no-deps -e "."
     assert install_into_hermes._patch_dockerfile_workstation_python_alias(dockerfile, dry_run=False) == []
 
 
+def test_dockerfile_backend_dependency_patch_supports_messaging_extra_sync(tmp_path):
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(
+        "RUN uv sync --frozen --no-install-project --extra all --extra messaging\n"
+        'RUN uv pip install --no-cache-dir --no-deps -e "."\n',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_dockerfile_backend_dependencies(dockerfile, dry_run=False)
+    text = dockerfile.read_text(encoding="utf-8")
+
+    assert applied == ["dockerfile:install_backend_dependencies"]
+    assert "RUN uv pip install --no-cache-dir" in text
+    assert "chromadb" in text
+    assert "kuzu" in text
+    assert "hindsight-all-slim" in text
+
+
 def test_dockerfile_patch_adds_global_hermes_cli_after_workstation_python_alias(tmp_path):
     dockerfile = tmp_path / "Dockerfile"
     dockerfile.write_text(
@@ -510,6 +528,53 @@ def test_tool_result_budget_patch_covers_kanban_board_outputs(tmp_path):
     assert budget.resolve_threshold("kanban_list") == 12_000
     assert budget.resolve_threshold("kanban_show") == 16_000
     assert budget.resolve_threshold("read_file") == 32_000
+
+
+def test_terminal_tool_result_hygiene_supports_pending_approval_shape(tmp_path):
+    module = tmp_path / "terminal_tool.py"
+    module.write_text(
+        '''
+import json
+def terminal_tool(command, force=False):
+    approval = _check_all_guards(command, "local")
+    if True:
+        if True:
+            if not approval["approved"]:
+                # Check if this is an approval_required (gateway ask mode)
+                if approval.get("status") == "pending_approval":
+                    return json.dumps({
+                        "output": "",
+                        "exit_code": -1,
+                        "error": "",
+                        "status": "pending_approval",
+                        "approval_pending": True,
+                        "command": approval.get("command", command),
+                        "description": approval.get("description", "command flagged"),
+                        "pattern_key": approval.get("pattern_key", ""),
+                    }, ensure_ascii=False)
+                # Command was blocked
+                desc = approval.get("description", "command flagged")
+                fallback_msg = (
+                    f"Command denied: {desc}. "
+                    "Use the approval prompt to allow it, or rephrase the command."
+                )
+                return json.dumps({
+                    "output": "",
+                    "exit_code": -1,
+                    "error": approval.get("message", fallback_msg),
+                    "status": "blocked"
+                }, ensure_ascii=False)
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_terminal_tool_result_hygiene(module, dry_run=False)
+    text = module.read_text(encoding="utf-8")
+
+    assert "terminal_tool:approval_required_output_hygiene" in applied
+    assert '"output": approval_message,' in text
+    assert '"error": approval_message,' in text
+    assert '"output": approval.get("message", fallback_msg),' in text
 
 
 def test_context_compressor_patch_bounds_summary_and_preserves_fallback(tmp_path):
@@ -2164,6 +2229,87 @@ class AIAgent:
     assert "def _validate_external_memory_final_response" in text
     assert text.index("_validate_external_memory_final_response(") < text.index("_persist_session")
     assert "self._record_external_memory_validation_delivery(final_response)" in text
+
+
+def test_run_agent_memory_output_validation_patch_supports_extracted_conversation_loop(tmp_path):
+    module = tmp_path / "run_agent.py"
+    loop = tmp_path / "agent" / "conversation_loop.py"
+    loop.parent.mkdir()
+    module.write_text(
+        '''
+class AIAgent:
+    def _sync_external_memory_for_turn(
+        self,
+        *,
+        original_user_message: Any,
+        final_response: Any,
+        interrupted: bool,
+    ) -> None:
+        pass
+''',
+        encoding="utf-8",
+    )
+    loop.write_text(
+        '''
+def run_conversation(agent, messages, conversation_history, final_response, interrupted, original_user_message):
+    # Persist session to both JSON log and SQLite only after private retry
+    # scaffolding has been removed. Otherwise a later user "continue" turn
+    # can replay assistant("(empty)") / recovery nudges and fall into the
+    # same empty-response loop again.
+    agent._drop_trailing_empty_response_scaffolding(messages)
+    agent._persist_session(messages, conversation_history)
+
+    # Plugin hook: post_llm_call
+    if final_response and not interrupted:
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            pass
+        except Exception as exc:
+            logger.warning("post_llm_call hook failed: %s", exc)
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_run_agent_memory_output_validation_seam(module, dry_run=False)
+
+    module_text = module.read_text(encoding="utf-8")
+    loop_text = loop.read_text(encoding="utf-8")
+    assert "run_agent:memory_output_validation_helpers" in applied
+    assert "agent.conversation_loop:normal_memory_output_validation" in applied
+    assert "agent.conversation_loop:memory_output_validation_delivery_record" in applied
+    assert "def _validate_external_memory_final_response" in module_text
+    assert "agent._validate_external_memory_final_response(" in loop_text
+    assert loop_text.index("agent._validate_external_memory_final_response(") < loop_text.index("agent._persist_session")
+    assert "agent._record_external_memory_validation_delivery(final_response)" in loop_text
+
+
+def test_run_agent_ebadf_recovery_patch_supports_runtime_helper_extraction(tmp_path):
+    module = tmp_path / "run_agent.py"
+    helper = tmp_path / "agent" / "agent_runtime_helpers.py"
+    helper.parent.mkdir()
+    module.write_text("class AIAgent:\n    pass\n", encoding="utf-8")
+    helper.write_text(
+        '''
+def try_recover_primary_transport(agent, api_error, *, retry_count, max_retries):
+    if agent._fallback_activated:
+        return False
+
+    # Only for transient transport errors
+    error_type = type(api_error).__name__
+    if error_type not in _TRANSIENT_TRANSPORT_ERRORS:
+        return False
+
+    return True
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_run_agent_ebadf_transport_recovery(module, dry_run=False)
+    helper_text = helper.read_text(encoding="utf-8")
+
+    assert applied == ["agent_runtime_helpers:ebadf_transport_recovery"]
+    assert "is_ebadf_transport_error" in helper_text
+    assert "error_type not in _TRANSIENT_TRANSPORT_ERRORS and not is_ebadf_transport_error" in helper_text
 
 
 def test_run_agent_terminal_final_guard_patch_blocks_terminal_false_success(tmp_path):

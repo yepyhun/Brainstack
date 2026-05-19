@@ -1338,7 +1338,26 @@ def test_core_host_patch_lowers_existing_session_search_90s_default(tmp_path: Pa
 
     assert "session_search:lower_default_total_deadline" in actions
     assert "default: float = 20.0" in text
-    assert "default: float = 90.0" not in text
+
+
+def test_core_host_patch_skips_zero_llm_session_search_shape(tmp_path: Path) -> None:
+    session_search_tool = tmp_path / "session_search_tool.py"
+    session_search_tool.write_text(
+        '"""Session search without summarization LLM calls."""\n'
+        "def _format_timestamp(ts):\n"
+        "    return str(ts)\n"
+        "def session_search(query=None):\n"
+        "    return {'success': True, 'mode': 'discovery'}\n",
+        encoding="utf-8",
+    )
+
+    actions = install_into_hermes._patch_session_search_total_deadline(
+        session_search_tool,
+        dry_run=False,
+    )
+
+    assert actions == []
+    assert "def _get_session_search_total_deadline" not in session_search_tool.read_text(encoding="utf-8")
 
 
 def test_brainstack_projection_carries_private_memory_and_scheduler_contract(

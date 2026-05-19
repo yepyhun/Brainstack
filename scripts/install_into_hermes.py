@@ -4284,6 +4284,52 @@ def _patch_run_agent_memory_output_validation_seam(path: Path, dry_run: bool) ->
     if "        if final_response and not interrupted:\n            final_response = self._validate_external_memory_final_response(\n                original_user_message=original_user_message,\n                final_response=final_response,\n                interrupted=interrupted,\n            )" not in text:
         if normal_anchor in text:
             text = text.replace(normal_anchor, normal_replacement, 1)
+        elif (path.parent / "agent" / "conversation_loop.py").exists():
+            loop_path = path.parent / "agent" / "conversation_loop.py"
+            loop_text = loop_path.read_text(encoding="utf-8")
+            loop_marker = (
+                "    if final_response and not interrupted:\n"
+                "        final_response = agent._validate_external_memory_final_response(\n"
+                "            original_user_message=original_user_message,\n"
+                "            final_response=final_response,\n"
+                "            interrupted=interrupted,\n"
+                "        )\n"
+            )
+            loop_anchor = (
+                "    # Persist session to both JSON log and SQLite only after private retry\n"
+                "    # scaffolding has been removed. Otherwise a later user \"continue\" turn\n"
+                "    # can replay assistant(\"(empty)\") / recovery nudges and fall into the\n"
+                "    # same empty-response loop again.\n"
+                "    agent._drop_trailing_empty_response_scaffolding(messages)\n"
+                "    agent._persist_session(messages, conversation_history)\n"
+            )
+            loop_replacement = (
+                "    if final_response and not interrupted:\n"
+                "        final_response = agent._validate_external_memory_final_response(\n"
+                "            original_user_message=original_user_message,\n"
+                "            final_response=final_response,\n"
+                "            interrupted=interrupted,\n"
+                "        )\n"
+                "        agent._replace_last_assistant_response_content(messages, conversation_history, final_response)\n"
+                "\n"
+                "    # Persist session to both JSON log and SQLite only after private retry\n"
+                "    # scaffolding has been removed. Otherwise a later user \"continue\" turn\n"
+                "    # can replay assistant(\"(empty)\") / recovery nudges and fall into the\n"
+                "    # same empty-response loop again.\n"
+                "    agent._drop_trailing_empty_response_scaffolding(messages)\n"
+                "    agent._persist_session(messages, conversation_history)\n"
+            )
+            if loop_marker not in loop_text:
+                loop_text = _replace_once(
+                    loop_text,
+                    loop_anchor,
+                    loop_replacement,
+                    label="conversation_loop normal memory output validation",
+                    path=loop_path,
+                )
+                if not dry_run:
+                    loop_path.write_text(loop_text, encoding="utf-8")
+            applied.append("agent.conversation_loop:normal_memory_output_validation")
         else:
             text = _replace_once(
                 text,
@@ -4306,14 +4352,46 @@ def _patch_run_agent_memory_output_validation_seam(path: Path, dry_run: bool) ->
         "                from hermes_cli.plugins import invoke_hook as _invoke_hook\n"
     )
     if "self._record_external_memory_validation_delivery(final_response)" not in text:
-        text = _replace_once(
-            text,
-            delivery_anchor,
-            delivery_replacement,
-            label="run_agent memory output validation delivery record",
-            path=path,
-        )
-        applied.append("run_agent:memory_output_validation_delivery_record")
+        if delivery_anchor in text:
+            text = _replace_once(
+                text,
+                delivery_anchor,
+                delivery_replacement,
+                label="run_agent memory output validation delivery record",
+                path=path,
+            )
+            applied.append("run_agent:memory_output_validation_delivery_record")
+        elif (path.parent / "agent" / "conversation_loop.py").exists():
+            loop_path = path.parent / "agent" / "conversation_loop.py"
+            loop_text = loop_path.read_text(encoding="utf-8")
+            loop_delivery_marker = "agent._record_external_memory_validation_delivery(final_response)"
+            loop_delivery_anchor = "    # Plugin hook: post_llm_call\n"
+            loop_delivery_replacement = (
+                "    if final_response and not interrupted:\n"
+                "        agent._record_external_memory_validation_delivery(final_response)\n"
+                "\n"
+                "    # Plugin hook: post_llm_call\n"
+            )
+            if loop_delivery_marker not in loop_text:
+                loop_text = _replace_once(
+                    loop_text,
+                    loop_delivery_anchor,
+                    loop_delivery_replacement,
+                    label="conversation_loop memory output validation delivery record",
+                    path=loop_path,
+                )
+                if not dry_run:
+                    loop_path.write_text(loop_text, encoding="utf-8")
+            applied.append("agent.conversation_loop:memory_output_validation_delivery_record")
+        else:
+            text = _replace_once(
+                text,
+                delivery_anchor,
+                delivery_replacement,
+                label="run_agent memory output validation delivery record",
+                path=path,
+            )
+            applied.append("run_agent:memory_output_validation_delivery_record")
 
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
@@ -4975,23 +5053,55 @@ def _patch_terminal_tool_result_hygiene(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
 
-    if '"output": message,' not in text:
-        text = _replace_once(
-            text,
+    if '"output": message,' not in text and '"output": approval_message,' not in text:
+        old_approval_anchor = (
             '                if approval.get("status") == "approval_required":\n'
             "                    return json.dumps({\n"
             '                        "output": "",\n'
             '                        "exit_code": -1,\n'
-            '                        "error": approval.get("message", "Waiting for user approval"),\n',
+            '                        "error": approval.get("message", "Waiting for user approval"),\n'
+        )
+        old_approval_replacement = (
             '                if approval.get("status") == "approval_required":\n'
             '                    message = approval.get("message", "Waiting for user approval")\n'
             "                    return json.dumps({\n"
             '                        "output": message,\n'
             '                        "exit_code": -1,\n'
-            '                        "error": message,\n',
-            label="terminal approval-required output hygiene",
-            path=path,
+            '                        "error": message,\n'
         )
+        pending_approval_anchor = (
+            '                if approval.get("status") == "pending_approval":\n'
+            "                    return json.dumps({\n"
+            '                        "output": "",\n'
+            '                        "exit_code": -1,\n'
+            '                        "error": "",\n'
+            '                        "status": "pending_approval",\n'
+        )
+        pending_approval_replacement = (
+            '                if approval.get("status") == "pending_approval":\n'
+            '                    approval_message = approval.get("message") or approval.get("description", "command flagged")\n'
+            "                    return json.dumps({\n"
+            '                        "output": approval_message,\n'
+            '                        "exit_code": -1,\n'
+            '                        "error": approval_message,\n'
+            '                        "status": "pending_approval",\n'
+        )
+        if old_approval_anchor in text:
+            text = _replace_once(
+                text,
+                old_approval_anchor,
+                old_approval_replacement,
+                label="terminal approval-required output hygiene",
+                path=path,
+            )
+        else:
+            text = _replace_once(
+                text,
+                pending_approval_anchor,
+                pending_approval_replacement,
+                label="terminal pending-approval output hygiene",
+                path=path,
+            )
         applied.append("terminal_tool:approval_required_output_hygiene")
 
     if '"output": approval.get("message", fallback_msg),' not in text:
@@ -6438,6 +6548,13 @@ def _patch_auxiliary_client(path: Path, dry_run: bool) -> list[str]:
 def _patch_session_search_total_deadline(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
+    has_llm_summary_path = (
+        "asyncio.gather(*coros" in text
+        or "Session summarization timed out" in text
+        or "SESSION_SEARCH_SUMMARIZATION_TIMEOUT" in text
+    )
+    if not has_llm_summary_path:
+        return applied
 
     helper = (
         "\n\n"
@@ -7148,16 +7265,15 @@ def _patch_discord_outbound_final_dedupe(path: Path, dry_run: bool) -> list[str]
 
 
 def _patch_run_agent_ebadf_transport_recovery(path: Path, dry_run: bool) -> list[str]:
-    text = path.read_text(encoding="utf-8")
     applied: list[str] = []
 
-    old = (
+    old_self = (
         "        # Only for transient transport errors\n"
         "        error_type = type(api_error).__name__\n"
         "        if error_type not in self._TRANSIENT_TRANSPORT_ERRORS:\n"
         "            return False\n"
     )
-    new = (
+    new_self = (
         "        # Only for transient transport errors. EBADF is the closed-file-\n"
         "        # descriptor variant seen when a long-lived provider transport is\n"
         "        # stale or was closed under a background cron run; recover once by\n"
@@ -7170,18 +7286,59 @@ def _patch_run_agent_ebadf_transport_recovery(path: Path, dry_run: bool) -> list
         "        if error_type not in self._TRANSIENT_TRANSPORT_ERRORS and not is_ebadf_transport_error:\n"
         "            return False\n"
     )
-    if "is_ebadf_transport_error" not in text:
+    old_helper = (
+        "    # Only for transient transport errors\n"
+        "    error_type = type(api_error).__name__\n"
+        "    if error_type not in _TRANSIENT_TRANSPORT_ERRORS:\n"
+        "        return False\n"
+    )
+    new_helper = (
+        "    # Only for transient transport errors. EBADF is the closed-file-\n"
+        "    # descriptor variant seen when a long-lived provider transport is\n"
+        "    # stale or was closed under a background cron run; recover once by\n"
+        "    # rebuilding the client instead of failing a large job immediately.\n"
+        "    error_type = type(api_error).__name__\n"
+        "    is_ebadf_transport_error = False\n"
+        "    if isinstance(api_error, OSError):\n"
+        "        import errno as _errno\n"
+        "        is_ebadf_transport_error = getattr(api_error, \"errno\", None) == _errno.EBADF\n"
+        "    if error_type not in _TRANSIENT_TRANSPORT_ERRORS and not is_ebadf_transport_error:\n"
+        "        return False\n"
+    )
+
+    targets = [("run_agent", path)]
+    helper_path = path.parent / "agent" / "agent_runtime_helpers.py"
+    if helper_path.exists():
+        targets.append(("agent_runtime_helpers", helper_path))
+
+    last_missing: RuntimeError | None = None
+    for label_prefix, target_path in targets:
+        if not target_path.exists():
+            continue
+        text = target_path.read_text(encoding="utf-8")
+        if "is_ebadf_transport_error" in text:
+            return applied
+        old = old_self if label_prefix == "run_agent" else old_helper
+        new = new_self if label_prefix == "run_agent" else new_helper
+        if old not in text:
+            last_missing = RuntimeError(
+                f"Installer patch anchor missing for EBADF provider transport recovery in {target_path}"
+            )
+            continue
         text = _replace_once(
             text,
             old,
             new,
             label="EBADF provider transport recovery",
-            path=path,
+            path=target_path,
         )
-        applied.append("run_agent:ebadf_transport_recovery")
+        applied.append(f"{label_prefix}:ebadf_transport_recovery")
+        if not dry_run:
+            target_path.write_text(text, encoding="utf-8")
+        return applied
 
-    if applied and not dry_run:
-        path.write_text(text, encoding="utf-8")
+    if last_missing is not None:
+        raise last_missing
     return applied
 
 
@@ -8878,6 +9035,7 @@ def _patch_dockerfile_backend_dependencies(path: Path, dry_run: bool) -> list[st
     anchors = (
         '    uv pip install --no-cache-dir -e ".[all]"\n',
         "RUN uv sync --frozen --no-install-project --extra all\n",
+        "RUN uv sync --frozen --no-install-project --extra all --extra messaging\n",
     )
     for anchor in anchors:
         if anchor in text:
