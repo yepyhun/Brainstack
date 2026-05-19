@@ -2783,6 +2783,50 @@ def test_doctor_profile_resolves_named_profile_config(monkeypatch, tmp_path):
     )
 
 
+def test_docker_doctor_uses_running_container_python_target(monkeypatch, tmp_path):
+    target = tmp_path / "hermes"
+    target.mkdir()
+    config = target / "hermes-config" / "bestie" / "config.yaml"
+    compose = target / "docker-compose.bestie.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text("memory: {}\nplugins: {}\n", encoding="utf-8")
+    compose.write_text("services:\n  hermes-bestie:\n    container_name: hermes-bestie-live\n", encoding="utf-8")
+
+    monkeypatch.setattr(brainstack_doctor, "_default_desktop_launcher", lambda _target: None)
+    monkeypatch.setattr(brainstack_doctor, "_default_target_python", lambda _target: None)
+    monkeypatch.setattr(brainstack_doctor, "_check_target_shape", lambda _target: [])
+    monkeypatch.setattr(brainstack_doctor, "_check_host_surfaces", lambda _target, planned_install=False: [])
+    monkeypatch.setattr(brainstack_doctor, "_check_plugin", lambda _target, planned_install: [])
+    monkeypatch.setattr(brainstack_doctor, "_check_config", lambda _config_path, **_kwargs: [])
+    monkeypatch.setattr(
+        brainstack_doctor,
+        "_run_docker_python_probe",
+        lambda *_args, **_kwargs: {"python": "/opt/hermes/.venv/bin/python"},
+    )
+
+    args = Namespace(
+        target=str(target),
+        config=str(config),
+        profile=None,
+        compose_file=str(compose),
+        desktop_launcher=None,
+        python=None,
+        runtime="docker",
+        planned_install=False,
+        check_docker=False,
+        check_desktop_launcher=False,
+        json=False,
+    )
+
+    code, checks = brainstack_doctor.run_doctor(args)
+
+    python_target = {check.name: check for check in checks}["python_target"]
+    assert code == 0
+    assert python_target.status == "pass"
+    assert "Docker runtime Python" in python_target.message
+    assert "/opt/hermes/.venv/bin/python" in python_target.message
+
+
 def test_doctor_explicit_config_wins_over_profile(monkeypatch, tmp_path):
     target = tmp_path / "hermes"
     profile_config = target / "hermes-config" / "titans-agent" / "config.yaml"

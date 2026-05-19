@@ -1217,6 +1217,42 @@ def _run_docker_python_probe(
     return None
 
 
+def _python_target_check(
+    *,
+    runtime: str,
+    python_bin: Path | None,
+    compose_path: Path | None,
+    planned_install: bool,
+) -> Check:
+    if python_bin is not None:
+        return Check("python_target", "pass", f"Dependency checks use {python_bin}")
+
+    if runtime == "docker" and compose_path is not None and not planned_install:
+        payload = _run_docker_python_probe(
+            "import json, sys; print(json.dumps({'python': sys.executable}))",
+            compose_path=compose_path,
+        )
+        docker_python = str((payload or {}).get("python") or "").strip()
+        if docker_python:
+            return Check(
+                "python_target",
+                "pass",
+                f"Dependency checks use Docker runtime Python {docker_python}",
+            )
+        return Check(
+            "python_target",
+            "warn",
+            "No host Python was configured and Docker runtime Python is not reachable; "
+            "dependency checks fall back to image/build proof or the current interpreter",
+        )
+
+    return Check(
+        "python_target",
+        "warn",
+        "No target Python detected; dependency checks fall back to the current interpreter",
+    )
+
+
 def _backend_openability_checks(
     *,
     backend: str,
@@ -1481,10 +1517,14 @@ def run_doctor(args: argparse.Namespace) -> tuple[int, list[Check]]:
                     f"Could not resolve profile {profile!r} config. Checked: {candidates}",
                 )
             )
-    if python_bin is not None:
-        checks.append(Check("python_target", "pass", f"Dependency checks use {python_bin}"))
-    else:
-        checks.append(Check("python_target", "warn", "No target Python detected; dependency checks fall back to the current interpreter"))
+    checks.append(
+        _python_target_check(
+            runtime=runtime,
+            python_bin=python_bin,
+            compose_path=compose_path,
+            planned_install=args.planned_install,
+        )
+    )
     checks.extend(_check_target_shape(target))
     if "planned_install" in inspect.signature(_check_host_surfaces).parameters:
         checks.extend(_check_host_surfaces(target, planned_install=args.planned_install))
