@@ -74,6 +74,25 @@ Each host patch entry records:
 - `removal_condition`: the concrete upstream state where the installer should stop
   applying it
 
+Important: `selected=false` or "not applied" does not automatically mean the
+seam is missing. A patch can be skipped because:
+
+- Hermes now owns the behavior natively;
+- a Brainstack provider projection replaced an old host wording patch;
+- the patch belongs only to legacy/compat mode, not the supported core mode.
+
+Use `brainstack_doctor.py` for the runtime contract verdict. The doctor should
+verify host seams by behavior evidence across the current Hermes module layout,
+not by assuming all memory-provider wiring still lives in `run_agent.py`.
+
+For each risky host seam, the useful states are:
+
+- `patched` — Brainstack applied the compatibility patch;
+- `upstream_native` — Hermes already provides the behavior;
+- `skipped_legacy` — intentionally outside core mode;
+- `superseded` — replaced by Brainstack plugin/provider projection;
+- `missing` — behavior is not proven and install/release is blocked.
+
 ## Temporary Upstream Hermes Hotfixes
 
 Temporary upstream hotfixes are not Brainstack product features. They are

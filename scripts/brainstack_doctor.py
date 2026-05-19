@@ -32,8 +32,10 @@ from brainstack.config_shape import validate_brainstack_config_shape  # noqa: E4
 
 try:
     from hermes_gateway_patch_support import inspect_gateway_patch_support
+    from brainstack_host_seams import scan_host_seams
 except ModuleNotFoundError:  # pytest imports scripts as a namespace package
     from scripts.hermes_gateway_patch_support import inspect_gateway_patch_support
+    from scripts.brainstack_host_seams import scan_host_seams
 
 
 REQUIRED_PLUGIN_FILES = [
@@ -455,6 +457,11 @@ def _check_host_surfaces(target: Path, *, planned_install: bool = False) -> list
     run_agent = _read(target / "run_agent.py")
     gateway_run = _read(target / "gateway" / "run.py")
     discord_platform = _read(target / "gateway" / "platforms" / "discord.py")
+    host_seam_probes = {probe.name: probe for probe in scan_host_seams(target)}
+
+    def append_host_probe(name: str) -> None:
+        probe = host_seam_probes[name]
+        checks.append(Check(probe.name, probe.status, probe.doctor_message()))
 
     required_provider_terms = [
         "class MemoryProvider",
@@ -496,17 +503,8 @@ def _check_host_surfaces(target: Path, *, planned_install: bool = False) -> list
     else:
         checks.append(Check("plugin_loader", "fail", "Hermes memory plugin loader is missing or incompatible"))
 
-    required_run_terms = [
-        "memory.provider",
-        "load_memory_provider",
-        "prefetch_all",
-        "sync_all",
-    ]
-    missing_run = [term for term in required_run_terms if term not in run_agent]
-    if missing_run:
-        checks.append(Check("host_runtime_wiring", "fail", f"Missing run_agent wiring terms: {', '.join(missing_run)}"))
-    else:
-        checks.append(Check("host_runtime_wiring", "pass", "run_agent has external memory provider wiring"))
+    append_host_probe("host_runtime_wiring")
+    append_host_probe("memory_write_metadata_seam")
 
     if "on_turn_start(" not in run_agent:
         checks.append(Check("turn_start_hook", "warn", "on_turn_start exists in provider API but is not called by this Hermes host; Brainstack can still count turns through sync_turn"))
@@ -529,43 +527,9 @@ def _check_host_surfaces(target: Path, *, planned_install: bool = False) -> list
     else:
         checks.append(Check("final_output_validation", "pass", "No Brainstack-specific host reply gate detected"))
 
-    if "self._memory_manager.on_memory_write(" in run_agent:
-        checks.append(Check("native_profile_write_bridge", "pass", "run_agent bridges Hermes native explicit writes into external memory providers"))
-    else:
-        checks.append(Check("native_profile_write_bridge", "fail", "run_agent does not bridge Hermes native explicit writes into external memory providers"))
-
-    upstream_interrupted_sync_guard = (
-        "def _sync_external_memory_for_turn(" in run_agent
-        and "Interrupted turns are skipped entirely (#15218)" in run_agent
-        and "if interrupted:\n            return" in run_agent
-    )
-    legacy_interrupted_sync_guard = (
-        "self._memory_manager and final_response and original_user_message and not interrupted" in run_agent
-    )
-    if upstream_interrupted_sync_guard:
-        checks.append(
-            Check(
-                "interrupted_turn_external_memory_guard",
-                "pass",
-                "Hermes native seam skips external memory sync for interrupted turns (#15218/#15395)",
-            )
-        )
-    elif legacy_interrupted_sync_guard:
-        checks.append(
-            Check(
-                "interrupted_turn_external_memory_guard",
-                "pass",
-                "Legacy Brainstack host patch skips external memory sync for interrupted turns",
-            )
-        )
-    else:
-        checks.append(
-            Check(
-                "interrupted_turn_external_memory_guard",
-                "fail",
-                "run_agent can mirror interrupted turns into external memory providers",
-            )
-        )
+    append_host_probe("native_profile_write_bridge")
+    append_host_probe("memory_output_validation_seam")
+    append_host_probe("interrupted_turn_external_memory_guard")
 
     if "filter_legacy_memory_tool_defs" in run_agent and "LEGACY_MEMORY_TOOL_NAMES" in run_agent:
         checks.append(Check("legacy_tool_surface_gate", "warn", "Legacy Brainstack-only tool gating is still present in run_agent"))
