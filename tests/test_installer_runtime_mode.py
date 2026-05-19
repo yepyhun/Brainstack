@@ -1777,7 +1777,7 @@ def _task_summary_dict(kb, conn, task) -> dict:
 def _handle_list(args: dict, **kw) -> str:
     include_archived, bool_error = _parse_bool_arg(args, "include_archived")
     if bool_error:
-        return bool_error
+        return tool_error(bool_error)
     limit = args.get("limit")
     return json.dumps({"tasks": [_task_summary_dict(kb, conn, t) for t in tasks]})
 KANBAN_LIST_SCHEMA = {
@@ -1852,6 +1852,170 @@ KANBAN_LIST_SCHEMA = {
     assert summary["child_count"] == 1
     assert full["parents"] == ["p1", "p2"]
     assert full["children"] == ["c1"]
+
+
+def test_kanban_list_compact_default_patch_preserves_upstream_summary_fields(tmp_path) -> None:
+    module = tmp_path / "kanban_tools.py"
+    module.write_text(
+        '''
+import json
+from typing import Any
+KANBAN_LIST_DEFAULT_LIMIT = 50
+KANBAN_LIST_MAX_LIMIT = 200
+def _parse_bool_arg(args: dict, name: str, *, default: bool = False):
+    value = args.get(name)
+    if value is None:
+        return default, None
+    return bool(value), None
+def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
+    """Compact task shape for board-listing tools."""
+    parents = kb.parent_ids(conn, task.id)
+    children = kb.child_ids(conn, task.id)
+    return {
+        "id": task.id,
+        "title": task.title,
+        "assignee": task.assignee,
+        "status": task.status,
+        "priority": task.priority,
+        "tenant": task.tenant,
+        "workspace_kind": task.workspace_kind,
+        "workspace_path": task.workspace_path,
+        "created_by": task.created_by,
+        "created_at": task.created_at,
+        "started_at": task.started_at,
+        "completed_at": task.completed_at,
+        "current_run_id": task.current_run_id,
+        "model_override": task.model_override,
+        "upstream_new_field": task.upstream_new_field,
+        "parents": parents,
+        "children": children,
+        "parent_count": len(parents),
+        "child_count": len(children),
+    }
+def _handle_list(args: dict, **kw) -> str:
+    include_archived, bool_error = _parse_bool_arg(args, "include_archived")
+    if bool_error:
+        return tool_error(bool_error)
+    limit = args.get("limit")
+    return json.dumps({"tasks": [_task_summary_dict(kb, conn, t) for t in tasks]})
+KANBAN_LIST_SCHEMA = {
+    "name": "kanban_list",
+    "description": (
+        "List Kanban task summaries so an orchestrator profile can discover "
+        "work to route. Supports the same core filters as the CLI: assignee, "
+        "status, tenant, include_archived, and limit. Returns compact rows "
+        "with ids, title, status, assignee, priority, parent/child ids, and "
+        "counts. Bounded to 50 rows by default, 200 max, with truncation "
+        "metadata. Also recomputes ready tasks before listing, matching the "
+        "CLI. Orchestrator-only — dispatcher-spawned task workers never see "
+        "this tool."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "include_archived": {
+                "type": "boolean",
+                "description": "Include archived tasks. Defaults to false.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Optional maximum rows to return (default 50, max 200).",
+            },
+        },
+        "required": [],
+    },
+}
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_kanban_list_compact_default(module, dry_run=False)
+    text = module.read_text(encoding="utf-8")
+    assert "kanban_list:compact_default_links" in applied
+    assert "include_links: bool = False" in text
+    assert '"model_override": task.model_override' in text
+    assert '"upstream_new_field": task.upstream_new_field' in text
+    assert not install_into_hermes._kanban_list_compact_patch_issues(text)
+
+    namespace: dict[str, object] = {}
+    exec(compile(text, str(module), "exec"), namespace)
+
+    class Kb:
+        def parent_ids(self, conn, task_id):
+            return ["p1", "p2"]
+
+        def child_ids(self, conn, task_id):
+            return ["c1"]
+
+    class Task:
+        id = "t1"
+        title = "task"
+        assignee = "worker"
+        status = "ready"
+        priority = 10
+        tenant = "default"
+        workspace_kind = "default"
+        workspace_path = ""
+        created_by = "test"
+        created_at = 1
+        started_at = None
+        completed_at = None
+        current_run_id = None
+        model_override = "gpt-test"
+        upstream_new_field = "kept"
+
+    summary = namespace["_task_summary_dict"](Kb(), None, Task())
+    full = namespace["_task_summary_dict"](Kb(), None, Task(), include_links=True)
+
+    assert summary["model_override"] == "gpt-test"
+    assert summary["upstream_new_field"] == "kept"
+    assert "parents" not in summary
+    assert "children" not in summary
+    assert full["parents"] == ["p1", "p2"]
+    assert full["children"] == ["c1"]
+
+
+def test_kanban_list_compact_default_patch_repairs_partial_half_wire(tmp_path) -> None:
+    module = tmp_path / "kanban_tools.py"
+    module.write_text(
+        '''
+KANBAN_LIST_DEFAULT_LIMIT = 20
+def _parse_bool_arg(args: dict, name: str, *, default: bool = False):
+    return default, None
+def _task_summary_dict(kb, conn, task) -> dict:
+    parents = kb.parent_ids(conn, task.id)
+    children = kb.child_ids(conn, task.id)
+    return {
+        "id": task.id,
+        "parents": parents,
+        "children": children,
+        "parent_count": len(parents),
+        "child_count": len(children),
+    }
+def _handle_list(args: dict, **kw) -> str:
+    include_links, bool_error = _parse_bool_arg(args, "include_links")
+    return {"tasks": [_task_summary_dict(kb, conn, t, include_links=include_links) for t in tasks]}
+KANBAN_LIST_SCHEMA = {
+    "parameters": {"properties": {
+        "include_links": {
+            "type": "boolean",
+            "description": "Include full parent/child id arrays. Defaults to false; counts are always returned.",
+        },
+    }},
+}
+''',
+        encoding="utf-8",
+    )
+    assert "summary_signature" in install_into_hermes._kanban_list_compact_patch_issues(
+        module.read_text(encoding="utf-8")
+    )
+
+    install_into_hermes._patch_kanban_list_compact_default(module, dry_run=False)
+    text = module.read_text(encoding="utf-8")
+
+    assert not install_into_hermes._kanban_list_compact_patch_issues(text)
+    assert "include_links: bool = False" in text
+    assert "return summary" in text
 
 
 def test_gateway_background_process_output_boundary_compacts_large_output(tmp_path, monkeypatch) -> None:

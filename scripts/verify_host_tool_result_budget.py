@@ -179,7 +179,12 @@ def build_report(hermes_source: Path) -> dict[str, Any]:
             "KANBAN_LIST_DEFAULT_LIMIT = 20" in patched_kanban
             and '"include_links"' in patched_kanban
             and "include_links=include_links" in patched_kanban
+            and "include_links: bool = False" in patched_kanban
+            and "return summary" in patched_kanban
             and "Pass include_links=true" in patched_kanban
+        ),
+        "kanban_list_compact_patch_consistent": not install_into_hermes._kanban_list_compact_patch_issues(
+            patched_kanban
         ),
         "no_blind_drop_contract": "tool capability limits" in patched and "persisted-output" in patched_storage,
         "public_safe": True,

@@ -1176,6 +1176,113 @@ def _replace_once_any(
     raise RuntimeError(f"Installer patch anchor missing for {label} in {path}")
 
 
+def _replace_python_function(text: str, function_name: str, new_source: str, *, path: Path) -> str:
+    """Replace a top-level Python function using AST line spans."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as exc:
+        raise RuntimeError(f"Cannot parse {path} while patching {function_name}: {exc}") from exc
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            if not getattr(node, "end_lineno", None):
+                raise RuntimeError(f"Cannot locate end line for {function_name} in {path}")
+            lines = text.splitlines(keepends=True)
+            start = node.lineno - 1
+            end = node.end_lineno
+            replacement = new_source.rstrip("\n") + "\n"
+            return "".join([*lines[:start], replacement, *lines[end:]])
+    raise RuntimeError(f"Installer patch function missing: {function_name} in {path}")
+
+
+def _extract_python_function(text: str, function_name: str, *, path: Path) -> str:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as exc:
+        raise RuntimeError(f"Cannot parse {path} while reading {function_name}: {exc}") from exc
+    lines = text.splitlines(keepends=True)
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            if not getattr(node, "end_lineno", None):
+                raise RuntimeError(f"Cannot locate end line for {function_name} in {path}")
+            return "".join(lines[node.lineno - 1 : node.end_lineno])
+    raise RuntimeError(f"Installer patch function missing: {function_name} in {path}")
+
+
+def _patch_kanban_task_summary_function(text: str, *, path: Path) -> tuple[str, bool]:
+    source = _extract_python_function(text, "_task_summary_dict", path=path)
+    first_line, _, _ = source.partition("\n")
+    if "include_links" in first_line and "return summary" in source:
+        return text, False
+    if "def _task_summary_dict(kb, conn, task" not in first_line:
+        raise RuntimeError(f"Unexpected _task_summary_dict signature in {path}: {first_line}")
+
+    patched = source.replace(
+        "def _task_summary_dict(kb, conn, task)",
+        "def _task_summary_dict(kb, conn, task, *, include_links: bool = False)",
+        1,
+    )
+    if "    return {\n" not in patched:
+        raise RuntimeError(f"Cannot find _task_summary_dict return dict in {path}")
+    patched = patched.replace("    return {\n", "    summary = {\n", 1)
+    patched = patched.replace('        "parents": parents,\n', "")
+    patched = patched.replace('        "children": children,\n', "")
+    dict_close = "    }\n"
+    if dict_close not in patched:
+        raise RuntimeError(f"Cannot find _task_summary_dict dict close in {path}")
+    patched = patched.replace(
+        dict_close,
+        (
+            "    }\n"
+            "    if include_links:\n"
+            '        summary["parents"] = parents\n'
+            '        summary["children"] = children\n'
+            "    return summary\n"
+        ),
+        1,
+    )
+    doc_anchor = '    """Compact task shape for board-listing tools."""\n'
+    if doc_anchor in patched:
+        patched = patched.replace(
+            doc_anchor,
+            (
+                '    """Compact task shape for board-listing tools.\n'
+                "\n"
+                "    Parent/child ids are useful for deep inspection, but ordinary board\n"
+                "    status checks only need counts. Keep full ids behind an explicit\n"
+                "    include_links flag so large boards do not flood model context.\n"
+                '    """\n'
+            ),
+            1,
+        )
+    return _replace_python_function(text, "_task_summary_dict", patched, path=path), True
+
+
+def _kanban_list_compact_patch_issues(text: str) -> list[str]:
+    markers = {
+        "summary_signature": bool(
+            re.search(
+                r"def\s+_task_summary_dict\s*\([^)]*include_links\s*:\s*bool\s*=\s*False",
+                text,
+            )
+        ),
+        "summary_return": "return summary" in text,
+        "handle_arg": 'include_links, bool_error = _parse_bool_arg(args, "include_links")' in text,
+        "summary_call": "include_links=include_links" in text,
+        "schema_property": '"include_links"' in text and "Include full parent/child id arrays" in text,
+    }
+    if not any(markers.values()):
+        return []
+    return [name for name, ok in markers.items() if not ok]
+
+
+def _assert_kanban_list_compact_patch_consistent(text: str, *, path: Path) -> None:
+    issues = _kanban_list_compact_patch_issues(text)
+    if issues:
+        raise RuntimeError(
+            f"Incomplete kanban_list compact patch in {path}: missing {', '.join(issues)}"
+        )
+
+
 def _memory_write_signature_accepts_metadata(text: str) -> bool:
     try:
         tree = ast.parse(text)
@@ -5520,71 +5627,9 @@ def _patch_kanban_list_compact_default(path: Path, dry_run: bool) -> list[str]:
         )
         applied.append("kanban_list:default_limit_20")
 
-    old_summary = '''def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
-    """Compact task shape for board-listing tools."""
-    parents = kb.parent_ids(conn, task.id)
-    children = kb.child_ids(conn, task.id)
-    return {
-        "id": task.id,
-        "title": task.title,
-        "assignee": task.assignee,
-        "status": task.status,
-        "priority": task.priority,
-        "tenant": task.tenant,
-        "workspace_kind": task.workspace_kind,
-        "workspace_path": task.workspace_path,
-        "created_by": task.created_by,
-        "created_at": task.created_at,
-        "started_at": task.started_at,
-        "completed_at": task.completed_at,
-        "current_run_id": task.current_run_id,
-        "parents": parents,
-        "children": children,
-        "parent_count": len(parents),
-        "child_count": len(children),
-    }
-'''
-    if old_summary not in text:
-        old_summary = old_summary.replace("dict[str, Any]", "dict")
-    if old_summary in text and "include_links: bool = False" not in text:
-        new_summary = '''def _task_summary_dict(kb, conn, task, *, include_links: bool = False) -> dict:
-    """Compact task shape for board-listing tools.
-
-    Parent/child ids are useful for deep inspection, but ordinary board
-    status checks only need counts. Keep full ids behind an explicit
-    include_links flag so large boards do not flood model context.
-    """
-    parents = kb.parent_ids(conn, task.id)
-    children = kb.child_ids(conn, task.id)
-    summary = {
-        "id": task.id,
-        "title": task.title,
-        "assignee": task.assignee,
-        "status": task.status,
-        "priority": task.priority,
-        "tenant": task.tenant,
-        "workspace_kind": task.workspace_kind,
-        "workspace_path": task.workspace_path,
-        "created_by": task.created_by,
-        "created_at": task.created_at,
-        "started_at": task.started_at,
-        "completed_at": task.completed_at,
-        "current_run_id": task.current_run_id,
-        "parent_count": len(parents),
-        "child_count": len(children),
-    }
-    if include_links:
-        summary["parents"] = parents
-        summary["children"] = children
-    return summary
-'''
-        text = _replace_once(
-            text,
-            old_summary,
-            new_summary,
-            label="kanban list compact default links",
-            path=path,
-        )
+    patched_text, patched_summary = _patch_kanban_task_summary_function(text, path=path)
+    if patched_summary:
+        text = patched_text
         applied.append("kanban_list:compact_default_links")
 
     if 'include_links, bool_error = _parse_bool_arg(args, "include_links")' not in text:
@@ -5665,6 +5710,7 @@ def _patch_kanban_list_compact_default(path: Path, dry_run: bool) -> list[str]:
         text = text.replace("default 50, max 200", "default 20, max 200")
         applied.append("kanban_list:limit_description")
 
+    _assert_kanban_list_compact_patch_consistent(text, path=path)
     if applied and not dry_run:
         path.write_text(text, encoding="utf-8")
     return applied
