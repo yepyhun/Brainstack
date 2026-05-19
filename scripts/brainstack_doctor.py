@@ -505,11 +505,7 @@ def _check_host_surfaces(target: Path, *, planned_install: bool = False) -> list
 
     append_host_probe("host_runtime_wiring")
     append_host_probe("memory_write_metadata_seam")
-
-    if "on_turn_start(" not in run_agent:
-        checks.append(Check("turn_start_hook", "warn", "on_turn_start exists in provider API but is not called by this Hermes host; Brainstack can still count turns through sync_turn"))
-    else:
-        checks.append(Check("turn_start_hook", "pass", "run_agent calls memory provider on_turn_start"))
+    append_host_probe("turn_start_hook")
 
     if (
         "def is_brainstack_only_mode" in brainstack_mode

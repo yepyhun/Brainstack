@@ -111,6 +111,79 @@ def _calls_attr(tree: ast.AST, attr: str, *, keyword: str | None = None) -> bool
     return False
 
 
+def _attr_chain(node: ast.AST) -> tuple[str, ...]:
+    parts: list[str] = []
+    current = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if isinstance(current, ast.Name):
+        parts.append(current.id)
+    return tuple(reversed(parts))
+
+
+def _function_calls_memory_manager_attr(
+    tree: ast.AST,
+    function_name: str,
+    attr: str,
+) -> bool:
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != function_name:
+            continue
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            func = child.func
+            if not isinstance(func, ast.Attribute) or func.attr != attr:
+                continue
+            chain = _attr_chain(func)
+            if "_memory_manager" in chain:
+                return True
+    return False
+
+
+def _function_calls_attr(tree: ast.AST, function_name: str, attr: str) -> bool:
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != function_name:
+            continue
+        for child in ast.walk(node):
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute):
+                if child.func.attr == attr:
+                    chain = _attr_chain(child.func)
+                    if not chain or chain[0] != "self":
+                        return True
+    return False
+
+
+def _call_tree_contains_attr(nodes: Iterable[ast.stmt], attr: str) -> bool:
+    for node in nodes:
+        for child in ast.walk(node):
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute):
+                if child.func.attr == attr:
+                    chain = _attr_chain(child.func)
+                    if not chain or chain[0] != "self":
+                        return True
+    return False
+
+
+def _function_try_wraps_attr(tree: ast.AST, function_name: str, attr: str) -> bool:
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != function_name:
+            continue
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Try):
+                continue
+            if child.handlers and _call_tree_contains_attr(child.body, attr):
+                return True
+    return False
+
+
 def _calls_name_or_attr(tree: ast.AST, name_or_attr: str) -> bool:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -317,6 +390,80 @@ def probe_memory_write_metadata_seam(target: Path) -> HostSeamProbe:
     )
 
 
+def probe_turn_start_lifecycle_hook(target: Path) -> HostSeamProbe:
+    corpus = HostSurfaceCorpus(target)
+    evidence: list[HostSeamEvidence] = []
+    missing: list[str] = []
+
+    provider_tree = corpus.tree("agent/memory_provider.py")
+    if provider_tree is not None and _has_function(provider_tree, "on_turn_start"):
+        evidence.append(
+            HostSeamEvidence(
+                "agent/memory_provider.py",
+                "MemoryProvider.on_turn_start",
+                "provider API exposes turn-start lifecycle hook",
+            )
+        )
+    else:
+        missing.append("MemoryProvider.on_turn_start API")
+
+    manager_tree = corpus.tree("agent/memory_manager.py")
+    if (
+        manager_tree is not None
+        and _has_function(manager_tree, "on_turn_start")
+        and _function_calls_attr(manager_tree, "on_turn_start", "on_turn_start")
+        and _function_try_wraps_attr(manager_tree, "on_turn_start", "on_turn_start")
+    ):
+        evidence.append(
+            HostSeamEvidence(
+                "agent/memory_manager.py",
+                "MemoryManager.on_turn_start -> provider.on_turn_start",
+                "manager fans turn-start lifecycle out to memory providers with exception containment",
+            )
+        )
+    else:
+        missing.append("MemoryManager.on_turn_start provider fanout with exception containment")
+
+    host_evidence: HostSeamEvidence | None = None
+    for rel_path, tree in _trees(corpus, ("run_agent.py", "agent/conversation_loop.py")):
+        if _function_calls_memory_manager_attr(tree, "run_conversation", "on_turn_start"):
+            host_evidence = HostSeamEvidence(
+                rel_path,
+                "run_conversation -> MemoryManager.on_turn_start",
+                "supported turn loop calls the manager lifecycle hook",
+            )
+            break
+    if host_evidence:
+        evidence.append(host_evidence)
+    else:
+        missing.append("host turn-start caller in run_conversation")
+
+    if "MemoryProvider.on_turn_start API" in missing or (
+        "MemoryManager.on_turn_start provider fanout with exception containment" in missing
+    ):
+        return HostSeamProbe(
+            "turn_start_hook",
+            "fail",
+            "Hermes turn-start lifecycle API/fanout is incomplete.",
+            tuple(evidence),
+            tuple(missing),
+        )
+    if "host turn-start caller in run_conversation" in missing:
+        return HostSeamProbe(
+            "turn_start_hook",
+            "warn",
+            "Hermes memory lifecycle has provider API/fanout, but no executable host turn-start caller was proven.",
+            tuple(evidence),
+            tuple(missing),
+        )
+    return HostSeamProbe(
+        "turn_start_hook",
+        "pass",
+        "Hermes turn-start lifecycle is wired through the supported host loop.",
+        tuple(evidence),
+    )
+
+
 def probe_memory_output_validation_seam(target: Path) -> HostSeamProbe:
     corpus = HostSurfaceCorpus(target)
     evidence: list[HostSeamEvidence] = []
@@ -410,6 +557,7 @@ def scan_host_seams(target: Path) -> list[HostSeamProbe]:
         probe_host_runtime_wiring(target),
         probe_native_profile_write_bridge(target),
         probe_memory_write_metadata_seam(target),
+        probe_turn_start_lifecycle_hook(target),
         probe_memory_output_validation_seam(target),
         probe_interrupted_turn_external_memory_guard(target),
     ]

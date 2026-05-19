@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 from brainstack import BrainstackMemoryProvider
@@ -24,6 +25,20 @@ def _initialize(provider: BrainstackMemoryProvider) -> None:
         agent_identity="agent-smoke",
         agent_workspace="workspace",
     )
+
+
+def _sqlite_row_counts(db_path: Path) -> dict[str, int]:
+    with sqlite3.connect(db_path) as conn:
+        table_names = [
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        ]
+        return {
+            name: int(conn.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0] or 0)
+            for name in table_names
+        }
 
 
 def test_lifecycle_status_reports_activation_hooks_and_tool_exports(tmp_path: Path) -> None:
@@ -59,6 +74,30 @@ def test_lifecycle_status_reports_activation_hooks_and_tool_exports(tmp_path: Pa
     after = provider.lifecycle_status()
     assert after["status"] == "unavailable"
     assert after["store_initialized"] is False
+
+
+def test_on_turn_start_is_lifecycle_only_and_does_not_write_durable_rows(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "brainstack.sqlite3"
+    provider = BrainstackMemoryProvider(
+        {
+            "db_path": str(db_path),
+            "graph_backend": "sqlite",
+            "corpus_backend": "sqlite",
+        }
+    )
+    _initialize(provider)
+    try:
+        before = _sqlite_row_counts(db_path)
+
+        provider.on_turn_start(5, "This is only a lifecycle tick, not durable truth.")
+
+        after = _sqlite_row_counts(db_path)
+        assert after == before
+        assert provider._turn_counter == 4
+    finally:
+        provider.shutdown()
 
 
 def test_brainstack_stats_includes_lifecycle_snapshot(tmp_path: Path) -> None:

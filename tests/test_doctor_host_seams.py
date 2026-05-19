@@ -19,6 +19,7 @@ class MemoryProvider:
     def initialize(self): pass
     def prefetch(self): pass
     def sync_turn(self): pass
+    def on_turn_start(self, turn_number, message, **kwargs): pass
     def on_pre_compress(self): pass
     def on_session_end(self, messages): pass
     def on_memory_write(self, action, target, content, metadata=None): pass
@@ -35,6 +36,12 @@ class MemoryManager:
     def prefetch_all(self, query, *, session_id=""): pass
     def queue_prefetch_all(self, query, *, session_id=""): pass
     def sync_all(self, user_content, assistant_content, *, session_id=""): pass
+    def on_turn_start(self, turn_number, message, **kwargs):
+        for provider in self._providers:
+            try:
+                provider.on_turn_start(turn_number, message, **kwargs)
+            except Exception:
+                pass
     def on_pre_compress(self): pass
     def on_session_end(self, messages): pass
     def shutdown_all(self): pass
@@ -265,3 +272,99 @@ def _sync_external_memory_for_turn(self, original_user_message, final_response, 
 
     assert checks["memory_output_validation_seam"].status == "fail"
     assert "delivery-record" in checks["memory_output_validation_seam"].message
+
+
+def test_doctor_accepts_turn_start_hook_in_split_conversation_loop(tmp_path: Path) -> None:
+    target = _base_hermes_target(tmp_path)
+    _write(
+        target / "agent" / "conversation_loop.py",
+        """
+def run_conversation(agent, original_user_message):
+    if agent._memory_manager:
+        agent._memory_manager.on_turn_start(agent._user_turn_count, original_user_message)
+    agent._memory_manager.prefetch_all(original_user_message)
+""",
+    )
+
+    checks = _checks_by_name(target)
+
+    assert checks["turn_start_hook"].status == "pass"
+    assert "agent/conversation_loop.py" in checks["turn_start_hook"].message
+    assert "MemoryManager.on_turn_start" in checks["turn_start_hook"].message
+
+
+def test_doctor_rejects_turn_start_provider_api_without_host_caller(tmp_path: Path) -> None:
+    target = _base_hermes_target(tmp_path)
+
+    checks = _checks_by_name(target)
+
+    assert checks["turn_start_hook"].status == "warn"
+    assert "host turn-start caller" in checks["turn_start_hook"].message
+
+
+def test_doctor_rejects_comment_only_turn_start_marker(tmp_path: Path) -> None:
+    target = _base_hermes_target(tmp_path)
+    _write(
+        target / "run_agent.py",
+        """
+# agent._memory_manager.on_turn_start(agent._user_turn_count, original_user_message)
+""",
+    )
+
+    checks = _checks_by_name(target)
+
+    assert checks["turn_start_hook"].status == "warn"
+    assert "host turn-start caller" in checks["turn_start_hook"].message
+
+
+def test_doctor_rejects_dead_turn_start_helper(tmp_path: Path) -> None:
+    target = _base_hermes_target(tmp_path)
+    _write(
+        target / "run_agent.py",
+        """
+def unused_turn_start_helper(agent, original_user_message):
+    agent._memory_manager.on_turn_start(agent._user_turn_count, original_user_message)
+""",
+    )
+
+    checks = _checks_by_name(target)
+
+    assert checks["turn_start_hook"].status == "warn"
+    assert "host turn-start caller" in checks["turn_start_hook"].message
+
+
+def test_doctor_rejects_turn_start_fanout_without_exception_containment(
+    tmp_path: Path,
+) -> None:
+    target = _base_hermes_target(tmp_path)
+    _write(
+        target / "agent" / "memory_manager.py",
+        """
+class MemoryManager:
+    def add_provider(self, provider): pass
+    def prefetch_all(self, query, *, session_id=""): pass
+    def queue_prefetch_all(self, query, *, session_id=""): pass
+    def sync_all(self, user_content, assistant_content, *, session_id=""): pass
+    def on_turn_start(self, turn_number, message, **kwargs):
+        for provider in self._providers:
+            provider.on_turn_start(turn_number, message, **kwargs)
+    def on_pre_compress(self): pass
+    def on_session_end(self, messages): pass
+    def shutdown_all(self): pass
+    def validate_assistant_output_all(self, content, *, user_content="", session_id=""): pass
+    def record_output_validation_delivery_all(self, result, *, delivered_content=""): pass
+    def on_memory_write(self, action, target, content, metadata=None): pass
+""",
+    )
+    _write(
+        target / "agent" / "conversation_loop.py",
+        """
+def run_conversation(agent, original_user_message):
+    agent._memory_manager.on_turn_start(agent._user_turn_count, original_user_message)
+""",
+    )
+
+    checks = _checks_by_name(target)
+
+    assert checks["turn_start_hook"].status == "fail"
+    assert "exception containment" in checks["turn_start_hook"].message
