@@ -16,6 +16,7 @@ from .behavior_policy import DEFAULT_BEHAVIOR_POLICY_CHAR_BUDGET
 from .graph_lineage import compact_graph_source_lineage
 from .literal_index import redact_literal_text
 from .operating_context import render_operating_context_section
+from .operating_temporal import operating_temporal_warning
 from .profile_contract import (
     is_native_explicit_style_item,
     normalize_profile_slot,
@@ -475,6 +476,9 @@ def _render_operating_truth_section(
             content = f"{content} [supporting only; not active workstream/project status]"
         else:
             label = record_type.replace("_", " ")
+        freshness = operating_temporal_warning(row)
+        if freshness:
+            content = f"{content} [{freshness}]"
         operating_lines.append(
             _with_provenance(
                 f"[{label}] {content}",

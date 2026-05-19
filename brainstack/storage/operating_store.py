@@ -60,6 +60,7 @@ class OperatingStoreMixin(StoreRuntimeBase):
             record_type=str(record_type or "").strip(),
             stable_key=logical_stable_key,
             source=str(source or "").strip(),
+            created_at=now,
             metadata=_merge_record_metadata(
                 existing["metadata_json"] if existing else None,
                 _enrich_record_metadata_with_literals(metadata, text=content),

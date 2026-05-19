@@ -105,7 +105,21 @@ def merge_temporal(
         payload.update(existing)
     if isinstance(incoming, Mapping):
         payload.update(incoming)
-    return normalize_temporal_fields(
+    passthrough = {
+        key: value
+        for key, value in payload.items()
+        if key
+        not in {
+            "observed_at",
+            "valid_at",
+            "valid_from",
+            "valid_to",
+            "supersedes",
+            "superseded_by",
+            "episode_id",
+        }
+    }
+    normalized = normalize_temporal_fields(
         observed_at=payload.get("observed_at"),
         valid_at=payload.get("valid_at"),
         valid_from=payload.get("valid_from"),
@@ -114,6 +128,8 @@ def merge_temporal(
         superseded_by=payload.get("superseded_by"),
         episode_id=payload.get("episode_id"),
     )
+    normalized.update(passthrough)
+    return normalized
 
 
 def infer_relative_duration_valid_to(

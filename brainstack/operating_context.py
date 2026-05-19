@@ -19,6 +19,7 @@ from .operating_truth import (
     is_background_recent_work,
 )
 from .local_typed_understanding import build_session_recovery_contract
+from .operating_temporal import operating_temporal_warning
 from .profile_contract import profile_item_display_label
 
 
@@ -127,13 +128,21 @@ def _operating_record_lines(
 ) -> List[str]:
     return _unique_lines(
         (
-            str(row.get("content") or "")
+            _operating_record_display_line(row)
             for row in operating_rows
             if str(row.get("record_type") or "").strip() == record_type
             and (include_background or not is_background_operating_record(dict(row)))
         ),
         limit=limit,
     )
+
+
+def _operating_record_display_line(row: Mapping[str, Any]) -> str:
+    content = str(row.get("content") or "")
+    warning = operating_temporal_warning(row)
+    if warning:
+        return f"{content} [{warning}]"
+    return content
 
 
 def _recent_work_line_and_status(

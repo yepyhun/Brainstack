@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass
 import re
 from typing import Any, Dict, Iterable, List, Mapping
 
+from .operating_temporal import normalize_operating_temporal_metadata
+
 
 OPERATING_RECORD_ACTIVE_WORK = "active_work"
 OPERATING_RECORD_LIVE_SYSTEM_STATE = "live_system_state"
@@ -207,13 +209,18 @@ def normalize_operating_record_metadata(
     stable_key: str,
     source: str,
     metadata: Dict[str, Any] | None,
+    created_at: str = "",
 ) -> Dict[str, Any]:
     payload = dict(metadata or {})
-    if str(record_type or "").strip() != OPERATING_RECORD_RECENT_WORK_SUMMARY:
-        return payload
-    return normalize_recent_work_metadata(
-        stable_key=stable_key,
-        source=source,
+    if str(record_type or "").strip() == OPERATING_RECORD_RECENT_WORK_SUMMARY:
+        payload = normalize_recent_work_metadata(
+            stable_key=stable_key,
+            source=source,
+            metadata=payload,
+        )
+    return normalize_operating_temporal_metadata(
+        record_type=record_type,
+        created_at=created_at,
         metadata=payload,
     )
 

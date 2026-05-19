@@ -245,7 +245,13 @@ def _normalize_record_metadata(metadata: Dict[str, Any] | None, *, source: str =
     for key in ("observed_at", "valid_at", "valid_from", "valid_to", "supersedes", "superseded_by", "episode_id"):
         if key in payload:
             temporal_payload[key] = payload.pop(key)
+    passthrough_temporal = {
+        key: temporal_payload.pop(key)
+        for key in list(temporal_payload.keys())
+        if key not in {"observed_at", "valid_at", "valid_from", "valid_to", "supersedes", "superseded_by", "episode_id"}
+    }
     temporal = normalize_temporal_fields(**temporal_payload)
+    temporal.update(passthrough_temporal)
 
     nested_provenance = payload.pop("provenance", None)
     provenance_seed: Dict[str, Any] = {}
