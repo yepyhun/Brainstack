@@ -62,6 +62,78 @@ class Agent:
     return root
 
 
+def _split_native_target(root: Path) -> Path:
+    target = _native_target(root)
+    _write(
+        target / "agent" / "background_review.py",
+        '''
+def build_memory_write_metadata(agent, *, task_id=None):
+    return {"write_origin": getattr(agent, "_memory_write_origin", "assistant_tool")}
+
+
+def prepare_background_review_agent(review_agent):
+    review_agent._memory_write_origin = "background_review"
+    review_agent._memory_write_context = "background_review"
+'''.lstrip(),
+    )
+    _write(
+        target / "agent" / "agent_init.py",
+        '''
+def init_agent(agent, *, user_name=None, chat_id=None, chat_name=None, chat_type=None, thread_id=None):
+    agent._user_name = user_name
+    agent._chat_id = chat_id
+    agent._chat_name = chat_name
+    agent._chat_type = chat_type
+    agent._thread_id = thread_id
+    _init_kwargs = {}
+    if agent._user_name:
+        _init_kwargs["user_name"] = agent._user_name
+    if agent._chat_id:
+        _init_kwargs["chat_id"] = agent._chat_id
+    if agent._chat_name:
+        _init_kwargs["chat_name"] = agent._chat_name
+    if agent._chat_type:
+        _init_kwargs["chat_type"] = agent._chat_type
+    if agent._thread_id:
+        _init_kwargs["thread_id"] = agent._thread_id
+'''.lstrip(),
+    )
+    _write(
+        target / "agent" / "tool_executor.py",
+        '''
+def write(agent):
+    agent._memory_manager.on_memory_write(
+        "add",
+        "memory",
+        "x",
+        metadata=agent._build_memory_write_metadata(task_id="t1"),
+    )
+'''.lstrip(),
+    )
+    _write(
+        target / "run_agent.py",
+        '''
+from agent.background_review import build_memory_write_metadata
+
+
+class Agent:
+    def __init__(self):
+        user_name = chat_id = chat_name = chat_type = thread_id = None
+        _init_kwargs = {"user_name": user_name, "chat_id": chat_id, "chat_name": chat_name, "chat_type": chat_type, "thread_id": thread_id}
+
+    def _build_memory_write_metadata(self, *, task_id=None):
+        return build_memory_write_metadata(self, task_id=task_id)
+
+    def _sync_external_memory_for_turn(self, *, original_user_message, final_response, interrupted):
+        """Interrupted turns are skipped entirely (#15218)."""
+        if interrupted:
+            return
+        self._memory_manager.sync_all(original_user_message, final_response)
+'''.lstrip(),
+    )
+    return target
+
+
 def test_core_host_patch_inventory_skips_native_metadata_compat_seams() -> None:
     inventory = {
         item["patcher"]: item
@@ -98,3 +170,31 @@ def test_host_seam_audit_classifies_native_write_metadata_as_narrow(tmp_path: Pa
     assert decisions["_patch_memory_provider"]["decision"] == "narrow"
     assert decisions["_patch_memory_manager_required_seam"]["decision"] == "narrow"
     assert decisions["_patch_dockerfile_backend_dependencies"]["decision"] == "keep"
+
+
+def test_host_seam_audit_classifies_split_native_write_metadata_as_narrow(
+    tmp_path: Path,
+) -> None:
+    target = _split_native_target(tmp_path / "hermes")
+
+    report = build_report(target, runtime_mode="docker")
+    seams = report["native_seams"]
+    decisions = {row["patcher"]: row for row in report["patch_decisions"]}
+
+    assert seams["run_agent_write_origin_metadata"]["status"] == "pass"
+    assert decisions["_patch_run_agent"]["decision"] == "narrow"
+    assert decisions["_patch_run_agent"]["native_coverage_complete"] is True
+
+
+def test_host_seam_audit_marks_legacy_terminal_guard_outside_core(
+    tmp_path: Path,
+) -> None:
+    target = _split_native_target(tmp_path / "hermes")
+
+    report = build_report(target, runtime_mode="docker")
+    decisions = {row["patcher"]: row for row in report["patch_decisions"]}
+
+    terminal_guard = decisions["_patch_run_agent_terminal_final_guard_seam"]
+    assert terminal_guard["category"] == "legacy_host_patch"
+    assert terminal_guard["decision"] == "remove"
+    assert terminal_guard["native_coverage_complete"] is None

@@ -93,6 +93,16 @@ For each risky host seam, the useful states are:
 - `superseded` — replaced by Brainstack plugin/provider projection;
 - `missing` — behavior is not proven and install/release is blocked.
 
+Current Hermes may split behavior across `run_agent.py`, `agent/agent_init.py`,
+`agent/background_review.py`, `agent/tool_executor.py`, and
+`agent/conversation_loop.py`. Host seam audits must follow the behavior owner
+rather than assuming the old monolithic `run_agent.py` layout.
+
+Legacy-only patches are not default blockers. For example,
+`_patch_run_agent_terminal_final_guard_seam` targets old `run_agent.py` terminal
+guard anchors and is only selected by explicit `legacy` host patch mode. Current
+core/compat installs should not fail because those obsolete anchors are absent.
+
 ## Temporary Upstream Hermes Hotfixes
 
 Temporary upstream hotfixes are not Brainstack product features. They are

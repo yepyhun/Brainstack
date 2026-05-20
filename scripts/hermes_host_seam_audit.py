@@ -45,7 +45,12 @@ def _has_user_memory_provider_discovery(target: Path) -> bool:
 
 
 def _has_contextual_metadata_threading(target: Path) -> bool:
-    text = _read(target / "run_agent.py")
+    text = "\n".join(
+        (
+            _read(target / "run_agent.py"),
+            _read(target / "agent" / "agent_init.py"),
+        )
+    )
     required = (
         "user_name",
         "chat_id",
@@ -59,10 +64,33 @@ def _has_contextual_metadata_threading(target: Path) -> bool:
 
 def _has_write_origin_metadata(target: Path) -> bool:
     text = _read(target / "run_agent.py")
-    return (
+    if (
         "_build_memory_write_metadata" in text
         and "_memory_write_origin" in text
         and "metadata=self._build_memory_write_metadata" in text
+    ):
+        return True
+
+    background_review = _read(target / "agent" / "background_review.py")
+    write_paths = "\n".join(
+        _read(path)
+        for path in (
+            target / "agent" / "tool_executor.py",
+            target / "agent" / "agent_runtime_helpers.py",
+            target / "run_agent.py",
+        )
+    )
+    return (
+        "build_memory_write_metadata" in background_review
+        and "_memory_write_origin" in background_review
+        and 'review_agent._memory_write_origin = "background_review"' in background_review
+        and 'review_agent._memory_write_context = "background_review"' in background_review
+        and "on_memory_write" in write_paths
+        and "metadata=" in write_paths
+        and (
+            "_build_memory_write_metadata" in write_paths
+            or "build_memory_write_metadata" in write_paths
+        )
     )
 
 

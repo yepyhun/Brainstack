@@ -1577,3 +1577,57 @@ def test_gateway_patch_dry_run_copy_ignores_runtime_state() -> None:
     assert "runtime" in ignored
     assert "state.db*" in ignored
     assert "auth.json*" in ignored
+
+
+def test_gateway_patch_auto_reports_incompatible_without_aborting(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def _raise_incompatible(target: Path, *, dry_run: bool):
+        raise RuntimeError("patch does not apply")
+
+    def _inspect(target: Path):
+        return {
+            "schema": "brainstack.hermes_gateway_patch_status.v1",
+            "status": "gateway_patch_missing",
+            "missing_files": ["gateway/turn_contract.py"],
+        }
+
+    monkeypatch.setattr(
+        install_into_hermes,
+        "apply_gateway_patch_bundle",
+        _raise_incompatible,
+    )
+    monkeypatch.setattr(install_into_hermes, "inspect_gateway_patch_support", _inspect)
+
+    status = install_into_hermes._resolve_gateway_patch_status(
+        tmp_path,
+        dry_run=False,
+        gateway_patch_mode="auto",
+    )
+
+    assert status["status"] == "gateway_patch_incompatible"
+    assert status["mode"] == "auto"
+    assert status["error"] == "patch does not apply"
+
+
+def test_gateway_patch_require_still_fails_closed(tmp_path: Path, monkeypatch) -> None:
+    def _raise_incompatible(target: Path, *, dry_run: bool):
+        raise RuntimeError("patch does not apply")
+
+    monkeypatch.setattr(
+        install_into_hermes,
+        "apply_gateway_patch_bundle",
+        _raise_incompatible,
+    )
+
+    try:
+        install_into_hermes._resolve_gateway_patch_status(
+            tmp_path,
+            dry_run=False,
+            gateway_patch_mode="require",
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "patch does not apply"
+    else:
+        raise AssertionError("require mode must fail closed on incompatible patches")

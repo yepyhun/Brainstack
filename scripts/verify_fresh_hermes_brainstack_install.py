@@ -219,11 +219,18 @@ def evaluate_installed_target(target: Path) -> dict[str, Any]:
     dockerfile = _dockerfile_checks(target)
     start_script = _start_script_checks(target)
     gateway_patch = inspect_gateway_patch_support(target)
+    manifest_gateway_patch = manifest.get("hermes_gateway_patches") or {}
     manifest_status = "pass" if manifest.get("status") == "present" and manifest.get("secrets_included") is False else "fail"
     payload_status = "pass" if not missing_plugin_files else "fail"
     gateway_patch_status = "pass" if gateway_patch.get("status") == "upstream_gateway_supported" else "fail"
+    if (
+        gateway_patch_status == "fail"
+        and manifest_gateway_patch.get("mode") == "auto"
+        and manifest_gateway_patch.get("status") == "gateway_patch_incompatible"
+    ):
+        gateway_patch_status = "warn"
     status = "pass" if all(
-        item == "pass"
+        item in {"pass", "warn"}
         for item in (
             manifest_status,
             payload_status,
@@ -256,6 +263,9 @@ def evaluate_installed_target(target: Path) -> dict[str, Any]:
         "gateway_patch": {
             "status": gateway_patch.get("status"),
             "missing_files": gateway_patch.get("missing_files"),
+            "manifest_status": manifest_gateway_patch.get("status"),
+            "manifest_mode": manifest_gateway_patch.get("mode"),
+            "manifest_error": manifest_gateway_patch.get("error"),
         },
     }
 

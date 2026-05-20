@@ -329,9 +329,9 @@ HOST_PATCH_POLICIES: dict[str, dict[str, str]] = {
         "removal_condition": "Hermes run loop natively validates memory acknowledgements before final response persistence and delivery.",
     },
     "_patch_run_agent_terminal_final_guard_seam": {
-        "category": "compat_hotfix",
+        "category": "legacy_host_patch",
         "owner": "hermes-tool-safety-seam",
-        "removal_condition": "Hermes provider loop natively prevents terminal execution success claims without terminal tool results.",
+        "removal_condition": "Legacy run_agent.py terminal-final guard anchors are no longer present in current Hermes; keep only for explicit legacy host installs until an upstream-native replacement is available.",
     },
     "_patch_memory_answer_renderer_language": {
         "category": "compat_hotfix",
@@ -3782,6 +3782,27 @@ def _patch_run_agent_tool_call_interim_boundary(path: Path, dry_run: bool) -> li
     return applied
 
 
+def _has_split_native_background_review_write_origin(run_agent_path: Path) -> bool:
+    """Return whether current Hermes owns background-review provenance elsewhere.
+
+    Hermes v0.14 split background-review setup out of run_agent.py. In that
+    shape, the compat patch must not look for the old inline anchor; it should
+    treat the seam as native and continue with the rest of the bundle.
+    """
+
+    background_review = run_agent_path.parent / "agent" / "background_review.py"
+    try:
+        text = background_review.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    return (
+        "build_memory_write_metadata" in text
+        and "_memory_write_origin" in text
+        and 'review_agent._memory_write_origin = "background_review"' in text
+        and 'review_agent._memory_write_context = "background_review"' in text
+    )
+
+
 def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
@@ -3905,7 +3926,11 @@ def _patch_run_agent(path: Path, dry_run: bool) -> list[str]:
 
     background_origin = '                    review_agent._brainstack_memory_write_origin = "background_review"\n'
     native_background_origin = 'review_agent._memory_write_origin = "background_review"'
-    if background_origin not in text and native_background_origin not in text:
+    if (
+        background_origin not in text
+        and native_background_origin not in text
+        and not _has_split_native_background_review_write_origin(path)
+    ):
         old_review_setup = (
             "                    review_agent._memory_store = self._memory_store\n"
             "                    review_agent._memory_enabled = self._memory_enabled\n"
@@ -9401,6 +9426,35 @@ def _resolve_enabled_runtime_contract(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _resolve_gateway_patch_status(
+    target: Path,
+    *,
+    dry_run: bool,
+    gateway_patch_mode: str,
+) -> dict[str, Any]:
+    if gateway_patch_mode == "skip":
+        status = inspect_gateway_patch_support(target)
+        status["mode"] = "skip"
+        return status
+    try:
+        status = apply_gateway_patch_bundle(target, dry_run=dry_run)
+        status["mode"] = gateway_patch_mode
+        return status
+    except RuntimeError as exc:
+        if gateway_patch_mode == "require":
+            raise
+        status = inspect_gateway_patch_support(target)
+        status.update(
+            {
+                "status": "gateway_patch_incompatible",
+                "mode": gateway_patch_mode,
+                "error": str(exc),
+                "rollback": "none_written_auto_probe_failed",
+            }
+        )
+        return status
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Install Brainstack into a target Hermes checkout.")
     parser.add_argument("target", help="Path to target Hermes checkout")
@@ -9703,12 +9757,11 @@ def main() -> int:
 
     gateway_patch_mode = "skip" if args.skip_hermes_gateway_patches else args.gateway_patch_mode
     try:
-        if gateway_patch_mode == "skip":
-            hermes_gateway_patches = inspect_gateway_patch_support(target)
-            hermes_gateway_patches["mode"] = "skip"
-        else:
-            hermes_gateway_patches = apply_gateway_patch_bundle(target, dry_run=args.dry_run)
-            hermes_gateway_patches["mode"] = gateway_patch_mode
+        hermes_gateway_patches = _resolve_gateway_patch_status(
+            target,
+            dry_run=args.dry_run,
+            gateway_patch_mode=gateway_patch_mode,
+        )
     except RuntimeError as exc:
         print(f"FAIL Hermes Gateway patch support: {exc}", file=sys.stderr)
         return 2
@@ -9773,7 +9826,11 @@ def main() -> int:
         host_patches.extend(_run_host_patch("_patch_dockerfile_workstation_hermes_cli", target / "Dockerfile", args.dry_run, host_patch_mode=args.host_patch_mode))
         host_patches.extend(_run_host_patch("_patch_docker_entrypoint", target / "docker" / "entrypoint.sh", args.dry_run, host_patch_mode=args.host_patch_mode))
 
-    if gateway_patch_mode != "skip" and not args.dry_run:
+    if (
+        gateway_patch_mode == "require"
+        and not args.dry_run
+        and hermes_gateway_patches.get("status") != "gateway_patch_incompatible"
+    ):
         hermes_gateway_patches["after_host_patches"] = inspect_gateway_patch_support(target)
         if hermes_gateway_patches["after_host_patches"]["status"] != "upstream_gateway_supported":
             print(
