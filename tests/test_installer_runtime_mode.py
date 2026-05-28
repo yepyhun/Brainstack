@@ -249,6 +249,52 @@ def test_dockerfile_backend_dependency_patch_supports_messaging_extra_sync(tmp_p
     assert "hindsight-all-slim" in text
 
 
+def test_dockerfile_backend_dependency_patch_supports_latest_provider_extra_sync(tmp_path):
+    dockerfile = tmp_path / "Dockerfile"
+    latest_anchor = (
+        "RUN uv sync --frozen --no-install-project --extra all --extra messaging "
+        "--extra anthropic --extra bedrock --extra azure-identity\n"
+    )
+    dockerfile.write_text(
+        latest_anchor + 'RUN uv pip install --no-cache-dir --no-deps -e "."\n',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_dockerfile_backend_dependencies(dockerfile, dry_run=False)
+    text = dockerfile.read_text(encoding="utf-8")
+
+    assert applied == ["dockerfile:install_backend_dependencies"]
+    assert latest_anchor in text
+    assert "RUN uv pip install --no-cache-dir" in text
+    assert "chromadb" in text
+    assert "kuzu" in text
+    assert "hindsight-all-slim" in text
+
+
+def test_dockerfile_workstation_wrappers_support_latest_provider_extra_sync(tmp_path):
+    dockerfile = tmp_path / "Dockerfile"
+    latest_anchor = (
+        "RUN uv sync --frozen --no-install-project --extra all --extra messaging "
+        "--extra anthropic --extra bedrock --extra azure-identity\n"
+    )
+    dockerfile.write_text("FROM debian:13\n" + latest_anchor, encoding="utf-8")
+
+    python_applied = install_into_hermes._patch_dockerfile_workstation_python_alias(
+        dockerfile,
+        dry_run=False,
+    )
+    hermes_applied = install_into_hermes._patch_dockerfile_workstation_hermes_cli(
+        dockerfile,
+        dry_run=False,
+    )
+    text = dockerfile.read_text(encoding="utf-8")
+
+    assert python_applied == ["dockerfile:workstation_python_alias"]
+    assert hermes_applied == ["dockerfile:workstation_hermes_cli"]
+    assert 'exec /opt/hermes/.venv/bin/python "$@"' in text
+    assert 'exec /opt/hermes/.venv/bin/hermes "$@"' in text
+
+
 def test_dockerfile_patch_adds_global_hermes_cli_after_workstation_python_alias(tmp_path):
     dockerfile = tmp_path / "Dockerfile"
     dockerfile.write_text(
@@ -575,6 +621,95 @@ def terminal_tool(command, force=False):
     assert '"output": approval_message,' in text
     assert '"error": approval_message,' in text
     assert '"output": approval.get("message", fallback_msg),' in text
+
+
+def test_discord_host_patch_resolves_bundled_plugin_adapter(tmp_path):
+    target = tmp_path / "hermes"
+    adapter = target / "plugins" / "platforms" / "discord" / "adapter.py"
+    adapter.parent.mkdir(parents=True)
+    adapter.write_text(
+        "import asyncio\n"
+        "import time\n"
+        "from typing import Any, Dict, Optional\n"
+        "\n"
+        "class SendResult:\n"
+        "    def __init__(self, success, message_id=None, raw_response=None, error=None):\n"
+        "        self.success = success\n"
+        "\n"
+        "class DiscordAdapter:\n"
+        "    MAX_MESSAGE_LENGTH = 2000\n"
+        "    def __init__(self):\n"
+        "        # Persistent typing indicator loops per channel (DMs don't reliably\n"
+        "        # show the standard typing gateway event for bots)\n"
+        "        self._typing_tasks: Dict[str, asyncio.Task] = {}\n"
+        "        self._reply_to_mode = 'first'\n"
+        "        self._last_self_message_id = {}\n"
+        "    def format_message(self, content): return content\n"
+        "    def truncate_message(self, formatted, limit): return [formatted]\n"
+        "    async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> SendResult:\n"
+        "        try:\n"
+        "            channel = self._client.get_channel(int(chat_id))\n"
+        "            thread_id = None\n"
+        "            # Format and split message if needed\n"
+        "            formatted = self.format_message(content)\n"
+        "            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)\n"
+        "\n"
+        "            message_ids = []\n"
+        "            reference = None\n"
+        "            for i, chunk in enumerate(chunks):\n"
+        "                if self._reply_to_mode == \"all\":\n"
+        "                    chunk_reference = reference\n"
+        "                else:  # \"first\" (default) or \"off\"\n"
+        "                    chunk_reference = reference if i == 0 else None\n"
+        "                try:\n"
+        "                    msg = await channel.send(content=chunk, reference=chunk_reference)\n"
+        "                except Exception:\n"
+        "                    raise\n"
+        "                message_ids.append(str(msg.id))\n"
+        "            return SendResult(\n"
+        "                success=True,\n"
+        "                message_id=message_ids[0] if message_ids else None,\n"
+        "                raw_response={\"message_ids\": message_ids}\n"
+        "            )\n"
+        "        except Exception:\n"
+        "            return SendResult(success=False, error='failed')\n",
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._run_host_patch(
+        "_patch_discord_outbound_final_dedupe",
+        target / "gateway" / "platforms" / "discord.py",
+        dry_run=False,
+        host_patch_mode="core",
+    )
+
+    text = adapter.read_text(encoding="utf-8")
+    assert {"discord_outbound_dedupe:state", "discord_outbound_dedupe:final_record"} <= set(applied)
+    assert "self._recent_outbound_final_dedupe" in text
+    assert "hermes_delivery_id" in text
+
+
+def test_discord_typing_patch_skips_native_retry_after_plugin_adapter(tmp_path):
+    adapter = tmp_path / "adapter.py"
+    adapter.write_text(
+        "class DiscordAdapter:\n"
+        "    def _extract_discord_retry_after(self, exc):\n"
+        "        return None\n"
+        "    async def send_typing(self, chat_id: str, metadata=None) -> None:\n"
+        "        \"\"\"Start a persistent typing indicator.\n"
+        "\n"
+        "        Rate-limit handling: if a 429 is encountered, the loop logs a\n"
+        "        warning, sleeps for the ``retry_after`` duration, and continues.\n"
+        "        \"\"\"\n"
+        "        return None\n",
+        encoding="utf-8",
+    )
+    before = adapter.read_text(encoding="utf-8")
+
+    applied = install_into_hermes._patch_discord_typing_backoff(adapter, dry_run=False)
+
+    assert applied == []
+    assert adapter.read_text(encoding="utf-8") == before
 
 
 def test_context_compressor_patch_bounds_summary_and_preserves_fallback(tmp_path):
@@ -2761,6 +2896,102 @@ def test_docker_doctor_accepts_fresh_image_build_dependency_proof(monkeypatch, t
         "route_hint_dependency": "pass",
         "cron_dependency": "pass",
     }
+
+
+def test_docker_doctor_accepts_build_dependency_proof_without_host_imports(monkeypatch, tmp_path):
+    config = tmp_path / "config.yaml"
+    compose = tmp_path / "docker-compose.yml"
+    dockerfile = tmp_path / "Dockerfile"
+    config.write_text("{}", encoding="utf-8")
+    compose.write_text("services:\n  gateway:\n    build: .\n", encoding="utf-8")
+    dockerfile.write_text("RUN uv pip install --no-cache-dir kuzu chromadb openai croniter\n", encoding="utf-8")
+
+    monkeypatch.setattr(brainstack_doctor, "_docker_python_can_import", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(brainstack_doctor, "_python_can_import", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        brainstack_doctor,
+        "_load_yaml",
+        lambda _path: {
+            "memory": {
+                "provider": "brainstack",
+                "memory_enabled": True,
+                "user_profile_enabled": True,
+            },
+            "plugins": {
+                "brainstack": {
+                    "graph_backend": "kuzu",
+                    "graph_db_path": "$HERMES_HOME/brainstack/brainstack.kuzu",
+                    "corpus_backend": "chroma",
+                    "corpus_db_path": "$HERMES_HOME/brainstack/brainstack.chroma",
+                }
+            },
+        },
+    )
+
+    checks = brainstack_doctor._check_config(
+        config,
+        planned_install=False,
+        python_bin=None,
+        runtime="docker",
+        compose_path=compose,
+    )
+
+    dependency_checks = {
+        check.name: check.status
+        for check in checks
+        if check.name
+        in {
+            "graph_backend_dependency",
+            "corpus_backend_dependency",
+            "route_hint_dependency",
+            "cron_dependency",
+        }
+    }
+    assert dependency_checks == {
+        "graph_backend_dependency": "pass",
+        "corpus_backend_dependency": "pass",
+        "route_hint_dependency": "pass",
+        "cron_dependency": "pass",
+    }
+
+
+def test_doctor_reads_bundled_discord_plugin_adapter_surface(tmp_path):
+    target = tmp_path / "hermes"
+    adapter = target / "plugins" / "platforms" / "discord" / "adapter.py"
+    adapter.parent.mkdir(parents=True)
+    adapter.write_text("adapter_self._ready_event.set()\n", encoding="utf-8")
+
+    assert brainstack_doctor._read_discord_adapter_surface(target) == "adapter_self._ready_event.set()\n"
+
+
+def test_doctor_warns_when_gateway_patch_bundle_is_incompatible(tmp_path, monkeypatch):
+    target = tmp_path / "hermes"
+    target.mkdir()
+    (target / ".brainstack-install-manifest.json").write_text(
+        json.dumps(
+            {
+                "hermes_gateway_patches": {
+                    "status": "gateway_patch_incompatible",
+                    "mode": "auto",
+                    "error": "patch does not apply",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        brainstack_doctor,
+        "inspect_gateway_patch_support",
+        lambda _target: {
+            "status": "gateway_patch_partial",
+            "missing_files": ["gateway/turn_contract.py"],
+        },
+    )
+
+    check = brainstack_doctor._gateway_patch_support_check(target, planned_install=False)
+
+    assert check.status == "warn"
+    assert "incompatible" in check.message
 
 
 def test_docker_doctor_treats_live_kuzu_lock_as_warn(monkeypatch, tmp_path):

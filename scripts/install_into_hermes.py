@@ -1116,6 +1116,29 @@ def _host_patch_selected(patcher: str, host_patch_mode: str) -> bool:
     return policy["category"] in allowed
 
 
+DISCORD_ADAPTER_PATCHERS: frozenset[str] = frozenset(
+    {
+        "_patch_discord_typing_backoff",
+        "_patch_discord_outbound_final_dedupe",
+    }
+)
+
+
+def _resolve_host_patch_target(patcher: str, target_path: Path) -> Path:
+    """Resolve Hermes host patch targets across upstream file moves."""
+    if target_path.exists():
+        return target_path
+    if patcher in DISCORD_ADAPTER_PATCHERS:
+        try:
+            root = target_path.parents[2]
+        except IndexError:
+            return target_path
+        plugin_adapter = root / "plugins" / "platforms" / "discord" / "adapter.py"
+        if plugin_adapter.exists():
+            return plugin_adapter
+    return target_path
+
+
 def _selected_host_patch_inventory(runtime_mode: str, host_patch_mode: str = "core") -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     normalized = "docker" if runtime_mode == "docker" else "source"
@@ -1154,7 +1177,7 @@ def _run_host_patch(
     patch_func = globals().get(patcher)
     if not callable(patch_func):
         raise RuntimeError(f"Unknown host patcher: {patcher}")
-    return list(patch_func(target_path, dry_run))
+    return list(patch_func(_resolve_host_patch_target(patcher, target_path), dry_run))
 
 
 def _replace_once(text: str, old: str, new: str, *, label: str, path: Path) -> str:
@@ -6759,6 +6782,12 @@ def _patch_discord_typing_backoff(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
 
+    # Hermes latest moved Discord to plugins/platforms/discord/adapter.py and
+    # added native retry_after handling. Do not force the older Brainstack
+    # hotfix over a native upstream implementation.
+    if "Rate-limit handling: if a 429 is encountered" in text and "_extract_discord_retry_after" in text:
+        return applied
+
     typing_state_anchor = (
         "        # Persistent typing indicator loops per channel (DMs don't reliably\n"
         "        # show the standard typing gateway event for bots)\n"
@@ -9107,6 +9136,7 @@ def _patch_dockerfile_backend_dependencies(path: Path, dry_run: bool) -> list[st
         '    uv pip install --no-cache-dir -e ".[all]"\n',
         "RUN uv sync --frozen --no-install-project --extra all\n",
         "RUN uv sync --frozen --no-install-project --extra all --extra messaging\n",
+        "RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra anthropic --extra bedrock --extra azure-identity\n",
     )
     for anchor in anchors:
         if anchor in text:
@@ -9139,6 +9169,7 @@ def _patch_dockerfile_workstation_python_alias(path: Path, dry_run: bool) -> lis
         'RUN uv pip install --no-cache-dir --no-deps -e "."\n',
         '    uv pip install --no-cache-dir -e ".[all]"\n',
         "RUN uv sync --frozen --no-install-project --extra all\n",
+        "RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra anthropic --extra bedrock --extra azure-identity\n",
     )
     for anchor in anchors:
         if anchor in text:
@@ -9167,6 +9198,7 @@ def _patch_dockerfile_workstation_hermes_cli(path: Path, dry_run: bool) -> list[
         'RUN uv pip install --no-cache-dir --no-deps -e "."\n',
         '    uv pip install --no-cache-dir -e ".[all]"\n',
         "RUN uv sync --frozen --no-install-project --extra all\n",
+        "RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra anthropic --extra bedrock --extra azure-identity\n",
     )
     for anchor in anchors:
         if anchor in text:

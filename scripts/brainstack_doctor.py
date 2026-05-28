@@ -99,6 +99,45 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         return {}
 
 
+def _load_install_manifest(target: Path) -> dict[str, Any]:
+    manifest = target / ".brainstack-install-manifest.json"
+    if not manifest.exists():
+        return {}
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _read_discord_adapter_surface(target: Path) -> str:
+    legacy = _read(target / "gateway" / "platforms" / "discord.py")
+    if legacy:
+        return legacy
+    return _read(target / "plugins" / "platforms" / "discord" / "adapter.py")
+
+
+def _gateway_patch_support_check(target: Path, *, planned_install: bool) -> Check:
+    gateway_patch_status = inspect_gateway_patch_support(target)
+    status = str(gateway_patch_status.get("status") or "unknown")
+    if status == "upstream_gateway_supported":
+        return Check("hermes_gateway_patch_support", "pass", "Hermes Gateway optimization support is present")
+    if planned_install and status == "gateway_patch_missing":
+        return Check("hermes_gateway_patch_support", "pass", "Installer will apply Hermes Gateway optimization patch bundle")
+    manifest = _load_install_manifest(target)
+    manifest_gateway = manifest.get("hermes_gateway_patches") if isinstance(manifest.get("hermes_gateway_patches"), dict) else {}
+    if manifest_gateway.get("status") == "gateway_patch_incompatible":
+        return Check(
+            "hermes_gateway_patch_support",
+            "warn",
+            "Hermes Gateway patch bundle is incompatible with this upstream checkout and was not applied",
+        )
+    if status == "gateway_patch_missing":
+        return Check("hermes_gateway_patch_support", "fail", "Hermes Gateway optimization support is missing; run Brainstack installer with gateway patch mode enabled")
+    missing = ", ".join(gateway_patch_status.get("missing_files") or [])
+    return Check("hermes_gateway_patch_support", "fail", f"Hermes Gateway patch state is partial; missing: {missing}")
+
+
 def _default_compose_service(compose_path: Path) -> str | None:
     data = _load_yaml(compose_path)
     services = data.get("services") if isinstance(data, dict) else None
@@ -456,7 +495,7 @@ def _check_host_surfaces(target: Path, *, planned_install: bool = False) -> list
     loader = _read(target / "plugins" / "memory" / "__init__.py")
     run_agent = _read(target / "run_agent.py")
     gateway_run = _read(target / "gateway" / "run.py")
-    discord_platform = _read(target / "gateway" / "platforms" / "discord.py")
+    discord_platform = _read_discord_adapter_surface(target)
     host_seam_probes = {probe.name: probe for probe in scan_host_seams(target)}
 
     def append_host_probe(name: str) -> None:
@@ -562,17 +601,7 @@ def _check_host_surfaces(target: Path, *, planned_install: bool = False) -> list
     else:
         checks.append(Check("discord_readiness_gate", "fail", "Discord startup still blocks readiness on slash command sync"))
 
-    gateway_patch_status = inspect_gateway_patch_support(target)
-    status = str(gateway_patch_status.get("status") or "unknown")
-    if status == "upstream_gateway_supported":
-        checks.append(Check("hermes_gateway_patch_support", "pass", "Hermes Gateway optimization support is present"))
-    elif planned_install and status == "gateway_patch_missing":
-        checks.append(Check("hermes_gateway_patch_support", "pass", "Installer will apply Hermes Gateway optimization patch bundle"))
-    elif status == "gateway_patch_missing":
-        checks.append(Check("hermes_gateway_patch_support", "fail", "Hermes Gateway optimization support is missing; run Brainstack installer with gateway patch mode enabled"))
-    else:
-        missing = ", ".join(gateway_patch_status.get("missing_files") or [])
-        checks.append(Check("hermes_gateway_patch_support", "fail", f"Hermes Gateway patch state is partial; missing: {missing}"))
+    checks.append(_gateway_patch_support_check(target, planned_install=planned_install))
 
     checks.extend(_check_skill_policy_surfaces(target, planned_install=planned_install))
 
@@ -648,10 +677,7 @@ def _check_config(
             docker_state = _docker_python_can_import(module_name, compose_path)
             if docker_state is True:
                 return True
-            if _python_can_import(module_name, python_bin) and _dockerfile_declares_runtime_dependency(
-                compose_path,
-                module_name,
-            ):
+            if _dockerfile_declares_runtime_dependency(compose_path, module_name):
                 return True
             return docker_state
         return _python_can_import(module_name, python_bin)
