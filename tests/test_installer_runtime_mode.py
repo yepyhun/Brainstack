@@ -538,6 +538,30 @@ def test_config_patch_preserves_generous_auxiliary_compression_timeout(tmp_path)
     assert result["compression_runtime_hygiene"]["status"] == "unchanged"
 
 
+def test_context_compressor_runtime_budget_skips_native_fallback_contract(tmp_path):
+    module = tmp_path / "context_compressor.py"
+    module.write_text(
+        '''
+_SUMMARY_TOKENS_CEILING = 12_000
+_FALLBACK_SUMMARY_MAX_CHARS = 12_000
+class ContextCompressor:
+    def __init__(self, abort_on_summary_failure: bool = False):
+        self.abort_on_summary_failure = abort_on_summary_failure
+    def _build_static_fallback_summary(self, turns_to_summarize, compress_start, compress_end):
+        return "native fallback"
+    def _compute_summary_budget(self, turns_to_summarize):
+        budget = 100
+        return max(_MIN_SUMMARY_TOKENS, min(budget, self.max_summary_tokens))
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_context_compressor_runtime_budget(module, dry_run=False)
+
+    assert applied == []
+    assert "_FAST_SUMMARY_TOKENS_CEILING" not in module.read_text(encoding="utf-8")
+
+
 def test_tool_result_budget_patch_covers_kanban_board_outputs(tmp_path):
     budget_config = tmp_path / "budget_config.py"
     budget_config.write_text(
@@ -1887,7 +1911,7 @@ def _parse_bool_arg(args: dict, name: str, *, default: bool = False):
         return default, None
     return bool(value), None
 def _task_summary_dict(kb, conn, task) -> dict:
-    """Compact task shape for board-listing tools."""
+    """Task shape for board-listing tools."""
     parents = kb.parent_ids(conn, task.id)
     children = kb.child_ids(conn, task.id)
     return {
@@ -1920,7 +1944,7 @@ KANBAN_LIST_SCHEMA = {
     "description": (
         "List Kanban task summaries so an orchestrator profile can discover "
         "work to route. Supports the same core filters as the CLI: assignee, "
-        "status, tenant, include_archived, and limit. Returns compact rows "
+        "status, tenant, include_archived, and limit. Returns rows "
         "with ids, title, status, assignee, priority, parent/child ids, and "
         "counts. Bounded to 50 rows by default, 200 max, with truncation "
         "metadata. Also recomputes ready tasks before listing, matching the "
@@ -2003,7 +2027,7 @@ def _parse_bool_arg(args: dict, name: str, *, default: bool = False):
         return default, None
     return bool(value), None
 def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
-    """Compact task shape for board-listing tools."""
+    """Task shape for board-listing tools."""
     parents = kb.parent_ids(conn, task.id)
     children = kb.child_ids(conn, task.id)
     return {
@@ -2038,7 +2062,7 @@ KANBAN_LIST_SCHEMA = {
     "description": (
         "List Kanban task summaries so an orchestrator profile can discover "
         "work to route. Supports the same core filters as the CLI: assignee, "
-        "status, tenant, include_archived, and limit. Returns compact rows "
+        "status, tenant, include_archived, and limit. Returns rows "
         "with ids, title, status, assignee, priority, parent/child ids, and "
         "counts. Bounded to 50 rows by default, 200 max, with truncation "
         "metadata. Also recomputes ready tasks before listing, matching the "
@@ -2108,6 +2132,50 @@ KANBAN_LIST_SCHEMA = {
     assert "children" not in summary
     assert full["parents"] == ["p1", "p2"]
     assert full["children"] == ["c1"]
+
+
+def test_kanban_list_compact_default_patch_skips_native_compact_rows(tmp_path) -> None:
+    module = tmp_path / "kanban_tools.py"
+    module.write_text(
+        '''
+KANBAN_LIST_DEFAULT_LIMIT = 50
+KANBAN_LIST_MAX_LIMIT = 200
+def _task_summary_dict(kb, conn, task):
+    """Compact task shape for board-listing tools."""
+    parents = kb.parent_ids(conn, task.id)
+    children = kb.child_ids(conn, task.id)
+    return {
+        "id": task.id,
+        "title": task.title,
+        "status": task.status,
+        "assignee": task.assignee,
+        "priority": task.priority,
+        "parents": parents,
+        "children": children,
+        "parent_count": len(parents),
+        "child_count": len(children),
+    }
+KANBAN_LIST_SCHEMA = {
+    "name": "kanban_list",
+    "description": (
+        "List Kanban task summaries so an orchestrator profile can discover "
+        "work to route. Supports the same core filters as the CLI: assignee, "
+        "status, tenant, include_archived, and limit. Returns compact rows "
+        "with ids, title, status, assignee, priority, parent/child ids, and "
+        "counts. Bounded to 50 rows by default, 200 max, with truncation "
+        "metadata."
+    ),
+}
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_kanban_list_compact_default(module, dry_run=False)
+
+    text = module.read_text(encoding="utf-8")
+    assert applied == []
+    assert "KANBAN_LIST_DEFAULT_LIMIT = 50" in text
+    assert "include_links" not in text
 
 
 def test_kanban_list_compact_default_patch_repairs_partial_half_wire(tmp_path) -> None:
@@ -2580,6 +2648,105 @@ def run_conversation(agent, messages, conversation_history, final_response, inte
     assert "agent._validate_external_memory_final_response(" in loop_text
     assert loop_text.index("agent._validate_external_memory_final_response(") < loop_text.index("agent._persist_session")
     assert "agent._record_external_memory_validation_delivery(final_response)" in loop_text
+
+
+def test_run_agent_memory_output_validation_patch_supports_latest_sync_signature(tmp_path):
+    module = tmp_path / "run_agent.py"
+    loop = tmp_path / "agent" / "conversation_loop.py"
+    loop.parent.mkdir()
+    module.write_text(
+        '''
+class AIAgent:
+    def _sync_external_memory_for_turn(
+        self,
+        *,
+        original_user_message: Any,
+        final_response: Any,
+        interrupted: bool,
+        messages: list | None = None,
+    ) -> None:
+        pass
+''',
+        encoding="utf-8",
+    )
+    loop.write_text(
+        '''
+def run_conversation(agent, messages, conversation_history, final_response, interrupted, original_user_message):
+    # Persist session to both JSON log and SQLite only after private retry
+    # scaffolding has been removed. Otherwise a later user "continue" turn
+    # can replay assistant("(empty)") / recovery nudges and fall into the
+    # same empty-response loop again.
+    agent._drop_trailing_empty_response_scaffolding(messages)
+    agent._persist_session(messages, conversation_history)
+
+    # Plugin hook: post_llm_call
+    if final_response and not interrupted:
+        pass
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_run_agent_memory_output_validation_seam(module, dry_run=False)
+
+    module_text = module.read_text(encoding="utf-8")
+    loop_text = loop.read_text(encoding="utf-8")
+    assert "run_agent:memory_output_validation_helpers" in applied
+    assert "agent.conversation_loop:normal_memory_output_validation" in applied
+    assert "def _validate_external_memory_final_response" in module_text
+    assert "messages: list | None = None" in module_text
+    assert loop_text.index("agent._validate_external_memory_final_response(") < loop_text.index("agent._persist_session")
+
+
+def test_memory_manager_output_validation_patch_supports_messages_sync_signature(tmp_path):
+    module = tmp_path / "memory_manager.py"
+    module.write_text(
+        '''
+from typing import Any, Dict, List, Optional
+
+
+class MemoryManager:
+    def _provider_sync_accepts_messages(self, provider):
+        return True
+    def sync_all(
+        self,
+        user_content: str,
+        assistant_content: str,
+        *,
+        session_id: str = "",
+        messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """Sync a completed turn to all providers."""
+        for provider in self._providers:
+            try:
+                if messages is not None and self._provider_sync_accepts_messages(provider):
+                    provider.sync_turn(
+                        user_content,
+                        assistant_content,
+                        session_id=session_id,
+                        messages=messages,
+                    )
+                else:
+                    provider.sync_turn(
+                        user_content,
+                        assistant_content,
+                        session_id=session_id,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Memory provider '%s' sync_turn failed: %s",
+                    provider.name, e,
+                )
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_memory_manager_output_validation_seam(module, dry_run=False)
+
+    text = module.read_text(encoding="utf-8")
+    assert "memory_manager:output_validation_seam" in applied
+    assert "messages: Optional[List[Dict[str, Any]]] = None" in text
+    assert "def validate_assistant_output_all(" in text
+    assert "def record_output_validation_delivery_all(" in text
 
 
 def test_run_agent_ebadf_recovery_patch_supports_runtime_helper_extraction(tmp_path):

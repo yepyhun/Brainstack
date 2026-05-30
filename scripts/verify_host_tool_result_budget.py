@@ -147,6 +147,17 @@ def build_report(hermes_source: Path) -> dict[str, Any]:
         issues.extend(threshold_issues)
 
     installer_source = (REPO_ROOT / "scripts" / "install_into_hermes.py").read_text(encoding="utf-8")
+    legacy_kanban_compact_contract = (
+        "KANBAN_LIST_DEFAULT_LIMIT = 20" in patched_kanban
+        and '"include_links"' in patched_kanban
+        and "include_links=include_links" in patched_kanban
+        and "include_links: bool = False" in patched_kanban
+        and "return summary" in patched_kanban
+        and "Pass include_links=true" in patched_kanban
+    )
+    native_kanban_compact_contract = install_into_hermes._kanban_list_has_native_compact_rows(
+        patched_kanban
+    )
     proof = {
         "installer_registers_required_core_host_seam": (
             '"patcher": "_patch_tool_result_budget_config"' in installer_source
@@ -176,13 +187,9 @@ def build_report(hermes_source: Path) -> dict[str, Any]:
             and "env is None" in patched_storage
         ),
         "kanban_list_compact_default_present": (
-            "KANBAN_LIST_DEFAULT_LIMIT = 20" in patched_kanban
-            and '"include_links"' in patched_kanban
-            and "include_links=include_links" in patched_kanban
-            and "include_links: bool = False" in patched_kanban
-            and "return summary" in patched_kanban
-            and "Pass include_links=true" in patched_kanban
+            legacy_kanban_compact_contract or native_kanban_compact_contract
         ),
+        "kanban_list_native_compact_rows_accepted": native_kanban_compact_contract,
         "kanban_list_compact_patch_consistent": not install_into_hermes._kanban_list_compact_patch_issues(
             patched_kanban
         ),

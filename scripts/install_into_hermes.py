@@ -1298,6 +1298,22 @@ def _kanban_list_compact_patch_issues(text: str) -> list[str]:
     return [name for name, ok in markers.items() if not ok]
 
 
+def _kanban_list_has_native_compact_rows(text: str) -> bool:
+    """Return True when upstream already exposes a compact kanban_list shape.
+
+    Newer Hermes lists bounded task summaries with compact row wording and
+    parent/child counts. In that shape, Brainstack should not force its older
+    include_links hotfix over the native tool surface.
+    """
+    return (
+        "Returns compact rows" in text
+        and "Compact task shape for board-listing tools" in text
+        and '"parent_count": len(parents)' in text
+        and '"child_count": len(children)' in text
+        and "KANBAN_LIST_DEFAULT_LIMIT = 50" in text
+    )
+
+
 def _assert_kanban_list_compact_patch_consistent(text: str, *, path: Path) -> None:
     issues = _kanban_list_compact_patch_issues(text)
     if issues:
@@ -1811,7 +1827,39 @@ def _patch_memory_manager_output_validation_seam(path: Path, dry_run: bool) -> l
             "                    provider.name, e,\n"
             "                )\n"
         )
-        new_block = old_block + (
+        latest_block = (
+            "    def sync_all(\n"
+            "        self,\n"
+            "        user_content: str,\n"
+            "        assistant_content: str,\n"
+            "        *,\n"
+            "        session_id: str = \"\",\n"
+            "        messages: Optional[List[Dict[str, Any]]] = None,\n"
+            "    ) -> None:\n"
+            "        \"\"\"Sync a completed turn to all providers.\"\"\"\n"
+            "        for provider in self._providers:\n"
+            "            try:\n"
+            "                if messages is not None and self._provider_sync_accepts_messages(provider):\n"
+            "                    provider.sync_turn(\n"
+            "                        user_content,\n"
+            "                        assistant_content,\n"
+            "                        session_id=session_id,\n"
+            "                        messages=messages,\n"
+            "                    )\n"
+            "                else:\n"
+            "                    provider.sync_turn(\n"
+            "                        user_content,\n"
+            "                        assistant_content,\n"
+            "                        session_id=session_id,\n"
+            "                    )\n"
+            "            except Exception as e:\n"
+            "                logger.warning(\n"
+            "                    \"Memory provider '%s' sync_turn failed: %s\",\n"
+            "                    provider.name, e,\n"
+            "                )\n"
+        )
+        sync_block = latest_block if latest_block in text else old_block
+        new_block = sync_block + (
             "\n"
             "    def validate_assistant_output_all(\n"
             "        self,\n"
@@ -1888,7 +1936,7 @@ def _patch_memory_manager_output_validation_seam(path: Path, dry_run: bool) -> l
         )
         text = _replace_once(
             text,
-            old_block,
+            sync_block,
             new_block,
             label="memory_manager output validation seam",
             path=path,
@@ -4314,6 +4362,17 @@ def _patch_run_agent_memory_output_validation_seam(path: Path, dry_run: bool) ->
             "        interrupted: bool,\n"
             "    ) -> None:\n"
         )
+        latest_block = (
+            "    def _sync_external_memory_for_turn(\n"
+            "        self,\n"
+            "        *,\n"
+            "        original_user_message: Any,\n"
+            "        final_response: Any,\n"
+            "        interrupted: bool,\n"
+            "        messages: list | None = None,\n"
+            "    ) -> None:\n"
+        )
+        sync_anchor = latest_block if latest_block in text else old_block
         helper_block = (
             "    def _validate_external_memory_final_response(\n"
             "        self,\n"
@@ -4368,8 +4427,8 @@ def _patch_run_agent_memory_output_validation_seam(path: Path, dry_run: bool) ->
         )
         text = _replace_once(
             text,
-            old_block,
-            helper_block + old_block,
+            sync_anchor,
+            helper_block + sync_anchor,
             label="run_agent memory output validation helpers",
             path=path,
         )
@@ -5665,6 +5724,9 @@ def _patch_kanban_list_compact_default(path: Path, dry_run: bool) -> list[str]:
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
 
+    if _kanban_list_has_native_compact_rows(text):
+        return []
+
     if "KANBAN_LIST_DEFAULT_LIMIT = 50" in text:
         text = _replace_once(
             text,
@@ -5769,6 +5831,13 @@ def _patch_context_compressor_runtime_budget(path: Path, dry_run: bool) -> list[
         return []
     text = path.read_text(encoding="utf-8")
     applied: list[str] = []
+
+    if (
+        "_FALLBACK_SUMMARY_MAX_CHARS" in text
+        and "def _build_static_fallback_summary(" in text
+        and "abort_on_summary_failure" in text
+    ):
+        return []
 
     if "_FAST_SUMMARY_TOKENS_CEILING" not in text:
         anchor = "_SUMMARY_TOKENS_CEILING = 12_000\n"
