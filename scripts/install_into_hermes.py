@@ -1859,7 +1859,7 @@ def _patch_memory_manager_output_validation_seam(path: Path, dry_run: bool) -> l
             "                )\n"
         )
         sync_block = latest_block if latest_block in text else old_block
-        new_block = sync_block + (
+        helper_methods = (
             "\n"
             "    def validate_assistant_output_all(\n"
             "        self,\n"
@@ -1934,13 +1934,22 @@ def _patch_memory_manager_output_validation_seam(path: Path, dry_run: bool) -> l
             "            except Exception as e:\n"
             "                logger.debug(\"Memory provider '%s' output validation delivery record failed: %s\", provider.name, e)\n"
         )
-        text = _replace_once(
-            text,
-            sync_block,
-            new_block,
-            label="memory_manager output validation seam",
-            path=path,
-        )
+        if sync_block in text:
+            text = _replace_once(
+                text,
+                sync_block,
+                sync_block + helper_methods,
+                label="memory_manager output validation seam",
+                path=path,
+            )
+        else:
+            text = _replace_once(
+                text,
+                "\n    # -- Background dispatch -------------------------------------------------\n",
+                helper_methods + "\n    # -- Background dispatch -------------------------------------------------\n",
+                label="memory_manager output validation seam after sync_all",
+                path=path,
+            )
         applied.append("memory_manager:output_validation_seam")
 
     if "def _render_memory_commitment_blocked(" not in text:
@@ -4498,6 +4507,52 @@ def _patch_run_agent_memory_output_validation_seam(path: Path, dry_run: bool) ->
     if "        if final_response and not interrupted:\n            final_response = self._validate_external_memory_final_response(\n                original_user_message=original_user_message,\n                final_response=final_response,\n                interrupted=interrupted,\n            )" not in text:
         if normal_anchor in text:
             text = text.replace(normal_anchor, normal_replacement, 1)
+        elif (path.parent / "agent" / "turn_finalizer.py").exists():
+            finalizer_path = path.parent / "agent" / "turn_finalizer.py"
+            finalizer_text = finalizer_path.read_text(encoding="utf-8")
+            finalizer_marker = (
+                "    if final_response and not interrupted:\n"
+                "        final_response = agent._validate_external_memory_final_response(\n"
+                "            original_user_message=original_user_message,\n"
+                "            final_response=final_response,\n"
+                "            interrupted=interrupted,\n"
+                "        )\n"
+            )
+            finalizer_anchor = (
+                "    # Persist session to both JSON log and SQLite only after private retry\n"
+                "    # scaffolding has been removed. Otherwise a later user \"continue\" turn\n"
+                "    # can replay assistant(\"(empty)\") / recovery nudges and fall into the\n"
+                "    # same empty-response loop again.\n"
+                "    agent._drop_trailing_empty_response_scaffolding(messages)\n"
+                "    agent._persist_session(messages, conversation_history)\n"
+            )
+            finalizer_replacement = (
+                "    if final_response and not interrupted:\n"
+                "        final_response = agent._validate_external_memory_final_response(\n"
+                "            original_user_message=original_user_message,\n"
+                "            final_response=final_response,\n"
+                "            interrupted=interrupted,\n"
+                "        )\n"
+                "        agent._replace_last_assistant_response_content(messages, conversation_history, final_response)\n"
+                "\n"
+                "    # Persist session to both JSON log and SQLite only after private retry\n"
+                "    # scaffolding has been removed. Otherwise a later user \"continue\" turn\n"
+                "    # can replay assistant(\"(empty)\") / recovery nudges and fall into the\n"
+                "    # same empty-response loop again.\n"
+                "    agent._drop_trailing_empty_response_scaffolding(messages)\n"
+                "    agent._persist_session(messages, conversation_history)\n"
+            )
+            if finalizer_marker not in finalizer_text:
+                finalizer_text = _replace_once(
+                    finalizer_text,
+                    finalizer_anchor,
+                    finalizer_replacement,
+                    label="turn_finalizer normal memory output validation",
+                    path=finalizer_path,
+                )
+                if not dry_run:
+                    finalizer_path.write_text(finalizer_text, encoding="utf-8")
+            applied.append("agent.turn_finalizer:normal_memory_output_validation")
         elif (path.parent / "agent" / "conversation_loop.py").exists():
             loop_path = path.parent / "agent" / "conversation_loop.py"
             loop_text = loop_path.read_text(encoding="utf-8")
@@ -4575,6 +4630,28 @@ def _patch_run_agent_memory_output_validation_seam(path: Path, dry_run: bool) ->
                 path=path,
             )
             applied.append("run_agent:memory_output_validation_delivery_record")
+        elif (path.parent / "agent" / "turn_finalizer.py").exists():
+            finalizer_path = path.parent / "agent" / "turn_finalizer.py"
+            finalizer_text = finalizer_path.read_text(encoding="utf-8")
+            finalizer_delivery_marker = "agent._record_external_memory_validation_delivery(final_response)"
+            finalizer_delivery_anchor = "    # Plugin hook: post_llm_call\n"
+            finalizer_delivery_replacement = (
+                "    if final_response and not interrupted:\n"
+                "        agent._record_external_memory_validation_delivery(final_response)\n"
+                "\n"
+                "    # Plugin hook: post_llm_call\n"
+            )
+            if finalizer_delivery_marker not in finalizer_text:
+                finalizer_text = _replace_once(
+                    finalizer_text,
+                    finalizer_delivery_anchor,
+                    finalizer_delivery_replacement,
+                    label="turn_finalizer memory output validation delivery record",
+                    path=finalizer_path,
+                )
+                if not dry_run:
+                    finalizer_path.write_text(finalizer_text, encoding="utf-8")
+            applied.append("agent.turn_finalizer:memory_output_validation_delivery_record")
         elif (path.parent / "agent" / "conversation_loop.py").exists():
             loop_path = path.parent / "agent" / "conversation_loop.py"
             loop_text = loop_path.read_text(encoding="utf-8")
@@ -9201,21 +9278,31 @@ def _patch_dockerfile_backend_dependencies(path: Path, dry_run: bool) -> list[st
         if not dry_run:
             path.write_text(text, encoding="utf-8")
         return ["dockerfile:install_runtime_dependencies"]
-    anchors = (
-        '    uv pip install --no-cache-dir -e ".[all]"\n',
-        "RUN uv sync --frozen --no-install-project --extra all\n",
-        "RUN uv sync --frozen --no-install-project --extra all --extra messaging\n",
-        "RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra anthropic --extra bedrock --extra azure-identity\n",
-    )
-    for anchor in anchors:
-        if anchor in text:
-            text = text.replace(anchor, anchor + f"RUN {install_line}\n", 1)
-            break
+    legacy_anchor = '    uv pip install --no-cache-dir -e ".[all]"\n'
+    if legacy_anchor in text:
+        text = text.replace(legacy_anchor, legacy_anchor + f"RUN {install_line}\n", 1)
     else:
-        raise RuntimeError(f"Installer patch anchor missing for docker backend deps in {path}")
+        sync_anchor = re.search(r"^RUN uv sync --frozen --no-install-project[^\n]*\n", text, flags=re.MULTILINE)
+        if sync_anchor is None:
+            raise RuntimeError(f"Installer patch anchor missing for docker backend deps in {path}")
+        insertion_point = sync_anchor.end()
+        text = text[:insertion_point] + f"RUN {install_line}\n" + text[insertion_point:]
     if not dry_run:
         path.write_text(text, encoding="utf-8")
     return ["dockerfile:install_backend_dependencies"]
+
+
+def _insert_after_docker_python_dependency_layer(text: str, insertion: str, *, path: Path, label: str) -> str:
+    legacy_anchor = '    uv pip install --no-cache-dir -e ".[all]"\n'
+    editable_anchor = 'RUN uv pip install --no-cache-dir --no-deps -e "."\n'
+    for anchor in (editable_anchor, legacy_anchor):
+        if anchor in text:
+            return text.replace(anchor, anchor + insertion, 1)
+    sync_anchor = re.search(r"^RUN uv sync --frozen --no-install-project[^\n]*\n", text, flags=re.MULTILINE)
+    if sync_anchor is None:
+        raise RuntimeError(f"Installer patch anchor missing for {label} in {path}")
+    insertion_point = sync_anchor.end()
+    return text[:insertion_point] + insertion + text[insertion_point:]
 
 
 def _patch_dockerfile_workstation_python_alias(path: Path, dry_run: bool) -> list[str]:
@@ -9234,18 +9321,12 @@ def _patch_dockerfile_workstation_python_alias(path: Path, dry_run: bool) -> lis
         if not dry_run:
             path.write_text(text, encoding="utf-8")
         return ["dockerfile:workstation_python_alias"]
-    anchors = (
-        'RUN uv pip install --no-cache-dir --no-deps -e "."\n',
-        '    uv pip install --no-cache-dir -e ".[all]"\n',
-        "RUN uv sync --frozen --no-install-project --extra all\n",
-        "RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra anthropic --extra bedrock --extra azure-identity\n",
+    text = _insert_after_docker_python_dependency_layer(
+        text,
+        wrapper_line,
+        path=path,
+        label="Docker python alias",
     )
-    for anchor in anchors:
-        if anchor in text:
-            text = text.replace(anchor, anchor + wrapper_line, 1)
-            break
-    else:
-        raise RuntimeError(f"Installer patch anchor missing for Docker python alias in {path}")
     if not dry_run:
         path.write_text(text, encoding="utf-8")
     return ["dockerfile:workstation_python_alias"]
@@ -9261,20 +9342,19 @@ def _patch_dockerfile_workstation_hermes_cli(path: Path, dry_run: bool) -> list[
     )
     if wrapper_line in text:
         return []
-    anchors = (
+    python_wrapper_line = (
         "RUN printf '%s\\n' '#!/bin/sh' 'exec /opt/hermes/.venv/bin/python \"$@\"' "
-        "> /usr/local/bin/python && chmod 0755 /usr/local/bin/python\n",
-        'RUN uv pip install --no-cache-dir --no-deps -e "."\n',
-        '    uv pip install --no-cache-dir -e ".[all]"\n',
-        "RUN uv sync --frozen --no-install-project --extra all\n",
-        "RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra anthropic --extra bedrock --extra azure-identity\n",
+        "> /usr/local/bin/python && chmod 0755 /usr/local/bin/python\n"
     )
-    for anchor in anchors:
-        if anchor in text:
-            text = text.replace(anchor, anchor + wrapper_line, 1)
-            break
+    if python_wrapper_line in text:
+        text = text.replace(python_wrapper_line, python_wrapper_line + wrapper_line, 1)
     else:
-        raise RuntimeError(f"Installer patch anchor missing for Docker Hermes CLI in {path}")
+        text = _insert_after_docker_python_dependency_layer(
+            text,
+            wrapper_line,
+            path=path,
+            label="Docker Hermes CLI",
+        )
     if not dry_run:
         path.write_text(text, encoding="utf-8")
     return ["dockerfile:workstation_hermes_cli"]

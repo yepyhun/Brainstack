@@ -293,6 +293,25 @@ def run_conversation(agent, original_user_message):
     assert "MemoryManager.on_turn_start" in checks["turn_start_hook"].message
 
 
+def test_doctor_accepts_turn_start_hook_in_split_turn_context(tmp_path: Path) -> None:
+    target = _base_hermes_target(tmp_path)
+    _write(
+        target / "agent" / "turn_context.py",
+        """
+def build_turn_context(agent, original_user_message):
+    if agent._memory_manager:
+        agent._memory_manager.on_turn_start(agent._user_turn_count, original_user_message)
+    return {}
+""",
+    )
+
+    checks = _checks_by_name(target)
+
+    assert checks["turn_start_hook"].status == "pass"
+    assert "agent/turn_context.py" in checks["turn_start_hook"].message
+    assert "MemoryManager.on_turn_start" in checks["turn_start_hook"].message
+
+
 def test_doctor_rejects_turn_start_provider_api_without_host_caller(tmp_path: Path) -> None:
     target = _base_hermes_target(tmp_path)
 
@@ -331,6 +350,32 @@ def unused_turn_start_helper(agent, original_user_message):
 
     assert checks["turn_start_hook"].status == "warn"
     assert "host turn-start caller" in checks["turn_start_hook"].message
+
+
+def test_doctor_accepts_gateway_session_boundary_in_split_slash_commands(tmp_path: Path) -> None:
+    target = _base_hermes_target(tmp_path)
+    _write(target / "gateway" / "run.py", "")
+    _write(
+        target / "gateway" / "slash_commands.py",
+        """
+async def reset_session(self, session_key):
+    from hermes_cli.plugins import invoke_hook
+    invoke_hook("on_session_finalize", session_id="old", reason="new_session")
+    await self.hooks.emit("session:end", {"session_key": session_key})
+""",
+    )
+    _write(
+        target / "run_agent.py",
+        """
+def shutdown(self, messages):
+    self._memory_manager.on_session_end(messages or [])
+""",
+    )
+
+    checks = _checks_by_name(target)
+
+    assert checks["gateway_session_boundary_gate"].status == "pass"
+    assert "upstream session-finalize" in checks["gateway_session_boundary_gate"].message
 
 
 def test_doctor_rejects_turn_start_fanout_without_exception_containment(

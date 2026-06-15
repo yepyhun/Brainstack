@@ -271,6 +271,28 @@ def test_dockerfile_backend_dependency_patch_supports_latest_provider_extra_sync
     assert "hindsight-all-slim" in text
 
 
+def test_dockerfile_backend_dependency_patch_supports_expanded_upstream_extra_sync(tmp_path):
+    dockerfile = tmp_path / "Dockerfile"
+    upstream_anchor = (
+        "RUN uv sync --frozen --no-install-project --extra all --extra messaging "
+        "--extra anthropic --extra bedrock --extra azure-identity --extra hindsight --extra matrix\n"
+    )
+    dockerfile.write_text(
+        upstream_anchor + 'RUN uv pip install --no-cache-dir --no-deps -e "."\n',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_dockerfile_backend_dependencies(dockerfile, dry_run=False)
+    text = dockerfile.read_text(encoding="utf-8")
+
+    assert applied == ["dockerfile:install_backend_dependencies"]
+    assert upstream_anchor in text
+    assert "RUN uv pip install --no-cache-dir" in text
+    assert "chromadb" in text
+    assert "kuzu" in text
+    assert "hindsight-all-slim" in text
+
+
 def test_dockerfile_workstation_wrappers_support_latest_provider_extra_sync(tmp_path):
     dockerfile = tmp_path / "Dockerfile"
     latest_anchor = (
@@ -291,6 +313,31 @@ def test_dockerfile_workstation_wrappers_support_latest_provider_extra_sync(tmp_
 
     assert python_applied == ["dockerfile:workstation_python_alias"]
     assert hermes_applied == ["dockerfile:workstation_hermes_cli"]
+    assert 'exec /opt/hermes/.venv/bin/python "$@"' in text
+    assert 'exec /opt/hermes/.venv/bin/hermes "$@"' in text
+
+
+def test_dockerfile_workstation_wrappers_support_expanded_upstream_extra_sync(tmp_path):
+    dockerfile = tmp_path / "Dockerfile"
+    upstream_anchor = (
+        "RUN uv sync --frozen --no-install-project --extra all --extra messaging "
+        "--extra anthropic --extra bedrock --extra azure-identity --extra hindsight --extra matrix\n"
+    )
+    dockerfile.write_text("FROM debian:13\n" + upstream_anchor, encoding="utf-8")
+
+    python_applied = install_into_hermes._patch_dockerfile_workstation_python_alias(
+        dockerfile,
+        dry_run=False,
+    )
+    hermes_applied = install_into_hermes._patch_dockerfile_workstation_hermes_cli(
+        dockerfile,
+        dry_run=False,
+    )
+    text = dockerfile.read_text(encoding="utf-8")
+
+    assert python_applied == ["dockerfile:workstation_python_alias"]
+    assert hermes_applied == ["dockerfile:workstation_hermes_cli"]
+    assert upstream_anchor in text
     assert 'exec /opt/hermes/.venv/bin/python "$@"' in text
     assert 'exec /opt/hermes/.venv/bin/hermes "$@"' in text
 
@@ -2697,6 +2744,55 @@ def run_conversation(agent, messages, conversation_history, final_response, inte
     assert loop_text.index("agent._validate_external_memory_final_response(") < loop_text.index("agent._persist_session")
 
 
+def test_run_agent_memory_output_validation_patch_supports_turn_finalizer_extraction(tmp_path):
+    module = tmp_path / "run_agent.py"
+    finalizer = tmp_path / "agent" / "turn_finalizer.py"
+    finalizer.parent.mkdir()
+    module.write_text(
+        '''
+class AIAgent:
+    def _sync_external_memory_for_turn(
+        self,
+        *,
+        original_user_message: Any,
+        final_response: Any,
+        interrupted: bool,
+        messages: list | None = None,
+    ) -> None:
+        pass
+''',
+        encoding="utf-8",
+    )
+    finalizer.write_text(
+        '''
+def finalize_turn(agent, messages, conversation_history, final_response, interrupted, original_user_message):
+    # Persist session to both JSON log and SQLite only after private retry
+    # scaffolding has been removed. Otherwise a later user "continue" turn
+    # can replay assistant("(empty)") / recovery nudges and fall into the
+    # same empty-response loop again.
+    agent._drop_trailing_empty_response_scaffolding(messages)
+    agent._persist_session(messages, conversation_history)
+
+    # Plugin hook: post_llm_call
+    if final_response and not interrupted:
+        pass
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_run_agent_memory_output_validation_seam(module, dry_run=False)
+
+    module_text = module.read_text(encoding="utf-8")
+    finalizer_text = finalizer.read_text(encoding="utf-8")
+    assert "run_agent:memory_output_validation_helpers" in applied
+    assert "agent.turn_finalizer:normal_memory_output_validation" in applied
+    assert "agent.turn_finalizer:memory_output_validation_delivery_record" in applied
+    assert "def _validate_external_memory_final_response" in module_text
+    assert "agent._validate_external_memory_final_response(" in finalizer_text
+    assert finalizer_text.index("agent._validate_external_memory_final_response(") < finalizer_text.index("agent._persist_session")
+    assert "agent._record_external_memory_validation_delivery(final_response)" in finalizer_text
+
+
 def test_memory_manager_output_validation_patch_supports_messages_sync_signature(tmp_path):
     module = tmp_path / "memory_manager.py"
     module.write_text(
@@ -2747,6 +2843,76 @@ class MemoryManager:
     assert "messages: Optional[List[Dict[str, Any]]] = None" in text
     assert "def validate_assistant_output_all(" in text
     assert "def record_output_validation_delivery_all(" in text
+
+
+def test_memory_manager_output_validation_patch_preserves_async_sync_all(tmp_path):
+    module = tmp_path / "memory_manager.py"
+    module.write_text(
+        '''
+from typing import Any, Dict, List, Optional
+
+
+class MemoryManager:
+    def _submit_background(self, fn) -> None:
+        pass
+
+    @staticmethod
+    def _provider_sync_accepts_messages(provider):
+        return True
+
+    def sync_all(
+        self,
+        user_content: str,
+        assistant_content: str,
+        *,
+        session_id: str = "",
+        messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """Sync a completed turn to all providers."""
+        providers = list(self._providers)
+        if not providers:
+            return
+
+        def _run() -> None:
+            for provider in providers:
+                try:
+                    if messages is not None and self._provider_sync_accepts_messages(provider):
+                        provider.sync_turn(
+                            user_content,
+                            assistant_content,
+                            session_id=session_id,
+                            messages=messages,
+                        )
+                    else:
+                        provider.sync_turn(
+                            user_content,
+                            assistant_content,
+                            session_id=session_id,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "Memory provider '%s' sync_turn failed: %s",
+                        provider.name, e,
+                    )
+
+        self._submit_background(_run)
+
+    # -- Background dispatch -------------------------------------------------
+
+    def _submit_background(self, fn) -> None:
+        pass
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_memory_manager_output_validation_seam(module, dry_run=False)
+
+    text = module.read_text(encoding="utf-8")
+    assert "memory_manager:output_validation_seam" in applied
+    assert "self._submit_background(_run)" in text
+    assert "def validate_assistant_output_all(" in text
+    assert text.index("self._submit_background(_run)") < text.index("def validate_assistant_output_all(")
+    assert text.index("def validate_assistant_output_all(") < text.index("# -- Background dispatch")
 
 
 def test_run_agent_ebadf_recovery_patch_supports_runtime_helper_extraction(tmp_path):
@@ -2952,6 +3118,26 @@ exec gosu hermes "$0" "$@"
 """
 
     assert brainstack_doctor._has_runtime_ownership_normalization(entrypoint)
+
+
+def test_doctor_accepts_upstream_s6_stage2_runtime_ownership_normalization():
+    stage2_hook = """
+HERMES_UID="${HERMES_UID:-${PUID:-}}"
+HERMES_GID="${HERMES_GID:-${PGID:-}}"
+if [ -n "${HERMES_UID:-}" ]; then
+    usermod -u "$HERMES_UID" hermes
+fi
+if [ -n "${HERMES_GID:-}" ]; then
+    groupmod -o -g "$HERMES_GID" hermes 2>/dev/null || true
+fi
+chown hermes:hermes "$HERMES_HOME" 2>/dev/null || true
+for sub in cron sessions logs hooks memories skills skins plans workspace home profiles pairing platforms/pairing; do
+    chown -R hermes:hermes "$HERMES_HOME/$sub" 2>/dev/null || true
+done
+as_hermes() { [ "$(id -u)" = 0 ] || { "$@"; return; }; s6-setuidgid hermes "$@"; }
+"""
+
+    assert brainstack_doctor._has_runtime_ownership_normalization("", stage2_hook)
 
 
 def test_doctor_accepts_legacy_brainstack_docker_runtime_ownership_normalization():

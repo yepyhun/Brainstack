@@ -495,6 +495,7 @@ def _check_host_surfaces(target: Path, *, planned_install: bool = False) -> list
     loader = _read(target / "plugins" / "memory" / "__init__.py")
     run_agent = _read(target / "run_agent.py")
     gateway_run = _read(target / "gateway" / "run.py")
+    gateway_slash_commands = _read(target / "gateway" / "slash_commands.py")
     discord_platform = _read_discord_adapter_surface(target)
     host_seam_probes = {probe.name: probe for probe in scan_host_seams(target)}
 
@@ -577,9 +578,10 @@ def _check_host_surfaces(target: Path, *, planned_install: bool = False) -> list
         checks.append(Check("personal_memory_guidance", "pass", "run_agent is not injecting Brainstack-only personal-memory guidance"))
 
     legacy_brainstack_boundary = "_async_finalize_session_memory" in gateway_run and "_finalize_brainstack_session_memory" in gateway_run
+    gateway_session_boundary_surface = "\n".join((gateway_run, gateway_slash_commands))
     upstream_boundary = (
-        "on_session_finalize" in gateway_run
-        and "session:end" in gateway_run
+        "on_session_finalize" in gateway_session_boundary_surface
+        and "session:end" in gateway_session_boundary_surface
         and "self._memory_manager.on_session_end(" in run_agent
     )
     if legacy_brainstack_boundary:
@@ -1454,10 +1456,10 @@ def _check_docker_helpers(target: Path, planned_install: bool) -> list[Check]:
         checks.append(Check("dockerignore_runtime_excludes", "pass", "Installer will patch .dockerignore to exclude runtime state"))
     else:
         checks.append(Check("dockerignore_runtime_excludes", "warn", "Runtime state is still visible to Docker build context"))
-    entrypoint = target / "docker" / "entrypoint.sh"
-    entrypoint_text = _read(entrypoint)
-    if _has_runtime_ownership_normalization(entrypoint_text):
-        checks.append(Check("docker_runtime_ownership_fix", "pass", "Docker entrypoint normalizes runtime ownership before privilege drop"))
+    entrypoint_text = _read(target / "docker" / "entrypoint.sh")
+    stage2_hook_text = _read(target / "docker" / "stage2-hook.sh")
+    if _has_runtime_ownership_normalization(entrypoint_text, stage2_hook_text):
+        checks.append(Check("docker_runtime_ownership_fix", "pass", "Docker startup normalizes runtime ownership before privilege drop"))
     elif planned_install:
         checks.append(Check("docker_runtime_ownership_fix", "pass", "Installer will patch Docker entrypoint ownership normalization"))
     else:
@@ -1465,7 +1467,7 @@ def _check_docker_helpers(target: Path, planned_install: bool) -> list[Check]:
     return checks
 
 
-def _has_runtime_ownership_normalization(entrypoint_text: str) -> bool:
+def _has_runtime_ownership_normalization(entrypoint_text: str, stage2_hook_text: str = "") -> bool:
     """Return whether Docker startup owns writable runtime state before running Hermes.
 
     Older Brainstack installs used a narrow `fix_critical_runtime_ownership`
@@ -1474,16 +1476,27 @@ def _has_runtime_ownership_normalization(entrypoint_text: str) -> bool:
     privilege drop. The doctor should accept either shape instead of forcing a
     Brainstack-specific host patch back into core mode.
     """
-    text = str(entrypoint_text or "")
+    entrypoint = str(entrypoint_text or "")
+    stage2_hook = str(stage2_hook_text or "")
+    text = "\n".join(part for part in (entrypoint, stage2_hook) if part)
     if "fix_critical_runtime_ownership" in text:
         return True
-    required_markers = (
+    legacy_upstream_markers = (
         "HERMES_UID",
         "HERMES_GID",
         'chown -R hermes:hermes "$HERMES_HOME"',
         "exec gosu hermes",
     )
-    return all(marker in text for marker in required_markers)
+    if all(marker in text for marker in legacy_upstream_markers):
+        return True
+    s6_stage2_markers = (
+        "HERMES_UID",
+        "HERMES_GID",
+        'chown hermes:hermes "$HERMES_HOME"',
+        'chown -R hermes:hermes "$HERMES_HOME/$sub"',
+        "s6-setuidgid hermes",
+    )
+    return all(marker in text for marker in s6_stage2_markers)
 
 
 def run_doctor(args: argparse.Namespace) -> tuple[int, list[Check]]:

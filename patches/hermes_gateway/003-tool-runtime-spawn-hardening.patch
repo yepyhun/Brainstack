@@ -1,8 +1,7 @@
 diff --git a/gateway/platforms/whatsapp.py b/gateway/platforms/whatsapp.py
-index 8e2173644..3baabceb4 100644
 --- a/gateway/platforms/whatsapp.py
 +++ b/gateway/platforms/whatsapp.py
-@@ -565,7 +565,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
+@@ -516,7 +516,7 @@
                  ],
                  stdout=bridge_log_fh,
                  stderr=bridge_log_fh,
@@ -12,10 +11,9 @@ index 8e2173644..3baabceb4 100644
              )
              _write_bridge_pidfile(self._session_path, self._bridge_process.pid)
 diff --git a/tools/code_execution_tool.py b/tools/code_execution_tool.py
-index 092f7e37e..d00e888f3 100644
 --- a/tools/code_execution_tool.py
 +++ b/tools/code_execution_tool.py
-@@ -1237,7 +1237,10 @@ def execute_code(
+@@ -1290,7 +1290,10 @@
              stdout=subprocess.PIPE,
              stderr=subprocess.PIPE,
              stdin=subprocess.DEVNULL,
@@ -26,13 +24,38 @@ index 092f7e37e..d00e888f3 100644
 +            start_new_session=False if _IS_WINDOWS else True,
              creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
          )
+
+diff --git a/tools/environments/local.py b/tools/environments/local.py
+--- a/tools/environments/local.py
++++ b/tools/environments/local.py
+@@ -601,7 +601,10 @@
+             stdout=subprocess.PIPE,
+             stderr=subprocess.STDOUT,
+             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
+-            preexec_fn=None if _IS_WINDOWS else os.setsid,
++            # Avoid preexec_fn in the gateway's multithreaded process. Python
++            # exposes start_new_session for this exact setsid use case without
++            # running arbitrary Python in the forked child.
++            start_new_session=False if _IS_WINDOWS else True,
+             cwd=_popen_cwd,
+             **_popen_kwargs,
+         )
+diff --git a/tools/process_registry.py b/tools/process_registry.py
+--- a/tools/process_registry.py
++++ b/tools/process_registry.py
+@@ -605,7 +605,7 @@
+             stdout=subprocess.PIPE,
+             stderr=subprocess.STDOUT,
+             stdin=subprocess.DEVNULL,
+-            preexec_fn=None if _IS_WINDOWS else os.setsid,
++            start_new_session=False if _IS_WINDOWS else True,
+             **_popen_kwargs,
+         )
  
-         # --- Poll loop: watch for exit, timeout, and interrupt ---
 diff --git a/tools/environments/base.py b/tools/environments/base.py
-index 8a53cefb5..466ee82f9 100644
 --- a/tools/environments/base.py
 +++ b/tools/environments/base.py
-@@ -319,6 +319,7 @@ class BaseEnvironment(ABC):
+@@ -319,6 +319,7 @@
          self._cwd_file = f"{temp_dir}/hermes-cwd-{self._session_id}.txt"
          self._cwd_marker = _cwd_marker(self._session_id)
          self._snapshot_ready = False
@@ -40,20 +63,19 @@ index 8a53cefb5..466ee82f9 100644
  
      # ------------------------------------------------------------------
      # Abstract methods
-@@ -782,44 +783,49 @@ class BaseEnvironment(ABC):
-         stdin_data: str | None = None,
+@@ -836,43 +837,48 @@
+         rewrite_compound_background: bool = True,
      ) -> dict:
          """Execute a command, return {"output": str, "returncode": int}."""
 -        self._before_execute()
 -
 -        exec_command, sudo_stdin = self._prepare_command(command)
--        # Guard against the `A && B &` subshell-wait trap: bash forks a
--        # subshell for the compound that then waits for an infinite B (a
--        # server, `yes > /dev/null`, etc.), leaking the subshell forever.
--        # Rewriting to `A && { B & }` runs B as a plain background in the
--        # current shell — no subshell wait.
--        from tools.terminal_tool import _rewrite_compound_background
--        exec_command = _rewrite_compound_background(exec_command)
+-        # Guard against the `A && B &` subshell-wait trap by default.
+-        # Some callers (spawn_via_env) already produce shell-safe wrappers and
+-        # pass rewrite_compound_background=False.
+-        if rewrite_compound_background:
+-            from tools.terminal_tool import _rewrite_compound_background
+-            exec_command = _rewrite_compound_background(exec_command)
 -        effective_timeout = timeout or self.timeout
 -        effective_cwd = cwd or self.cwd
 -
@@ -80,6 +102,8 @@ index 8a53cefb5..466ee82f9 100644
 -        )
 -        result = self._wait_for_process(proc, timeout=effective_timeout)
 -        self._update_cwd(result)
+-
+-        return result
 +        # A terminal environment is stateful: each command can update the
 +        # shared snapshot file and cwd marker. Run one command at a time per
 +        # environment; parallelism belongs above this layer with independent
@@ -88,13 +112,12 @@ index 8a53cefb5..466ee82f9 100644
 +            self._before_execute()
 +
 +            exec_command, sudo_stdin = self._prepare_command(command)
-+            # Guard against the `A && B &` subshell-wait trap: bash forks a
-+            # subshell for the compound that then waits for an infinite B (a
-+            # server, `yes > /dev/null`, etc.), leaking the subshell forever.
-+            # Rewriting to `A && { B & }` runs B as a plain background in the
-+            # current shell — no subshell wait.
-+            from tools.terminal_tool import _rewrite_compound_background
-+            exec_command = _rewrite_compound_background(exec_command)
++            # Guard against the `A && B &` subshell-wait trap by default.
++            # Some callers (spawn_via_env) already produce shell-safe wrappers and
++            # pass rewrite_compound_background=False.
++            if rewrite_compound_background:
++                from tools.terminal_tool import _rewrite_compound_background
++                exec_command = _rewrite_compound_background(exec_command)
 +            effective_timeout = timeout or self.timeout
 +            effective_cwd = cwd or self.cwd
 +
@@ -121,41 +144,8 @@ index 8a53cefb5..466ee82f9 100644
 +            )
 +            result = self._wait_for_process(proc, timeout=effective_timeout)
 +            self._update_cwd(result)
- 
--        return result
++
 +            return result
  
      # ------------------------------------------------------------------
      # Shared helpers
-diff --git a/tools/environments/local.py b/tools/environments/local.py
-index 378f34054..7d7204425 100644
---- a/tools/environments/local.py
-+++ b/tools/environments/local.py
-@@ -531,7 +531,10 @@ class LocalEnvironment(BaseEnvironment):
-             stdout=subprocess.PIPE,
-             stderr=subprocess.STDOUT,
-             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
--            preexec_fn=None if _IS_WINDOWS else os.setsid,
-+            # Avoid preexec_fn in the gateway's multithreaded process. Python
-+            # exposes start_new_session for this exact setsid use case without
-+            # running arbitrary Python in the forked child.
-+            start_new_session=False if _IS_WINDOWS else True,
-             creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
-             cwd=_popen_cwd,
-             **_popen_kwargs,
-         )
-         if not _IS_WINDOWS:
-diff --git a/tools/process_registry.py b/tools/process_registry.py
-index 771ebf0b4..060feef8d 100644
---- a/tools/process_registry.py
-+++ b/tools/process_registry.py
-@@ -562,7 +562,7 @@ class ProcessRegistry:
-             stdout=subprocess.PIPE,
-             stderr=subprocess.STDOUT,
-             stdin=subprocess.DEVNULL,
--            preexec_fn=None if _IS_WINDOWS else os.setsid,
-+            start_new_session=False if _IS_WINDOWS else True,
-             **_popen_kwargs,
-         )
- 
-         session.process = proc

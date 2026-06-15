@@ -425,12 +425,18 @@ def probe_turn_start_lifecycle_hook(target: Path) -> HostSeamProbe:
         missing.append("MemoryManager.on_turn_start provider fanout with exception containment")
 
     host_evidence: HostSeamEvidence | None = None
-    for rel_path, tree in _trees(corpus, ("run_agent.py", "agent/conversation_loop.py")):
-        if _function_calls_memory_manager_attr(tree, "run_conversation", "on_turn_start"):
+    host_functions_by_path = {
+        "run_agent.py": ("run_conversation",),
+        "agent/conversation_loop.py": ("run_conversation",),
+        "agent/turn_context.py": ("build_turn_context",),
+    }
+    for rel_path, tree in _trees(corpus, tuple(host_functions_by_path)):
+        function_names = host_functions_by_path.get(rel_path, ())
+        if any(_function_calls_memory_manager_attr(tree, name, "on_turn_start") for name in function_names):
             host_evidence = HostSeamEvidence(
                 rel_path,
-                "run_conversation -> MemoryManager.on_turn_start",
-                "supported turn loop calls the manager lifecycle hook",
+                "turn prologue -> MemoryManager.on_turn_start",
+                "supported turn prologue calls the manager lifecycle hook",
             )
             break
     if host_evidence:
