@@ -1404,6 +1404,11 @@ def _patch_cron_authority_jobs(path: Path, dry_run: bool) -> list[str]:
         "JOBS_FILE = CRON_DIR / \"jobs.json\"\n"
         "OUTPUT_DIR = CRON_DIR / \"output\"\n"
     )
+    head_authority = (
+        "HERMES_DIR = get_hermes_home().resolve()\n"
+        "CRON_DIR = HERMES_DIR / \"cron\"\n"
+        "JOBS_FILE = CRON_DIR / \"jobs.json\"\n"
+    )
     new_authority = (
         "def get_cron_home() -> Path:\n"
         "    \"\"\"Return the explicit cron authority for this process.\n\n"
@@ -1453,6 +1458,20 @@ def _patch_cron_authority_jobs(path: Path, dry_run: bool) -> list[str]:
         "JOBS_FILE = CRON_DIR / \"jobs.json\"\n"
         "OUTPUT_DIR = CRON_DIR / \"output\"\n"
     )
+    head_new_authority = (
+        "def get_cron_home() -> Path:\n"
+        "    \"\"\"Return the explicit cron authority for this process.\n\n"
+        "    Profiles keep profile-local cron by default. Coordinated multi-profile\n"
+        "    workers may opt into a shared cron authority by setting HERMES_CRON_HOME.\n"
+        "    \"\"\"\n"
+        "    override = os.environ.get(\"HERMES_CRON_HOME\", \"\").strip()\n"
+        "    if override:\n"
+        "        return Path(override).expanduser()\n"
+        "    return get_hermes_home()\n\n\n"
+        "HERMES_DIR = get_cron_home().resolve()\n"
+        "CRON_DIR = HERMES_DIR / \"cron\"\n"
+        "JOBS_FILE = CRON_DIR / \"jobs.json\"\n"
+    )
     if "def get_cron_home() -> Path:" not in text:
         text = _replace_once_any(
             text,
@@ -1460,6 +1479,7 @@ def _patch_cron_authority_jobs(path: Path, dry_run: bool) -> list[str]:
                 (locked_authority, locked_new_authority),
                 (old_authority, new_authority),
                 (alt_authority, alt_new_authority),
+                (head_authority, head_new_authority),
             ],
             label="cron.jobs HERMES_CRON_HOME authority",
             path=path,
@@ -4526,6 +4546,10 @@ def _patch_run_agent_memory_output_validation_seam(path: Path, dry_run: bool) ->
                 "    agent._drop_trailing_empty_response_scaffolding(messages)\n"
                 "    agent._persist_session(messages, conversation_history)\n"
             )
+            finalizer_try_anchor = (
+                "    try:\n"
+                "        agent._drop_trailing_empty_response_scaffolding(messages)\n"
+            )
             finalizer_replacement = (
                 "    if final_response and not interrupted:\n"
                 "        final_response = agent._validate_external_memory_final_response(\n"
@@ -4542,14 +4566,29 @@ def _patch_run_agent_memory_output_validation_seam(path: Path, dry_run: bool) ->
                 "    agent._drop_trailing_empty_response_scaffolding(messages)\n"
                 "    agent._persist_session(messages, conversation_history)\n"
             )
+            finalizer_try_replacement = (
+                "    try:\n"
+                "        agent._drop_trailing_empty_response_scaffolding(messages)\n"
+                "\n"
+                "        if final_response and not interrupted:\n"
+                "            final_response = agent._validate_external_memory_final_response(\n"
+                "                original_user_message=original_user_message,\n"
+                "                final_response=final_response,\n"
+                "                interrupted=interrupted,\n"
+                "            )\n"
+                "            agent._replace_last_assistant_response_content(messages, conversation_history, final_response)\n"
+            )
             if finalizer_marker not in finalizer_text:
-                finalizer_text = _replace_once(
-                    finalizer_text,
-                    finalizer_anchor,
-                    finalizer_replacement,
-                    label="turn_finalizer normal memory output validation",
-                    path=finalizer_path,
-                )
+                if finalizer_anchor in finalizer_text:
+                    finalizer_text = finalizer_text.replace(finalizer_anchor, finalizer_replacement, 1)
+                else:
+                    finalizer_text = _replace_once(
+                        finalizer_text,
+                        finalizer_try_anchor,
+                        finalizer_try_replacement,
+                        label="turn_finalizer guarded memory output validation",
+                        path=finalizer_path,
+                    )
                 if not dry_run:
                     finalizer_path.write_text(finalizer_text, encoding="utf-8")
             applied.append("agent.turn_finalizer:normal_memory_output_validation")

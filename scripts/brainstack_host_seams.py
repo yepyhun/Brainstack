@@ -305,11 +305,38 @@ def probe_host_runtime_wiring(target: Path) -> HostSeamProbe:
 
 def probe_native_profile_write_bridge(target: Path) -> HostSeamProbe:
     corpus = HostSurfaceCorpus(target)
+    manager_tree = corpus.tree("agent/memory_manager.py")
+    manager_has_notify_bridge = bool(
+        manager_tree is not None
+        and _has_function(manager_tree, "notify_memory_tool_write")
+        and _calls_attr(manager_tree, "on_memory_write", keyword="metadata")
+    )
     call_without_metadata: HostSeamEvidence | None = None
     for rel_path, tree in _trees(
         corpus,
         ("agent/tool_executor.py", "agent/agent_runtime_helpers.py", "run_agent.py"),
     ):
+        if (
+            manager_has_notify_bridge
+            and _calls_attr(tree, "notify_memory_tool_write", keyword="build_metadata")
+        ):
+            return HostSeamProbe(
+                "native_profile_write_bridge",
+                "pass",
+                "Hermes native memory writes are bridged into external memory providers.",
+                (
+                    HostSeamEvidence(
+                        rel_path,
+                        "notify_memory_tool_write(build_metadata=...)",
+                        "built-in memory write path delegates committed-write gating and provenance to MemoryManager",
+                    ),
+                    HostSeamEvidence(
+                        "agent/memory_manager.py",
+                        "notify_memory_tool_write -> on_memory_write(metadata=...)",
+                        "manager bridge forwards provenance metadata to providers",
+                    ),
+                ),
+            )
         if _calls_attr(tree, "on_memory_write", keyword="metadata"):
             return HostSeamProbe(
                 "native_profile_write_bridge",

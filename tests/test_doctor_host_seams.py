@@ -163,6 +163,92 @@ def call_memory_tool(agent, function_args, target):
     assert checks["memory_output_validation_seam"].status == "pass"
 
 
+def test_doctor_accepts_manager_notify_memory_tool_write_bridge(tmp_path: Path) -> None:
+    target = _base_hermes_target(tmp_path)
+    _write(
+        target / "agent" / "agent_init.py",
+        """
+def init_agent(agent, mem_config, skip_memory=False):
+    from agent.memory_manager import MemoryManager
+    from plugins.memory import load_memory_provider
+    agent._memory_manager = MemoryManager()
+    agent._memory_manager.add_provider(load_memory_provider(mem_config.get("provider")))
+""",
+    )
+    _write(
+        target / "agent" / "memory_manager.py",
+        """
+def _render_memory_commitment_blocked(provider_results):
+    return "blocked"
+
+class MemoryManager:
+    def add_provider(self, provider): pass
+    def prefetch_all(self, query, *, session_id=""): pass
+    def queue_prefetch_all(self, query, *, session_id=""): pass
+    def sync_all(self, user_content, assistant_content, *, session_id=""): pass
+    def on_turn_start(self, turn_number, message, **kwargs):
+        for provider in self._providers:
+            provider.on_turn_start(turn_number, message, **kwargs)
+    def on_pre_compress(self): pass
+    def on_session_end(self, messages): pass
+    def shutdown_all(self): pass
+    def validate_assistant_output_all(self, content, *, user_content="", session_id=""): pass
+    def record_output_validation_delivery_all(self, result, *, delivered_content=""): pass
+    def on_memory_write(self, action, target, content, metadata=None):
+        for provider in self._providers:
+            provider.on_memory_write(action, target, content, metadata=metadata)
+    def notify_memory_tool_write(self, tool_result, tool_args, *, build_metadata=None):
+        metadata = build_metadata() if build_metadata else {}
+        self.on_memory_write(
+            tool_args.get("action", ""),
+            tool_args.get("target", "memory"),
+            tool_args.get("content", ""),
+            metadata=metadata,
+        )
+
+def build_memory_context_block(raw_context):
+    return "<memory-context>NOT new user input</memory-context>"
+
+def sanitize_context(raw_context):
+    return raw_context
+""",
+    )
+    _write(
+        target / "run_agent.py",
+        """
+def _validate_external_memory_final_response(self, original_user_message, final_response, interrupted):
+    result = self._memory_manager.validate_assistant_output_all(final_response, user_content=original_user_message, session_id=self.session_id)
+    return result["content"]
+
+def _record_external_memory_validation_delivery(self, delivered_content):
+    self._memory_manager.record_output_validation_delivery_all(self._last_memory_output_validation, delivered_content=str(delivered_content))
+
+def _sync_external_memory_for_turn(self, original_user_message, final_response, interrupted):
+    if interrupted:
+        return
+    self._memory_manager.sync_all(original_user_message, final_response, session_id=self.session_id)
+    self._memory_manager.queue_prefetch_all(original_user_message, session_id=self.session_id)
+""",
+    )
+    _write(
+        target / "agent" / "tool_executor.py",
+        """
+def call_memory_tool(agent, function_args, result):
+    if agent._memory_manager:
+        agent._memory_manager.notify_memory_tool_write(
+            result,
+            function_args,
+            build_metadata=lambda: agent._build_memory_write_metadata(task_id="t1"),
+        )
+""",
+    )
+
+    checks = _checks_by_name(target)
+
+    assert checks["native_profile_write_bridge"].status == "pass"
+    assert "notify_memory_tool_write" in checks["native_profile_write_bridge"].message
+
+
 def test_doctor_rejects_comment_only_host_seam_markers(tmp_path: Path) -> None:
     target = _base_hermes_target(tmp_path)
     _write(

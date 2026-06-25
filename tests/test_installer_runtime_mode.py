@@ -2793,6 +2793,104 @@ def finalize_turn(agent, messages, conversation_history, final_response, interru
     assert "agent._record_external_memory_validation_delivery(final_response)" in finalizer_text
 
 
+def test_run_agent_memory_output_validation_patch_supports_guarded_turn_finalizer_persist(tmp_path):
+    module = tmp_path / "run_agent.py"
+    finalizer = tmp_path / "agent" / "turn_finalizer.py"
+    finalizer.parent.mkdir()
+    module.write_text(
+        '''
+class AIAgent:
+    def _sync_external_memory_for_turn(
+        self,
+        *,
+        original_user_message: Any,
+        final_response: Any,
+        interrupted: bool,
+        messages: list | None = None,
+    ) -> None:
+        pass
+''',
+        encoding="utf-8",
+    )
+    finalizer.write_text(
+        '''
+def finalize_turn(agent, messages, conversation_history, final_response, interrupted, original_user_message):
+    try:
+        agent._drop_trailing_empty_response_scaffolding(messages)
+
+        if interrupted and messages and messages[-1].get("role") == "tool":
+            messages.append({"role": "assistant", "content": (final_response or "").strip() or "Operation interrupted."})
+
+        agent._persist_session(messages, conversation_history)
+    except Exception as _persist_err:
+        pass
+
+    # Plugin hook: transform_llm_output
+    if final_response and not interrupted:
+        pass
+
+    # Plugin hook: post_llm_call
+    if final_response and not interrupted:
+        pass
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_run_agent_memory_output_validation_seam(module, dry_run=False)
+
+    finalizer_text = finalizer.read_text(encoding="utf-8")
+    assert "agent.turn_finalizer:normal_memory_output_validation" in applied
+    assert finalizer_text.index("agent._validate_external_memory_final_response(") < finalizer_text.index("agent._persist_session")
+    assert finalizer_text.index("agent._validate_external_memory_final_response(") < finalizer_text.index("if interrupted and messages")
+    assert "agent._record_external_memory_validation_delivery(final_response)" in finalizer_text
+
+
+def test_cron_authority_patch_supports_latest_locked_jobs_header(tmp_path):
+    module = tmp_path / "cron" / "jobs.py"
+    module.parent.mkdir()
+    module.write_text(
+        '''
+import contextlib
+import json
+import os
+import threading
+from pathlib import Path
+from hermes_constants import get_hermes_home
+
+HERMES_DIR = get_hermes_home().resolve()
+CRON_DIR = HERMES_DIR / "cron"
+JOBS_FILE = CRON_DIR / "jobs.json"
+# Heartbeat file the in-process ticker touches on every loop iteration. The
+# gateway process and the (separate) ``hermes cron status`` process share it
+# so status can tell whether the ticker THREAD is alive, not just whether the
+# gateway PROCESS exists.
+TICKER_HEARTBEAT_FILE = CRON_DIR / "ticker_heartbeat"
+TICKER_SUCCESS_FILE = CRON_DIR / "ticker_last_success"
+TICKER_INTERVAL_SECONDS = 60
+
+# In-process lock protecting load_jobs->modify->save_jobs cycles.
+_jobs_file_lock = threading.RLock()
+_jobs_lock_state = threading.local()
+OUTPUT_DIR = CRON_DIR / "output"
+ONESHOT_GRACE_SECONDS = 120
+''',
+        encoding="utf-8",
+    )
+
+    applied = install_into_hermes._patch_cron_authority_jobs(module, dry_run=False)
+
+    text = module.read_text(encoding="utf-8")
+    assert applied == ["cron_authority_jobs:resolver"]
+    assert "def get_cron_home() -> Path:" in text
+    assert 'override = os.environ.get("HERMES_CRON_HOME", "").strip()' in text
+    assert "HERMES_DIR = get_cron_home().resolve()" in text
+    assert 'TICKER_HEARTBEAT_FILE = CRON_DIR / "ticker_heartbeat"' in text
+    assert "_jobs_file_lock = threading.RLock()" in text
+    assert "_jobs_lock_state = threading.local()" in text
+    assert 'OUTPUT_DIR = CRON_DIR / "output"' in text
+    assert install_into_hermes._patch_cron_authority_jobs(module, dry_run=False) == []
+
+
 def test_memory_manager_output_validation_patch_supports_messages_sync_signature(tmp_path):
     module = tmp_path / "memory_manager.py"
     module.write_text(
