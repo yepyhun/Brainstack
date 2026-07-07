@@ -1314,6 +1314,25 @@ def _kanban_list_has_native_compact_rows(text: str) -> bool:
     )
 
 
+def _target_has_native_profile_local_cron_authority(target: Path) -> bool:
+    """New Hermes keeps cron authority profile-local by design (#4707)."""
+    jobs = target / "cron" / "jobs.py"
+    scheduler = target / "cron" / "scheduler.py"
+    kanban = target / "hermes_cli" / "kanban_db.py"
+    if not (jobs.exists() and scheduler.exists() and kanban.exists()):
+        return False
+    jobs_text = jobs.read_text(encoding="utf-8")
+    scheduler_text = scheduler.read_text(encoding="utf-8")
+    kanban_text = kanban.read_text(encoding="utf-8")
+    return (
+        "Cron is per-profile by design" in jobs_text
+        and "profile-scoped gateway runs that" in jobs_text
+        and "Cron is per-profile by design (#4707)" in scheduler_text
+        and "hermes_home = _get_hermes_home()" in scheduler_text
+        and "env[\"HERMES_HOME\"] = resolve_profile_env(profile_arg)" in kanban_text
+    )
+
+
 def _assert_kanban_list_compact_patch_consistent(text: str, *, path: Path) -> None:
     issues = _kanban_list_compact_patch_issues(text)
     if issues:
@@ -10002,11 +10021,12 @@ def main() -> int:
     host_patches.extend(_run_host_patch("_patch_skill_prompt_policy", target / "agent" / "prompt_builder.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_skill_view_progressive_disclosure", target / "tools" / "skills_tool.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_prompt_builder", target / "agent" / "prompt_builder.py", args.dry_run, host_patch_mode=args.host_patch_mode))
-    host_patches.extend(_run_host_patch("_patch_cron_authority_jobs", target / "cron" / "jobs.py", args.dry_run, host_patch_mode=args.host_patch_mode))
-    host_patches.extend(_run_host_patch("_patch_cron_authority_scheduler", target / "cron" / "scheduler.py", args.dry_run, host_patch_mode=args.host_patch_mode))
-    host_patches.extend(_run_host_patch("_patch_kanban_spawn_cron_authority", target / "hermes_cli" / "kanban_db.py", args.dry_run, host_patch_mode=args.host_patch_mode))
-    host_patches.extend(_run_host_patch("_patch_cron_scheduler_authority_tests", target / "tests" / "cron" / "test_scheduler.py", args.dry_run, host_patch_mode=args.host_patch_mode))
-    host_patches.extend(_run_host_patch("_patch_cron_authority_tests", target / "tests" / "cron" / "test_jobs.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+    if not _target_has_native_profile_local_cron_authority(target):
+        host_patches.extend(_run_host_patch("_patch_cron_authority_jobs", target / "cron" / "jobs.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+        host_patches.extend(_run_host_patch("_patch_cron_authority_scheduler", target / "cron" / "scheduler.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+        host_patches.extend(_run_host_patch("_patch_kanban_spawn_cron_authority", target / "hermes_cli" / "kanban_db.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+        host_patches.extend(_run_host_patch("_patch_cron_scheduler_authority_tests", target / "tests" / "cron" / "test_scheduler.py", args.dry_run, host_patch_mode=args.host_patch_mode))
+        host_patches.extend(_run_host_patch("_patch_cron_authority_tests", target / "tests" / "cron" / "test_jobs.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_cron_jobs", target / "cron" / "jobs.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_cron_scheduler", target / "cron" / "scheduler.py", args.dry_run, host_patch_mode=args.host_patch_mode))
     host_patches.extend(_run_host_patch("_patch_cron_scheduler_tests", target / "tests" / "cron" / "test_scheduler.py", args.dry_run, host_patch_mode=args.host_patch_mode))

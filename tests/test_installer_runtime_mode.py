@@ -3238,6 +3238,23 @@ as_hermes() { [ "$(id -u)" = 0 ] || { "$@"; return; }; s6-setuidgid hermes "$@";
     assert brainstack_doctor._has_runtime_ownership_normalization("", stage2_hook)
 
 
+def test_doctor_accepts_current_upstream_stage2_chown_helper():
+    stage2_hook = """
+HERMES_UID="${HERMES_UID:-${PUID:-}}"
+HERMES_GID="${HERMES_GID:-${PGID:-}}"
+chown hermes:hermes "$HERMES_HOME" 2>/dev/null || true
+chown_hermes_tree() {
+    chown -R hermes:hermes "$target" 2>/dev/null || true
+}
+for sub in cron sessions logs hooks memories skills; do
+    chown_hermes_tree "$HERMES_HOME/$sub"
+done
+as_hermes() { [ "$(id -u)" = 0 ] || { "$@"; return; }; s6-setuidgid hermes "$@"; }
+"""
+
+    assert brainstack_doctor._has_runtime_ownership_normalization("", stage2_hook)
+
+
 def test_doctor_accepts_legacy_brainstack_docker_runtime_ownership_normalization():
     assert brainstack_doctor._has_runtime_ownership_normalization("fix_critical_runtime_ownership() { :; }")
 

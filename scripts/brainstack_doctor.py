@@ -1493,10 +1493,14 @@ def _has_runtime_ownership_normalization(entrypoint_text: str, stage2_hook_text:
         "HERMES_UID",
         "HERMES_GID",
         'chown hermes:hermes "$HERMES_HOME"',
-        'chown -R hermes:hermes "$HERMES_HOME/$sub"',
         "s6-setuidgid hermes",
     )
-    return all(marker in text for marker in s6_stage2_markers)
+    if all(marker in text for marker in s6_stage2_markers) and (
+        'chown -R hermes:hermes "$HERMES_HOME/$sub"' in text
+        or 'chown_hermes_tree "$HERMES_HOME/$sub"' in text
+    ):
+        return True
+    return False
 
 
 def run_doctor(args: argparse.Namespace) -> tuple[int, list[Check]]:

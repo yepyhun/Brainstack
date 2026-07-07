@@ -988,6 +988,34 @@ def test_core_host_patch_mode_skips_cron_authority_jobs_with_direct_cron_dir_res
     assert jobs_py.read_text(encoding="utf-8") == original
 
 
+def test_wizard_detects_native_profile_local_cron_authority(tmp_path: Path) -> None:
+    (tmp_path / "cron").mkdir()
+    (tmp_path / "hermes_cli").mkdir()
+    (tmp_path / "cron" / "jobs.py").write_text(
+        "from hermes_constants import get_hermes_home\n"
+        "# Cron is per-profile by design (issue #4707). Each profile owns its own cron\n"
+        "# store under its own HERMES_HOME, and a profile-scoped gateway runs that\n"
+        "HERMES_DIR = get_hermes_home().resolve()\n"
+        "CRON_DIR = HERMES_DIR / \"cron\"\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "cron" / "scheduler.py").write_text(
+        "def _get_hermes_home():\n"
+        "    # Cron is per-profile by design (#4707): the in-process ticker runs inside a\n"
+        "    return get_hermes_home()\n\n"
+        "def _get_lock_paths():\n"
+        "    hermes_home = _get_hermes_home()\n"
+        "    return hermes_home / \"cron\", hermes_home / \"cron\" / \".tick.lock\"\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "hermes_cli" / "kanban_db.py").write_text(
+        "env[\"HERMES_HOME\"] = resolve_profile_env(profile_arg)\n",
+        encoding="utf-8",
+    )
+
+    assert install_into_hermes._target_has_native_profile_local_cron_authority(tmp_path)
+
+
 def test_core_host_patch_mode_applies_cron_scheduler_authority_lock(
     tmp_path: Path,
 ) -> None:
